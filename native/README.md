@@ -2,7 +2,7 @@
 
 The Rust binary owns the transparent CONNECT transport, account sign-in and refresh, quota admission, persistent session affinity, certificate renewal and dashboard counters. There is no Node routing daemon or Python supervisor. The small management command and Zed ACP adapter use Node only when invoked.
 
-Inference bodies, system prompts, models, tools, history, cache markers and beta headers pass through unchanged. Non-inference Anthropic requests retain the native login for Remote Control. A conversation stays on its account until it is disabled, unavailable or out of included quota, then stays on the replacement. Ambiguous lost responses and partial streams are never automatically replayed.
+Inference bodies, system prompts, models, tools, history, cache markers and beta headers pass through unchanged. Non-inference Anthropic requests retain the native login for Remote Control. A conversation stays on its account until it is disabled, unavailable or out of included quota, then stays on the replacement. Inference uses a ten-minute read timeout, matching the native SDK timeout allowance. Ambiguous lost responses and partial streams are never automatically replayed. Local transport-failure diagnostics record only an error classification and elapsed time, without raw error strings or request contents.
 
 New sessions choose the eligible account whose confirmed weekly reset is soonest. Existing sessions stay pinned, even when another account resets sooner; failover chooses the soonest eligible replacement and persists that new pin. Unknown or past reset dates rank last, with the configured preferred account breaking ties.
 

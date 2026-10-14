@@ -77,6 +77,10 @@ test.before(async () => {
         body: Buffer.concat(parts),
         headers: req.headers,
       });
+      if (req.url.includes("slowheaders")) {
+        await new Promise(r => setTimeout(r, 31000));
+        if (res.destroyed) return;
+      }
       if(req.url.includes("jsonlarge")){
         res.writeHead(200,{"content-type":"application/json"});
         return res.end(JSON.stringify({content:[{type:"text",text:"x".repeat(1100*1024)}],usage:{input_tokens:2,cache_read_input_tokens:84,output_tokens:7}}));
@@ -171,6 +175,14 @@ test("new sessions choose soonest included weekly reset; existing sessions retai
   } finally { fs.writeFileSync(dir + "/body.json", original); }
 });
 
+test("native inference tolerates more than thirty seconds before response headers without replay", async () => {
+  const before = seen.length;
+  const r = await curl("?slowheaders", true, "40");
+  assert.equal(r.code, 0, r.error);
+  assert.deepEqual(r.body, response);
+  assert.equal(seen.length, before + 1);
+});
+
 test("local proxy rejects requests without secret before contacting upstream", async () => {
   const n = seen.length;
   const r = await curl("", false);
@@ -221,6 +233,12 @@ test("lost response before headers never silently repeats accepted request", asy
   const r = await curl("?lost");
   assert.equal(seen.length, n + 1);
   assert.ok(r.body.toString().includes("not replayed"));
+  const e = fs.readFileSync(dir + "/events.jsonl", "utf8").trim().split("\n").map(JSON.parse).at(-1);
+  assert.equal(e.type, "transport-failure");
+  assert.ok(["timeout", "connect", "connection-reset", "transport"].includes(e.failureKind));
+  assert.ok(Number.isFinite(e.elapsedMs));
+  assert.equal(e.replayed, false);
+  assert.ok(!JSON.stringify(e).includes(secret));
 });
 
 test("non-streaming native response is unchanged and reports provider counters", async () => {

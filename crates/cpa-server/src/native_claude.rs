@@ -563,14 +563,24 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             .request(parts.method.clone(), format!("{target}{path}"))
             .headers(headers(&parts.headers, Some(&a.token)))
             .body(raw.clone())
-            .read_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(600))
             .send()
             .await;
         let r = match result {
             Ok(r) => r,
-            Err(_) => {
+            Err(upstream_error) => {
                 s.cool(&a, 0)?;
-                s.event(json!({"type":"transport-failure","session":sid,"account":a.id,"replayed":false}));
+                // Log only classifications, never error Display strings containing URLs or credentials.
+                let failure_kind = if upstream_error.is_timeout() {
+                    "timeout"
+                } else if upstream_error.is_connect() {
+                    "connect"
+                } else if upstream_error.is_connection_reset() {
+                    "connection-reset"
+                } else {
+                    "transport"
+                };
+                s.event(json!({"type":"transport-failure","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 return Ok(error(
                     422,
                     "Upstream response was lost; request was not replayed to avoid duplicate inference. Check the session before explicitly retrying.",
