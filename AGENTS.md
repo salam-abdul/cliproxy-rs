@@ -23,6 +23,8 @@ A Rust rewrite of CLIProxyAPI (https://github.com/router-for-me/CLIProxyAPI) tar
 
 ## Rules
 
+- Never commit private operational evidence: real account or organization details, quota/reset measurements, session identifiers or URLs, conversation/file contents, credential material, local user paths, or live test logs. Keep those outside the repository. Committed examples and fixtures must be synthetic and use generic account labels.
+
 - The full test suite is slow and memory-heavy (the BoringSSL build and the release link). While iterating, run the affected crate or a filter, for example `cargo test -p cpa-exec kimi`; CI runs fmt, `clippy -D warnings` and the whole suite. On a shared or small machine, add `CARGO_BUILD_JOBS=2 nice -n 19`.
 - The Go and PostgreSQL comparison tests in `cargo test` run fully only in CI, inside a network-denied namespace. For a local Go/Rust differential run on Linux, use `./harness/run` (see `harness/README.md`).
 - Request bodies are forwarded byte for byte unless a ported rule rewrites them. Never re-serialize JSON just to pass it through.

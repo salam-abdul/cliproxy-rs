@@ -12,6 +12,9 @@
     model = $state(""),
     test = $state<{ lamp: Lamp; text: string }>({ lamp: "off", text: "" });
   const key = $derived(keys[Math.min(pick, keys.length - 1)] || "");
+  const acpLauncher = $derived(readPath(store.config.data || {}, "native-claude/acp-launcher", "/absolute/path/to/cliproxy-native/acp/launch") as string);
+  const nativeEnabled = $derived(!!readPath(store.config.data || {}, "native-claude/config-file", ""));
+  const acpSetup = $derived(JSON.stringify({agent_servers:{"claude-acp":{type:"custom",command:acpLauncher,args:[],env:{},default_config_options:{mode:"auto",model:"opus",effort:"medium"}}}},null,2));
   const local = /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname);
   // Cursor calls the proxy from its own servers, so a local address cannot work there.
   const target = $derived(tool === "Cursor" && local ? "https://your-public-address" : base);
@@ -59,6 +62,21 @@
 
 <Load res={store.config} what="Client keys">
   {#snippet children()}
+    {#if nativeEnabled}
+      <section class="section" aria-label="Native Claude and Zed ACP setup">
+        <h2>Zed Claude ACP · native routing</h2>
+        <p>Keep native login, history and automatic Remote Control. Conversations stay pinned until their account is unavailable or out of included quota.</p>
+        <ol>
+          <li>Sign into Claude Code. Set <code>remoteControlAtStartup: true</code> in Claude settings.</li>
+          <li>Merge this into <code>~/.config/zed/settings.json</code>.</li>
+          <li>Choose <strong>Claude Agent</strong> in Zed. Saved ACP threads resume normally.</li>
+        </ol>
+        <pre class="code-window" aria-label="Zed Claude ACP setup"><div>{acpSetup}</div></pre>
+        <div class="row"><button class="key primary" onclick={() => store.act(() => navigator.clipboard.writeText(acpSetup), "ACP setup copied.")}>Copy ACP settings</button></div>
+        <p class="note">Requires the installed ACP launcher. Check routing and cache with <code>cliproxy-native status</code>.</p>
+        <p class="note">Keep <code>ANTHROPIC_BASE_URL</code> on Anthropic. The launcher sets CONNECT and certificate trust. Custom-endpoint examples below do not preserve Remote Control.</p>
+      </section>
+    {/if}
     <section class="section">
       <h2>Address and key</h2>
       <dl class="facts">

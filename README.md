@@ -1,5 +1,17 @@
 # cliproxy-rs
 
+## Purpose of this fork
+
+This fork supports **one native Claude workflow across multiple subscription accounts**. It keeps Claude Code and Zed Claude ACP conversations intact, preserves native Remote Control, pins each conversation to one inference account, and fails over only when that account is disabled, unavailable or out of included quota.
+
+The transparent CONNECT transport runs **inside the Rust binary**, alongside account sign-in, credential refresh and the dashboard. It forwards inference request bodies, system prompts, tools, history, cache markers, model names and beta headers unchanged. It does not compress or rewrite conversations, rotate healthy conversations between accounts, or replay requests after an ambiguous lost response. Fresh quota checks exclude spendable paid extra usage.
+
+Use the dashboard's **Use with tools → Zed Claude ACP** instructions and the [native setup guide](native/README.md). The installed ACP adapter enables Remote Control for new and resumed conversations. The normal upstream translating endpoints remain available as a separate mode; setting a custom model endpoint is not the native Remote Control setup.
+
+This fork is based on [vayungodara/cliproxy-rs](https://github.com/vayungodara/cliproxy-rs). The upstream installation commands below install upstream releases, not this fork's native additions. Build this fork from source for the native workflow. Fork changes are maintained on `main`.
+
+## Upstream project
+
 [![CI](https://github.com/vayungodara/cliproxy-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/vayungodara/cliproxy-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/vayungodara/cliproxy-rs)](https://github.com/vayungodara/cliproxy-rs/releases/latest)
 [![Homebrew](https://img.shields.io/badge/brew-vayungodara%2Ftap%2Fcliproxy--rs-orange)](https://github.com/vayungodara/homebrew-tap)

@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+"""Explicit terminal startup; Zed cannot supply a recreated terminal's session ID."""
+import os,sys
+from pathlib import Path
+launcher=Path(__file__).resolve().parent/'claude'
+while True:
+ try:choice=input('Claude: [N] New  [R] Resume  [Q] Quit: ').strip().lower()
+ except (EOFError,KeyboardInterrupt):sys.exit(0)
+ if choice in ['n','new']:os.execv(str(launcher),[str(launcher)])
+ if choice in ['r','resume']:os.execv(str(launcher),[str(launcher),'--resume'])
+ if choice in ['q','quit']:sys.exit(0)

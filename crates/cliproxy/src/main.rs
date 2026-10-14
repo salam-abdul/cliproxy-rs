@@ -1359,6 +1359,7 @@ async fn serve(
     // Translators and thinking validation read model capabilities through the global
     // overlay; without it they see only the static catalog.
     cpa_server::install_registry(&rt);
+    let _native_router = cpa_server::native_claude::start(rt.clone()).await?;
     rt.start_auto_refresh();
     let options = cpa_server::management::Options {
         local_password: password,

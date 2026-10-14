@@ -1,0 +1,23 @@
+--- a/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js
++++ b/node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js
+@@ -1,3 +1,4 @@
++import { enableRoutedRemoteControl } from "./routed-remote-control.mjs";
+ import { agent as acpAgent, CreateElicitationResponse, methods, ndJsonStream, RequestError, } from "@agentclientprotocol/sdk";
+ import { getSessionMessages, getSubagentMessages, listSessions, query, } from "@anthropic-ai/claude-agent-sdk";
+ import { GOAL_ACTIONS, GOAL_CONTROL_METHOD, GOAL_EXTENSION_VERSION, goalUpdateFromPrompt, parseGoalRequest, toGoalSnapshot, } from "./goal-extension.js";
+@@ -7706,6 +7707,15 @@
+                 accountKind: fromAccountInfo(initializationResult.account)?.kind,
+                 fileChangeReporter,
+             };
++            if (process.env.CLAUDE_ROUTE_ACP_REMOTE_CONTROL === "1") {
++                try {
++                    await enableRoutedRemoteControl(q, sessionId);
++                    this.ensureConsumer(this.sessions[sessionId], sessionId);
++                } catch (error) {
++                    delete this.sessions[sessionId];
++                    throw error;
++                }
++            }
+             timing.phase("register");
+             this.refreshContextWindowInBackground(sessionId, this.sessions[sessionId]);
+             return {

@@ -1,0 +1,19 @@
+#!/usr/bin/python3
+from pathlib import Path
+import hashlib,json,os,sys,shutil
+root=Path(__file__).resolve().parent
+manifest=json.loads((root/'manifest.json').read_text())
+for relative,expected in manifest['hashes'].items():
+    if hashlib.sha256((root/relative).read_bytes()).hexdigest()!=expected:
+        sys.exit('Routed Claude ACP integrity check failed: '+relative)
+env=dict(os.environ)
+for key in ['ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','CLAUDE_CODE_OAUTH_TOKEN','HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy']:
+    env.pop(key,None)
+env['CLAUDE_CODE_EXECUTABLE']=str(Path.home()/'.local/share/cliproxy-native/current/claude')
+env['CLAUDE_ROUTE_ACP_REMOTE_CONTROL']='1'
+if env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')=='1':
+    sys.exit('Routed Claude ACP: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC blocks Remote Control; remove that opt-out for this agent.')
+node=shutil.which('node')
+if not node:sys.exit('Node.js is required for Claude ACP')
+entry=str(root/'node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js')
+os.execve(node,[node,entry,*sys.argv[1:]],env)

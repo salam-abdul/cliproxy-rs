@@ -1,0 +1,159 @@
+#!/usr/bin/env node
+"use strict";
+const fs = require("node:fs"),
+  path = require("node:path"),
+  os = require("node:os"),
+  cp = require("node:child_process");
+const ctl = require("./control.cjs");
+function open(url) {
+  const p =
+    process.platform === "darwin"
+      ? cp.spawn("open", [url], { stdio: "ignore" })
+      : cp.spawn("xdg-open", [url], { stdio: "ignore" });
+  p.on("error", () => console.log("Open in your browser: " + url));
+}
+(async () => {
+  let args = process.argv.slice(2),
+    configPath =
+      process.env.CLIPROXY_NATIVE_CONFIG ||
+      path.join(os.homedir(), ".config/cliproxy-native/config.json");
+  if (args[0] === "--config") {
+    configPath = args[1];
+    args = args.slice(2);
+  }
+  const [command, ...rest] = args;
+  if (!command || ["help", "--help", "-h"].includes(command)) {
+    console.log(
+      "cliproxy-native accounts | login | refresh ACCOUNT | enable ACCOUNT | disable ACCOUNT | rename ACCOUNT NAME | status | settings [set preferred-account ACCOUNT|none] | dashboard [--copy-key]\nCredentials: cliproxy-rs dashboard; native Claude permissions stay in Claude.",
+    );
+    return;
+  }
+  const c = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  if (command === "accounts") {
+    const all = await ctl.accounts(c);
+    console.log(
+      JSON.stringify(
+        all.map(({ id, fileId, name, enabled, disabled, expired }) => ({
+          id,
+          fileId,
+          name,
+          enabled,
+          disabled,
+          expired,
+        })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (["enable", "disable"].includes(command)) {
+    if (rest.length !== 1) throw Error("Specify one account name or ID");
+    await ctl.toggle(c, rest[0], command === "enable");
+    console.log(command === "enable" ? "Account enabled" : "Account disabled");
+    return;
+  }
+  if (command === "refresh") {
+    if (rest.length !== 1) throw Error("Specify one account");
+    const r = await ctl.refresh(c, rest[0]);
+    if (r.ok !== true) throw Error("Credential refresh did not succeed");
+    console.log("Credential refreshed by cliproxy-rs");
+    return;
+  }
+  if (command === "rename") {
+    if (rest.length !== 2) throw Error("Use rename ACCOUNT NAME");
+    await ctl.rename(c, ...rest);
+    console.log("Account name saved");
+    return;
+  }
+  if (command === "settings") {
+    if (rest.length) {
+      if (
+        rest.length !== 3 ||
+        rest[0] !== "set" ||
+        rest[1] !== "preferred-account"
+      )
+        throw Error(
+          "Only settings set preferred-account ACCOUNT|none is supported",
+        );
+      await ctl.setPreference(c, rest[2]);
+    }
+    console.log(
+      JSON.stringify(
+        {
+          ...ctl.settings(c),
+          sessionAffinity: "persistent, no expiry",
+          compression: false,
+          conversationRewriting: false,
+          paidExtraUsage: false,
+          permissionSettings: "native Claude",
+          managementUrl: ctl.localManagement(c),
+          proxyPort: c.port,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (command === "status") {
+    const s = await ctl.status(c);
+    console.log(JSON.stringify(s, null, 2));
+    if (!s.ready) process.exitCode = 1;
+    return;
+  }
+  if (command === "dashboard") {
+    const url = ctl.localManagement(c) + "/management.html";
+    if (rest.includes("--copy-key")) {
+      if (process.platform !== "darwin")
+        throw Error("Copy-key is available on macOS only");
+      cp.execFileSync("pbcopy", [], {
+        input: fs.readFileSync(c.managementKeyFile),
+      });
+      console.log(
+        "Management password copied to clipboard. Paste it into the dashboard.",
+      );
+    }
+    open(url);
+    console.log(
+      "Dashboard: " +
+        url +
+        "\nOptional: dashboard --copy-key copies the local management password.",
+    );
+    return;
+  }
+  if (command === "login") {
+    const r = await ctl.login(c);
+    if (typeof r.url !== "string" || !r.state)
+      throw Error("Invalid sign-in response");
+    const u = new URL(r.url);
+    if (
+      u.protocol !== "https:" ||
+      !["claude.ai", "api.anthropic.com", "platform.claude.com"].includes(
+        u.hostname,
+      )
+    )
+      throw Error("Unexpected Claude sign-in destination");
+    if (rest.includes("--no-browser")) console.log(r.url);
+    else open(r.url);
+    console.log(
+      "Choose the intended account/organization in your browser. Waiting for sign-in…",
+    );
+    const end = Date.now() + 300000;
+    while (Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const s = await ctl.loginStatus(c, r.state);
+      if (s.status === "ok") {
+        console.log("Account signed in. Run accounts, then rename if desired.");
+        return;
+      }
+      if (s.status === "error" || s.error)
+        throw Error("Sign-in failed; retry through the dashboard");
+    }
+    throw Error("Sign-in timed out");
+  }
+  throw Error("Unknown command; run help");
+})().catch((e) => {
+  console.error("cliproxy-native: " + e.message);
+  process.exitCode = 1;
+});

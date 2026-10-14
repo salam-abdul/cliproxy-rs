@@ -1644,7 +1644,7 @@ pub const RECENT_BUCKET_SECONDS: i64 = 600;
 const RECENT_BUCKETS: usize = 20;
 
 impl CredentialStore {
-    fn note_activity(&self, id: &str, success: bool) {
+    pub(crate) fn note_activity(&self, id: &str, success: bool) {
         let bucket = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64 / RECENT_BUCKET_SECONDS);
