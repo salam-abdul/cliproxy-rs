@@ -312,6 +312,14 @@ impl Config {
         document.coerce_typed_scalars();
         schema::validate(document.value(), false)?;
         let canonical = document.value().as_mapping().expect("document is a mapping");
+        if canonical
+            .get("plugins")
+            .and_then(|p| p.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            bail!("plugins are not supported by this personal fork");
+        }
         let routing = decode_section::<RoutingConfig>(canonical, "routing")?;
         let mut routing = routing;
         routing.retry.max_retry_credentials = routing.retry.max_retry_credentials.max(0);

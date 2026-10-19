@@ -1,5 +1,7 @@
 //! Opt-in native Claude CONNECT transport. Unlike the API translator, inference
 //! bodies and feature headers are never shaped; only the inference credential changes.
+mod quota;
+
 use crate::Runtime;
 use anyhow::Context;
 use axum::{
@@ -95,7 +97,7 @@ struct State {
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
     secret: String,
     pins: Mutex<Pins>,
-    quota: tokio::sync::Mutex<HashMap<String, (Instant, Value)>>,
+    quota: quota::Cache,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
@@ -352,32 +354,46 @@ impl State {
         if let Some(q) = &self.config.fixture_quota {
             return Ok(q.clone());
         }
-        // One owner for refresh; quota lookups are single-flight and token-bound.
-        let mut cache = self.quota.lock().await;
         let key = hash(format!("{}:{}", a.id, a.token));
-        if let Some((at, q)) = cache.get(&key).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)) {
-            let _ = at;
-            return Ok(q.clone());
-        }
-        let r = self
-            .client
-            .get("https://api.anthropic.com/api/oauth/usage")
-            .bearer_auth(&a.token)
-            .header("anthropic-beta", "oauth-2025-04-20")
-            .header("user-agent", "claude-code/2.1.296")
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await?;
-        anyhow::ensure!(
-            r.status() == StatusCode::OK,
-            "Included quota availability not established"
-        );
-        let bytes = r.bytes().await?;
-        anyhow::ensure!(bytes.len() <= 1048576, "Usage response too large");
-        let q: Value = serde_json::from_slice(&bytes)?;
-        cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(30));
-        cache.insert(key, (Instant::now(), q.clone()));
-        Ok(q)
+        self.quota
+            .get(key, async {
+                let r = self
+                    .client
+                    .get("https://api.anthropic.com/api/oauth/usage")
+                    .bearer_auth(&a.token)
+                    .header("anthropic-beta", "oauth-2025-04-20")
+                    .header("user-agent", "claude-code/2.1.296")
+                    .timeout(Duration::from_secs(15))
+                    .send()
+                    .await?;
+                anyhow::ensure!(
+                    r.status() == StatusCode::OK,
+                    "Included quota availability not established"
+                );
+                let mut bytes = Vec::new();
+                let mut stream = r.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    anyhow::ensure!(chunk.len() <= 1048576 - bytes.len(), "Usage response too large");
+                    bytes.extend_from_slice(&chunk);
+                }
+                let q: Value = serde_json::from_slice(&bytes)?;
+                Ok(q)
+            })
+            .await
+    }
+
+    async fn quota_accounts(&self, accounts: Vec<Account>) -> Vec<Account> {
+        futures_util::stream::iter(accounts)
+            .map(|mut a| async {
+                if a.enabled {
+                    a.quota = self.quota(&a).await.unwrap_or(Value::Null);
+                }
+                a
+            })
+            .buffered(8)
+            .collect()
+            .await
     }
     fn select(&self, sid: &str, pool: &[Account], tried: &HashSet<String>) -> anyhow::Result<Option<Account>> {
         let mut pins = self.pins.lock().unwrap();
@@ -392,21 +408,24 @@ impl State {
     }
     async fn admit(&self, sid: &str, model: &str, tried: &mut HashSet<String>) -> anyhow::Result<Option<Account>> {
         loop {
-            let mut pool = Vec::new();
-            for a in self
+            let accounts = self
                 .accounts()?
                 .into_iter()
                 .filter(|a| a.enabled && !tried.contains(&a.id))
-            {
-                match self.quota(&a).await {
-                    Ok(q) if eligible(&q, model) => {
-                        let mut a = a;
-                        a.quota = q;
-                        pool.push(a);
+                .collect();
+            let pool: Vec<_> = self
+                .quota_accounts(accounts)
+                .await
+                .into_iter()
+                .filter(|a| {
+                    if eligible(&a.quota, model) {
+                        true
+                    } else {
+                        self.event(json!({"type":"quota-unavailable","account":a.id}));
+                        false
                     }
-                    _ => self.event(json!({"type":"quota-unavailable","account":a.id})),
-                }
-            }
+                })
+                .collect();
             let Some(a) = self.select(sid, &pool, tried)? else {
                 return Ok(None);
             };
@@ -431,9 +450,9 @@ impl State {
     }
     async fn status(&self) -> anyhow::Result<Value> {
         let mut all = Vec::new();
-        for a in self.accounts()? {
-            let q = if a.enabled { self.quota(&a).await.ok() } else { None };
-            all.push(json!({"id":a.id,"fileId":a.file_id,"name":a.name,"enabled":a.enabled,"disabled":a.disabled,"expired":a.expired,"includedQuota":q.map(|q|json!({"fiveHour":q["five_hour"]["utilization"],"weekly":q["seven_day"]["utilization"],"weeklyResetsAt":q["seven_day"]["resets_at"],"eligible":eligible(&q,"claude-sonnet-5-5")}))}));
+        for a in self.quota_accounts(self.accounts()?).await {
+            let q = (!a.quota.is_null()).then_some(&a.quota);
+            all.push(json!({"id":a.id,"fileId":a.file_id,"name":a.name,"enabled":a.enabled,"disabled":a.disabled,"expired":a.expired,"includedQuota":q.map(|q|json!({"fiveHour":q["five_hour"]["utilization"],"weekly":q["seven_day"]["utilization"],"weeklyResetsAt":q["seven_day"]["resets_at"],"eligible":eligible(q,"claude-sonnet-5-5")}))}));
         }
         let ready = !self.config.qualification && all.iter().any(|a| a["includedQuota"]["eligible"] == true);
         let mut counts = BTreeMap::new();
@@ -547,7 +566,11 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
-    let lock = s.sessions.lock().unwrap().entry(sid.clone()).or_default().clone();
+    let lock = {
+        let mut sessions = s.sessions.lock().unwrap();
+        sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
+        sessions.entry(sid.clone()).or_default().clone()
+    };
     let guard = lock.lock_owned().await;
     let mut tried = HashSet::new();
     loop {
@@ -590,7 +613,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         let status = r.status();
         if [401, 429, 503, 529].contains(&status.as_u16()) {
             s.cool(&a, status.as_u16())?;
-            s.quota.lock().await.clear();
+            s.quota.invalidate(&hash(format!("{}:{}", a.id, a.token))).await;
             s.event(json!({"type":"failover","session":sid,"account":a.id,"status":status.as_u16()}));
             continue;
         }

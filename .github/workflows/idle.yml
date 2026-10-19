@@ -1,16 +1,4 @@
-# Idle cost outside the per-PR Linux gate: once a week, by hand, and on a push to master
-# or a pull request that changes the file watcher or these gates.
-#
-# - macOS (Apple silicon and Intel) and Windows: release build, the file-watch tests,
-#   then the idle gate (bench/gate.sh, bench/budgets.txt).
-# - Go comparison: CLIProxyAPI's release binary and this one on the same one-API-key
-#   config in a loopback-only network, 30 s of warm-up, then 300 s of samples. No OAuth
-#   credentials are involved, so nothing can be signed out. The numbers go to the job
-#   summary and an artifact; they are reported, not gated.
-# One run per change: pushes to master, and pull requests through `pull_request` only. A
-# branch push used to start a second run of every job for the same commit. Runs are
-# grouped per pull request (or per ref outside one), and a newer push cancels the older
-# run.
+# Cross-platform idle gates and synthetic Go comparisons.
 name: idle
 
 on:
@@ -18,7 +6,7 @@ on:
     - cron: "23 4 * * 1"
   workflow_dispatch:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - crates/cpa-server/src/fs_events.rs
       - crates/cpa-server/src/watching.rs
@@ -68,7 +56,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      # As in release.yml: BoringSSL needs NASM on a native MSVC build; bindgen needs libclang.
+      # BoringSSL needs NASM on a native MSVC build; bindgen needs libclang.
       - name: NASM and libclang (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -86,7 +74,7 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --release --locked -p cliproxy --target ${{ matrix.target }}
       # kqueue on macOS and ReadDirectoryChangesW on Windows are only exercised here.
@@ -114,7 +102,7 @@ jobs:
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --release --locked -p cliproxy
       - name: CLIProxyAPI release binary

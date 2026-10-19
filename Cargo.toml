@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
@@ -15,7 +15,6 @@ cpa-common = { path = "crates/cpa-common" }
 cpa-core = { path = "crates/cpa-core" }
 cpa-exec = { path = "crates/cpa-exec" }
 cpa-home = { path = "crates/cpa-home" }
-cpa-plugin = { path = "crates/cpa-plugin" }
 cpa-server = { path = "crates/cpa-server" }
 cpa-store = { path = "crates/cpa-store" }
 cpa-translate = { path = "crates/cpa-translate" }

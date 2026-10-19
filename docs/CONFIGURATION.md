@@ -1,6 +1,6 @@
 # Configuration
 
-cliproxy-rs reads one YAML file, `config.yaml`. Pass its path with `--config`; without it, the server reads `config.yaml` in the current directory. It accepts CLIProxyAPI's v8 layout (shown here) and the older flat layout, and every setting in CLIProxyAPI's [`config.example.yaml`](https://github.com/router-for-me/CLIProxyAPI/blob/6fecc6e5567912661654a4eaf9b8f5436facd1c2/config.example.yaml) is accepted. Settings for features that are not ported yet are kept in the file but have no effect.
+cliproxy-rs reads one YAML file, `config.yaml`. Pass its path with `--config`; without it, the server reads `config.yaml` in the current directory. It accepts CLIProxyAPI's v8 layout (shown here) and the older flat layout, with settings based on CLIProxyAPI's [`config.example.yaml`](https://github.com/router-for-me/CLIProxyAPI/blob/6fecc6e5567912661654a4eaf9b8f5436facd1c2/config.example.yaml). Unsupported settings remain inert; `plugins.enabled: true` is rejected.
 
 The server watches the file and applies most changes within a second, without a restart. `server.host`, `server.port`, `server.tls` and `server.trusted-proxies` are read at start, so restart after changing them. When the dashboard or the Management API changes a setting, only that key is rewritten; the rest of the file, comments included, stays as it was.
 
@@ -35,7 +35,7 @@ observability:
 | `host` | The address to listen on. `"127.0.0.1"` accepts only this computer; `""` listens on every interface. |
 | `port` | The port, `8317` by default. |
 | `tls.enable`, `tls.cert`, `tls.key` | Serve HTTPS on the same port with this certificate and key file. |
-| `trusted-proxies` | Addresses of reverse proxies or tunnels whose `X-Forwarded-For` header is trusted. Set it when a tunnel on the same machine forwards requests, for example `[127.0.0.1, "::1"]`. See [running it safely](GETTING-STARTED.md#running-it-safely). |
+| `trusted-proxies` | Addresses of reverse proxies or tunnels whose `X-Forwarded-For` header is trusted. Set it when a tunnel on the same machine forwards requests, for example `[127.0.0.1, "::1"]`. See [installation](INSTALL.md). |
 
 ## access
 
@@ -129,6 +129,7 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `logs.logging-to-file` | `true` writes the log to `main.log` in a `logs` folder, rotated, instead of standard output. |
 | `logs.logs-max-total-size-mb` | The most disk space the log files may use. |
 | `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
+| `usage.claude-cache-telemetry` | A cliproxy-rs addition, `false` by default. With `usage.usage-statistics-enabled: true` and management enabled, adds content-free final-wire Claude cache observations to the existing usage queue and RESP channel. No tokenizer or maintenance requests run. Hashes rotate on restart; additional records without returned usage have `usage_observed: false`. Large payloads add parsing and hashing work before upstream send. See [Claude cache telemetry](CLAUDE-CACHE-TELEMETRY.md). Go ignores the setting at startup, preserves it on v0 saves, and archives it on v8 edits. |
 
 ## worker-threads
 

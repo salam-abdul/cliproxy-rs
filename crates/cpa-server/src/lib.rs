@@ -29,7 +29,6 @@ pub mod native_claude;
 pub mod observability;
 mod openai;
 pub mod persist;
-pub mod plugins;
 mod realtime;
 mod refresh;
 pub mod registry;

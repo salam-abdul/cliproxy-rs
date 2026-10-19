@@ -54,7 +54,7 @@ pub(crate) fn is_server_tool_type(kind: &str) -> bool {
 }
 
 /// HMAC-SHA256(secret, "cpa-claude-mcp-alias-v2\0" + purpose + "\0" + original).
-fn digest(secret: &str, purpose: &str, original: &str) -> [u8; 32] {
+pub(super) fn digest(secret: &str, purpose: &str, original: &str) -> [u8; 32] {
     let mut key = [0u8; 64];
     if secret.len() > 64 {
         key[..32].copy_from_slice(&Sha256::digest(secret.as_bytes()));

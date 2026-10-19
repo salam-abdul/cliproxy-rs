@@ -29,6 +29,9 @@
 //!
 //! Environment: N (requests per run, default 200), SIZES (bytes, default
 //! 5000,50000,300000,2000000), CONC (default 1,8), WARMUP (default 20 requests).
+//! CACHE_TELEMETRY=on|off enables usage statistics with telemetry on/off;
+//! MEDIA=1 uses a synthetic base64 image; UNRELATED_STREAM=1 measures a 10 ms
+//! unrelated stream's inter-chunk gaps under load; WORKERS defaults to 4.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -177,10 +180,24 @@ where
             if let Some(id) = marker(&body) {
                 mock.seen.lock().unwrap().insert(id, Seen { head, done });
             }
+            let response_body = if marker(&body) == Some(0) {
+                let start_end = SSE.find("\n\n").unwrap() + 2;
+                axum::body::Body::from_stream(futures_util::stream::unfold(0, move |n| async move {
+                    let chunk = if n == 0 {
+                        Bytes::from_static(&SSE.as_bytes()[..start_end])
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        Bytes::from_static(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"tick\"}}\n\n")
+                    };
+                    Some((Ok::<_, Infallible>(chunk), n + 1))
+                }))
+            } else {
+                axum::body::Body::from(SSE)
+            };
             let response = hyper::Response::builder()
                 .header("content-type", "text/event-stream")
                 .header("request-id", "req_bench")
-                .body(axum::body::Body::from(SSE))
+                .body(response_body)
                 .unwrap();
             Ok::<_, Infallible>(response)
         }
@@ -282,6 +299,18 @@ impl Rng {
 /// (signed thinking, text, tool_use) and user tool_result turns, and a final user text
 /// padded to the size. `{ID}` marks the request.
 fn conversation(size: usize) -> String {
+    if std::env::var("MEDIA").as_deref() == Ok("1") {
+        use base64::Engine;
+        let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+        let raw: Vec<u8> = (0..size * 3 / 4).map(|_| r.next() as u8).collect();
+        return json!({"model":MODEL,"max_tokens":32,"stream":true,
+        "messages":[{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/png",
+                "data":base64::engine::general_purpose::STANDARD.encode(raw)}},
+            {"type":"text","text":"lat-req-{ID}","cache_control":{"type":"ephemeral"}}
+        ]}]})
+        .to_string();
+    }
     let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ size as u64);
     let system_len = (size / 5).clamp(600, 18_000);
     let system = json!([
@@ -402,9 +431,38 @@ fn ms(d: Duration) -> f64 {
 struct Run {
     samples: Vec<Sample>,
     marks: Vec<Vec<(&'static str, Instant)>>,
+    stream_gaps_ms: Vec<f64>,
 }
 
 async fn run(target: Arc<Target>, template: Arc<String>, n: usize, conc: usize, next_id: Arc<AtomicUsize>) -> Run {
+    let stop = Arc::new(AtomicBool::new(false));
+    let unrelated = if std::env::var("UNRELATED_STREAM").as_deref() == Ok("1") {
+        let response = target.client.post(&target.url).header("x-api-key", KEY)
+            .body(format!(r#"{{"model":"{MODEL}","max_tokens":16,"stream":true,"messages":[{{"role":"user","content":"lat-req-0"}}]}}"#))
+            .send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let mut chunks = response.bytes_stream();
+        assert!(
+            !chunks.next().await.unwrap().unwrap().is_empty(),
+            "stream is active before the load"
+        );
+        let stop = stop.clone();
+        Some(tokio::spawn(async move {
+            let mut last = Instant::now();
+            let mut gaps = Vec::new();
+            while let Some(chunk) = chunks.next().await {
+                assert!(!chunk.unwrap().is_empty());
+                gaps.push(ms(last.elapsed()));
+                last = Instant::now();
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            gaps
+        }))
+    } else {
+        None
+    };
     let collect_marks = conc == 1;
     COLLECTING.store(collect_marks, Ordering::Relaxed);
     let mut tasks = Vec::new();
@@ -437,7 +495,17 @@ async fn run(target: Arc<Target>, template: Arc<String>, n: usize, conc: usize, 
             marks.push(mark);
         }
     }
-    Run { samples, marks }
+    stop.store(true, Ordering::Relaxed);
+    let stream_gaps_ms = if let Some(task) = unrelated {
+        task.await.unwrap()
+    } else {
+        Vec::new()
+    };
+    Run {
+        samples,
+        marks,
+        stream_gaps_ms,
+    }
 }
 
 fn summarize(run: &Run, mock: &Mock) -> Value {
@@ -477,6 +545,10 @@ fn summarize(run: &Run, mock: &Mock) -> Value {
         "up_first_ms": {"p50": pct(&mut up_first, 0.5), "p99": pct(&mut up_first, 0.99)},
         "up_done_ms": {"p50": pct(&mut up_done, 0.5), "p99": pct(&mut up_done, 0.99)},
         "client_first_ms": {"p50": pct(&mut client_first, 0.5), "p99": pct(&mut client_first, 0.99)},
+        "unrelated_stream_max_gap_ms": run.stream_gaps_ms.iter().copied().fold(0.0, f64::max),
+        "unrelated_stream_chunks": run.stream_gaps_ms.len(),
+        "completed_requests": run.samples.len(),
+        "errors": 0,
         "stages_ms": stage_json,
     })
 }
@@ -491,6 +563,21 @@ fn vmhwm_kb() -> u64 {
                 .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
         })
         .unwrap_or(0)
+}
+
+/// Whole harness CPU (proxy + mock + client), not a proxy-only estimate.
+fn cpu_ms() -> f64 {
+    #[cfg(unix)]
+    {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+        let ms = |t: libc::timeval| t.tv_sec as f64 * 1000.0 + t.tv_usec as f64 / 1000.0;
+        ms(usage.ru_utime) + ms(usage.ru_stime)
+    }
+    #[cfg(not(unix))]
+    {
+        0.0
+    }
 }
 
 fn env_list(name: &str, default: &str) -> Vec<usize> {
@@ -511,6 +598,8 @@ fn main() {
     let warmup: usize = std::env::var("WARMUP").ok().map_or(20, |v| v.parse().unwrap());
     let sizes = env_list("SIZES", "5000,50000,300000,2000000");
     let concs = env_list("CONC", "1,8");
+    let telemetry = std::env::var("CACHE_TELEMETRY").ok();
+    assert!(telemetry.as_deref().is_none_or(|v| matches!(v, "on" | "off")));
     tracing_subscriber::registry()
         .with(
             Probe.with_filter(
@@ -519,15 +608,17 @@ fn main() {
         )
         .init();
 
-    let workers = |n| {
+    let workers = |n, name: &str| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(n)
+            .thread_name(name)
             .enable_all()
             .build()
             .unwrap()
     };
-    let proxy_rt = workers(4);
-    let load_rt = workers(4);
+    let worker_count = std::env::var("WORKERS").ok().map_or(4, |v| v.parse().unwrap());
+    let proxy_rt = workers(worker_count, "proxy-worker");
+    let load_rt = workers(4, "load-worker");
 
     // Mock upstream.
     let mock = Arc::new(Mock::default());
@@ -547,6 +638,12 @@ fn main() {
         "auth-dir: {:?}\napi-keys:\n  - {KEY}\nrequest-retry: 0\n",
         dir.to_string_lossy()
     );
+    if let Some(value) = &telemetry {
+        yaml.push_str(&format!(
+            "observability:\n  usage:\n    usage-statistics-enabled: true\n    claude-cache-telemetry: {}\n",
+            value == "on"
+        ));
+    }
     if mode == "oauth" {
         std::fs::write(
             dir.join("claude-bench.json"),
@@ -583,14 +680,19 @@ fn main() {
         openai: Default::default(),
         google: Default::default(),
     };
-    let proxy_addr: SocketAddr = proxy_rt.block_on(async {
+    let (proxy_addr, runtime) = proxy_rt.block_on(async {
         let rt = Arc::new(cpa_server::testing::runtime(config, credentials, executors));
+        rt.usage_queue().configure(true, &rt.config());
         rt.set_local_model(true);
         cpa_server::install_registry(&rt);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(cpa_server::listener::serve(listener, cpa_server::router(rt), None));
-        addr
+        tokio::spawn(cpa_server::listener::serve(
+            listener,
+            cpa_server::router(rt.clone()),
+            None,
+        ));
+        (addr, rt)
     });
 
     let direct_client = wreq::Client::builder()
@@ -622,6 +724,9 @@ fn main() {
                 line.insert("size".into(), json!(template.len()));
                 line.insert("conc".into(), json!(conc));
                 line.insert("n".into(), json!(n));
+                line.insert("cache_telemetry".into(), json!(telemetry));
+                line.insert("media".into(), json!(std::env::var("MEDIA").as_deref() == Ok("1")));
+                line.insert("proxy_workers".into(), json!(worker_count));
                 for (label, target) in [("direct", &direct), ("proxy", &proxied)] {
                     run(
                         target.clone(),
@@ -633,14 +738,51 @@ fn main() {
                     .await;
                     let conns_before = mock.conns.load(Ordering::Relaxed);
                     let setups_before = mock.setups.lock().unwrap().len();
+                    let cpu_before = cpu_ms();
                     let result = run(target.clone(), template.clone(), n, conc, next_id.clone()).await;
+                    let cpu = cpu_ms() - cpu_before;
                     let mut summary = summarize(&result, &mock);
+                    summary["process_cpu_ms"] = json!(cpu);
                     let mut setups: Vec<f64> = mock.setups.lock().unwrap()[setups_before..]
                         .iter()
                         .map(|d| ms(*d))
                         .collect();
                     summary["new_upstream_conns"] = json!(mock.conns.load(Ordering::Relaxed) - conns_before);
                     summary["conn_setup_p50_ms"] = json!(pct(&mut setups, 0.5));
+                    if label == "proxy" && telemetry.is_some() {
+                        let records: Vec<Value> = runtime
+                            .usage_queue()
+                            .pop_oldest(usize::MAX)
+                            .iter()
+                            .map(|r| serde_json::from_slice(r).unwrap())
+                            .collect();
+                        let count = records.iter().filter(|r| r.get("claude_cache").is_some()).count();
+                        assert_eq!(
+                            count > 0,
+                            telemetry.as_deref() == Some("on"),
+                            "the measured telemetry toggle took effect"
+                        );
+                        let large = records
+                            .iter()
+                            .filter(|r| {
+                                r.get("claude_cache").is_some()
+                                    && r["upstream_request_bytes"].as_u64().unwrap_or(0)
+                                        >= (template.len() * 9 / 10) as u64
+                            })
+                            .count();
+                        if telemetry.as_deref() == Some("on") {
+                            assert_eq!(
+                                large,
+                                (warmup.max(conc).div_ceil(conc) + n.div_ceil(conc)) * conc,
+                                "each measured and warmup payload produced final-wire telemetry"
+                            );
+                        }
+                        if std::env::var("MEDIA").as_deref() == Ok("1") && count > 0 {
+                            assert!(records.iter().any(|r| r["claude_cache"]["media_present"] == true));
+                        }
+                        summary["large_payload_telemetry_records"] = json!(large);
+                        summary["telemetry_records_including_warmup"] = json!(count);
+                    }
                     line.insert(label.into(), summary);
                 }
                 // The whole process (proxy, mock and client) so far: an upper bound on

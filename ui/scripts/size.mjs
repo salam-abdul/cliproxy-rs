@@ -27,8 +27,6 @@ for (const kind of ["js", "css"]) {
   );
 }
 console.log(`HTML ${gz(html)} B gzip (icon sprite and theme script)`);
-const panel = readFileSync("dist-panel/management.html");
-console.log(`Panel ${gz(panel)} B gzip, ${panel.length} B raw (dist-panel/management.html, font inlined)`);
 if (failed) {
   console.error("Bundle budget exceeded.");
   process.exitCode = 1;

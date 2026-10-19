@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # Live prompt-cache check for the cloaked Claude path. Run by hand against a running
 # cliproxy-rs whose Claude login is an OAuth subscription; it is not part of CI and it
-# spends real tokens (about 40k input tokens on Opus, most of them cache reads).
+# spends real tokens (about 75k input tokens on Opus, most of them cache reads).
 #
 #   CPA_URL=http://127.0.0.1:8317 CPA_KEY=<client key> bench/claude-cache-live.sh [results.jsonl]
 #
 # It streams one conversation through /v1/messages the way a coding client does (a
-# caller system prompt, tools, a long first user message) and prints Anthropic's own
-# usage for each turn: uncached input, cache reads, and cache writes split into the
-# 5-minute and 1-hour pools.
+# caller system prompt, tools, a long first user message, a tool call as the first
+# reply) and prints Anthropic's own usage for each turn: uncached input, cache reads,
+# and cache writes split into the 5-minute and 1-hour pools.
+#
+# The first reply is a tool call on purpose. An OAuth login moves the caller prompt to
+# a system turn just before the first assistant turn. In probes on claude-opus-5-5 on
+# 14 October 2026, the next turn did not reuse the cold turn's cache entry for that
+# system turn when the assistant turn after it held only text, either made up or the
+# model's own reply with its thinking block removed: it read up to the first user
+# message and wrote the caller prompt again. A tool call, or the model's reply replayed
+# with its thinking block, reused it. The messages sent upstream were byte-identical
+# through the system turn in both cases, and so were the tools and the identity block;
+# only the billing header differed, as it does on every turn. That points to
+# Anthropic's cache handling, not to the proxy.
 #
 #   cold     the first turn: writes the prefix.
 #   warm     the next turn at once: reads everything the cold turn wrote, writes its tail.
@@ -28,7 +39,7 @@
 # Environment: CPA_URL (default http://127.0.0.1:8317), CPA_KEY (required), MODEL
 # (default claude-opus-5-5; a current model, since older ones put the caller prompt
 # before the document), IDLE_SECONDS (default 330, between 301 and 3300), DOC_LINES
-# (default 600, at least 300; about 15 tokens a line).
+# (default 600, at least 300; about 30 tokens a line).
 set +x
 set -euo pipefail
 
@@ -68,9 +79,11 @@ body() { # system, number of user turns
   jq -n --arg model "$MODEL" --arg system "$1" --argjson tools "$TOOLS" --arg doc "$DOC" --argjson turns "$2" '
     def text(t): [{type: "text", text: t}];
     [{role: "user", content: text($doc + "\nSummarise the checklist in one line.")},
+     {role: "assistant", content: [{type: "tool_use", id: "toolu_01CacheLiveRead", name: "read_file",
+                                    input: {path: "CHECKLIST.md"}}]},
+     {role: "user", content: [{type: "tool_result", tool_use_id: "toolu_01CacheLiveRead",
+                               content: "Builds, tests, signing, packaging and notes."}]},
      {role: "assistant", content: text("The checklist covers builds, tests, signing, packaging and notes.")},
-     {role: "user", content: text("Which item mentions signing first?")},
-     {role: "assistant", content: text("Item 1 mentions signing.")},
      {role: "user", content: text("Reply with just: done")}] as $all
     | {model: $model, max_tokens: 16, stream: true, system: $system, tools: $tools,
        messages: $all[: (2 * $turns - 1)]}'
@@ -139,7 +152,7 @@ printf '%s\n' "${results[@]}" | jq -rse --argjson idle "$IDLE_SECONDS" '
       ["cold writes its prefix to the 1-hour pool", $r.cold.cache_write_1h > 0],
       ["warm reads everything cold cached", $r.warm.cache_read >= $cold],
       ["warm writes its new tail", $r.warm.cache_write > 0],
-      ["changed reads the shared prefix only", $r.changed.cache_read > 0 and $r.changed.cache_read < $warm],
+      ["changed reads the shared prefix only", $r.changed.cache_read > 0 and $r.changed.cache_read < $cold],
       ["changed writes the new tail", $r.changed.cache_write > 0],
       ["idle reads everything warm cached after \($idle)s", $r.idle.cache_read >= $warm],
       ["no 5-minute writes", all(.[]; .cache_write_5m == 0)]

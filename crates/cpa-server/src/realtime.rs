@@ -175,12 +175,12 @@ async fn authenticate(
             secret: Some(grant),
         }
     } else {
-        let (authenticated, access) = crate::plugins::authenticate(&rt, req).await;
+        let (authenticated, access) = crate::access::authenticate_request(&rt, req);
         req = authenticated;
         match access {
             // No provider registered: Go sets nothing.
-            Ok(crate::plugins::Access::Open) => Principal::default(),
-            Ok(crate::plugins::Access::Granted { caller, provider }) => Principal {
+            Ok(crate::access::Access::Open) => Principal::default(),
+            Ok(crate::access::Access::Granted { caller, provider }) => Principal {
                 key: caller.principal,
                 provider,
                 secret: None,
@@ -188,14 +188,6 @@ async fn authenticate(
             Err(denied) if matches!(mode, Mode::Ordinary) => {
                 let body = crate::gojson::Obj::new().str("error", denied.message).finish();
                 return crate::respond::gin_json(denied.status, body);
-            }
-            Err(denied) if denied.status >= 500 => {
-                return realtime_error(
-                    denied.status,
-                    denied.message,
-                    "server_error",
-                    "authentication_service_error",
-                );
             }
             Err(denied) => {
                 return realtime_error(denied.status, denied.message, "authentication_error", "invalid_api_key");
@@ -405,6 +397,7 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         stream: false,
         clock: Default::default(),
         prompt_prefix_hash: String::new(),
+        attempts: Default::default(),
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

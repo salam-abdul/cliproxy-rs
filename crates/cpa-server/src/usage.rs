@@ -22,6 +22,8 @@ pub struct UsageQueue {
     enabled: AtomicBool,
     /// Go `UsageStatisticsEnabled`: `observability.usage.usage-statistics-enabled`.
     statistics: AtomicBool,
+    /// Separate, default-off final-wire observations; not a Go usage setting.
+    claude_cache: AtomicBool,
     retention_seconds: AtomicI64,
     items: Mutex<VecDeque<(Instant, Vec<u8>)>>,
     usage_subscribers: std::sync::Arc<Subscribers>,
@@ -101,6 +103,7 @@ impl Default for UsageQueue {
             enabled: AtomicBool::new(false),
             // Go's package default; startup immediately applies the config value.
             statistics: AtomicBool::new(true),
+            claude_cache: AtomicBool::new(false),
             retention_seconds: AtomicI64::new(DEFAULT_RETENTION_SECONDS),
             items: Mutex::default(),
             usage_subscribers: std::sync::Arc::default(),
@@ -118,6 +121,13 @@ impl UsageQueue {
             .and_then(|u| u.get("usage-statistics-enabled"))
             .and_then(serde_yaml_ng::Value::as_bool)
             .unwrap_or(false);
+        self.claude_cache.store(
+            usage
+                .and_then(|u| u.get("claude-cache-telemetry"))
+                .and_then(serde_yaml_ng::Value::as_bool)
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
         let retention = usage
             .and_then(|u| u.get("redis-usage-queue-retention-seconds"))
             .and_then(serde_yaml_ng::Value::as_i64)
@@ -142,6 +152,10 @@ impl UsageQueue {
     /// Whether a usage record would be kept; producers can skip building one.
     pub fn accepts(&self) -> bool {
         self.enabled.load(Ordering::SeqCst) && self.statistics.load(Ordering::SeqCst)
+    }
+
+    pub fn wants_claude_cache(&self) -> bool {
+        self.accepts() && self.claude_cache.load(Ordering::SeqCst)
     }
 
     /// Queues one serialized usage record (Go `usageQueuePlugin.HandleUsage` +
@@ -232,6 +246,10 @@ mod tests {
         q.enqueue(b"{}".to_vec());
         assert!(q.pop_oldest(5).is_empty(), "statistics default off");
         q.configure(true, &on);
+        assert!(
+            !q.wants_claude_cache(),
+            "usage statistics alone do not enable cache telemetry"
+        );
         for i in 0..3 {
             q.enqueue(format!("{{\"n\":{i}}}").into_bytes());
         }
@@ -239,6 +257,11 @@ mod tests {
         q.configure(false, &on);
         q.configure(true, &on);
         assert!(q.pop_oldest(5).is_empty(), "disabling clears the queue");
+        let telemetry = cfg("observability: {usage: {usage-statistics-enabled: true, claude-cache-telemetry: true}}\n");
+        q.configure(true, &telemetry);
+        assert!(q.wants_claude_cache());
+        q.configure(false, &telemetry);
+        assert!(!q.wants_claude_cache(), "telemetry also needs an accepting queue");
     }
 
     #[test]

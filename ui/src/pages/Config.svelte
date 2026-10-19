@@ -16,7 +16,6 @@
     client: "Per-client tweaks.",
     multimedia: "Image and video generation.",
     observability: "Logs and usage statistics.",
-    plugins: "Native plugins.",
   };
   let edit = $state<{ path: string; value: unknown; title: string; yaml: boolean } | null>(null);
   // Strategies this server understands; "soonest-reset" is a cliproxy-rs addition.
@@ -53,7 +52,7 @@
         </div>
         <p class="muted">{current.help}</p>
       </section>
-      {@const sections = [...new Set([...Object.keys(about), ...Object.keys(config)])].filter((k) => k !== "config-version")}
+      {@const sections = [...new Set([...Object.keys(about), ...Object.keys(config)])].filter((k) => k !== "config-version" && k !== "plugins")}
       <ul class="list">
         {#each sections as k}
           {@const v = config[k]}

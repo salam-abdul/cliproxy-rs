@@ -606,10 +606,11 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             std::fs::write(dir.join("auth").join("fixture.json"), auth).unwrap();
         }
         let cfg = Config::parse(&text).unwrap();
-        let credential = cpa_core::config::credentials::load(&cfg)
+        let mut credential = cpa_core::config::credentials::load(&cfg)
             .into_iter()
             .find(|c| c.provider == "claude")
             .unwrap_or_else(|| panic!("{name}: no claude credential"));
+        credential.id = format!("{run}:{}", credential.id);
         let body = Bytes::from(scenario["body"].as_str().unwrap().to_owned());
         let source = match scenario["source"].as_str() {
             Some("openai") => Format::OpenAI,

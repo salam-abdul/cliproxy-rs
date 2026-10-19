@@ -10,7 +10,7 @@
 //! the test marked it [`local`] because the test built its executor against a mock.
 //! A non-loopback proxy (including `direct`) does not count: it could reach a
 //! provider. Stored credentials never change, so management listings, reconciliation and
-//! features that pick their own proxy (management `api-call`, `latest-version`) behave
+//! features that pick their own proxy (management `api-call`) behave
 //! as configured.
 // ponytail: the realtime routes dial through the Codex executor's live endpoints
 // directly, outside these executor calls; their tests build those endpoints on mocks.

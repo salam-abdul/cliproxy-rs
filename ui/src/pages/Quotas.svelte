@@ -7,7 +7,6 @@
   import Meter from "../Meter.svelte";
 
   $effect(() => every(15_000, () => store.creds.load(true)));
-  if (!store.plugins.data) store.plugins.load();
   let checking = $state(false);
   async function all() {
     checking = true;
@@ -59,7 +58,7 @@
               <span class="legend">observed {ago(a.quota.observed_at)}</span>
             </div>{/if}
           {#if !q && !signals.length && !hasSource(a)}<p class="legend">
-              No quota source for {label(provider(a))}. A plugin can add one.
+              No quota source for {label(provider(a))}.
             </p>{/if}
         </li>
       {:else}

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "cpa-exec"
 description = "Upstream provider executors for cliproxy-rs"
 version.workspace = true

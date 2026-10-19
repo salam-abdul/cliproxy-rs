@@ -13,7 +13,6 @@
   import Usage from "./pages/Usage.svelte";
   import Logs from "./pages/Logs.svelte";
   import Config from "./pages/Config.svelte";
-  import Plugins from "./pages/Plugins.svelte";
   import System from "./pages/System.svelte";
 
   const views: Record<string, Component> = {
@@ -29,7 +28,6 @@
     usage: Usage,
     logs: Logs,
     config: Config,
-    plugins: Plugins,
     system: System,
   };
   const View = $derived(views[store.route.page]);

@@ -522,7 +522,7 @@ async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
 /// `upstream_url`: the runtime, and the proxy's `/v1/messages` URL.
 async fn usage_proxy(dir: &Path, upstream_url: &str) -> (Arc<cpa_server::Runtime>, String) {
     let mut config = Config::parse(&format!(
-        "observability:\n  usage:\n    usage-statistics-enabled: true\n\
+        "observability:\n  usage:\n    usage-statistics-enabled: true\n    claude-cache-telemetry: true\n\
          claude-api-key:\n  - api-key: sk-upstream-usage\n    base-url: {upstream_url}\n"
     ))
     .unwrap();
@@ -736,6 +736,15 @@ async fn usage_record_names_the_conversation_and_prompt_prefix() {
     );
     assert_eq!(prefix(0), prefix(4));
     assert_ne!(prefix(0), prefix(3), "another system prompt");
+    let cache = |i: usize| &records[i]["claude_cache"];
+    assert_eq!(cache(0)["session_hash"], cache(1)["session_hash"]);
+    assert_ne!(cache(0)["session_hash"], cache(2)["session_hash"]);
+    assert_eq!(cache(0)["account_hash"], cache(4)["account_hash"]);
+    assert_eq!(cache(0)["tools"], cache(3)["tools"]);
+    assert_eq!(cache(0)["system"], cache(2)["system"]);
+    assert_ne!(cache(0)["system"], cache(3)["system"]);
+    assert_ne!(cache(0)["history_prefix"], cache(1)["history_prefix"]);
+    assert!(cache(0)["history_prefix"]["bytes"].as_u64().unwrap() > 0);
     for record in &records {
         let text = record.to_string();
         for prompt in [
@@ -748,5 +757,328 @@ async fn usage_record_names_the_conversation_and_prompt_prefix() {
             assert!(!text.contains(prompt), "{prompt:?} in {text}");
         }
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Both response modes keep the returned TTL buckets and final wire facts. Turning
+/// telemetry off changes neither the prepared request bytes nor the response bytes.
+#[tokio::test]
+async fn claude_cache_telemetry_is_final_content_free_and_observational() {
+    let _registry = REGISTRY.lock().await;
+    const REPLY: &str = r#"{"id":"msg_cache","type":"message","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":13,"output_tokens":3,"cache_read_input_tokens":1700,"cache_creation_input_tokens":900,"cache_creation":{"ephemeral_5m_input_tokens":217,"ephemeral_1h_input_tokens":683}}}"#;
+    let seen: Log = Arc::default();
+    let upstream_url = serve(
+        axum::Router::new()
+            .route("/v1/messages", axum::routing::post(|State(log): State<Log>, req: Request| async move {
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
+                log.lock().unwrap().push(Seen {
+                    uri: String::new(), authorization: String::new(), beta: String::new(),
+                    accept_encoding: String::new(), client_key_leaked: false, body: body.clone(),
+                });
+                if serde_json::from_slice::<serde_json::Value>(&body).unwrap()["stream"] == true {
+                    let sse = format!("event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{REPLY}}}\n\nevent: message_delta\ndata: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":7}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n");
+                    ([("content-type", "text/event-stream")], sse).into_response()
+                } else {
+                    ([("content-type", "application/json")], REPLY).into_response()
+                }
+            }))
+            .with_state(seen.clone()),
+    ).await;
+    let dir = auth_dir("cache-telemetry", &[]);
+    let (rt, url) = usage_proxy(&dir, &upstream_url).await;
+    let client = wreq::Client::new();
+    let body = serde_json::json!({
+        "model":"claude-opus-5-5", "max_tokens":32,
+        "tools":[{"name":"private_tool_name", "description":"secret tool description", "input_schema":{"type":"object"}, "cache_control":{"type":"ephemeral","ttl":"1h"}}],
+        "system":[{"type":"text","text":"secret system text","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+        "messages":[{"role":"user","content":[{"type":"text","text":"secret history text","cache_control":{"type":"ephemeral"}}]}],
+        "thinking":{"type":"adaptive"}, "output_config":{"effort":"high"},
+        "betas":["extended-cache-ttl-2025-04-11"],
+        "prompt_cache_options":{"mode":"explicit"}
+    });
+    let mut replies = Vec::new();
+    for kind in ["main", "helper", "subagent", "compaction", "retry"] {
+        let mut body = body.clone();
+        body["stream"] = (kind == "subagent").into();
+        replies.push(
+            client
+                .post(&url)
+                .header("x-api-key", "client-key-1")
+                .header("x-claude-code-session-id", "cache-session-private")
+                .header("x-cliproxy-request-type", kind)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        );
+    }
+    let records = usage_records(&rt, 5).await;
+    // Reproduce the former offline verifier with the configured API-key ID.
+    // None of its inputs are secret to an attacker guessing that key.
+    let credential = cpa_core::config::credentials::from_config(&rt.config()).remove(0);
+    use sha2::{Digest, Sha256};
+    let old_account = format!(
+        "{:x}",
+        Sha256::digest(format!("cpa:claude-cache:account:v1\0{}", credential.id))
+    );
+    assert_ne!(records[0]["claude_cache"]["account_hash"], old_account);
+    let old_session = format!(
+        "{:x}",
+        Sha256::digest(b"cpa:claude-cache:session:v1\0cache-session-private")
+    );
+    assert_ne!(records[0]["claude_cache"]["session_hash"], old_session);
+    for (i, kind) in ["main", "helper", "subagent", "compaction", "retry"].iter().enumerate() {
+        let record = &records[i];
+        let cache = &record["claude_cache"];
+        assert_eq!(cache["schema_version"], 2);
+        assert_eq!(cache["media_present"], false);
+        assert!(cache["history_prefix"].get("tokens_estimate").is_none());
+        assert!(
+            record.get("usage_observed").is_none(),
+            "ordinary records keep Go accounting"
+        );
+        assert_eq!(cache["request_type"], *kind, "{record}");
+        assert_eq!(cache["model"], "claude-opus-5-5");
+        assert_eq!(cache["thinking_type"], "adaptive");
+        assert_eq!(cache["effort"], "high");
+        assert!(
+            cache["betas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "extended-cache-ttl-2025-04-11")
+        );
+        assert_eq!(cache["breakpoints"][0]["ttl"], "1h");
+        assert_eq!(cache["breakpoints"][1]["ttl"], "1h");
+        assert_eq!(cache["breakpoints"][2]["ttl"], "5m");
+        for key in ["session_hash", "account_hash", "scope_hash"] {
+            assert_eq!(cache[key].as_str().unwrap().len(), 64);
+            assert_eq!(cache[key], records[0]["claude_cache"][key]);
+        }
+        let start = cache["request_start_unix_ms"].as_i64().unwrap();
+        let first = cache["first_response_byte_unix_ms"].as_i64().unwrap();
+        let end = cache["end_unix_ms"].as_i64().unwrap();
+        assert!(start <= first && first <= end, "{record}");
+        assert_eq!(record["tokens"]["cache_creation_5m_tokens"], 217);
+        assert_eq!(record["tokens"]["cache_creation_1h_tokens"], 683);
+        assert_eq!(record["tokens"]["output_tokens"], if i == 2 { 7 } else { 3 });
+        let telemetry = cache.to_string();
+        for secret in [
+            "secret system text",
+            "secret history text",
+            "secret tool description",
+            "private_tool_name",
+            "sk-upstream-usage",
+            "client-key-1",
+            "cache-session-private",
+        ] {
+            assert!(!telemetry.contains(secret), "{secret} leaked in {telemetry}");
+        }
+        let wire: serde_json::Value = serde_json::from_slice(&seen.lock().unwrap()[i].body).unwrap();
+        assert_eq!(wire["tools"][0]["cache_control"]["ttl"], "1h");
+        assert!(wire.get("prompt_cache_options").is_none(), "final body was shaped");
+        assert_eq!(wire["messages"][0]["content"][0]["text"], "secret history text");
+    }
+    // Usage remains enabled: only the new, separate telemetry opt-in is off.
+    rt.usage_queue().configure(
+        true,
+        &Config::parse("observability: {usage: {usage-statistics-enabled: true}}\n").unwrap(),
+    );
+    for (kind, original) in [("main", 0), ("subagent", 2)] {
+        let mut plain = body.clone();
+        plain["stream"] = (kind == "subagent").into();
+        let off_reply = client
+            .post(&url)
+            .header("x-api-key", "client-key-1")
+            .header("x-claude-code-session-id", "cache-session-private")
+            .header("x-cliproxy-request-type", kind)
+            .json(&plain)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(off_reply, replies[original], "both response modes keep their bytes");
+    }
+    let off_records = usage_records(&rt, 2).await;
+    assert!(
+        off_records.iter().all(|r| r.get("claude_cache").is_none()),
+        "statistics alone never enable telemetry"
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].body, seen[5].body);
+        assert_eq!(seen[2].body, seen[6].body, "streaming on/off upstream identity");
+    }
+    rt.usage_queue().configure(true, &rt.config());
+    for data in ["c2VjcmV0LWltYWdlLWE=", "c2VjcmV0LWltYWdlLWI="] {
+        let mut media = body.clone();
+        media["messages"] = serde_json::json!([
+            {"role":"assistant","content":[{"type":"tool_use","id":"image-call","name":"private_tool_name","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"image-call","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":data}}
+            ],"cache_control":{"type":"ephemeral"}}]}
+        ]);
+        let response = client
+            .post(&url)
+            .header("x-api-key", "client-key-1")
+            .json(&media)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+    }
+    let media = usage_records(&rt, 2).await;
+    let first = &media[0]["claude_cache"];
+    let second = &media[1]["claude_cache"];
+    assert_eq!(first["media_present"], true, "nested tool-result media must be flagged");
+    assert_eq!(second["media_present"], true);
+    assert_eq!(first["history_prefix"]["bytes"], second["history_prefix"]["bytes"]);
+    assert_ne!(
+        first["history_prefix"]["hash"], second["history_prefix"]["hash"],
+        "media bytes remain in the hash"
+    );
+    for row in media {
+        assert!(!row["claude_cache"].to_string().contains("c2VjcmV0LWltYWdl"));
+    }
+    assert!(rt.usage_queue().pop_oldest(10).is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Cache lookup's 20-position boundary includes the target and groups parallel
+/// tools. Automatic caching skips ineligible suffixes without inventing a write.
+#[tokio::test]
+async fn claude_cache_telemetry_lookup_boundaries_and_automatic_targets() {
+    let _registry = REGISTRY.lock().await;
+    let log: Log = Arc::default();
+    let upstream_url = serve(axum::Router::new().fallback(upstream).with_state(log)).await;
+    let dir = auth_dir("cache-lookup", &[]);
+    let (rt, url) = usage_proxy(&dir, &upstream_url).await;
+    let client = wreq::Client::new();
+    let mut messages = Vec::new();
+    let mut bodies = Vec::new();
+    for i in 0..=20 {
+        messages.push(serde_json::json!({"role":"user", "content":[{
+            "type":"text", "text":format!("block {i}"), "cache_control":{"type":"ephemeral"}
+        }]}));
+        if [0, 19, 20].contains(&i) {
+            bodies.push(serde_json::json!({"messages":messages}));
+        }
+        messages[i]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control");
+    }
+    let mut parallel = bodies[0].clone();
+    for (role, kind) in [("assistant", "tool_use"), ("user", "tool_result")] {
+        let content: Vec<_> = (0..30)
+            .map(|i| {
+                if kind == "tool_use" {
+                    serde_json::json!({"type":kind, "id":format!("call{i}"), "name":"read", "input":{}})
+                } else {
+                    serde_json::json!({"type":kind, "tool_use_id":format!("call{i}"), "content":"ok"})
+                }
+            })
+            .collect();
+        parallel["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"role":role,"content":content}));
+    }
+    parallel["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"role":"user","content":[{
+            "type":"text", "text":"after parallel tools", "cache_control":{"type":"ephemeral"}
+        }]}));
+    bodies.push(parallel);
+    let automatic = serde_json::json!({
+        "cache_control":{"type":"ephemeral"},
+        "messages":[{"role":"assistant","content":[
+            {"type":"text","text":"eligible"},
+            {"type":"thinking","thinking":"private reasoning","signature":"private signature"},
+            {"type":"text","text":""}
+        ]}]
+    });
+    bodies.push(automatic.clone());
+    let mut explicit = automatic;
+    explicit["messages"][0]["content"][0]["cache_control"] = serde_json::json!({"type":"ephemeral"});
+    bodies.push(explicit);
+    let mut invalid = bodies[3].clone();
+    invalid["cache_control"] = serde_json::Value::Null;
+    for message in &mut invalid["messages"].as_array_mut().unwrap()[1..3] {
+        for (i, block) in message["content"].as_array_mut().unwrap().iter_mut().enumerate() {
+            block["cache_control"] = match i % 3 {
+                0 => serde_json::Value::Null,
+                1 => serde_json::json!({}),
+                _ => serde_json::json!({"type":"invalid"}),
+            };
+        }
+    }
+    bodies.push(invalid);
+    for body in &mut bodies {
+        body["model"] = "claude-opus-5-5".into();
+        body["max_tokens"] = 16.into();
+        body["prompt_cache_options"] = serde_json::json!({"mode":"explicit"});
+        assert_eq!(
+            client
+                .post(&url)
+                .header("x-api-key", "client-key-1")
+                .json(body)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            JSON_REPLY
+        );
+    }
+    let records = usage_records(&rt, bodies.len()).await;
+    let cache = |i: usize| &records[i]["claude_cache"];
+    let initial = &cache(0)["breakpoints"][0]["prefix"]["hash"];
+    let last = |i: usize| cache(i)["breakpoints"].as_array().unwrap().last().unwrap();
+    let contains_initial = |i| {
+        last(i)["lookback"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| &p["hash"] == initial)
+    };
+    assert_eq!(last(1)["lookback"].as_array().unwrap().len(), 19);
+    assert!(contains_initial(1), "19 new positions can still read the initial write");
+    assert!(
+        !contains_initial(2),
+        "20 new positions put the initial write outside lookup"
+    );
+    assert!(
+        contains_initial(3),
+        "60 parallel tools occupy only two additional positions"
+    );
+    assert_eq!(cache(4)["automatic_cache_ttl"], "5m");
+    assert_eq!(last(4)["path"], "cache_control:messages.0.content.0");
+    assert_eq!(cache(4)["breakpoints"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        cache(5)["breakpoints"].as_array().unwrap().len(),
+        1,
+        "same-TTL automatic marker is a no-op"
+    );
+    assert_eq!(last(5)["path"], "messages.0.content.0");
+    assert_eq!(cache(4)["history_prefix"], cache(5)["history_prefix"]);
+    assert!(!cache(4).to_string().contains("private reasoning"));
+    assert!(
+        cache(6)["automatic_cache_ttl"].is_null(),
+        "null root control is not automatic caching"
+    );
+    assert_eq!(
+        cache(6)["breakpoints"].as_array().unwrap().len(),
+        2,
+        "invalid controls do not invent writes"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -16,15 +16,15 @@ use cpa_core::exec::Caller;
 
 use crate::runtime::Runtime;
 
-/// Go `AuthMiddleware`: client keys, then plugin frontend auth providers.
+/// Client-key authentication for HTTP routes.
 pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
-    let (mut req, access) = crate::plugins::authenticate(&rt, req).await;
+    let (mut req, access) = authenticate_request(&rt, req);
     let caller = match access {
-        Ok(crate::plugins::Access::Open) => Caller {
+        Ok(Access::Open) => Caller {
             principal: String::new(),
             source: "",
         },
-        Ok(crate::plugins::Access::Granted { caller, .. }) => caller,
+        Ok(Access::Granted { caller, .. }) => caller,
         // gin `AbortWithStatusJSON(status, gin.H{"error": msg})`.
         Err(denied) => {
             let body = crate::gojson::Obj::new().str("error", denied.message).finish();
@@ -32,8 +32,7 @@ pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, ne
         }
     };
     req.extensions_mut().insert(caller);
-    let query = req.uri().query().unwrap_or_default().to_owned();
-    crate::plugins::execution::with_query(&query, next.run(req)).await
+    next.run(req).await
 }
 
 pub(crate) fn authenticate(keys: &[String], headers: &HeaderMap, query: &str) -> Result<Caller, &'static str> {
@@ -117,6 +116,34 @@ pub(crate) fn unescape(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+pub(crate) enum Access {
+    /// No provider registered: Go's manager returns no result and sets nothing.
+    Open,
+    /// Go `sdkaccess.Result`: the caller and the provider identifier that accepted it.
+    Granted { caller: Caller, provider: String },
+}
+
+/// Go `sdkaccess.AuthError` as the middlewares answer it.
+pub(crate) struct Denied {
+    pub status: u16,
+    pub message: &'static str,
+}
+
+pub(crate) fn authenticate_request(rt: &Runtime, req: Request) -> (Request, Result<Access, Denied>) {
+    let config = rt.config();
+    let result = if config.api_keys.is_empty() {
+        Ok(Access::Open)
+    } else {
+        authenticate(&config.api_keys, req.headers(), req.uri().query().unwrap_or_default())
+            .map(|caller| Access::Granted {
+                caller,
+                provider: "config-inline".to_owned(),
+            })
+            .map_err(|message| Denied { status: 401, message })
+    };
+    (req, result)
 }
 
 #[cfg(test)]

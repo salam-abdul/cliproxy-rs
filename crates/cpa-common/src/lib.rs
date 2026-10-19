@@ -119,3 +119,6 @@ pub(crate) mod alloc_count {
         BYTES.with(Cell::get)
     }
 }
+
+pub mod quota;
+pub mod wirejson;

@@ -478,4 +478,14 @@ mod tests {
         assert!(archive_unknown(&mut migrated).is_empty());
         assert_eq!(migrated, on);
     }
+
+    #[test]
+    fn claude_cache_telemetry_survives_strict_writes_and_migration() {
+        let on = yaml("observability: {usage: {claude-cache-telemetry: true}}");
+        validate(&on, true).unwrap();
+        assert!(validate(&yaml("observability: {usage: {claude-cache-telemetry: [true]}}"), true).is_err());
+        let mut migrated = on.clone();
+        assert!(archive_unknown(&mut migrated).is_empty());
+        assert_eq!(migrated, on);
+    }
 }

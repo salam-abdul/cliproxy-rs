@@ -675,7 +675,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cliproxy"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -684,7 +684,6 @@ dependencies = [
  "cpa-core",
  "cpa-exec",
  "cpa-home",
- "cpa-plugin",
  "cpa-server",
  "cpa-store",
  "futures-util",
@@ -796,7 +795,7 @@ checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
 name = "cpa-common"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "base64 0.22.1",
  "cpa-core",
@@ -812,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "cpa-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -830,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "cpa-exec"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-compression",
  "axum",
@@ -871,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "cpa-home"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -892,35 +891,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpa-plugin"
-version = "0.2.5"
-dependencies = [
- "async-compression",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "cpa-common",
- "cpa-core",
- "cpa-exec",
- "cpa-plugin",
- "cpa-translate",
- "flate2",
- "futures-util",
- "http",
- "libc",
- "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "wreq",
-]
-
-[[package]]
 name = "cpa-server"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -934,7 +906,6 @@ dependencies = [
  "cpa-common",
  "cpa-core",
  "cpa-exec",
- "cpa-plugin",
  "cpa-translate",
  "futures-util",
  "getrandom 0.3.4",
@@ -967,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "cpa-store"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -990,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "cpa-translate"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "base64 0.22.1",
  "bytes",

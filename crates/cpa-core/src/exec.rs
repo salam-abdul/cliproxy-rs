@@ -105,6 +105,13 @@ pub struct ExecRequest {
 
 /// Receives the upstream payloads Go's executors feed their usage reporter.
 pub trait UsageObserver: Send + Sync {
+    fn wants_claude_cache(&self) -> bool {
+        false
+    }
+    /// Content-free Claude cache facts, taken after every request rewrite.
+    fn claude_cache(&self, telemetry: ClaudeCacheTelemetry) {
+        let _ = telemetry;
+    }
     /// A whole upstream response body in `format` (Go `Parse*Usage` on the body).
     fn response_body(&self, format: Format, body: &[u8]);
     /// One upstream stream line in `format`, as received (Go feeds each scanner line to
@@ -202,6 +209,52 @@ pub enum UpstreamStage {
 #[derive(Clone, Default)]
 pub struct UsageSink(Option<std::sync::Arc<dyn UsageObserver>>, CaptureSink);
 
+/// No payloads or credentials: keyed fingerprints and serialized byte lengths only.
+/// Replay estimates token positions offline from returned aggregate usage.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CacheFingerprint {
+    pub hash: String,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CacheBreakpoint {
+    pub path: String,
+    pub ttl: String,
+    pub prefix: CacheFingerprint,
+    /// Earlier boundaries within 20 lookup positions including this breakpoint;
+    /// consecutive tool_use/tool_result blocks share a position.
+    pub lookback: Vec<CacheFingerprint>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ClaudeCacheTelemetry {
+    pub schema_version: u8,
+    pub media_present: bool,
+    pub session_hash: String,
+    pub account_hash: String,
+    pub scope_hash: String,
+    pub model: String,
+    pub thinking_type: String,
+    pub thinking_budget: Option<i64>,
+    pub thinking_hash: String,
+    pub effort: String,
+    pub betas: Vec<String>,
+    pub speed: String,
+    pub service_tier: String,
+    pub request_type: String,
+    pub base_request_type: String,
+    pub attempt: usize,
+    pub tools: CacheFingerprint,
+    pub system: CacheFingerprint,
+    pub history_prefix: CacheFingerprint,
+    pub automatic_cache_ttl: Option<String>,
+    pub breakpoints: Vec<CacheBreakpoint>,
+    pub request_start_unix_ms: Option<i64>,
+    pub first_response_byte_unix_ms: Option<i64>,
+    pub end_unix_ms: Option<i64>,
+}
+
 impl UsageSink {
     pub fn new(observer: std::sync::Arc<dyn UsageObserver>) -> Self {
         Self(Some(observer), CaptureSink::default())
@@ -216,6 +269,16 @@ impl UsageSink {
     /// Whether anyone listens; executors can skip the work otherwise.
     pub fn enabled(&self) -> bool {
         self.0.is_some()
+    }
+
+    pub fn wants_claude_cache(&self) -> bool {
+        self.0.as_ref().is_some_and(|o| o.wants_claude_cache())
+    }
+
+    pub fn claude_cache(&self, telemetry: ClaudeCacheTelemetry) {
+        if let Some(o) = &self.0 {
+            o.claude_cache(telemetry);
+        }
     }
 
     pub fn response_body(&self, format: Format, body: &[u8]) {

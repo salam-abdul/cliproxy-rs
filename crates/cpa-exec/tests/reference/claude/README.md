@@ -48,7 +48,7 @@ time zone and is recorded per scenario; the replay pins its clock to it.
 ## v8.0.27 goldens
 
 The Claude prompt-cache and prompt-shaping fixes this executor follows from v8.0.27
-(see `docs/parity-audit/upstream-v8.0.27.md`) have their own goldens, recorded from a
+(see `docs/PARITY.md`) have their own goldens, recorded from a
 v8.0.27 checkout (`bf93416`) the same way; everything else stays on `6fecc6e`.
 
 - `../../../src/claude/testdata/go_executor_v8.0.27.json`: this generator on

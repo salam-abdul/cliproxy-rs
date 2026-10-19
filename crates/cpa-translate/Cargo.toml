@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "cpa-translate"
 description = "Request and response translation between AI API formats"
 version.workspace = true

@@ -552,6 +552,7 @@
         "usage": {
           "fields": {
             "usage-statistics-enabled": "bool",
+            "claude-cache-telemetry": "bool",
             "redis-usage-queue-retention-seconds": "int"
           }
         },

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "cpa-core"
 description = "Shared contracts for cliproxy-rs: config, credentials, formats and the execution envelope"
 version.workspace = true

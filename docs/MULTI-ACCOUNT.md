@@ -1,6 +1,6 @@
 # Several accounts
 
-This guide covers routing across your own accounts and API keys, for use on your own machines. Do not pool other people's subscriptions. Read [Accounts and provider terms](../README.md#accounts-and-provider-terms). It assumes the proxy is already running ([GETTING-STARTED.md](GETTING-STARTED.md)).
+This guide covers routing across your own accounts and API keys, for use on your own machines. Do not pool other people's subscriptions. It assumes the proxy is already running ([INSTALL.md](INSTALL.md)).
 
 ## Add the accounts
 

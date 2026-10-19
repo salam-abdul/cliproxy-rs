@@ -102,7 +102,7 @@ try {
   browser("click", 'nav a[href="#quotas"]');
   browser("wait", "4000");
   const pluginReads = evaluate(`window.__calls.slice(${before}).filter(c=>c.path.endsWith('/plugins')&&c.method==='GET').length`);
-  assert.ok(pluginReads <= 1, `GET /plugins read ${pluginReads} times`);
+  assert.ok(pluginReads === 0, `GET /plugins read ${pluginReads} times`);
   console.log(`PASS unsupported reads are not retried in a loop (${pluginReads} read of GET /plugins)`);
 
   browser("click", 'nav a[href="#payload"]');

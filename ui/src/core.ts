@@ -237,7 +237,7 @@ export function usageStats(events: Event[]) {
  */
 export type Window = { label: string; used: number | null; reset: string; source?: string; detail?: string };
 const clamp = (n: number) => Math.round(Math.max(0, Math.min(100, n)) * 10) / 10;
-/** Normalised plugin groups first; then the built-in Claude, Codex and Kimi usage payloads. */
+/** Normalised quota groups first; then the built-in Claude, Codex and Kimi usage payloads. */
 export function quotaWindows(p: string, payload: Data): Window[] {
   const out: Window[] = [];
   if (Array.isArray(payload.groups)) {

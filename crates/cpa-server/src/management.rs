@@ -1,7 +1,8 @@
 //! Management API (v8, plus the few legacy v0 reads the dashboard predates).
 //!
 //! Routing follows gin: an unknown path or an unregistered method on a known path is a
-//! bare 404 that never reaches authentication. Access rules live in [`access`].
+//! bare 404, except legacy management paths retain their authentication guard.
+//! Access rules live in [`access`].
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -28,15 +29,10 @@ mod logs;
 mod multipart;
 mod oauth;
 pub mod observability;
-mod plugin_auth;
-mod plugin_oauth;
-mod plugin_store;
-mod plugins;
 mod quota;
 mod quota_probe;
 pub use access::cors;
 pub(crate) use access::{Cors, cors_headers};
-pub(crate) use plugins::go_query;
 
 pub struct Management {
     pub(crate) rt: Arc<Runtime>,
@@ -55,11 +51,6 @@ pub struct Management {
     pub(crate) runtime_seen: Mutex<std::collections::HashMap<String, auth_files::RuntimeSeen>>,
     /// Go net/http clients by proxy for `api-call`.
     pub(crate) clients: cpa_exec::proxy::GoClients,
-    pub(crate) latest_release_url: std::borrow::Cow<'static, str>,
-    pub(crate) update_check_disabled: bool,
-    // No task or expiry timer: allocated only after a successful, explicit check.
-    // Wall-clock time, so a cached result also expires across sleep or hibernation.
-    pub(crate) latest_release: tokio::sync::Mutex<Option<(std::time::SystemTime, String)>>,
     /// Pending and recent management logins (Go `oauthSessionStore`).
     pub(crate) oauth: oauth::Sessions,
     /// Callback forwarders by port (Go `callbackForwarders`).
@@ -73,8 +64,6 @@ pub struct Management {
     auth_dir: Option<PathBuf>,
     /// The zone log line timestamps are parsed in (Go `time.Local` when `None`).
     pub(crate) log_zone: logs::Zone,
-    /// Plugin store test seams and release cache (Go `Handler.pluginStore*`).
-    pub(crate) plugin_store: plugin_store::StoreState,
     access: access::Access,
 }
 
@@ -88,10 +77,6 @@ pub struct Options {
     pub standalone: bool,
     /// Overrides the `MANAGEMENT_PASSWORD` environment variable when set.
     pub management_password: Option<String>,
-    /// Overrides [`observability::LATEST_RELEASE_URL`] (tests point it at a local server).
-    pub latest_release_url: Option<String>,
-    /// Overrides CLIPROXY_NO_UPDATE_CHECK (tests only).
-    pub update_check_disabled: Option<bool>,
     /// One local base URL for every provider's login endpoints (tests only).
     pub login_base: Option<String>,
     /// Overrides the log directory Go resolves at startup (tests only).
@@ -105,13 +90,6 @@ pub struct Options {
     /// auth-dir, so a config without one never reads the default `~/.cli-proxy-api`
     /// (tests only). A configured store still wins.
     pub auth_dir: Option<PathBuf>,
-    /// The only plugin store registry (Go `pluginStoreRegistryURL`; tests only).
-    pub plugin_store_registry_url: Option<String>,
-    /// The plugin store's HTTP client (Go `pluginStoreHTTPClient`; tests only).
-    pub plugin_store_http: Option<Arc<dyn cpa_plugin::store::Doer>>,
-    /// The plugin store's GitHub rate limiter (Go `pluginStoreRateLimiter`); the
-    /// process-wide one when unset.
-    pub plugin_store_rate_limiter: Option<Arc<cpa_plugin::store::GitHubRateLimiter>>,
 }
 
 impl Management {
@@ -139,14 +117,6 @@ impl Management {
     pub fn with_options(rt: Arc<Runtime>, path: PathBuf, options: Options) -> Arc<Self> {
         let cfg = rt.config();
         rt.publish_policy(policy(&cfg));
-        let latest_release_url = options
-            .latest_release_url
-            .clone()
-            .map(std::borrow::Cow::Owned)
-            .unwrap_or(std::borrow::Cow::Borrowed(observability::LATEST_RELEASE_URL));
-        let update_check_disabled = options
-            .update_check_disabled
-            .unwrap_or_else(|| std::env::var("CLIPROXY_NO_UPDATE_CHECK").is_ok_and(|v| v == "1"));
         let login_base = options.login_base.clone();
         let log_dir = options
             .log_dir
@@ -156,11 +126,6 @@ impl Management {
         let store = options.store.take();
         let auth_dir = options.auth_dir.take();
         let log_zone = options.log_zone;
-        let plugin_store = plugin_store::StoreState::new(
-            options.plugin_store_registry_url.take(),
-            options.plugin_store_http.take(),
-            options.plugin_store_rate_limiter.take(),
-        );
         let access = access::Access::new(&cfg, options);
         rt.usage_queue().configure(access.available(), &cfg);
         let state = Arc::new(Self {
@@ -172,9 +137,6 @@ impl Management {
             disabled_via_api: Mutex::default(),
             runtime_seen: Mutex::default(),
             clients: cpa_exec::proxy::GoClients::new(cpa_exec::proxy::Hooks::default()),
-            latest_release_url,
-            update_check_disabled,
-            latest_release: tokio::sync::Mutex::new(None),
             oauth: oauth::Sessions::default(),
             forwarders: Mutex::default(),
             login_base,
@@ -182,11 +144,9 @@ impl Management {
             store,
             auth_dir,
             log_zone,
-            plugin_store,
         });
         oauth::install_callback_sink(&state);
         access::start_purge(&state);
-        plugin_auth::attach(&state);
         state
     }
 
@@ -397,11 +357,10 @@ macro_rules! open {
 }
 
 /// gin answers HEAD and unregistered methods on a known path with NoRoute (no `Allow`
-/// header; starting from `any` keeps axum from adding one). Go's NoRoute serves
-/// plugin routes, so those requests go to [`plugins::no_route`].
+/// header; starting from `any` keeps axum from adding one).
 fn methods() -> MethodRouter<Arc<Management>> {
     // An explicit HEAD keeps axum from answering HEAD with the GET handler.
-    any(plugins::no_route).head(plugins::no_route)
+    any(no_route).head(no_route)
 }
 
 /// The OAuth callback POST needs no key, so unlike Go it keeps a bound: legitimate
@@ -549,71 +508,13 @@ pub fn router(state: Arc<Management>) -> Router {
     ] {
         router = router.route(&format!("{v0}/{path}"), route);
     }
-    // Plugin routes: v8 and the v0 spellings Go keeps (internal/api/server_management.go,
-    // server_management_v8.go); the v0 config, enable and v8 store routes share them.
-    for (path, route) in [
-        ("plugins", methods().get(guarded!(s, plugins::list))),
-        ("plugins/{id}", methods().delete(guarded!(s, plugins::delete))),
-    ] {
-        router = router
-            .route(&format!("{v8}/{path}"), route.clone())
-            .route(&format!("{v0}/{path}"), route);
-    }
-    // Plugin store (plugin_store.go). gin keeps one route tree per method, so a DELETE of
-    // `plugins/store` is DeletePlugin with the ID `store`.
     router = router
-        .route(
-            &format!("{v8}/plugins/store"),
-            methods()
-                .get(guarded!(s, plugin_store::list))
-                .delete(guarded!(s, plugins::delete_store_id)),
-        )
-        .route(
-            &format!("{v8}/plugins/store/{{id}}/install"),
-            methods().post(guarded!(s, plugin_store::install)),
-        )
-        .route(
-            &format!("{v0}/plugin-store"),
-            methods().get(guarded!(s, plugin_store::list)),
-        )
-        .route(
-            &format!("{v0}/plugin-store/{{id}}/install"),
-            methods().post(guarded!(s, plugin_store::install)),
-        );
-    // Plugin quota (plugin_quota.go): per-plugin under v8 and v0, the credential-level
-    // routes and the reset alias only under v0.
-    for base in [v8, v0] {
-        router = router.route(
-            &format!("{base}/plugins/{{id}}/quota"),
-            methods()
-                .get(guarded!(s, quota::get_plugin))
-                .post(guarded!(s, quota::fetch_plugin))
-                .delete(guarded!(s, quota::reset_plugin)),
-        );
-    }
-    router = router
-        .route(
-            &format!("{v0}/plugins/{{id}}/quota/reset"),
-            methods().post(guarded!(s, quota::reset_plugin)),
-        )
         .route(
             &format!("{v0}/quota/providers"),
             methods().get(guarded!(s, quota::providers)),
         )
         .route(&format!("{v0}/quota/fetch"), methods().post(guarded!(s, quota::fetch)))
         .route(&format!("{v0}/quota/reset"), methods().post(guarded!(s, quota::reset)));
-    router = router
-        .route(
-            &format!("{v0}/plugins/{{id}}/enabled"),
-            methods().patch(guarded!(s, plugins::patch_enabled)),
-        )
-        .route(
-            &format!("{v0}/plugins/{{id}}/config"),
-            methods()
-                .get(guarded!(s, plugins::get_config))
-                .put(guarded!(s, plugins::put_config))
-                .patch(guarded!(s, plugins::patch_config)),
-        );
     // Go's remaining v0 routes, adapted over the v8 handlers (management/legacy.rs).
     router = router.route(&format!("{v0}/config"), methods().get(guarded!(s, legacy::config)));
     for path in legacy::FIELD_ROUTES {
@@ -671,7 +572,7 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().get(guarded!(s, logs::request_log)),
         );
     router
-        .fallback(plugins::no_route)
+        .fallback(no_route)
         .route("/management.html", get(panel))
         .route("/assets/{*path}", get(panel))
         .route("/fonts/{*path}", get(panel))
@@ -952,4 +853,18 @@ async fn panel(State(state): State<Arc<Management>>, OriginalUri(uri): OriginalU
         bytes,
     )
         .into_response()
+}
+
+async fn no_route(State(state): State<Arc<Management>>, req: axum::extract::Request) -> Response {
+    let path = percent_decode(req.uri().path());
+    if path != "/v0/management" && !path.starts_with("/v0/management/") {
+        return access::not_found();
+    }
+    use tower::ServiceExt;
+    let route: MethodRouter<(), std::convert::Infallible> =
+        any(|| async { access::not_found() }).layer(middleware::from_fn_with_state(state, access::guard));
+    match route.oneshot(req).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    }
 }

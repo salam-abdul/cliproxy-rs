@@ -158,6 +158,7 @@ async fn alpha_search(
             stream: false,
             clock: Default::default(),
             prompt_prefix_hash: String::new(),
+            attempts: Default::default(),
         };
         return search(&rt, lease, &body, &headers, &model, &cfg, &capture, Some(&facts)).await;
     }

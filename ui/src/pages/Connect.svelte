@@ -7,11 +7,7 @@
   const builtIn = ["claude", "codex", "antigravity", "kimi", "kimi-ai", "xai", "devin", "meta"];
   // Go starts a local callback forwarder for these when asked by a web UI.
   const forwarded = ["claude", "codex", "antigravity", "xai", "devin"];
-  if (!store.plugins.data) store.plugins.load();
-  const providers = $derived([
-    ...builtIn,
-    ...(store.plugins.data || []).filter((p) => p.supports_oauth).map((p) => String(p.oauth_provider || p.id)),
-  ]);
+  const providers = builtIn;
   let gone = $state<string[]>([]),
     session = $state<Data | null>(null),
     status = $state(""),

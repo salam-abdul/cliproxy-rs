@@ -44,8 +44,6 @@ pub struct Runtime {
     usage: Arc<crate::usage::UsageQueue>,
     /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
     local_model: std::sync::atomic::AtomicBool,
-    /// The native plugin host, synced with each published config (see [`crate::plugins`]).
-    plugins: crate::plugins::PluginRuntime,
     /// The remote dispatcher that replaces local selection (Go Home mode).
     remote: RwLock<Option<Arc<dyn crate::remote::RemoteDispatch>>>,
     /// Set only by [`crate::testing::runtime`]: executor calls get credentials that
@@ -90,7 +88,6 @@ impl Runtime {
             pool_offsets: Mutex::default(),
             usage: Arc::default(),
             local_model: Default::default(),
-            plugins: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
@@ -125,24 +122,6 @@ impl Runtime {
         self.local_model.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Serves with `host`, a plugin host that already runs (Go hands the host that
-    /// registered plugin command-line flags to the service; additive API). Call before
-    /// [`crate::plugins::start`].
-    pub fn with_plugin_host(mut self, host: cpa_plugin::Host) -> Self {
-        self.plugins = crate::plugins::PluginRuntime::with_host(host);
-        self
-    }
-
-    /// The plugin host (additive API). [`crate::plugins::start`] syncs it with the
-    /// config.
-    pub fn plugins(&self) -> &cpa_plugin::Host {
-        self.plugins.host()
-    }
-
-    pub(crate) fn plugin_runtime(&self) -> &crate::plugins::PluginRuntime {
-        &self.plugins
-    }
-
     /// The config snapshot to use for one whole request.
     pub fn config(&self) -> Arc<Config> {
         self.config.read().unwrap_or_else(PoisonError::into_inner).clone()
@@ -169,12 +148,8 @@ impl Runtime {
         let ws_auth = crate::relay::ws_auth(&config);
         let config = Arc::new(config);
         let previous = {
-            // The plugin worker is told under the same lock, so concurrent publishes
-            // reach it in the order they replaced the config.
             let mut current = self.config.write().unwrap_or_else(PoisonError::into_inner);
-            let previous = std::mem::replace(&mut *current, config.clone());
-            self.plugins.config_published(config);
-            previous
+            std::mem::replace(&mut *current, config.clone())
         };
         // Go's websocket auth change handler: turning ws-auth on ends the relay sessions
         // that connected without a key.
@@ -1559,34 +1534,6 @@ impl CredentialStore {
         self.persist_cooldowns();
     }
 
-    /// Inserts or replaces one credential (a plugin's `host.auth.save`) under a single
-    /// write lock, so a concurrent `apply_patch` on another credential is never undone
-    /// the way a snapshot followed by [`Self::reconcile`] could undo it. An unchanged
-    /// credential keeps its revision, as in `reconcile`.
-    pub fn upsert(&self, mut credential: Credential) {
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let slot = inner.creds.iter().position(|c| c.id == credential.id);
-        if slot.is_some_and(|i| unchanged(&inner.creds[i], &credential)) {
-            return;
-        }
-        inner.generation += 1;
-        credential.revision = inner.generation;
-        let credential = Arc::new(credential);
-        match slot {
-            Some(i) => inner.creds[i] = credential,
-            None => inner.creds.push(credential),
-        }
-        inner.epoch += 1;
-        self.changed.send_replace(());
-        self.scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reconcile(&inner.creds);
-        drop(inner);
-        self.clear_disabled_cooldowns();
-        self.persist_cooldowns();
-    }
-
     /// Adds a runtime-only credential (Go's auth add for a `/v1/ws` relay session)
     /// unless one with its ID is already active. Additive API for the relay route.
     pub fn add_runtime(&self, mut credential: Credential) -> bool {
@@ -1679,15 +1626,6 @@ impl CredentialStore {
     }
 
     /// Active cooldowns of one credential.
-    /// Credentials bound to live session-affinity keys that `matches`, without
-    /// refreshing them (the plugin host's `host.affinity.lookup`).
-    pub(crate) fn affinity_bound(&self, matches: impl Fn(&crate::affinity::Key) -> bool) -> Vec<String> {
-        self.scheduler
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .affinity_bound(Instant::now(), matches)
-    }
-
     pub fn cooldowns(&self, id: &str) -> Vec<crate::scheduler::CooldownState> {
         self.scheduler
             .lock()
@@ -2072,47 +2010,6 @@ mod tests {
             .filter(|n| n.ends_with(".tmp") && !n.ends_with(".0.tmp"))
             .collect();
         assert!(leftovers.is_empty(), "no temp files left behind: {leftovers:?}");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A plugin save running alongside token refreshes of another credential never
-    /// reinstalls a stale copy of it: every refresh finds the revision it left.
-    #[test]
-    fn upsert_never_undoes_a_concurrent_patch() {
-        let dir = std::env::temp_dir().join(format!("cpa-upsert-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("refreshed.json"), r#"{"type":"claude","refresh_token":"r0"}"#).unwrap();
-        std::fs::write(dir.join("saved.json"), r#"{"type":"claude"}"#).unwrap();
-        let mut cfg = cpa_core::config::Config::parse("").unwrap();
-        cfg.auth_dir = dir.clone();
-        let store = Arc::new(CredentialStore::new(cpa_core::config::credentials::from_auth_dir(&cfg)));
-        let saved = (*store.get("saved.json").unwrap()).clone();
-        let saver = {
-            let store = store.clone();
-            std::thread::spawn(move || {
-                for n in 0..500 {
-                    let mut next = saved.clone();
-                    next.metadata.insert("n".into(), n.into());
-                    store.upsert(next);
-                }
-            })
-        };
-        let mut revision = store.get("refreshed.json").unwrap().revision;
-        for n in 1..=500 {
-            let mut patch = MetadataPatch::default();
-            patch.set.insert("refresh_token".into(), format!("r{n}").into());
-            revision = store
-                .apply_patch("refreshed.json", revision, &patch)
-                .unwrap_or_else(|e| panic!("refresh {n} was undone: {e:?}"))
-                .revision;
-        }
-        saver.join().unwrap();
-        let refreshed = store.get("refreshed.json").unwrap();
-        assert_eq!(refreshed.revision, revision);
-        assert_eq!(refreshed.metadata["refresh_token"], "r500");
-        assert_eq!(store.get("saved.json").unwrap().metadata["n"], 499);
-        assert_eq!(store.snapshot().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

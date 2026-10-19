@@ -1,5 +1,7 @@
 # Benchmarks
 
+The upstream measurements below predate this personal fork. Reproduce them before comparing current builds. The final section measures this fork's native quota scheduling.
+
 Binary size, memory and throughput of cliproxy-rs and CLIProxyAPI on the same configuration, with a local fake upstream. The numbers come from one small machine and a synthetic load, so use them to compare the two servers with each other. They say little about how much traffic either one can carry on bigger hardware.
 
 ## Field memory
@@ -453,6 +455,66 @@ The Codex client for `chatgpt.com` opens a new TCP and TLS connection for every 
 - With 8 clients, a 2 MB request also waits for other requests' preparation on its Tokio worker: on the OAuth path the median to the first upstream byte is 56 to 62 ms against 45 to 47 ms with one client. Preparation runs on the async worker; moving it to a blocking thread would hold a thread for every large request, so the remedy is less work per request.
 - Raw results: [`bench/results/2026-10-05-latency.jsonl`](../bench/results/2026-10-05-latency.jsonl).
 
+## Claude cache telemetry: opt-in observation cost
+
+Measured on 2026-10-15 in a 4-vCPU Intel Xeon 2.60 GHz Linux orb, not Core.
+Rust 1.99.0, release profile, the revised PR #59 collector without online
+tokenization. Both sides enable usage statistics; only the separate telemetry
+opt-in changes. The existing latency harness runs the production router, listener,
+and Claude executor against local mocks, in a loopback-only network namespace.
+It uses Sonnet 4.5, two proxy workers, four load/mock workers, CPU affinity 0-3,
+two simultaneous requests, and an unrelated SSE stream producing a chunk every
+10 ms. Each fresh process warms up with two requests before measuring two.
+Five off/on pairs alternate for each workload and transport. Load average was
+about 1.1 before the runs and 0.8 after them; no compiler ran during measurement.
+
+Text bodies are 1,000,000 bytes. The media fixture contains 30,000,000 bytes of
+synthetic base64 image data plus JSON framing. It exercises hashing of media,
+not valid-image processing by Anthropic. Both the OAuth/native TLS and configured
+API-key/plain HTTP paths are measured. Reproduce with the
+[mock load check](CLAUDE-CACHE-TELEMETRY.md#mock-load-check), setting `CPUS=0-3`.
+
+Each cell is the median of five runs, followed by its minimum and maximum.
+Arrival is the slower of the two requests' client-start-to-upstream-head times.
+CPU is process CPU for the measured pair and its unrelated stream. RSS is the
+whole process's peak, including warm-up, proxy, mock, and load generator; neither
+CPU nor RSS isolates the proxy. Stream gap is the largest inter-chunk gap while
+that run's requests execute.
+
+| Body / transport | Telemetry | Arrival ms | CPU ms | Peak RSS MiB | Stream gap ms |
+| --- | --- | --- | --- | --- | --- |
+| 1 MB text / OAuth | off | 26.51 (25.77–27.69) | 60.45 (59.47–63.16) | 56.66 (55.23–58.53) | 26.25 (25.47–26.45) |
+| 1 MB text / OAuth | on | 30.69 (29.37–32.13) | 68.08 (67.82–71.62) | 59.08 (56.88–60.15) | 30.28 (29.17–30.99) |
+| 1 MB text / API key | off | 16.34 (15.25–17.70) | 39.37 (36.84–41.31) | 52.61 (50.84–55.62) | 16.09 (14.63–16.64) |
+| 1 MB text / API key | on | 19.82 (19.32–20.54) | 46.16 (44.93–48.67) | 56.17 (51.62–56.75) | 19.60 (18.84–20.09) |
+| 30 MB media / OAuth | off | 1419.40 (1345.69–1492.62) | 3099.59 (2970.22–3244.62) | 834.65 (710.80–891.48) | 1356.45 (1318.37–1467.44) |
+| 30 MB media / OAuth | on | 1524.58 (1470.55–1597.63) | 3213.82 (3169.11–3410.85) | 886.71 (837.93–928.45) | 1435.22 (1418.08–1548.01) |
+| 30 MB media / API key | off | 849.50 (817.33–889.11) | 1873.13 (1796.34–1971.81) | 687.02 (680.70–757.04) | 826.87 (811.28–871.02) |
+| 30 MB media / API key | on | 941.46 (915.58–1013.01) | 2041.23 (1997.62–2187.51) | 766.51 (744.39–794.38) | 914.66 (894.14–977.97) |
+
+The paired median added arrival delay is 4.44 ms for OAuth text (2.86–4.85 ms)
+and 105.18 ms for OAuth media (23.40–202.17 ms). API-key delays are 3.75 ms
+(1.62–4.30 ms) and 108.53 ms (81.63–123.89 ms). These are on/off observations
+of the revised collector, not a speedup measured against the earlier tokenizer.
+Media CPU and RSS ranges overlap, especially on OAuth; these short combined-process
+runs do not establish a precise proxy-only memory increment.
+
+All 80 measured proxy requests and 80 direct controls returned HTTP 200 and
+`message_stop`; zero errors. Every on run produced observations for all four
+large payloads including warm-up; off runs produced none. Each measured run
+received chunks from the unrelated stream. A separate, excluded profiling run
+sampled `/proc` task CPU every 20 ms during 20 API-key media requests: proxy
+workers consumed 20.93 CPU seconds, load/mock workers 4.48, and the main thread
+0.16. The proxy's synchronous request preparation, not the load generator, is
+the dominant CPU cost. Parsing and full-content hashing still add work before
+send, but no tokenizer or its resident encoder is initialized by telemetry.
+
+The 30 MB fixture already stalls streams for roughly a second with telemetry
+off. These results are not a guarantee of nonblocking preparation, and do not
+measure Core or a production week. Keep collection explicitly opt-in and do
+not infer a safe Core resource budget from this combined harness's RSS.
+Raw results: [2026-10-15-claude-cache-telemetry.jsonl](../bench/results/2026-10-15-claude-cache-telemetry.jsonl).
+
 ## Idle: wakeups, threads and memory
 
 Measured on 2026-10-06 on Linux, to see what a server costs while nobody uses it.
@@ -535,3 +597,13 @@ Four runs on 2026-10-03 with the same method and machine. The Go column gives th
 - Run 3 and 0.1.0: cliproxy-rs writes Go's access log, request-log capture is wired in (off in this config), and usage reporting follows Go's contract. Since run 2, Go's lead on non-streaming requests grew from about 20% to 34 to 42%.
 
 Raw results: [`bench/results/`](../bench/results).
+
+## Native quota refresh concurrency
+
+A local synthetic benchmark on 2026-10-19 compares three independent 100 ms quota fetches, sequentially and concurrently, across five runs. Median wall time: **308.6 ms sequential, 103.0 ms concurrent**. This isolates refresh scheduling; it does not measure provider or inference latency. Production admission allows eight concurrent account lookups and coalesces callers for the same account/token.
+
+```sh
+cargo test -p cpa-server --lib native_claude::quota::tests::refresh_latency -- --ignored --nocapture
+```
+
+The ordinary paused-clock regression asserts exactly 100 ms for three independent 100 ms lookups; the former global lock took 300 ms. Separate tests cover coalescing, token rotation, TTL expiry, failure, cancellation and the 64-entry cache bound.

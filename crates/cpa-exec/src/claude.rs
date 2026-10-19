@@ -41,6 +41,7 @@ mod settings;
 mod signals;
 mod signing;
 mod stream;
+mod telemetry;
 mod thread;
 
 use std::sync::Arc;
@@ -329,6 +330,11 @@ impl ClaudeExecutor {
         // reporter.SetTranslatedReasoningEffort on the body sent upstream.
         if req.usage.enabled() {
             req.usage.request(Format::Claude, prepared.body.as_bytes());
+        }
+        if req.usage.wants_claude_cache()
+            && let Some(telemetry) = telemetry::collect(&ctx, &req, &prepared)
+        {
+            req.usage.claude_cache(telemetry);
         }
         let response = self
             .send(&ctx, &mut prepared, "/v1/messages", Some(&req.usage), req.capture())

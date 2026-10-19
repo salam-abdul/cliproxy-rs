@@ -29,8 +29,9 @@ RUN apt-get update \
  && chown cliproxy:cliproxy /data
 COPY --from=build /usr/local/bin/cliproxy /usr/local/bin/cliproxy
 USER cliproxy
+# Config and credentials live in /data; mount a volume there. No VOLUME instruction:
+# some hosts, Railway among them, refuse to build a Dockerfile that has one.
 WORKDIR /data
-VOLUME ["/data"]
 EXPOSE 8317
 ENTRYPOINT ["cliproxy"]
 CMD ["--config", "/data/config.yaml"]
