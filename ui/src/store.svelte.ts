@@ -54,6 +54,7 @@ function parse(hash: string) {
 
 class Store {
   logged = $state(false);
+  localDashboard = $state(false);
   theme = $state(document.documentElement.dataset.theme || "dark");
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
@@ -81,7 +82,7 @@ class Store {
   #probed = new Set<string>();
   #timer: ReturnType<typeof setTimeout> | undefined;
 
-  async login(secret: string) {
+  async login(secret: string, localDashboard = false) {
     this.meta = { version: "", commit: "", built: "" };
     connect(secret, {
       unauthorized: () => {
@@ -97,7 +98,7 @@ class Store {
         this.meta.commit = h.get("x-cpa-commit") || this.meta.commit;
         this.meta.built = h.get("x-cpa-build-date") || this.meta.built;
       },
-    });
+    }, localDashboard);
     try {
       this.config.data = await api("/config");
     } catch (e) {
@@ -105,11 +106,13 @@ class Store {
       throw new Error(signInHelp(e));
     }
     this.logged = true;
+    this.localDashboard = localDashboard;
     this.creds.load();
   }
   logout() {
     disconnect();
     this.logged = false;
+    this.localDashboard = false;
     this.caps = {};
     this.#probed.clear();
     this.config.data = this.creds.data = undefined;

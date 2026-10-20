@@ -64,6 +64,9 @@ pub(crate) struct Access {
     local_secret: bool,
     /// Startup-only, as gin's `SetTrustedProxies` is called once in `NewServer`.
     trusted: TrustedProxies,
+    local_listener: bool,
+    port: u16,
+    scheme: &'static str,
     enabled: AtomicBool,
     attempts: Mutex<Attempts>,
     warned_untrusted_forwarding: AtomicBool,
@@ -108,12 +111,23 @@ impl Access {
         let env_secret = go_trim_space(&raw).to_vec();
         let local_password = options.local_password;
         let local_secret = options.standalone && !local_password.is_empty();
-        let enabled = !cfg.management.secret_key.is_empty() || !env_secret.is_empty() || !local_password.is_empty();
+        let local_listener = cfg.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+        let enabled = !cfg.management.secret_key.is_empty()
+            || !env_secret.is_empty()
+            || !local_password.is_empty()
+            || (local_listener && cfg.management.local_dashboard);
         Self {
             env_secret,
             local_password,
             local_secret,
             trusted: TrustedProxies::new(&cfg.trusted_proxies),
+            local_listener,
+            port: cfg.port,
+            scheme: if cfg.document["server"]["tls"]["enable"].as_bool() == Some(true) {
+                "https"
+            } else {
+                "http"
+            },
             enabled: AtomicBool::new(enabled),
             attempts: Mutex::new(Attempts { by_ip: HashMap::new() }),
             warned_untrusted_forwarding: AtomicBool::new(false),
@@ -123,14 +137,53 @@ impl Access {
     /// Go's reload rule: MANAGEMENT_PASSWORD keeps routes on; otherwise availability
     /// follows the config secret alone. A `--password` that enabled routes at startup
     /// no longer counts after the first reload, exactly as in server_reload.go, except
-    /// in the standalone TUI.
+    /// in the standalone TUI. Opt-in local dashboard access also keeps routes on.
     pub(crate) fn config_published(&self, cfg: &Config) {
-        let enabled = !self.env_secret.is_empty() || !cfg.management.secret_key.is_empty() || self.local_secret;
+        let enabled = !self.env_secret.is_empty()
+            || !cfg.management.secret_key.is_empty()
+            || self.local_secret
+            || (self.local_listener && cfg.management.local_dashboard);
         self.enabled.store(enabled, Ordering::SeqCst);
     }
 
     pub(crate) fn available(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
+    }
+
+    fn local_dashboard(&self, cfg: &Config, peer: Option<SocketAddr>, headers: &HeaderMap) -> bool {
+        if !self.local_listener
+            || !cfg.management.local_dashboard
+            || !peer.is_some_and(|p| p.ip().is_loopback())
+            || headers.get("x-cpa-local-dashboard").is_none_or(|v| v != "1")
+            || headers.keys().any(|h| {
+                h == "forwarded"
+                    || h.as_str().starts_with("x-forwarded-")
+                    || h == "x-real-ip"
+                    || h == "cf-connecting-ip"
+            })
+        {
+            return false;
+        }
+        let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else {
+            return false;
+        };
+        let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+            return false;
+        };
+        if host.contains('@') || !matches!(authority.host(), "localhost" | "127.0.0.1" | "[::1]") {
+            return false;
+        }
+        let port = authority
+            .port_u16()
+            .unwrap_or(if self.scheme == "https" { 443 } else { 80 });
+        if self.port != 0 && self.port != port {
+            return false;
+        }
+        if headers.get("sec-fetch-site").is_some_and(|site| site != "same-origin") {
+            return false;
+        }
+        let origin = format!("{}://{host}", self.scheme);
+        headers.get(header::ORIGIN).is_none_or(|value| value == origin.as_str())
     }
 
     pub(crate) fn client_ip(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> String {
@@ -312,7 +365,16 @@ pub(crate) async fn guard(State(state): State<Arc<Management>>, req: Request, ne
     let local = ip == "127.0.0.1" || ip == "::1";
     let provided = provided_key(req.headers()).to_vec();
     let cfg = state.rt.config();
-    let mut response = match state.access.authenticate(&cfg, &ip, local, &provided).await {
+    let auth = if provided.is_empty() && req.headers().contains_key("x-cpa-local-dashboard") {
+        if state.access.local_dashboard(&cfg, peer, req.headers()) {
+            Ok(())
+        } else {
+            Err((StatusCode::FORBIDDEN, "local dashboard access denied".into()))
+        }
+    } else {
+        state.access.authenticate(&cfg, &ip, local, &provided).await
+    };
+    let mut response = match auth {
         Ok(()) => next.run(req).await,
         Err((status, message)) => json_error(status, &message),
     };
@@ -356,6 +418,50 @@ pub(crate) fn cors_headers(response: &mut Response) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_dashboard_checks_socket_origin_and_startup_listener() {
+        let cfg =
+            Config::parse("server: {host: '127.0.0.1', port: 8318}\nmanagement: {local-dashboard: true}\n").unwrap();
+        let access = Access::new(&cfg, super::super::Options::default());
+        let peer = Some("127.0.0.1:12345".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:8318"));
+        headers.insert("x-cpa-local-dashboard", HeaderValue::from_static("1"));
+        assert!(access.local_dashboard(&cfg, peer, &headers));
+        assert!(!access.local_dashboard(&cfg, None, &headers));
+        assert!(!access.local_dashboard(&cfg, Some("203.0.113.1:12345".parse().unwrap()), &headers));
+        for host in ["localhost:8318", "[::1]:8318"] {
+            headers.insert("host", host.parse().unwrap());
+            headers.insert("origin", format!("http://{host}").parse().unwrap());
+            assert!(access.local_dashboard(&cfg, peer, &headers), "{host}");
+        }
+        headers.remove("origin");
+        for host in [
+            "localhost:8319",
+            "localhost",
+            "localhost.evil.invalid:8318",
+            "evil@localhost:8318",
+        ] {
+            headers.insert("host", host.parse().unwrap());
+            assert!(!access.local_dashboard(&cfg, peer, &headers), "{host}");
+        }
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:8318"));
+        headers.insert("origin", HeaderValue::from_static("https://127.0.0.1:8318"));
+        assert!(!access.local_dashboard(&cfg, peer, &headers));
+        headers.remove("origin");
+        let public = Config::parse("server: {host: '0.0.0.0'}\nmanagement: {local-dashboard: true}\n").unwrap();
+        let access = Access::new(&public, super::super::Options::default());
+        access.config_published(&cfg);
+        assert!(!access.available());
+        assert!(!access.local_dashboard(&cfg, peer, &headers));
+        let access = Access::new(&cfg, super::super::Options::default());
+        let mut disabled = cfg.clone();
+        disabled.management.local_dashboard = false;
+        access.config_published(&disabled);
+        assert!(!access.available());
+        assert!(!access.local_dashboard(&disabled, peer, &headers));
+    }
 
     #[test]
     fn failures_only_expire_through_the_hourly_purge() {

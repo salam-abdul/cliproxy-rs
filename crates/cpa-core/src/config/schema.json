@@ -127,7 +127,8 @@
         "disable-control-panel": "bool",
         "disable-auto-update-panel": "bool",
         "panel-github-repository": "string",
-        "base-url": "string"
+        "base-url": "string",
+        "local-dashboard": "bool"
       }
     },
     "access": {

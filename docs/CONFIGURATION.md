@@ -47,7 +47,8 @@ observability:
 
 | Setting | What it does |
 |---|---|
-| `secret-key` | The dashboard and Management API password. A plaintext value is replaced by its bcrypt hash on first start. The `MANAGEMENT_PASSWORD` environment variable works too. When neither is set, the management API is off. |
+| `secret-key` | The dashboard and Management API password. A plaintext value is replaced by its bcrypt hash on first start. The `MANAGEMENT_PASSWORD` environment variable works too. Without a key, the management API is off unless `local-dashboard` is enabled on a loopback listener. |
+| `local-dashboard` | `false` by default. `true` lets the dashboard connect without a key when the server binds to a loopback IP. Requires a local socket, a loopback Host, the dashboard request header, no forwarding headers, and a matching browser origin. Client API keys remain required. |
 | `allow-remote` | `false` (the default) accepts management requests from this computer only. |
 | `disable-control-panel` | `true` stops serving the dashboard at `/management.html`; the Management API keeps working. |
 

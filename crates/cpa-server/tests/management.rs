@@ -1765,3 +1765,122 @@ async fn personal_scope_keeps_quota_probes_and_removes_plugin_routes() {
     server.abort();
     mock.abort();
 }
+
+#[tokio::test]
+async fn local_dashboard_connects_without_a_key_but_rejects_other_origins() {
+    let f = Fixture::from_yaml("local-dashboard", |auth, hash| {
+        format!(
+            "server:\n  host: '127.0.0.1'\nmanagement:\n  local-dashboard: true\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let request = || {
+        client
+            .get(format!("{base}/v8/management/config"))
+            .header("x-cpa-local-dashboard", "1")
+    };
+    assert_eq!(request().send().await.unwrap().status(), 200);
+    assert_eq!(
+        request()
+            .header("origin", &base)
+            .header("sec-fetch-site", "same-origin")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    for (header, value) in [
+        ("origin", "https://untrusted.invalid"),
+        ("origin", "null"),
+        ("sec-fetch-site", "cross-site"),
+        ("sec-fetch-site", "same-site"),
+        ("host", "untrusted.invalid"),
+        ("forwarded", "for=203.0.113.1"),
+        ("x-forwarded-for", "127.0.0.1"),
+        ("x-forwarded-host", "localhost"),
+        ("x-real-ip", "127.0.0.1"),
+    ] {
+        assert_eq!(
+            request().header(header, value).send().await.unwrap().status(),
+            403,
+            "{header}: {value}"
+        );
+    }
+    assert_eq!(
+        client
+            .get(format!("{base}/v8/management/config"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(request().send().await.unwrap().status(), 200);
+    assert_eq!(
+        client
+            .get(format!("{base}/v8/management/config"))
+            .bearer_auth("fake-management-only")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .put(format!("{base}/v8/management/config/routing/retry/request-retry"))
+            .header("x-cpa-local-dashboard", "1")
+            .header("origin", &base)
+            .json(&1)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(f.rt.config().routing.retry.request_retry, 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn local_dashboard_requires_loopback_binding_and_explicit_opt_in() {
+    for (name, host, enabled) in [("off", "127.0.0.1", false), ("public", "0.0.0.0", true)] {
+        let f = Fixture::from_yaml(&format!("local-dashboard-{name}"), |auth, hash| {
+            format!(
+                "server:\n  host: '{host}'\nmanagement:\n  local-dashboard: {enabled}\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+                auth.display()
+            )
+        });
+        let (base, server) = f.server().await;
+        let response = wreq::Client::new()
+            .get(format!("{base}/v8/management/config"))
+            .header("x-cpa-local-dashboard", "1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn local_dashboard_works_without_a_management_secret() {
+    let f = Fixture::from_yaml("local-dashboard-no-key", |auth, _| {
+        format!(
+            "server:\n  host: '127.0.0.1'\nmanagement:\n  local-dashboard: true\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let response = wreq::Client::new()
+        .get(format!("{base}/v8/management/config"))
+        .header("x-cpa-local-dashboard", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    server.abort();
+}

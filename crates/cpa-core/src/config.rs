@@ -193,6 +193,7 @@ pub struct CooldownConfig {
 #[serde(default, rename_all = "kebab-case")]
 pub struct ManagementConfig {
     pub allow_remote: bool,
+    pub local_dashboard: bool,
     #[serde(deserialize_with = "de_go_string")]
     pub secret_key: String,
     pub disable_control_panel: bool,

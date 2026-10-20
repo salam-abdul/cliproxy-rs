@@ -34,7 +34,7 @@ Create a private directory for the [configuration](CONFIGURATION.md), auth files
 ./target/release/cliproxy --config /path/to/config.yaml
 ```
 
-Open `http://127.0.0.1:8317/management.html`, using the configured port. The management key signs into the dashboard; the client key belongs in client settings. Do not share either key.
+Open `http://127.0.0.1:8317/management.html`, using the configured port. For automatic local access, set `management.local-dashboard: true` with `server.host: 127.0.0.1` (or `::1`). Otherwise, sign in with the management key. Client keys still belong in client settings; never share either key.
 
 If another machine needs access, use the [remote-access guidance](MULTI-ACCOUNT.md#reach-the-proxy-from-other-machines). Restrict trusted proxies explicitly. Model catalog downloads can be disabled with `--local-model`.
 

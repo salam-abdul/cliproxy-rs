@@ -5,6 +5,7 @@ import type { Data } from "./core";
 // (/management.html -> /v8/management, also under a reverse-proxy path prefix).
 export const base = new URL(".", location.href).href.replace(/\/$/, "");
 let key = "";
+let local = false;
 let revision = 0;
 let hooks: {
   unauthorized(): void;
@@ -13,14 +14,22 @@ let hooks: {
 } = { unauthorized() {}, missing() {}, meta() {} };
 
 export class ApiError extends Error {
+  status: number;
+  code: string;
+  method: string;
+  path: string;
   constructor(
     message: string,
-    public status: number,
-    public code: string,
-    public method: string,
-    public path: string,
+    status: number,
+    code: string,
+    method: string,
+    path: string,
   ) {
     super(message);
+    this.status = status;
+    this.code = code;
+    this.method = method;
+    this.path = path;
   }
   /** The server does not implement this route or method (Rust 501/405, Go's empty 404). */
   get missing() {
@@ -28,22 +37,26 @@ export class ApiError extends Error {
   }
 }
 
-export function connect(secret: string, h: typeof hooks) {
+export function connect(secret: string, h: typeof hooks, localDashboard = false) {
   key = secret;
+  local = localDashboard;
   hooks = h;
   revision++;
 }
 export function disconnect() {
   key = "";
+  local = false;
   revision++;
 }
 export const endpoint = () => `${base}/v8/management`;
 export const route = (path: string) => path.split("?")[0];
 
 async function send(path: string, method: string, body?: unknown) {
-  if (!key) throw new Error("Sign in with your management key.");
+  if (!key && !local) throw new Error("Sign in with your management key.");
   const at = revision;
-  const headers: Record<string, string> = { Authorization: `Bearer ${key}` };
+  const headers: Record<string, string> = local
+    ? { "X-CPA-Local-Dashboard": "1" }
+    : { Authorization: `Bearer ${key}` };
   const yaml = path === "/config.yaml";
   if (body !== undefined && !(body instanceof FormData))
     headers["Content-Type"] = yaml ? "application/yaml" : "application/json";

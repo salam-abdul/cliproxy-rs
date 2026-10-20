@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, type Component } from "svelte";
+  import { onMount, tick, type Component } from "svelte";
   import { store, pages } from "./store.svelte";
   import Overview from "./pages/Overview.svelte";
   import Use from "./pages/Use.svelte";
@@ -48,6 +48,15 @@
   let secret = $state(""),
     failure = $state(""),
     connecting = $state(false);
+  let starting = $state(true);
+  onMount(async () => {
+    try {
+      await store.login("", true);
+    } catch {
+    } finally {
+      starting = false;
+    }
+  });
 
   async function login(e: SubmitEvent) {
     e.preventDefault();
@@ -98,7 +107,9 @@
     ><svg class="i" aria-hidden="true"><use href={`#i-${store.theme === "dark" ? "sun" : "moon"}`} /></svg></button
   >{/snippet}
 
-{#if !store.logged}
+{#if starting}
+  <main class="login"><p role="status">Connecting to the local dashboard…</p></main>
+{:else if !store.logged}
   <main class="login">
     <form onsubmit={login}>
       <div class="top-row">
@@ -145,7 +156,7 @@
       </div>
       <div class="side-foot">
         {@render theme()}
-        <button class="key quiet" onclick={() => (!store.dirty || confirm("Discard unsaved changes?")) && store.logout()}><svg class="i" aria-hidden="true"><use href="#i-out" /></svg>Sign out</button>
+        {#if !store.localDashboard}<button class="key quiet" onclick={() => (!store.dirty || confirm("Discard unsaved changes?")) && store.logout()}><svg class="i" aria-hidden="true"><use href="#i-out" /></svg>Sign out</button>{/if}
       </div>
     </nav>
     <div class="main">

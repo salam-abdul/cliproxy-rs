@@ -91,6 +91,7 @@ schema["fields"]["config-version"] = "version"
 # them; a config edit through its v8 Management API moves them into comments.
 put("oauth.providers.codex.chatgpt-keep-alive", "bool")
 put("observability.usage.claude-cache-telemetry", "bool")
+put("management.local-dashboard", "bool")
 put("routing.cooldown.max-trusted-cooldown", "string")
 schema["fields"]["worker-threads"] = "int"
 schema["fields"].pop("home", None)
