@@ -849,7 +849,12 @@ async fn panel(State(state): State<Arc<Management>>, OriginalUri(uri): OriginalU
         return error(404, "not_found");
     };
     (
-        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-cache")],
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+            (header::X_FRAME_OPTIONS, "DENY"),
+        ],
         bytes,
     )
         .into_response()

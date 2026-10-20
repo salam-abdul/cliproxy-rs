@@ -258,6 +258,8 @@ async fn real_http_config_rejections_comments_publication_and_panel_assets() {
         404
     );
     let html = client.get(format!("{base}/management.html")).send().await.unwrap();
+    assert_eq!(html.headers()["content-security-policy"], "frame-ancestors 'none'");
+    assert_eq!(html.headers()["x-frame-options"], "DENY");
     assert_eq!(html.status(), 200);
     let html = html.text().await.unwrap();
     for piece in html
