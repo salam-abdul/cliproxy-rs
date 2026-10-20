@@ -31,5 +31,11 @@ Existing non-plugin Home and remote-store paths remain available. Local mocks an
 ## Reviewed plugin ideas
 
 - [Quota Router](https://github.com/kpatdev/quota-router): reset-aware selection and passive quota signals are already built in. This fork improves native quota refresh concurrency and bounds cache state; it does not import the plugin.
-- [CPA Usage](https://github.com/andyWang1688/cpa-usage): a second usage database/dashboard adds operational cost; retain the embedded dashboard and usage queue.
+- [CPA Usage](https://github.com/andyWang1688/cpa-usage): excluded; use OpenUsage for personal usage reporting. The embedded dashboard remains for proxy configuration and routing diagnostics.
 - [Gemini CLI plugin](https://github.com/router-for-me/cpa-plugin-gemini-cli): defer its additional provider path. Existing Gemini APIs remain supported.
+
+## OpenUsage
+
+OpenUsage remains independent. Its documented [local limits API](https://github.com/robinebers/openusage/blob/main/docs/local-http-api.md) exposes cached reset times and usage, with a five-minute freshness interval. A future adapter could use these as advisory data, but native admission retains its own 30-second, credential-bound quota checks. No OpenUsage adapter is implemented.
+
+Proxy-routed sessions may use a different account from the client's login, so client-log attribution alone cannot establish which proxy account served a request. Accurate integration would expose the proxy's account attribution without sharing credentials or refresh ownership.
