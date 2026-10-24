@@ -345,7 +345,7 @@ const codexWindow = (seconds: number, fallback: string) =>
 
 /**
  * Limits the server observed passively, without asking the provider: Codex rate-limit
- * headers (x-codex-primary-*, x-codex-secondary-*) and Devin's daily and weekly quota.
+ * headers, Claude included windows, and Devin daily and weekly quota.
  */
 export function signalWindows(p: string, quota: Data | undefined): Window[] {
   const sig: Data = {};
@@ -366,6 +366,15 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
         reset: resetAt > 0 ? new Date(resetAt * 1000).toISOString() : after >= 0 && at ? new Date(at + after * 1000).toISOString() : "",
         source: `x-codex-${w}-`,
       });
+    }
+  else if (p === "claude")
+    for (const [w, label] of [["5h", "Current session"], ["7d", "Current week (all models)"]]) {
+      const source = `anthropic-ratelimit-unified-${w}-`;
+      const raw = sig[source + "utilization"], used = Number(raw);
+      if (typeof raw !== "string" || !raw.trim() || !Number.isFinite(used) || used < 0) continue;
+      const reset = sig[source + "reset"], seconds = Number(reset);
+      const date = new Date(seconds > 0 ? seconds * 1000 : reset);
+      out.push({label, used: clamp(used * 100), reset: Number.isFinite(date.getTime()) ? date.toISOString() : "", source});
     }
   else if (p === "devin")
     for (const w of ["daily", "weekly"]) {

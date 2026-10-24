@@ -121,6 +121,51 @@ pub(crate) async fn usage_queue(State(state): State<Arc<Management>>, RawQuery(r
     super::json_ordered(StatusCode::OK, &Value::Array(records))
 }
 
+pub(crate) async fn native_status(State(state): State<Arc<Management>>) -> Response {
+    let native = state
+        .rt
+        .native_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade();
+    let Some(native) = native else {
+        return super::json_ordered(StatusCode::OK, &json!({"enabled":false}));
+    };
+    match native.status().await {
+        Ok(status) => super::json_ordered(StatusCode::OK, &status),
+        Err(_) => fail(StatusCode::SERVICE_UNAVAILABLE, "Native routing status unavailable"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativePolicy {
+    allow_extra_usage: bool,
+}
+
+pub(crate) async fn native_policy(
+    State(state): State<Arc<Management>>,
+    axum::Json(policy): axum::Json<NativePolicy>,
+) -> Response {
+    let native = state
+        .rt
+        .native_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade();
+    let Some(native) = native else {
+        return fail(StatusCode::CONFLICT, "Native routing is not enabled on this server");
+    };
+    match native.set_overage(policy.allow_extra_usage).await {
+        Ok(()) => super::json_ordered(StatusCode::OK, &json!({"allowExtraUsage":policy.allow_extra_usage})),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Native policy could not be saved"),
+    }
+}
+
+pub(crate) async fn native_events(State(state): State<Arc<Management>>) -> Response {
+    super::json_ordered(StatusCode::OK, &state.rt.native_events.snapshot())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -42,6 +42,8 @@ pub struct Runtime {
     pool_offsets: Mutex<HashMap<String, usize>>,
     /// Usage records for `GET /observability/usage/queue` (management configures it).
     usage: Arc<crate::usage::UsageQueue>,
+    pub(crate) native_state: RwLock<std::sync::Weak<crate::native_claude::State>>,
+    pub(crate) native_events: crate::native_claude::diagnostics::Diagnostics,
     /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
     local_model: std::sync::atomic::AtomicBool,
     /// The remote dispatcher that replaces local selection (Go Home mode).
@@ -87,6 +89,8 @@ impl Runtime {
             oauth_sink: RwLock::default(),
             pool_offsets: Mutex::default(),
             usage: Arc::default(),
+            native_events: Default::default(),
+            native_state: Default::default(),
             local_model: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
@@ -1184,7 +1188,7 @@ impl CredentialStore {
                 .collect();
             let candidates: Vec<_> = eligible
                 .iter()
-                .filter(|(c, m)| scheduler.wait(c, m, now).is_none())
+                .filter(|(c, m)| scheduler.wait(c, m, now).is_none() && !ranks(c).exhausted)
                 .map(|(c, _)| (c.as_ref(), crate::registry::provider_key(c)))
                 .collect();
             if candidates.is_empty() {
@@ -1867,6 +1871,43 @@ mod tests {
             at("oauth: {providers: {antigravity: {signature-cache-enabled: null}}}\n"),
             (true, false)
         );
+    }
+
+    #[test]
+    fn exhausted_quota_overrides_affinity_and_never_falls_back_to_paid_usage() {
+        for strategy in [
+            crate::scheduler::Strategy::SoonestReset,
+            crate::scheduler::Strategy::RoundRobin,
+        ] {
+            let store = CredentialStore::new(vec![cred("a", "claude", false), cred("b", "claude", false)]);
+            let policy = Arc::new(Policy {
+                strategy,
+                session_affinity: true,
+                ..Default::default()
+            });
+            let mut selection = Selection::new("claude", "model");
+            selection.session = Some("fixture-session".into());
+            let admit = |_: &Credential| Some("model".into());
+            let first = store
+                .select_ranked(selection.clone(), policy.clone(), &admit, &|_| Default::default())
+                .unwrap();
+            assert_eq!(first.credential.id, "a");
+            first.complete(Outcome::Success);
+            let exhausted = |c: &Credential| crate::scheduler::Windows {
+                exhausted: c.id == "a",
+                ..Default::default()
+            };
+            let next = store
+                .select_ranked(selection.clone(), policy.clone(), &admit, &exhausted)
+                .unwrap();
+            assert_eq!(next.credential.id, "b", "an exhausted pinned account must yield");
+            next.complete(Outcome::Success);
+            let all = |_: &Credential| crate::scheduler::Windows {
+                exhausted: true,
+                ..Default::default()
+            };
+            assert!(store.select_ranked(selection, policy, &admit, &all).is_err());
+        }
     }
 
     fn cred(id: &str, provider: &str, disabled: bool) -> Credential {

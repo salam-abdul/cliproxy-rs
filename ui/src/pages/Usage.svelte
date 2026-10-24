@@ -2,6 +2,7 @@
   import { store, Res, every } from "../store.svelte";
   import { api, missing, text } from "../api";
   import { buckets, sumBuckets, sum, label, provider, cleanEvent, usageStats, type Buckets, type Data, type Event } from "../core";
+  import NativeActivity from "../NativeActivity.svelte";
   import Grille from "../Grille.svelte";
   import Missing from "../Missing.svelte";
 
@@ -55,6 +56,8 @@
 
 <div class="head"><h1>Usage</h1></div>
 <Missing actions={[["GET", "/observability/usage/queue?count=0", "the live request view"]]} />
+
+<NativeActivity />
 
 <section class="section">
   <div class="section-head"><h2>Last 200 minutes</h2><span class="legend">Reported by the server · 10-minute buckets</span></div>

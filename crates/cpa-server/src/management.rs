@@ -447,6 +447,18 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().post(guarded!(s, auth_files::cooldown_reset)),
         ),
         (
+            "routing/native-policy",
+            methods().patch(guarded!(s, observability::native_policy)),
+        ),
+        (
+            "observability/native/status",
+            methods().get(guarded!(s, observability::native_status)),
+        ),
+        (
+            "observability/native/events",
+            methods().get(guarded!(s, observability::native_events)),
+        ),
+        (
             "observability/usage/api-keys",
             methods().get(guarded!(s, observability::api_key_usage)),
         ),

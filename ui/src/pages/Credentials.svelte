@@ -5,6 +5,7 @@
   import Grille from "../Grille.svelte";
   import Load from "../Load.svelte";
   import Missing from "../Missing.svelte";
+  import ClaudePolicy from "../ClaudePolicy.svelte";
 
   $effect(() => every(10_000, () => store.creds.load(true)));
   let query = $state(""),
@@ -175,6 +176,8 @@
     ["POST", "/routing/cooldown/reset", "cooldown reset"],
   ]}
 />
+
+<ClaudePolicy />
 
 <Load res={store.creds} what="Credentials">
   {#snippet children(list)}

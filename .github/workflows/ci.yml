@@ -233,4 +233,6 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
       - run: npm run check && npm test && npm run build
+      - run: npx playwright-core install --with-deps chromium
+      - run: node scripts/dashboard-check.mjs
       - run: git diff --exit-code -- dist

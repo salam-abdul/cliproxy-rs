@@ -15,7 +15,9 @@ let manager,
   child,
   config,
   rows = [],
-  seen = [];
+  seen = [],
+  exhaustUntil = 0,
+  upstreamStatus = 200;
 const secret = "test-native-proxy-secret-test-native-proxy-secret";
 async function start() {
   child = cp.spawn(
@@ -38,14 +40,14 @@ async function stop() {
     child.kill("SIGTERM");
   });
 }
-function send() {
+function send(include = false) {
   return new Promise((resolve) => {
     const p = cp.spawn("curl", ["--config", "-"]);
     let output = "";
     p.stdout.on("data", (x) => (output += x));
     p.on("exit", (code) => resolve({ code, output }));
     p.stdin.end(
-      'url = "https://api.anthropic.com/v1/messages?beta=true"\nproxy = "https://localhost:20150"\nproxy-user = "claude:' +
+      (include ? 'include\n' : '') + 'url = "https://api.anthropic.com/v1/messages?beta=true"\nproxy = "https://localhost:20150"\nproxy-user = "claude:' +
         secret +
         '"\nproxy-cacert = "' +
         ca +
@@ -106,6 +108,14 @@ test.before(async () => {
       let parts = [];
       for await (const c of req) parts.push(c);
       seen.push({ body: Buffer.concat(parts), headers: req.headers });
+      if (exhaustUntil) {
+        res.setHeader("anthropic-ratelimit-unified-5h-status", "rejected");
+        res.setHeader("anthropic-ratelimit-unified-5h-reset", String(exhaustUntil));
+      }
+      if (upstreamStatus === 429) {
+        res.writeHead(429, {"retry-after":"120"});
+        return res.end("quota exhausted");
+      }
       res.setHeader("content-type", "text/event-stream");
       res.end(
         'data: {"type":"message_start","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1234}}}\n\ndata: {"type":"message_stop"}\n\n',
@@ -115,6 +125,7 @@ test.before(async () => {
   await new Promise((r) => backend.listen(20151, "127.0.0.1", r));
   config = {
     port: 20150,
+    maxAttempts: 2,
     database: dir + "/routing.json",
     events: dir + "/events.jsonl",
     proxySecret: dir + "/proxy-secret",
@@ -127,7 +138,7 @@ test.before(async () => {
     managementUrl: "http://127.0.0.1:" + manager.address().port,
     fixtureQuota: {
       five_hour: { utilization: 1 },
-      seven_day: { utilization: 1 }, extra_usage: { is_enabled: false },
+      seven_day: { utilization: 1 }, extra_usage: { is_enabled: true, monthly_limit: 100, used_credits: 1 },
     },
     upstream: { hostname: "localhost", port: 20151, ca },
   };
@@ -167,6 +178,13 @@ test("native transport honors manager toggles, committed rotation and durable af
   assert.equal((await send()).code, 0);
   assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-a");
   await ctl.toggle(config, "a", false);
+  if (process.env.NATIVE_MANAGER_TEST_BINARY) {
+    const status = await require("./credentials.cjs").management(config, "/v8/management/observability/native/status");
+    assert.equal(status.enabled, true);
+    assert.equal(status.accounts.find(a => a.id === "a").disabled, true);
+    assert.equal(status.accounts.find(a => a.id === "a").includedQuota, null);
+    assert.ok(!JSON.stringify(status).includes("fixture-"), "status never exposes tokens");
+  }
   await send();
   assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-b");
   await ctl.toggle(config, "a", true);
@@ -188,6 +206,68 @@ test("native transport honors manager toggles, committed rotation and durable af
     assert.ok(!r.headers["proxy-authorization"]);
   }
   assert.equal((await ctl.status(config)).ready, true);
+});
+test("proxy overage toggle persists, yields to included quota, honors disabled accounts, and advertises reset", async () => {
+  if (!process.env.NATIVE_MANAGER_TEST_BINARY) return;
+  const management = require("./credentials.cjs").management;
+  const policy = value => management(config, "/v8/management/routing/native-policy", {method:"PATCH",body:JSON.stringify({allowExtraUsage:value})});
+  assert.equal((await ctl.status(config)).allowExtraUsage, false);
+  await assert.rejects(() => policy("true"));
+  exhaustUntil = Math.floor(Date.now()/1000) + 120;
+  await send();
+  assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-b-rotated");
+  await policy(true);
+  await send();
+  assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-a", "included quota beats the paid session pin");
+  await policy(false);
+  const count = seen.length;
+  const blocked = await send(true);
+  assert.equal(seen.length, count);
+  assert.match(blocked.output, /HTTP\/1.1 429/);
+  assert.match(blocked.output, /anthropic-ratelimit-unified-representative-claim: five_hour/i);
+  assert.match(blocked.output, new RegExp("anthropic-ratelimit-unified-reset: " + exhaustUntil, "i"));
+  assert.match(blocked.output, /retry-after: 1[012][0-9]/i);
+  await policy(true);
+  await ctl.toggle(config, "a", false);
+  await send();
+  assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-b-rotated", "disabled beats paid affinity");
+  await stop(); await start();
+  assert.equal((await ctl.status(config)).allowExtraUsage, true, "policy survives restart");
+  await ctl.toggle(config, "a", true);
+  await policy(false);
+  exhaustUntil = Math.floor(Date.now()/1000) + 2;
+  await send(); await send();
+  const before = seen.length;
+  await send();
+  assert.equal(seen.length, before, "both accounts are gated until reset");
+  await new Promise(r => setTimeout(r, Math.max(0, exhaustUntil*1000-Date.now())+100));
+  exhaustUntil = 0;
+  await send();
+  assert.equal(seen.length, before+1, "fresh included quota permits the next request after reset");
+});
+test("upstream quota rejection retains reset hints after failover and attempt exhaustion", async () => {
+  if (!process.env.NATIVE_MANAGER_TEST_BINARY) return;
+  await ctl.toggle(config, "b", false);
+  upstreamStatus = 429;
+  exhaustUntil = Math.floor(Date.now()/1000) + 30;
+  let before = seen.length;
+  let result = await send(true);
+  assert.equal(seen.length, before + 1, "only the enabled account is attempted");
+  assert.match(result.output, /HTTP\/1.1 429/);
+  assert.match(result.output, /retry-after: 1[12][0-9]/i);
+  assert.ok(Number(result.output.match(/anthropic-ratelimit-unified-reset: (\d+)/i)?.[1]) >= exhaustUntil + 90, "retry hint includes the longer cooldown");
+  await stop();
+  const pins = JSON.parse(fs.readFileSync(config.database));
+  pins.cooldowns = {}; pins.model_cooldowns = {};
+  fs.writeFileSync(config.database, JSON.stringify(pins));
+  await start();
+  await ctl.toggle(config, "b", true);
+  before = seen.length;
+  result = await send(true);
+  assert.equal(seen.length, before + 2, "each eligible account is tried once");
+  assert.match(result.output, /HTTP\/1.1 429/);
+  assert.match(result.output, /retry-after: 1[12][0-9]/i);
+  assert.ok(Number(result.output.match(/anthropic-ratelimit-unified-reset: (\d+)/i)?.[1]) >= exhaustUntil + 90, "retry hint includes the longer cooldown");
 });
 test("health fails and inference stops when credential owner is unreachable", async () => {
   if(process.env.NATIVE_MANAGER_TEST_BINARY) { await stop(); const r=await send(); assert.notEqual(r.code,0); await assert.rejects(()=>ctl.status(config)); return; }

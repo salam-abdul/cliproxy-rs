@@ -82,10 +82,10 @@ function open(url) {
       JSON.stringify(
         {
           ...ctl.settings(c),
-          sessionAffinity: "persistent, no expiry",
+          sessionAffinity: "persistent; idle expiry after 30 days",
           compression: false,
           conversationRewriting: false,
-          paidExtraUsage: false,
+          paidExtraUsage: (await ctl.status(c)).allowExtraUsage === true,
           permissionSettings: "native Claude",
           managementUrl: ctl.localManagement(c),
           proxyPort: c.port,

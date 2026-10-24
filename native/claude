@@ -16,4 +16,5 @@ if args not in [['--version'],['-v'],['--help'],['-h']]:
   if not health.get('ready'):raise RuntimeError('Proxy or credential owner unavailable')
  except Exception as error:sys.exit('Native Claude routing unavailable: '+str(error)+'; no direct inference fallback')
  secret=pathlib.Path(c['proxySecret']).read_text().strip();e.update(HTTPS_PROXY='http://claude:'+secret+'@127.0.0.1:'+str(c['httpProxyPort']),NODE_EXTRA_CA_CERTS=c['ca'],NO_PROXY='localhost,127.0.0.1,::1')
-os.execve(str(exe),[str(exe),'--settings',json.dumps({'apiKeyHelper':'','env':{'ANTHROPIC_BASE_URL':'https://api.anthropic.com'}}),*args],e)
+settings=[] if args[:1] in [['rc'],['remote-control']] else ['--settings',json.dumps({'apiKeyHelper':'','env':{'ANTHROPIC_BASE_URL':'https://api.anthropic.com'}})]
+os.execve(str(exe),[str(exe),*settings,*args],e)

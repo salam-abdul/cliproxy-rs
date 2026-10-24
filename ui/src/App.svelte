@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick, type Component } from "svelte";
-  import { store, pages } from "./store.svelte";
-  import Overview from "./pages/Overview.svelte";
+  import { store, pages, sections } from "./store.svelte";
+    import Overview from "./pages/Overview.svelte";
   import Use from "./pages/Use.svelte";
   import Credentials from "./pages/Credentials.svelte";
   import Connect from "./pages/Connect.svelte";
@@ -32,6 +32,8 @@
   };
   const View = $derived(views[store.route.page]);
   const current = $derived(store.route.page === "connect" ? "credentials" : store.route.page);
+  const section = $derived(sections.find((s) => (s[2] as readonly string[]).includes(store.route.page))!);
+  const children = $derived(pages.filter((p) => (section[2] as readonly string[]).includes(p[0])));
   const title = $derived(
     store.route.page === "connect" ? "Connect an account" : pages.find((p) => p[0] === current)?.[1],
   );
@@ -146,13 +148,7 @@
     <nav class="side" class:open={menu} id="pages" aria-label="Pages">
       <a class="brand" href="#overview">{@render mark()}</a>
       <div class="nav">
-        {#each pages as [id, name]}{#if id}<a
-              href={`#${id}`}
-              aria-current={current === id ? "page" : undefined}
-              >{name}{#if id === "credentials" && store.creds.data?.length}<small
-                  >{store.creds.data.length}</small
-                >{/if}</a
-            >{:else}<hr />{/if}{/each}
+        {#each sections as [id, name]}<a href={`#${id}`} aria-current={section[0] === id ? "page" : undefined}>{name}</a>{/each}
       </div>
       <div class="side-foot">
         {@render theme()}
@@ -177,6 +173,9 @@
         >
       </header>
       <main class="page" id="main" tabindex="-1" inert={menu}>
+        {#if children.length > 1}<nav class="row section-tabs" aria-label={section[1]}>
+          {#each children as [id, name]}<a class="key small" class:primary={current === id} href={`#${id}`} aria-current={current === id ? "page" : undefined}>{name}</a>{/each}
+        </nav>{/if}
         {#key store.route.page}<View />{/key}
       </main>
     </div>

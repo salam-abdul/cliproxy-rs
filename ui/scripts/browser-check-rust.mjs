@@ -16,6 +16,11 @@ const settled = () => {
   browser("wait", "--fn", "!document.querySelector('main [aria-busy=true]')");
   browser("eval", "document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))))");
 };
+const go = (page) => {
+  const parent = ["providers", "quotas"].includes(page) ? "credentials" : ["keys", "models", "payload", "system"].includes(page) ? "config" : page;
+  browser("click", `.side nav a[href="#${parent}"], .side a[href="#${parent}"]`);
+  if (parent !== page) browser("click", `.section-tabs a[href="#${page}"]`);
+};
 const results = [];
 // Capability probes Go rejects with 400 before any side effect (see store.probe).
 const probes = new Set([
@@ -28,7 +33,7 @@ try {
   browser("set", "viewport", "1440", "1000", "2");
   browser(
     "eval",
-    `(()=>{window.__calls=[];const original=window.fetch;window.fetch=async(...args)=>{const response=await original(...args);window.__calls.push({path:new URL(args[0],location.href).pathname,method:args[1]?.method||'GET',status:response.status});return response};return true})()`,
+    `(()=>{window.__calls=[];const original=window.fetch;window.fetch=async(...args)=>{const request=(()=>{try{return JSON.parse(args[1]?.body||'{}')}catch{return {}}})();const response=String(args[0]).endsWith('/requests/api-call')&&request.authIndex?new Response(JSON.stringify({status_code:200,body:{}}),{headers:{'Content-Type':'application/json'}}):await original(...args);window.__calls.push({path:new URL(args[0],location.href).pathname,method:args[1]?.method||'GET',status:response.status});return response};return true})()`,
   );
   browser("find", "label", "Management key", "fill", "orb-dashboard-test-only");
   browser("find", "role", "button", "click", "--name", "Connect");
@@ -41,7 +46,7 @@ try {
     evaluate(`(()=>{if(document.documentElement.dataset.theme!=='${theme}')document.querySelector('[aria-label^="Use "]').click();return true})()`);
     for (const page of ["overview", "use", "credentials", "providers", "keys", "models", "payload", "config", "logs", "system"]) {
       const before = evaluate("window.__calls.length");
-      browser("click", `nav a[href="#${page}"]`);
+      go(page);
       browser("wait", "800");
       settled();
       const state = evaluate(
@@ -82,7 +87,7 @@ try {
     ["POST", "/routing/cooldown/reset", "cooldown reset", `[...document.querySelectorAll('.detail button')].find(b=>b.textContent==='Reset cooldown').disabled`],
     ["DELETE", "/credentials", "delete", `[...document.querySelectorAll('.detail button')].find(b=>b.textContent==='Delete').disabled`],
   ];
-  browser("click", 'nav a[href="#credentials"]');
+  go("credentials");
   settled();
   browser("eval", "location.hash='credentials/claude-research.json'");
   browser("wait", ".detail");
@@ -99,13 +104,13 @@ try {
 
   // A route the server lacks is read once, not retried in a loop.
   const before = evaluate("window.__calls.length");
-  browser("click", 'nav a[href="#quotas"]');
+  go("quotas");
   browser("wait", "4000");
   const pluginReads = evaluate(`window.__calls.slice(${before}).filter(c=>c.path.endsWith('/plugins')&&c.method==='GET').length`);
   assert.ok(pluginReads === 0, `GET /plugins read ${pluginReads} times`);
   console.log(`PASS unsupported reads are not retried in a loop (${pluginReads} read of GET /plugins)`);
 
-  browser("click", 'nav a[href="#payload"]');
+  go("payload");
   settled();
   browser("find", "role", "button", "click", "--name", "Add rule");
   browser("wait", "--text", "Rule added.");
@@ -114,7 +119,7 @@ try {
   browser("wait", "--fn", "document.querySelectorAll('main .rule').length===0");
   console.log("PASS payload add/remove: persisted real Rust writes");
 
-  browser("click", 'nav a[href="#config"]');
+  go("config");
   settled();
   browser("find", "role", "button", "click", "--name", "Edit YAML");
   browser("wait", "textarea");
@@ -130,7 +135,7 @@ try {
   browser("find", "role", "button", "click", "--name", "Close");
   console.log("PASS YAML editor: persisted tree, real diff, discarded without writing");
 
-  browser("click", 'nav a[href="#credentials"]');
+  go("credentials");
   settled();
   browser("set", "viewport", "390", "844", "2");
   settled();

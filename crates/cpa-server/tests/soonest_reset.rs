@@ -222,10 +222,13 @@ async fn soonest_weekly_reset_is_used_up_first_then_the_next() {
     *p.up.five_hour_out.lock().unwrap() = p.y.clone();
     assert_eq!(p.route(1).await, ["y"]);
     assert_eq!(p.route(2).await, ["x", "x"]);
-    // `x` runs out: its 429 fails over to `y`, the only account left, and cools `x`.
+    // Both included windows are now exhausted; never fall back to overage.
     *p.up.exhausted.lock().unwrap() = p.x.clone();
-    assert_eq!(p.route(1).await, ["x", "y"]);
-    assert_eq!(p.route(2).await, ["y", "y"]);
+    let before = p.up.keys.lock().unwrap().len();
+    assert_ne!(p.message().await.0, 200);
+    assert_eq!(&p.up.keys.lock().unwrap()[before..], std::slice::from_ref(&p.x));
+    assert_ne!(p.message().await.0, 200);
+    assert_eq!(p.up.keys.lock().unwrap().len(), before + 1);
 }
 
 /// An account whose answers carry quota signals but never a weekly reset gets one
@@ -279,4 +282,17 @@ async fn management_api_and_reload_switch_the_strategy() {
     assert_eq!(p.rt.policy().strategy, Strategy::RoundRobin);
     let spread = p.route(2).await;
     assert!(spread.contains(&"x") && spread.contains(&"y"), "{spread:?}");
+}
+
+#[tokio::test]
+async fn an_exhausted_included_window_moves_an_existing_conversation() {
+    let p = proxy("pinned-limit", "soonest-reset").await;
+    let config = yaml(&p.base, "soonest-reset", &p._dir.join("auths"))
+        .replace("  strategy:", "  session-affinity: true\n  strategy:");
+    p.rt.publish_config(Config::parse(&config).unwrap());
+    *p.up.soon.lock().unwrap() = p.y.clone();
+    assert_eq!(p.route(2).await, ["x", "x"]);
+    *p.up.five_hour_out.lock().unwrap() = p.x.clone();
+    assert_eq!(p.route(1).await, ["x"]);
+    assert_eq!(p.route(2).await, ["y", "y"]);
 }

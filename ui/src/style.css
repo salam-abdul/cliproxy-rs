@@ -384,3 +384,5 @@ select { appearance: none; padding-right: 34px; background: var(--raised) url("d
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+.section-tabs { flex-wrap: wrap; margin-bottom: 1.5rem; }

@@ -1,6 +1,3 @@
-// Live quota checks, shared by Overview and Quotas. A check asks the provider through the
-// server (/requests/api-call with the credential's own token), so it
-// only ever runs when the user presses a button.
 import { api } from "./api";
 import { store } from "./store.svelte";
 import {
@@ -27,16 +24,40 @@ export const canCheck = (a: Data) => !a.disabled && hasSource(a);
 /** What is known about one credential's limits: a live check in this tab, else passive signals. */
 export function limits(
   a: Data,
-): { windows: Window[]; at: number } | { error: string } | null {
+): { windows: Window[]; at: number; error?: string } | { error: string } | null {
   const live = store.quota[quotaKey(a)];
-  if (live) return live;
+  const observed = Date.parse(a.quota?.observed_at) || 0;
   const windows = signalWindows(provider(a), a.quota);
-  return windows.length
-    ? { windows, at: Date.parse(a.quota?.observed_at) || 0 }
-    : null;
+  if (windows.length && (!live || !("at" in live) || observed > live.at)) {
+    const previous = live && "windows" in live ? live.windows : [];
+    const merged = new Map(previous.map(w => [w.label, w]));
+    for (const window of windows) merged.set(window.label, window);
+    return {
+      windows: [...merged.values()],
+      at: observed,
+      error: live?.error,
+    };
+  }
+  return live || null;
 }
 
-export async function check(a: Data) {
+const pending = new Map<string, Promise<void>>();
+const attempted = new WeakMap<object, Map<string, number>>();
+export function check(a: Data): Promise<void> {
+  if (!canCheck(a)) return Promise.resolve();
+  const key = quotaKey(a);
+  const existing = pending.get(key);
+  if (existing) return existing;
+  const session = store.quota;
+  let times = attempted.get(session);
+  if (!times) attempted.set(session, times = new Map());
+  times.set(key, Date.now());
+  const task = read(a, session).finally(() => pending.delete(key));
+  pending.set(key, task);
+  return task;
+}
+
+async function read(a: Data, session: typeof store.quota) {
   const p = provider(a);
   try {
     let raw: Data;
@@ -67,18 +88,26 @@ export async function check(a: Data) {
           : `The provider answered HTTP ${r.status_code}. Try again later.`,
       );
     raw = typeof r.body === "string" ? JSON.parse(r.body) : r.body;
-    store.quota[quotaKey(a)] = {
+    if (store.quota !== session || !store.logged) return;
+    session[quotaKey(a)] = {
       at: Date.now(),
       windows: quotaWindows(p, raw),
     };
   } catch (e) {
-    store.quota[quotaKey(a)] = {
+    if (store.quota !== session || !store.logged) return;
+    session[quotaKey(a)] = {
+      ...session[quotaKey(a)],
       error: e instanceof Error ? e.message : String(e),
     };
   }
 }
 
 /** One check per supported credential, one after another so the provider is not hammered. */
-export async function checkAll(list: Data[]) {
-  for (const a of list) if (canCheck(a)) await check(a);
+export async function checkAll(list: Data[], automatic = false, active = () => true) {
+  const session = store.quota;
+  for (const a of list) {
+    if (!active() || document.hidden || !store.logged || store.quota !== session) break;
+    if (automatic && Date.now() - (attempted.get(session)?.get(quotaKey(a)) || 0) < 60_000) continue;
+    if (canCheck(a)) await check(a);
+  }
 }

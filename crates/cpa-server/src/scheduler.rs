@@ -104,17 +104,7 @@ fn window_length(minutes: f64, observed_at: SystemTime) -> Option<Duration> {
     observed_at.checked_add(length).map(|_| length)
 }
 
-/// A reset signal: epoch seconds (fractions allowed) or an RFC 3339 time.
-fn reset_time(raw: &str) -> Option<SystemTime> {
-    let raw = raw.trim();
-    if let Ok(seconds) = raw.parse::<f64>() {
-        return (seconds.is_finite() && seconds > 0.0)
-            .then(|| Duration::try_from_secs_f64(seconds).ok())
-            .flatten()
-            .and_then(|d| SystemTime::UNIX_EPOCH.checked_add(d));
-    }
-    chrono::DateTime::parse_from_rfc3339(raw).ok().map(SystemTime::from)
-}
+use crate::quota_time::reset_time;
 
 impl Windows {
     /// Reads a snapshot's `signals` (header name to value), observed at `observed_at`,

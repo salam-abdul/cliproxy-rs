@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Install a pinned native Rust proxy. Never change Claude defaults implicitly."""
-import hashlib,json,os,pathlib,secrets,shutil,socket,sqlite3,subprocess,sys
+import hashlib,json,os,pathlib,secrets,shutil,socket,sqlite3,subprocess,sys,urllib.parse
 src=pathlib.Path(__file__).parent
 home=pathlib.Path.home();state=home/'.local/state/cliproxy-native';configs=home/'.config/cliproxy-native'
 if len(sys.argv)<2:raise SystemExit('Supply the built cliproxy binary')
@@ -9,8 +9,13 @@ if not binary.is_file():raise SystemExit('Supply the built cliproxy binary')
 upgrade=(configs/'config.json').exists()
 if upgrade:
  if '--upgrade' not in sys.argv:raise SystemExit('Existing installation; stop its launch agent, then use --upgrade')
- with socket.socket() as probe:
-  if probe.connect_ex(('127.0.0.1',20148))==0:raise SystemExit('Stop the managed proxy before upgrading')
+ existing=json.loads((configs/'config.json').read_text())
+ endpoint=urllib.parse.urlparse(existing['managementUrl'])
+ if endpoint.hostname not in ['localhost','127.0.0.1','::1']:raise SystemExit('Management must be loopback')
+ ports={endpoint.port or (443 if endpoint.scheme=='https' else 80),existing['port'],existing.get('httpProxyPort',0)}-{0}
+ for port in ports:
+  with socket.socket() as probe:
+   if probe.connect_ex(('127.0.0.1',port))==0:raise SystemExit('Stop the managed proxy before upgrading')
 for p in [state,configs,state/'auth']:p.mkdir(parents=True,exist_ok=True,mode=0o700);p.chmod(0o700)
 sources={f:src/f for f in ['credentials.cjs','control.cjs','cliproxy-native','claude','zed-claude']};sources['cliproxy']=binary
 hashes={name:hashlib.sha256(p.read_bytes()).hexdigest() for name,p in sources.items()}

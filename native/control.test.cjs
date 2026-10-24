@@ -117,3 +117,23 @@ test("CLI never prints account credentials and invalid commands fail", async () 
   assert.equal((await run(["nonsense"])).code, 1);
   assert.equal((await run(["settings", "set", "compression", "on"])).code, 1);
 });
+
+test("upgrade refuses a running manager at a nondefault port before copying files", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "native-install-"));
+  try {
+    const configDir = path.join(home, ".config/cliproxy-native");
+    fs.mkdirSync(configDir, {recursive:true});
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({managementUrl:c.managementUrl, port:0, httpProxyPort:0}));
+    const binary = path.join(home, "cliproxy");
+    fs.writeFileSync(binary, "fixture");
+    const result = await new Promise(resolve => {
+      const child = cp.spawn("python3", [path.join(__dirname, "install.py"), binary, "--upgrade"], {env:{...process.env, HOME:home}});
+      let error = "";
+      child.stderr.on("data", data => error += data);
+      child.on("exit", code => resolve({code,error}));
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.error, /Stop the managed proxy/);
+    assert.equal(fs.existsSync(path.join(home, ".local")), false);
+  } finally { fs.rmSync(home, {recursive:true, force:true}); }
+});

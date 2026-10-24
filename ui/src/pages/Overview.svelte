@@ -1,28 +1,21 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { store, every } from "../store.svelte";
-  import { buckets, sumBuckets, sum, credState, credName, provider, label, readPath, newKey, ago, strategy, flag, type Data, type Lamp } from "../core";
+  import { store } from "../store.svelte";
+  import { buckets, sumBuckets, sum, credState, readPath, newKey, strategy, flag, type Data, type Lamp } from "../core";
   import { clientModels } from "../api";
-  import { checkAll, canCheck, limits } from "../quota";
+  import Quotas from "./Quotas.svelte";
+
   import Grille from "../Grille.svelte";
   import Load from "../Load.svelte";
-  import Meter from "../Meter.svelte";
 
-  $effect(() => every(10_000, () => store.creds.load(true)));
+
   const rows = $derived(
     (store.creds.data || []).map((a) => ({ a, b: buckets(a), s: credState(a) })),
   );
   const traffic = $derived(sumBuckets(rows.map((r) => r.b)));
-  const max = $derived(Math.max(1, ...rows.flatMap((r) => r.b?.total || [])));
   const total = $derived(traffic ? sum(traffic.total) : 0);
   const failed = $derived(traffic ? sum(traffic.failed) : 0);
   const count = (lamp: string) => rows.filter((r) => r.s.lamp === lamp).length;
-  const groups = $derived(
-    [...new Set(rows.map((r) => provider(r.a)))].map((p) => ({
-      p,
-      rows: rows.filter((r) => provider(r.a) === p),
-    })),
-  );
   const routing = $derived(readPath(store.config.data || {}, "routing", {}) as Data);
   const fmt = (n: number) => n.toLocaleString();
 
@@ -107,14 +100,6 @@
     }
   }
 
-  const limited = $derived(rows.map((r) => ({ a: r.a, l: limits(r.a) })).filter((x) => x.l));
-  const checkable = $derived(rows.some((r) => canCheck(r.a)));
-  let checking = $state(false);
-  async function checkLimits() {
-    checking = true;
-    await checkAll(store.creds.data || []);
-    checking = false;
-  }
 </script>
 
 <div class="head">
@@ -191,52 +176,9 @@
         </p>
       </section>
 
-      <section class="section">
-        <div class="section-head">
-          <h2>Credentials</h2>
-          {#if checkable}<button class="key quiet small" disabled={checking} onclick={checkLimits}
-              >{checking ? "Checking limits…" : "Check limits"}</button
-            >{/if}
-          <a class="key quiet small" href="#credentials">Manage <svg class="i" width="14" height="14" aria-hidden="true"><use href="#i-chevron" /></svg></a>
-        </div>
-        <ul class="list creds">
-          {#each groups as g (g.p)}
-            <li class="group">{label(g.p)}<span>{g.rows.length}</span></li>
-            {#each g.rows as r (`${r.a.name}\u0000${r.a.auth_index}`)}
-              <li>
-                <a class="item" href={`#credentials/${encodeURIComponent(r.a.id || r.a.name)}`}>
-                  <span class="lamp {r.s.lamp}"></span>
-                  <span class="name grow"
-                    ><strong>{credName(r.a)}</strong><small>{r.a.note || r.a.name}</small></span
-                  >
-                  {#if r.b}<Grille data={r.b} {max} />{:else}<span class="legend">No history reported</span>{/if}
-                  <span class="num count">{r.b ? fmt(sum(r.b.total)) : "—"}</span>
-                  <span class="state-label">{r.s.label}</span>
-                </a>
-              </li>
-            {/each}
-          {/each}
-          <li>
-            <a class="item add" href="#connect"><span class="lamp off"></span>Connect another account</a>
-          </li>
-        </ul>
-      </section>
 
-      {#if limited.length}
-        <section class="section">
-          <div class="section-head"><h2>Limits</h2></div>
-            <ul class="list limits">
-              {#each limited as x (`${x.a.name}\u0000${x.a.auth_index}`)}
-                <li class="item">
-                  <span class="name"><strong>{credName(x.a)}</strong><small>{label(provider(x.a))}{x.l && "at" in x.l && x.l.at ? ` · ${ago(x.l.at)}` : ""}</small></span>
-                  {#if x.l && "windows" in x.l}
-                    <div class="windows">{#each x.l.windows as w}<Meter {w} />{:else}<span class="legend">No usage windows reported.</span>{/each}</div>
-                  {:else if x.l}<p class="note error grow"><span class="lamp bad"></span>{x.l.error}</p>{/if}
-                </li>
-              {/each}
-            </ul>
-        </section>
-      {/if}
     {/if}
   {/snippet}
 </Load>
+
+<section class="section"><Quotas embedded /></section>

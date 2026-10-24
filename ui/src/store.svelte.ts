@@ -1,6 +1,15 @@
 import { api, connect, disconnect, configValue, route, ApiError } from "./api";
 import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
 
+export const sections = [
+  ["overview", "Overview", ["overview"]],
+  ["credentials", "Accounts", ["credentials", "quotas", "providers", "connect"]],
+  ["usage", "Usage", ["usage"]],
+  ["logs", "Logs", ["logs"]],
+  ["config", "Settings", ["config", "keys", "models", "payload", "system"]],
+  ["use", "Use with tools", ["use"]],
+] as const;
+
 export const pages = [
   ["overview", "Overview"],
   ["use", "Use with tools"],
@@ -73,12 +82,13 @@ class Store {
   toast = $state<{ text: string; bad: boolean } | null>(null);
   /** "METHOD /path" → false when the server does not implement it. */
   caps = $state<Record<string, false>>({});
+  native = new Res<Data>(() => api("/observability/native/status"));
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> =>
     reconcile(this.creds.data || [], (await api("/credentials")).files || [], (a) => `${a.name}\u0000${a.auth_index}`),
   );
   /** Live quota checks made in this tab, by auth index. */
-  quota = $state<Record<string, { at: number; windows: Window[] } | { error: string }>>({});
+  quota = $state<Record<string, { at: number; windows: Window[]; error?: string } | { error: string }>>({});
   #probed = new Set<string>();
   #timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -108,6 +118,7 @@ class Store {
     this.logged = true;
     this.localDashboard = localDashboard;
     this.creds.load();
+    this.native.load();
   }
   logout() {
     disconnect();
@@ -117,6 +128,8 @@ class Store {
     this.#probed.clear();
     this.config.data = this.creds.data = undefined;
     this.quota = {};
+    this.native.data = undefined;
+    this.native.error = null;
     this.dirty = false;
   }
   can(method: string, path: string) {
@@ -219,16 +232,23 @@ function signInHelp(e: unknown): string {
 }
 
 /** Repeat a read while the tab is visible; never overlap calls. Returns a cleanup. */
-export function every(ms: number, work: () => Promise<unknown>) {
-  let running = false;
-  const timer = setInterval(async () => {
-    if (running || document.hidden || !store.logged) return;
+export function every(ms: number, work: () => Promise<unknown>, immediate = false) {
+  let running = false, stopped = false;
+  const run = async () => {
+    if (running || stopped || document.hidden || !store.logged) return;
     running = true;
     try {
       await work();
     } finally {
       running = false;
     }
-  }, ms);
-  return () => clearInterval(timer);
+  };
+  const timer = setInterval(run, ms);
+  document.addEventListener("visibilitychange", run);
+  if (immediate) queueMicrotask(run);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", run);
+  };
 }

@@ -1,6 +1,17 @@
 //! Opt-in native Claude CONNECT transport. Unlike the API translator, inference
 //! bodies and feature headers are never shaped; only the inference credential changes.
+pub(crate) mod diagnostics;
+mod observation;
+mod policy;
 mod quota;
+mod routing;
+#[cfg(test)]
+use observation::UsageScanner;
+use observation::{Exchange, Observation};
+use policy::choose_account;
+#[cfg(test)]
+use policy::weekly_reset;
+use routing::RoutingState;
 
 use crate::Runtime;
 use anyhow::Context;
@@ -14,7 +25,7 @@ use btls::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
 use futures_util::{Stream, StreamExt};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,7 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader},
+    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
 };
@@ -48,10 +59,22 @@ pub struct Config {
     qualification: bool,
     #[serde(default = "body_limit")]
     max_body_bytes: usize,
+    #[serde(default = "minimum_remaining")]
+    new_session_min_remaining: f64,
+    #[serde(default)]
+    selection_shadow: bool,
+    #[serde(default = "max_attempts")]
+    max_attempts: usize,
     // Test fixtures cannot use a real provider destination or native auth directory.
     fixture_accounts: Option<Vec<Account>>,
     fixture_quota: Option<Value>,
     upstream: Option<Target>,
+}
+fn minimum_remaining() -> f64 {
+    5.0
+}
+fn max_attempts() -> usize {
+    3
 }
 fn body_limit() -> usize {
     16 * 1024 * 1024
@@ -80,23 +103,31 @@ struct Account {
     #[serde(default)]
     quota: Value,
 }
+impl Account {
+    fn quota_id(&self) -> &str {
+        if self.file_id.is_empty() {
+            &self.id
+        } else {
+            &self.file_id
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum QuotaTier {
+    Included,
+    Extra,
+}
 fn yes() -> bool {
     true
 }
-#[derive(Default, Serialize, Deserialize)]
-struct Pins {
-    #[serde(default)]
-    pins: BTreeMap<String, String>,
-    #[serde(default)]
-    cooldowns: BTreeMap<String, u64>,
-}
-struct State {
+pub(crate) struct State {
     config: Config,
+    events: diagnostics::Writer,
     rt: Arc<Runtime>,
     client: wreq::Client,
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
     secret: String,
-    pins: Mutex<Pins>,
+    routing: Mutex<RoutingState>,
     quota: quota::Cache,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -150,13 +181,6 @@ fn eligible(q: &Value, model: &str) -> bool {
     if !available(&q["five_hour"]) || !available(&q["seven_day"]) {
         return false;
     }
-    let e = &q["extra_usage"];
-    match e["is_enabled"].as_bool() {
-        Some(false) => {}
-        Some(true) if matches!((e["monthly_limit"].as_f64(),e["used_credits"].as_f64()),(Some(l),Some(u)) if l.is_finite()&&u.is_finite()&&l>=0.0&&u>=l) =>
-            {}
-        _ => return false,
-    }
     q.as_object().is_some_and(|q| {
         q.iter().all(|(k, v)| {
             v.is_null()
@@ -166,35 +190,6 @@ fn eligible(q: &Value, model: &str) -> bool {
                 || available(v)
         })
     })
-}
-// Rank only fresh, future weekly resets. Missing dates cannot win selection.
-fn weekly_reset(q: &Value, at: u64) -> Option<u64> {
-    q["seven_day"]["resets_at"]
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .and_then(|d| u64::try_from(d.timestamp_millis()).ok())
-        .filter(|reset| *reset > at)
-}
-fn choose_account<'a>(
-    sid: &str,
-    pool: &'a [Account],
-    pins: &Pins,
-    tried: &HashSet<String>,
-    at: u64,
-) -> Option<&'a Account> {
-    let usable: Vec<_> = pool
-        .iter()
-        .filter(|a| a.enabled && !tried.contains(&a.id) && pins.cooldowns.get(&a.id).copied().unwrap_or(0) <= at)
-        .collect();
-    usable
-        .iter()
-        .find(|a| pins.pins.get(sid) == Some(&a.id))
-        .copied()
-        .or_else(|| {
-            usable
-                .into_iter()
-                .min_by_key(|a| weekly_reset(&a.quota, at).unwrap_or(u64::MAX))
-        })
 }
 fn headers(input: &HeaderMap, token: Option<&str>) -> HeaderMap {
     let nominated: HashSet<_> = input
@@ -248,40 +243,40 @@ fn private(path: &Path) -> anyhow::Result<Vec<u8>> {
     }
     Ok(std::fs::read(path)?)
 }
-fn persist(path: &Path, pins: &Pins) -> anyhow::Result<()> {
-    let temp = path.with_extension("json.tmp");
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(&temp)?;
-    f.write_all(&serde_json::to_vec(pins)?)?;
-    f.sync_all()?;
-    std::fs::rename(temp, path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
 impl State {
+    pub(crate) async fn set_overage(self: &Arc<Self>, allow: bool) -> anyhow::Result<()> {
+        let s = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut routing = s.routing.lock().unwrap();
+            let mut next = routing.clone();
+            next.policy.allow_extra_usage = allow;
+            next.persist(&s.config.database)?;
+            *routing = next;
+            Ok(())
+        })
+        .await?
+    }
+    fn allow_extra_usage(&self) -> bool {
+        self.routing.lock().unwrap().policy.allow_extra_usage
+    }
+    fn reset(&self, a: &Account, model: &str) -> Option<quota::Reset> {
+        let at = now();
+        let mut recovery = quota::recovery(&a.quota, model, at);
+        if let Some(snapshot) = self.rt.executors.claude.quota().snapshot(a.quota_id()) {
+            recovery = recovery.intersect(quota::header_recovery(&snapshot.signals, at));
+        }
+        recovery.reset().map(|mut reset| {
+            let routing = self.routing.lock().unwrap();
+            reset.at = reset.at.max(routing.cooldowns.until(&a.id, model));
+            reset
+        })
+    }
     fn event(&self, mut v: Value) {
         v["at"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.append(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        if let Ok(mut f) = opts.open(&self.config.events) {
-            let _ = writeln!(f, "{v}");
-        }
+        self.events.send(&v, &self.rt.native_events.lost);
+        self.rt.native_events.record(v);
     }
+
     fn accounts(&self) -> anyhow::Result<Vec<Account>> {
         if let Some(a) = &self.config.fixture_accounts {
             return Ok(a.clone());
@@ -347,6 +342,21 @@ impl State {
         all.sort_by_key(|a| Some(a.id.as_str()) != preferred);
         Ok(all)
     }
+    fn included_available(&self, a: &Account, q: &Value, model: &str) -> bool {
+        if !eligible(q, model) {
+            return false;
+        }
+        let wall = std::time::SystemTime::now();
+        self.rt
+            .executors
+            .claude
+            .quota()
+            .snapshot(a.quota_id())
+            .is_none_or(|snapshot| {
+                !crate::scheduler::Windows::observed("claude", &snapshot.signals, snapshot.observed_at, wall).exhausted
+            })
+    }
+
     async fn quota(&self, a: &Account) -> anyhow::Result<Value> {
         if self.config.fixture_accounts.is_some() {
             return Ok(a.quota.clone());
@@ -395,89 +405,165 @@ impl State {
             .collect()
             .await
     }
-    fn select(&self, sid: &str, pool: &[Account], tried: &HashSet<String>) -> anyhow::Result<Option<Account>> {
-        let mut pins = self.pins.lock().unwrap();
-        let a = choose_account(sid, pool, &pins, tried, now()).cloned();
-        if let Some(a) = &a
-            && pins.pins.get(sid) != Some(&a.id)
-        {
-            pins.pins.insert(sid.to_owned(), a.id.clone());
-            persist(&self.config.database, &pins)?;
-        }
-        Ok(a)
+    async fn select(
+        self: &Arc<Self>,
+        sid: &str,
+        pool: Vec<Account>,
+        tried: &HashSet<String>,
+        model: &str,
+    ) -> anyhow::Result<Option<Account>> {
+        let s = self.clone();
+        let sid = sid.to_owned();
+        let tried = tried.clone();
+        let model = model.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let active: HashSet<_> = s
+                .sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, lock)| Arc::strong_count(lock) > 1)
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            let mut routing = s.routing.lock().unwrap();
+            let at = now();
+            let mut next = routing.clone();
+            let mut protected = active.clone();
+            protected.remove(&sid);
+            next.prune(at, &protected);
+            let pool: Vec<_> = pool
+                .into_iter()
+                .filter(|a| next.cooldowns.model_until(&a.id, &model) <= at)
+                .collect();
+            let baseline = choose_account(&sid, &pool, &next, &tried, at);
+            let proposed = policy::proposed(
+                &sid,
+                &pool,
+                &next,
+                &tried,
+                at,
+                &model,
+                s.config.new_session_min_remaining,
+            );
+            let selected = if s.config.selection_shadow { baseline } else { proposed }.cloned();
+            let reason = match selected.as_ref() {
+                None => "no_eligible_account",
+                Some(a) if next.affinity.get(&sid) == Some(&a.id) => "session_affinity",
+                Some(a) if baseline.is_some_and(|b| b.id != a.id) => "quota_headroom",
+                _ => "soonest_reset",
+            };
+            s.event(json!({
+                "type":"selection", "session":sid, "model":model,
+                "account":selected.as_ref().map(|a| &a.id), "proposedAccount":proposed.map(|a| &a.id),
+                "shadow":s.config.selection_shadow, "reason":reason
+            }));
+            if let Some(a) = &selected {
+                let checkpoint = next.affinity.bind(sid, a.id.clone(), at, &active)?;
+                if checkpoint || next.affinity.len() != routing.affinity.len() {
+                    next.persist(&s.config.database)?;
+                }
+            }
+            *routing = next;
+            Ok(selected)
+        })
+        .await?
     }
-    async fn admit(&self, sid: &str, model: &str, tried: &mut HashSet<String>) -> anyhow::Result<Option<Account>> {
+
+    async fn admit(
+        self: &Arc<Self>,
+        sid: &str,
+        model: &str,
+        tried: &mut HashSet<String>,
+    ) -> anyhow::Result<(Option<Account>, Option<quota::Reset>)> {
         loop {
+            if tried.len() >= self.config.max_attempts {
+                return Ok((None, None));
+            }
             let accounts = self
                 .accounts()?
                 .into_iter()
                 .filter(|a| a.enabled && !tried.contains(&a.id))
                 .collect();
-            let pool: Vec<_> = self
-                .quota_accounts(accounts)
-                .await
+            let accounts = self.quota_accounts(accounts).await;
+            let retry = accounts.iter().filter_map(|a| self.reset(a, model)).min();
+            let (included, extra): (Vec<_>, Vec<_>) = accounts
                 .into_iter()
-                .filter(|a| {
-                    if eligible(&a.quota, model) {
-                        true
-                    } else {
-                        self.event(json!({"type":"quota-unavailable","account":a.id}));
-                        false
-                    }
-                })
-                .collect();
-            let Some(a) = self.select(sid, &pool, tried)? else {
-                return Ok(None);
+                .partition(|a| self.included_available(a, &a.quota, model));
+            let mut tier = QuotaTier::Included;
+            let mut selected = self.select(sid, included, tried, model).await?;
+            if selected.is_none() && self.allow_extra_usage() {
+                let extra = extra.into_iter().filter(|a| quota::extra_available(&a.quota)).collect();
+                tier = QuotaTier::Extra;
+                selected = self.select(sid, extra, tried, model).await?;
+            }
+            let Some(a) = selected else {
+                return Ok((None, retry));
             };
             tried.insert(a.id.clone());
-            let Some(current) = self
+            let Some(mut current) = self
                 .accounts()?
                 .into_iter()
                 .find(|current| current.id == a.id && current.enabled)
             else {
                 continue;
             };
-            if matches!(self.quota(&current).await,Ok(q) if eligible(&q,model)) {
-                return Ok(Some(current));
+            if let Ok(q) = self.quota(&current).await {
+                let admitted = match tier {
+                    QuotaTier::Included => self.included_available(&current, &q, model),
+                    QuotaTier::Extra => self.allow_extra_usage() && quota::extra_available(&q),
+                };
+                if admitted {
+                    current.quota = q;
+                    return Ok((Some(current), None));
+                }
             }
         }
     }
-    fn cool(&self, a: &Account, status: u16) -> anyhow::Result<()> {
-        let mut pins = self.pins.lock().unwrap();
-        pins.cooldowns
-            .insert(a.id.clone(), now() + if status == 429 { 60000 } else { 15000 });
-        persist(&self.config.database, &pins)
+    async fn cool(self: &Arc<Self>, a: &Account, model: &str, status: u16, delay: Option<u64>) -> anyhow::Result<()> {
+        let s = self.clone();
+        let account = a.id.clone();
+        let model = model.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut routing = s.routing.lock().unwrap();
+            let mut next = routing.clone();
+            next.cooldowns.cool(&account, &model, status, delay, now());
+            next.persist(&s.config.database)?;
+            *routing = next;
+            Ok(())
+        })
+        .await?
     }
-    async fn status(&self) -> anyhow::Result<Value> {
+    pub(crate) async fn status(self: &Arc<Self>) -> anyhow::Result<Value> {
         let mut all = Vec::new();
+        let allow_extra = self.allow_extra_usage();
+        let mut ready = false;
         for a in self.quota_accounts(self.accounts()?).await {
+            ready |= a.enabled
+                && (self.included_available(&a, &a.quota, "claude") || allow_extra && quota::extra_available(&a.quota));
             let q = (!a.quota.is_null()).then_some(&a.quota);
-            all.push(json!({"id":a.id,"fileId":a.file_id,"name":a.name,"enabled":a.enabled,"disabled":a.disabled,"expired":a.expired,"includedQuota":q.map(|q|json!({"fiveHour":q["five_hour"]["utilization"],"weekly":q["seven_day"]["utilization"],"weeklyResetsAt":q["seven_day"]["resets_at"],"eligible":eligible(q,"claude-sonnet-5-5")}))}));
+            all.push(json!({"id":a.id,"fileId":a.file_id,"name":a.name,"enabled":a.enabled,"disabled":a.disabled,"expired":a.expired,"includedQuota":q.map(|q|json!({"fiveHour":q["five_hour"]["utilization"],"fiveHourResetsAt":q["five_hour"]["resets_at"],"weekly":q["seven_day"]["utilization"],"weeklyResetsAt":q["seven_day"]["resets_at"],"eligible":self.included_available(&a,q,"claude")}))}));
         }
-        let ready = !self.config.qualification && all.iter().any(|a| a["includedQuota"]["eligible"] == true);
-        let mut counts = BTreeMap::new();
-        for id in self.pins.lock().unwrap().pins.values() {
-            *counts.entry(id.clone()).or_insert(0) += 1;
-        }
-        let tail = (|| -> std::io::Result<String> {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(&self.config.events)?;
-            let size = f.metadata()?.len();
-            f.seek(SeekFrom::Start(size.saturating_sub(65536)))?;
-            let mut out = String::new();
-            f.read_to_string(&mut out)?;
-            Ok(out)
-        })()
-        .unwrap_or_default();
-        let recent = tail
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        let ready = !self.config.qualification && ready;
+        let state = self.clone();
+        let counts = tokio::task::spawn_blocking(move || {
+            let mut counts = BTreeMap::new();
+            for id in state.routing.lock().unwrap().affinity.accounts() {
+                *counts.entry(id.clone()).or_insert(0) += 1;
+            }
+            counts
+        })
+        .await?;
+        let snapshot = self.rt.native_events.snapshot();
+        let recent: Vec<_> = snapshot["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .filter(|e| e["type"] == "inference")
-            .rev()
             .take(10)
-            .collect::<Vec<_>>();
+            .cloned()
+            .collect();
         Ok(
-            json!({"selectionStrategy":"soonest-reset","ready":ready,"ownerReady":true,"proxyReady":true,"qualification":self.config.qualification,"accounts":all,"affinity":counts.into_iter().map(|(a,n)|json!({"account":a,"sessions":n})).collect::<Vec<_>>(),"recent":recent}),
+            json!({"enabled":true,"allowExtraUsage":allow_extra,"selectionStrategy":"soonest-reset","ready":ready,"ownerReady":true,"proxyReady":true,"qualification":self.config.qualification,"accounts":all,"affinity":counts.into_iter().map(|(a,n)|json!({"account":a,"sessions":n})).collect::<Vec<_>>(),"recent":recent}),
         )
     }
 }
@@ -491,6 +577,8 @@ async fn handle(s: Arc<State>, req: Request<Incoming>, diagnostics: bool) -> Res
     }
 }
 async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool) -> anyhow::Result<Response> {
+    let request_started = Instant::now();
+    let request_id = uuid::Uuid::new_v4().to_string();
     let (parts, body) = req.into_parts();
     let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     if diagnostics {
@@ -562,7 +650,10 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             "Native Claude session identity required; request was not routed",
         ));
     };
-    let Some(model) = body["model"].as_str().filter(|m| m.starts_with("claude-")) else {
+    let Some(model) = body["model"]
+        .as_str()
+        .filter(|m| m.starts_with("claude-") && m.len() <= 256)
+    else {
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
@@ -571,14 +662,72 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
         sessions.entry(sid.clone()).or_default().clone()
     };
+    let preparation_ms = request_started.elapsed().as_millis();
+    let waiting = Instant::now();
     let guard = lock.lock_owned().await;
+    let session_wait_ms = waiting.elapsed().as_millis();
+    let mut admission_ms = 0u128;
+    let mut upstream_headers_ms = 0u128;
+    let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut tried = HashSet::new();
+    let mut rejection: Option<quota::Rejection> = None;
     loop {
-        let Some(a) = s.admit(&sid, &model, &mut tried).await? else {
-            return Ok(error(
-                429,
-                "No account has confirmed available included quota; extra usage and direct fallback are disabled",
-            ));
+        if tried.len() >= s.config.max_attempts {
+            if let Some(rejection) = rejection {
+                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()}));
+                return Ok(rejection.response(now()));
+            }
+            s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"attempt_limit","status":503,"attempts":tried.len()}));
+            return Ok(error(503, "Native routing attempt limit reached; retry later"));
+        }
+        let admission_started = Instant::now();
+        let admitted = tokio::time::timeout_at(admission_deadline, s.admit(&sid, &model, &mut tried)).await;
+        admission_ms += admission_started.elapsed().as_millis();
+        let a = match admitted {
+            Ok(Ok((Some(a), _))) => a,
+            other => {
+                if let Ok(Ok((None, reset))) = &other
+                    && let Some(rejection) = rejection
+                {
+                    let rejection = reset.map_or(rejection, |reset| {
+                        rejection.earliest(quota::Rejection::new(Some(reset), None, now()))
+                    });
+                    s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()}));
+                    return Ok(rejection.response(now()));
+                }
+                let reset = match &other {
+                    Ok(Ok((None, reset))) => *reset,
+                    _ => None,
+                };
+                let (status, outcome, message) = match other {
+                    Ok(Ok((None, None))) if !tried.is_empty() => (
+                        503,
+                        "routing_unavailable",
+                        "No remaining account is available for this model; retry later",
+                    ),
+                    Ok(Ok((None, _))) => (
+                        429,
+                        "quota_unavailable",
+                        "No account has confirmed available quota under the proxy policy; retry after reset",
+                    ),
+                    Err(_) => (
+                        503,
+                        "admission_timeout",
+                        "Native quota admission timed out; retry later",
+                    ),
+                    _ => (
+                        502,
+                        "routing_error",
+                        "Native routing state unavailable; no request sent",
+                    ),
+                };
+                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"admissionMs":admission_ms}}));
+                let mut response = error(status, message);
+                if status == 429 {
+                    quota::retry_headers(response.headers_mut(), reset, now());
+                }
+                return Ok(response);
+            }
         };
         let started = Instant::now();
         let result = s
@@ -592,7 +741,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         let r = match result {
             Ok(r) => r,
             Err(upstream_error) => {
-                s.cool(&a, 0)?;
+                s.cool(&a, &model, 0, None).await?;
+                s.rt.store().note_activity(&a.file_id, false);
                 // Log only classifications, never error Display strings containing URLs or credentials.
                 let failure_kind = if upstream_error.is_timeout() {
                     "timeout"
@@ -603,18 +753,28 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 } else {
                     "transport"
                 };
-                s.event(json!({"type":"transport-failure","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
+                s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 return Ok(error(
                     422,
                     "Upstream response was lost; request was not replayed to avoid duplicate inference. Check the session before explicitly retrying.",
                 ));
             }
         };
+        upstream_headers_ms += started.elapsed().as_millis();
         let status = r.status();
-        if [401, 429, 503, 529].contains(&status.as_u16()) {
-            s.cool(&a, status.as_u16())?;
+        s.rt.executors
+            .claude
+            .quota()
+            .observe_model(a.quota_id(), &model, r.headers());
+        if [401, 403, 429, 503, 529].contains(&status.as_u16()) {
+            let delay = policy::retry_delay(r.headers().get("retry-after").and_then(|v| v.to_str().ok()), now());
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
+                rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
+            }
+            s.cool(&a, &model, status.as_u16(), delay).await?;
             s.quota.invalidate(&hash(format!("{}:{}", a.id, a.token))).await;
-            s.event(json!({"type":"failover","session":sid,"account":a.id,"status":status.as_u16()}));
+            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":"retryable_rejection","attempt":tried.len(),"retryAfterMs":delay}));
             continue;
         }
         let h = headers(r.headers(), None);
@@ -624,19 +784,22 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             .unwrap_or_default()
             .to_owned();
         let facts = Exchange {
+            request_id,
+            sse: h.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+            }),
+            timing: json!({"preparationMs":preparation_ms,"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms,"upstreamHeadersMs":upstream_headers_ms}),
+            headers_at: Instant::now(),
+            attempts: tried.len(),
             a,
             model,
             sid,
             status: status.as_u16(),
             digest: hash(&raw),
             body_bytes: raw.len(),
-            beta: parts
-                .headers
-                .get("anthropic-beta")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_owned(),
-            started,
+            started: request_started,
         };
         let record = Observation::new(s.clone(), facts, &encoding);
         let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, wreq::Error>> + Send>> =
@@ -654,13 +817,13 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         if item.is_err()
                             && let Some(o) = record.take()
                         {
-                            o.finish(false).await;
+                            o.finish("upstream_stream_error").await;
                         }
                         Some((item, (stream, record, guard)))
                     }
                     None => {
                         if let Some(o) = record.take() {
-                            o.finish(true).await;
+                            o.finish("complete").await;
                         }
                         None
                     }
@@ -671,267 +834,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         *response.status_mut() = status;
         *response.headers_mut() = h;
         return Ok(response);
-    }
-}
-#[derive(Clone)]
-struct Exchange {
-    a: Account,
-    model: String,
-    sid: String,
-    status: u16,
-    digest: String,
-    body_bytes: usize,
-    beta: String,
-    started: Instant,
-}
-struct Observation {
-    s: Arc<State>,
-    facts: Exchange,
-    usage: Arc<Mutex<UsageScanner>>,
-    writer: Option<tokio::io::DuplexStream>,
-    decoder: Option<JoinHandle<()>>,
-    published: bool,
-}
-#[derive(Default)]
-struct UsageScanner {
-    line: Vec<u8>,
-    json: JsonUsage,
-    usage: serde_json::Map<String, Value>,
-    oversized_line: bool,
-}
-
-#[derive(Default)]
-struct JsonUsage {
-    depth: i32,
-    string: bool,
-    escaped: bool,
-    word: Vec<u8>,
-    key: bool,
-    want: bool,
-    capture: Option<Vec<u8>>,
-    value: Option<Value>,
-}
-impl JsonUsage {
-    fn push(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            if let Some(capture) = self.capture.as_mut() {
-                if capture.len() < 65536 {
-                    capture.push(b)
-                } else {
-                    self.capture = None;
-                }
-            }
-            if self.string {
-                if self.escaped {
-                    self.escaped = false;
-                    continue;
-                }
-                if b == b'\\' {
-                    self.escaped = true;
-                    continue;
-                }
-                if b == b'"' {
-                    self.string = false;
-                    self.key = self.depth == 1 && self.word == b"usage";
-                    self.word.clear();
-                } else if self.depth == 1 && self.word.len() < 16 {
-                    self.word.push(b)
-                }
-                continue;
-            }
-            if b.is_ascii_whitespace() {
-                continue;
-            }
-            if self.want {
-                self.want = false;
-                if b == b'{' {
-                    self.capture = Some(vec![b]);
-                }
-            }
-            match b {
-                b'"' => {
-                    self.string = true;
-                    self.word.clear();
-                }
-                b':' => {
-                    self.want = self.key;
-                    self.key = false;
-                }
-                b'{' | b'[' => {
-                    self.depth += 1;
-                    self.key = false;
-                }
-                b'}' | b']' => {
-                    self.depth -= 1;
-                    if self.depth == 1
-                        && let Some(raw) = self.capture.take()
-                    {
-                        self.value = serde_json::from_slice(&raw).ok();
-                    }
-                    self.key = false;
-                }
-                _ => self.key = false,
-            }
-        }
-    }
-}
-impl UsageScanner {
-    fn push(&mut self, bytes: &[u8]) {
-        self.json.push(bytes);
-        for &byte in bytes {
-            if byte == b'\n' {
-                if !self.oversized_line
-                    && let Some(data) = self.line.strip_prefix(b"data:")
-                    && let Ok(v) = serde_json::from_slice::<Value>(data)
-                    && let Some(u) = v["message"]["usage"].as_object().or(v["usage"].as_object())
-                {
-                    self.usage.extend(u.clone());
-                }
-                self.line.clear();
-                self.oversized_line = false;
-            } else if self.line.len() < 1048576 && !self.oversized_line {
-                self.line.push(byte)
-            } else {
-                self.line.clear();
-                self.oversized_line = true;
-            }
-        }
-    }
-    fn value(&self) -> Value {
-        if !self.usage.is_empty() {
-            Value::Object(self.usage.clone())
-        } else {
-            self.json.value.clone().unwrap_or(Value::Null)
-        }
-    }
-}
-impl Observation {
-    fn new(s: Arc<State>, facts: Exchange, encoding: &str) -> Self {
-        use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
-        let (writer, reader) = tokio::io::duplex(65536);
-        let source = BufReader::new(reader);
-        let mut reader: Box<dyn AsyncRead + Unpin + Send> = match encoding {
-            "gzip" => Box::new(GzipDecoder::new(source)),
-            "br" => Box::new(BrotliDecoder::new(source)),
-            "deflate" => Box::new(ZlibDecoder::new(source)),
-            "zstd" => Box::new(ZstdDecoder::new(source)),
-            _ => Box::new(source),
-        };
-        let usage = Arc::new(Mutex::new(UsageScanner::default()));
-        let sink = usage.clone();
-        let decoder = tokio::spawn(async move {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => sink.lock().unwrap().push(&buffer[..n]),
-                }
-            }
-        });
-        Self {
-            s,
-            facts,
-            usage,
-            writer: Some(writer),
-            decoder: Some(decoder),
-            published: false,
-        }
-    }
-    async fn observe(&mut self, b: &[u8]) {
-        use tokio::io::AsyncWriteExt;
-        if let Some(writer) = self.writer.as_mut()
-            && writer.write_all(b).await.is_err()
-        {
-            self.writer.take();
-        }
-    }
-    async fn finish(mut self, complete: bool) {
-        self.writer.take();
-        if let Some(mut task) = self.decoder.take()
-            && tokio::time::timeout(Duration::from_secs(1), &mut task).await.is_err()
-        {
-            task.abort();
-        }
-        self.publish(complete);
-    }
-    fn publish(&mut self, complete: bool) {
-        if std::mem::replace(&mut self.published, true) {
-            return;
-        }
-        let usage = self.usage.lock().unwrap().value();
-        let f = &self.facts;
-        self.s.event(json!({"type":"inference","session":f.sid,"account":f.a.id,"model":f.model,"status":if complete{f.status}else{499},"upstreamStatus":f.status,"complete":complete,"bodySha256":f.digest,"bodyBytes":f.body_bytes,"beta":f.beta,"usage":usage}));
-        self.s
-            .rt
-            .store()
-            .note_activity(&f.a.file_id, complete && f.status < 400);
-        let credential = self.s.rt.store().snapshot().into_iter().find(|c| c.id == f.a.file_id);
-        let auth_index = credential
-            .as_ref()
-            .map(|c| cpa_core::config::credentials::auth_index(c))
-            .unwrap_or_default();
-        let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
-        let record = crate::usage_record::Record {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            execution_id: uuid::Uuid::new_v4().to_string(),
-            provider: "claude".into(),
-            executor_type: "claude".into(),
-            model: f.model.clone(),
-            alias: f.model.clone(),
-            response_model: String::new(),
-            source: f.a.name.clone(),
-            auth_index,
-            auth_type: "oauth".into(),
-            generate: true,
-            stream: true,
-            failed: !complete || f.status >= 400,
-            fail_status: if !complete {
-                499
-            } else if f.status >= 400 {
-                f.status as i64
-            } else {
-                0
-            },
-            latency_ms: f.started.elapsed().as_millis() as i64,
-            detail,
-            ..Default::default()
-        };
-        self.s.rt.usage_queue().enqueue(crate::usage_record::queued(
-            &record,
-            &crate::usage_record::Client {
-                session_id: f.sid.clone(),
-                session_source: "native",
-                endpoint: "POST /v1/messages".into(),
-                ..Default::default()
-            },
-        ));
-    }
-}
-impl Drop for Observation {
-    fn drop(&mut self) {
-        self.writer.take();
-        if self.published {
-            if let Some(task) = self.decoder.take() {
-                task.abort();
-            }
-            return;
-        }
-        self.published = true;
-        let mut finalizer = Self {
-            s: self.s.clone(),
-            facts: self.facts.clone(),
-            usage: self.usage.clone(),
-            writer: None,
-            decoder: self.decoder.take(),
-            published: false,
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                finalizer.finish(false).await;
-            });
-        } else {
-            finalizer.publish(false);
-        }
     }
 }
 fn constant(a: &str, b: &str) -> bool {
@@ -1027,7 +929,15 @@ pub async fn start(rt: Arc<Runtime>) -> anyhow::Result<Option<Running>> {
 }
 pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Running> {
     let c: Config = serde_json::from_slice(&std::fs::read(path)?)?;
-    // Existing SQLite pins are migrated offline once; never read SQLite as JSON.
+    anyhow::ensure!(
+        c.new_session_min_remaining.is_finite() && (0.0..=50.0).contains(&c.new_session_min_remaining),
+        "newSessionMinRemaining must be between 0 and 50"
+    );
+    anyhow::ensure!(
+        (1..=16).contains(&c.max_attempts),
+        "maxAttempts must be between 1 and 16"
+    );
+    // Existing SQLite routing are migrated offline once; never read SQLite as JSON.
     anyhow::ensure!(
         !c.database.extension().is_some_and(|e| e == "sqlite"),
         "Run the offline installer upgrade to migrate SQLite affinity before starting Rust"
@@ -1064,11 +974,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     };
     let secret = String::from_utf8(private(&c.proxy_secret)?)?.trim().to_owned();
     anyhow::ensure!(secret.len() >= 32, "Private proxy credential required");
-    let pins = if c.database.is_file() {
-        serde_json::from_slice(&private(&c.database)?)?
-    } else {
-        Pins::default()
-    };
+    let routing = RoutingState::load(&c.database, now())?;
     renew_certificate(&c)?;
     let tls = load_tls(&c)?;
     let mut client = wreq::Client::builder()
@@ -1084,12 +990,13 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         client = client.tls_cert_store(wreq::tls::trust::CertStore::from_pem_stack(std::fs::read(ca)?)?);
     }
     let s = Arc::new(State {
+        events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
         config: c.clone(),
         rt,
         client: client.build()?,
         tls: std::sync::RwLock::new(tls),
         secret,
-        pins: Mutex::new(pins),
+        routing: Mutex::new(routing),
         quota: Default::default(),
         sessions: Default::default(),
     });
@@ -1099,6 +1006,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
+    *s.rt.native_state.write().unwrap() = Arc::downgrade(&s);
     let cert_state = s.clone();
     let certificate = tokio::spawn(async move {
         loop {
@@ -1235,29 +1143,32 @@ mod tests {
             account("later", "2033-05-19T04:33:20Z"),
             account("sooner", "2033-05-18T04:33:20Z"),
         ];
-        let mut pins = Pins::default();
+        let mut routing = RoutingState::default();
         let tried = HashSet::new();
-        assert_eq!(choose_account("new", &pool, &pins, &tried, at).unwrap().id, "sooner");
-        pins.pins.insert("existing".into(), "later".into());
+        assert_eq!(choose_account("new", &pool, &routing, &tried, at).unwrap().id, "sooner");
+        routing
+            .affinity
+            .bind("existing".into(), "later".into(), at, &HashSet::new())
+            .unwrap();
         assert_eq!(
-            choose_account("existing", &pool, &pins, &tried, at).unwrap().id,
+            choose_account("existing", &pool, &routing, &tried, at).unwrap().id,
             "later"
         );
-        pins.cooldowns.insert("later".into(), at + 1000);
+        routing.cooldowns.cool("later", "opus", 429, Some(1000), at);
         assert_eq!(
-            choose_account("existing", &pool, &pins, &tried, at).unwrap().id,
+            choose_account("existing", &pool, &routing, &tried, at).unwrap().id,
             "sooner"
         );
-        pins.cooldowns.clear();
+        routing.cooldowns = Default::default();
         let mut disabled = pool.clone();
         disabled[0].enabled = false;
         assert_eq!(
-            choose_account("existing", &disabled, &pins, &tried, at).unwrap().id,
+            choose_account("existing", &disabled, &routing, &tried, at).unwrap().id,
             "sooner"
         );
         let tried = HashSet::from(["later".to_owned()]);
         assert_eq!(
-            choose_account("existing", &pool, &pins, &tried, at).unwrap().id,
+            choose_account("existing", &pool, &routing, &tried, at).unwrap().id,
             "sooner"
         );
     }
@@ -1279,17 +1190,17 @@ mod tests {
         assert!(session(&json!({}), &HeaderMap::new()).is_none());
     }
     #[test]
-    fn quota_rejects_unknown_or_spendable_paid_extra() {
+    fn included_quota_does_not_require_changing_account_billing() {
         let mut q = json!({"five_hour":{"utilization":1},"seven_day":{"utilization":1}});
-        assert!(!eligible(&q, "claude-haiku-5-5"));
-        q["extra_usage"] = json!({"is_enabled":false});
         assert!(eligible(&q, "claude-haiku-5-5"));
         q["extra_usage"] = json!({"is_enabled":true,"monthly_limit":100,"used_credits":99});
-        assert!(!eligible(&q, "claude-haiku-5-5"));
-        q["extra_usage"]["used_credits"] = json!(100);
         assert!(eligible(&q, "claude-haiku-5-5"));
         q["five_hour"]["utilization"] = json!(100);
         assert!(!eligible(&q, "claude-haiku-5-5"));
+        q["five_hour"]["utilization"] = json!(1);
+        q["seven_day_opus"] = json!({"utilization":100});
+        assert!(!eligible(&q, "claude-opus-5-5"));
+        assert!(eligible(&q, "claude-haiku-5-5"));
     }
     #[test]
     fn headers_keep_future_betas_and_separate_credentials() {
@@ -1322,19 +1233,5 @@ mod tests {
             scan.push(&[*b]);
         }
         assert_eq!(scan.value(), json!({"cache_read_input_tokens":42,"output_tokens":7}));
-        assert!(scan.json.capture.as_ref().is_none_or(|v| v.len() <= 65536));
-        assert!(scan.line.len() <= 1048576);
-    }
-    #[test]
-    fn affinity_is_atomic_private_and_survives_reload() {
-        let dir = std::env::temp_dir().join(format!("native-pins-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("pins.json");
-        let mut pins = Pins::default();
-        pins.pins.insert("native".into(), "account-b".into());
-        persist(&path, &pins).unwrap();
-        let read: Pins = serde_json::from_slice(&private(&path).unwrap()).unwrap();
-        assert_eq!(read.pins["native"], "account-b");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

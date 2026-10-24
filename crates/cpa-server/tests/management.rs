@@ -1886,3 +1886,76 @@ async fn local_dashboard_works_without_a_management_secret() {
     assert_eq!(response.status(), 200);
     server.abort();
 }
+
+#[tokio::test]
+async fn native_diagnostics_require_management_authentication() {
+    let f = Fixture::new("native-diagnostics");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let url = format!("{base}/v8/management/observability/native/events");
+    assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+    let a: Value = client
+        .get(&url)
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let b: Value = client
+        .get(&url)
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a["capacity"], 512);
+    assert_eq!(a["events"], json!([]));
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_status_identifies_a_server_without_a_native_router() {
+    let f = Fixture::new("native-status");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let url = format!("{base}/v8/management/observability/native/status");
+    assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+    let status: Value = client
+        .get(&url)
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status, json!({"enabled":false}));
+    let policy = format!("{base}/v8/management/routing/native-policy");
+    assert_eq!(
+        client
+            .patch(&policy)
+            .json(&json!({"allowExtraUsage":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .patch(&policy)
+            .bearer_auth("fake-management-only")
+            .json(&json!({"allowExtraUsage":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    server.abort();
+}

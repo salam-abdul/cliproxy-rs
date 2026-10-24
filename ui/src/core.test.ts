@@ -333,3 +333,21 @@ print(json.dumps({k.arg: k.value.value for n in ast.walk(ast.parse(sys.stdin.rea
     snippet("Codex CLI", `http://h/p"\\q`, key, model).split("# then")[0]);
   assert.equal(odd.model_providers.cliproxy.base_url, `http://h/p"\\q/v1`);
 });
+
+test("Claude response headers provide live included windows without treating missing usage as zero", () => {
+  const quota = {signals:{
+    "Anthropic-Ratelimit-Unified-5h-Utilization":"0.42",
+    "Anthropic-Ratelimit-Unified-5h-Reset":"1790949600",
+    "Anthropic-Ratelimit-Unified-7d-Utilization":"1.01",
+    "Anthropic-Ratelimit-Unified-7d-Reset":"2026-10-03T14:00:00Z",
+    "Anthropic-Ratelimit-Unified-Overage-Status":"rejected",
+  }};
+  assert.deepEqual(signalWindows("claude", quota), [
+    {label:"Current session",used:42,reset:"2026-10-02T14:00:00.000Z",source:"anthropic-ratelimit-unified-5h-"},
+    {label:"Current week (all models)",used:100,reset:"2026-10-03T14:00:00.000Z",source:"anthropic-ratelimit-unified-7d-"},
+  ]);
+  for (const raw of [undefined, "", " ", "Infinity", "NaN", "-0.1"]) {
+    assert.deepEqual(signalWindows("claude", {signals:{"anthropic-ratelimit-unified-5h-utilization":raw}}), []);
+  }
+  assert.deepEqual(otherSignals(quota, signalWindows("claude",quota)), [["Anthropic-Ratelimit-Unified-Overage-Status","rejected"]]);
+});
