@@ -234,5 +234,5 @@ jobs:
       - run: npm ci
       - run: npm run check && npm test && npm run build
       - run: npx playwright-core install --with-deps chromium
-      - run: node scripts/dashboard-check.mjs
+      - run: node scripts/dashboard-check.mjs && DASHBOARD_KIND=rust node scripts/dashboard-check.mjs
       - run: git diff --exit-code -- dist

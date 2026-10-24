@@ -1,4 +1,5 @@
-import { api } from "./api";
+import { api, requests } from "./api";
+import type { Lifetime } from "./lifetime";
 import { store } from "./store.svelte";
 import {
   provider,
@@ -18,19 +19,23 @@ const usageURL: Record<string, string> = {
 export const quotaKey = (a: Data) => a.auth_index || a.name;
 /** The provider has a usage endpoint this server can call. */
 export const hasSource = (a: Data) =>
-  !!usageURL[provider(a)] && store.can("POST", "/requests/api-call");
+  !!usageURL[provider(a)] &&
+  (provider(a) === "claude" && store.kind === "rust"
+    ? store.can("GET", "/observability/claude/usage")
+    : store.can("POST", "/requests/api-call"));
 export const canCheck = (a: Data) => !a.disabled && hasSource(a);
 
 /** What is known about one credential's limits: a live check in this tab, else passive signals. */
 export function limits(
   a: Data,
-): { windows: Window[]; at: number; error?: string } | { error: string } | null {
+):
+  { windows: Window[]; at: number; error?: string } | { error: string } | null {
   const live = store.quota[quotaKey(a)];
   const observed = Date.parse(a.quota?.observed_at) || 0;
   const windows = signalWindows(provider(a), a.quota);
   if (windows.length && (!live || !("at" in live) || observed > live.at)) {
     const previous = live && "windows" in live ? live.windows : [];
-    const merged = new Map(previous.map(w => [w.label, w]));
+    const merged = new Map(previous.map((w) => [w.label, w]));
     for (const window of windows) merged.set(window.label, window);
     return {
       windows: [...merged.values()],
@@ -41,23 +46,17 @@ export function limits(
   return live || null;
 }
 
-const pending = new Map<string, Promise<void>>();
-const attempted = new WeakMap<object, Map<string, number>>();
-export function check(a: Data): Promise<void> {
+export function check(a: Data, automatic = false): Promise<void> {
   if (!canCheck(a)) return Promise.resolve();
-  const key = quotaKey(a);
-  const existing = pending.get(key);
-  if (existing) return existing;
-  const session = store.quota;
-  let times = attempted.get(session);
-  if (!times) attempted.set(session, times = new Map());
-  times.set(key, Date.now());
-  const task = read(a, session).finally(() => pending.delete(key));
-  pending.set(key, task);
-  return task;
+  const lifetime = requests;
+  return lifetime.once(
+    `quota:${quotaKey(a)}`,
+    () => read(a, lifetime),
+    automatic ? 60_000 : 0,
+  );
 }
 
-async function read(a: Data, session: typeof store.quota) {
+async function read(a: Data, lifetime: Lifetime) {
   const p = provider(a);
   try {
     let raw: Data;
@@ -75,39 +74,48 @@ async function read(a: Data, session: typeof store.quota) {
       const account = a.account_id || a.id_token?.chatgpt_account_id;
       if (account) header["Chatgpt-Account-Id"] = account;
     }
-    const r = await api("/requests/api-call", "POST", {
-      authIndex: a.auth_index,
-      method: "GET",
-      url: usageURL[p],
-      header,
-    });
-    if (r.status_code < 200 || r.status_code >= 300)
-      throw new Error(
-        r.status_code === 401 || r.status_code === 403
-          ? `The provider rejected the account's token (HTTP ${r.status_code}). Refresh the token, or connect the account again.`
-          : `The provider answered HTTP ${r.status_code}. Try again later.`,
+    if (p === "claude" && store.kind === "rust") {
+      raw = await api(
+        `/observability/claude/usage?auth_index=${encodeURIComponent(a.auth_index)}`,
       );
-    raw = typeof r.body === "string" ? JSON.parse(r.body) : r.body;
-    if (store.quota !== session || !store.logged) return;
-    session[quotaKey(a)] = {
+    } else {
+      const r = await api("/requests/api-call", "POST", {
+        authIndex: a.auth_index,
+        method: "GET",
+        url: usageURL[p],
+        header,
+      });
+      if (r.status_code < 200 || r.status_code >= 300)
+        throw new Error(
+          r.status_code === 401 || r.status_code === 403
+            ? `The provider rejected the account's token (HTTP ${r.status_code}). Refresh the token, or connect the account again.`
+            : `The provider answered HTTP ${r.status_code}. Try again later.`,
+        );
+      raw = typeof r.body === "string" ? JSON.parse(r.body) : r.body;
+    }
+    if (!lifetime.active) return;
+    store.quota[quotaKey(a)] = {
       at: Date.now(),
       windows: quotaWindows(p, raw),
     };
   } catch (e) {
-    if (store.quota !== session || !store.logged) return;
-    session[quotaKey(a)] = {
-      ...session[quotaKey(a)],
+    if (!lifetime.active) return;
+    store.quota[quotaKey(a)] = {
+      ...store.quota[quotaKey(a)],
       error: e instanceof Error ? e.message : String(e),
     };
   }
 }
 
 /** One check per supported credential, one after another so the provider is not hammered. */
-export async function checkAll(list: Data[], automatic = false, active = () => true) {
-  const session = store.quota;
+export async function checkAll(
+  list: Data[],
+  automatic = false,
+  active = () => true,
+) {
+  const lifetime = requests;
   for (const a of list) {
-    if (!active() || document.hidden || !store.logged || store.quota !== session) break;
-    if (automatic && Date.now() - (attempted.get(session)?.get(quotaKey(a)) || 0) < 60_000) continue;
-    if (canCheck(a)) await check(a);
+    if (!active() || document.hidden || !lifetime.active) break;
+    if (canCheck(a)) await check(a, automatic);
   }
 }

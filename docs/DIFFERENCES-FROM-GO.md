@@ -6,7 +6,7 @@ Tests define these intentional differences from the Go references in [Compatibil
 
 - Plugin loading, hooks, CLI commands, Home synchronization and management routes are removed. `plugins.enabled: true` is rejected. Built-in authentication and declarative credential quota probes remain available; the support header is `X-CPA-SUPPORT-PLUGIN: 0`.
 - Public distribution and update checks are removed. Latest-version routes return `501 source_build_only` without network access; update from source.
-- Native quota refreshes are coalesced per account/token, with a 30-second TTL and at most 64 cached credentials. Concurrent accounts refresh independently. Oversized or unknown quota responses cannot authorize inference.
+- Native routing and `GET /v8/management/observability/claude/usage?auth_index=…` share Claude usage acquisition, coalesced by token digest with a 30-second TTL shortened at quota resets and at most 64 cached tokens. Accounts refresh independently; token rotation and upstream limit failures invalidate reuse. The dashboard uses this guarded route on Rust and retains API-call checks on Go. Oversized or unknown responses cannot authorize inference.
 
 ## Additions in cliproxy-rs
 

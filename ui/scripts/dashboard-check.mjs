@@ -10,11 +10,13 @@ const page = await browser.newPage();
 const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
+let requireKey = false, quotaStarted;
+const rust = process.env.DASHBOARD_KIND === "rust";
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 await page.route("**/*", async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
-  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "8.0.0", "x-cpa-commit": "synthetic" } });
+  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": rust ? "cliproxy-rs/0.2.6" : "8.0.0", "x-cpa-commit": "synthetic" } });
   if (path === "/v8/management/observability/native/status") return native === null ? route.fulfill({ status: 501, json: {} }) : send({ enabled: native, allowExtraUsage: overage });
   if (path === "/v8/management/routing/native-policy") {
     assert.equal(request.method(), "PATCH");
@@ -22,17 +24,26 @@ await page.route("**/*", async route => {
     overage = request.postDataJSON().allowExtraUsage;
     return send({allowExtraUsage:overage});
   }
-  if (path === "/v8/management/config") return send({});
+  if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
   if (path === "/v8/management/credentials") return send({ files: creds });
-  if (path === "/v8/management/requests/api-call") {
+  if (path === (rust ? "/v8/management/observability/claude/usage" : "/v8/management/requests/api-call")) {
+    if (rust) {
+      assert.equal(request.method(), "GET");
+      assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a");
+    } else {
     const body = request.postDataJSON();
     assert.equal(body.authIndex, "a");
     assert.equal(body.method, "GET");
     assert.equal(body.url, "https://api.anthropic.com/api/oauth/usage");
+    }
     checks++;
+    quotaStarted?.();
     if (hold) await hold;
-    return send({ status_code: fail ? 503 : 200, body: { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} } });
+    const body = { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} };
+    if (rust) return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
+    return send({status_code: fail ? 503 : 200, body});
   }
+  if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method()) && request.postData() === "{}") return route.fulfill({status:400,json:{error:"invalid request"}});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
   assert.match(asset, /^(index\.html|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
@@ -59,7 +70,7 @@ try {
   assert.equal(checks, 2, "hidden tabs do not check providers");
   fail = true;
   await page.evaluate(() => { Object.defineProperty(document, "hidden", { configurable: true, value: false }); document.dispatchEvent(new Event("visibilitychange")); });
-  await page.getByText(/The provider answered HTTP 503/).waitFor();
+  await page.getByText(/provider answered HTTP 503/).waitFor();
   assert.equal(checks, 3, "resuming a stale visible tab checks immediately");
   assert.ok(await page.getByText(/23%/).count(), "a failed refresh retains the last quota");
   fail = false;
@@ -68,7 +79,7 @@ try {
   await page.getByRole("button", { name: "Check quota", exact: true }).first().click();
   assert.equal(checks, 4, "manual requests coalesce while pending");
   release(); hold = null;
-  await page.getByText(/The provider answered HTTP 503/).waitFor({ state: "hidden" });
+  await page.getByText(/provider answered HTTP 503/).waitFor({ state: "hidden" });
   await page.locator('.side a[href="#config"]').click();
   await settle();
   assert.equal(await page.locator(".section-tabs a").count(), 5);
@@ -114,6 +125,30 @@ try {
   await page.reload();
   await page.locator(".side .nav").waitFor({state:"attached"});
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0);
+  await page.setViewportSize({width:1280,height:900});
+  delete creds[0].quota;
+  requireKey = true;
+  native = false;
+  await page.goto("http://dashboard.test/management.html");
+  await page.getByLabel("Management key").fill("synthetic-management");
+  hold = new Promise(r => release = r);
+  const before = checks;
+  const pendingRequest = new Promise(resolve => quotaStarted = resolve);
+  await page.getByRole("button", {name:"Connect", exact:true}).click();
+  await pendingRequest;
+  quotaStarted = undefined;
+  assert.equal(checks, before + 1);
+  await page.getByRole("button", {name:"Sign out", exact:true}).click();
+  hold = null;
+  await page.getByLabel("Management key").fill("synthetic-management");
+  await page.getByRole("button", {name:"Connect", exact:true}).click();
+  await page.getByText("Checked just now", {exact:true}).waitFor({timeout:5000}).catch(async error => {console.log({checks,before,errors}, await page.locator("body").innerText()); throw error;});
+  assert.equal(checks, before + 2, "reconnect starts fresh work despite an old pending quota read");
+  fail = true;
+  release();
+  await settle();
+  assert.equal(await page.getByText(/provider answered HTTP 503/).count(), 0, "old failure cannot repopulate the new connection");
+  fail = false;
   if (process.env.DASHBOARD_CAPTURE) await page.screenshot({ path: process.env.DASHBOARD_CAPTURE, fullPage: true });
   assert.deepEqual(errors, []);
   console.log("PASS grouped navigation, automatic quota refresh, hidden/resume, disabled accounts, coalescing, retained errors, cleanup, mobile layout, native scope and unsupported status");

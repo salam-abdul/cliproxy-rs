@@ -451,6 +451,10 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().patch(guarded!(s, observability::native_policy)),
         ),
         (
+            "observability/claude/usage",
+            methods().get(guarded!(s, quota::claude_usage)),
+        ),
+        (
             "observability/native/status",
             methods().get(guarded!(s, observability::native_status)),
         ),

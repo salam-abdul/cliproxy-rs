@@ -48,3 +48,26 @@ test("key login clears local access and sends only the selected management key",
     disconnect();
   }
 });
+
+test("disconnect aborts requests and an old body cannot publish to the new connection", async () => {
+  const original = globalThis.fetch;
+  let finish!: (value: any) => void;
+  let signal: AbortSignal | undefined;
+  let oldMeta = 0, newMeta = 0;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      signal = init?.signal as AbortSignal;
+      return { ok: true, status: 200, headers: new Headers(), json: () => new Promise(resolve => { finish = resolve; }) } as Response;
+    };
+    connect("old", { ...hooks, meta() { oldMeta++; } });
+    const task = api("/config");
+    while (!finish) await Promise.resolve();
+    disconnect();
+    assert.equal(signal?.aborted, true);
+    connect("new", { ...hooks, meta() { newMeta++; } });
+    finish({ old: true });
+    await assert.rejects(task, /Connection changed/);
+    assert.equal(oldMeta, 1);
+    assert.equal(newMeta, 0);
+  } finally { globalThis.fetch = original; disconnect(); }
+});

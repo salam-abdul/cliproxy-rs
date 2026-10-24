@@ -1,3 +1,4 @@
+import { Lifetime } from "./lifetime.ts";
 import type { Data } from "./core";
 
 // The management key lives only in this module's memory. It is never written to storage.
@@ -6,7 +7,7 @@ import type { Data } from "./core";
 export const base = new URL(".", location.href).href.replace(/\/$/, "");
 let key = "";
 let local = false;
-let revision = 0;
+export let requests = new Lifetime();
 let hooks: {
   unauthorized(): void;
   missing(method: string, path: string): void;
@@ -41,19 +42,21 @@ export function connect(secret: string, h: typeof hooks, localDashboard = false)
   key = secret;
   local = localDashboard;
   hooks = h;
-  revision++;
+  requests.dispose();
+  requests = new Lifetime();
 }
 export function disconnect() {
   key = "";
   local = false;
-  revision++;
+  requests.dispose();
+  requests = new Lifetime();
 }
 export const endpoint = () => `${base}/v8/management`;
 export const route = (path: string) => path.split("?")[0];
 
 async function send(path: string, method: string, body?: unknown) {
   if (!key && !local) throw new Error("Sign in with your management key.");
-  const at = revision;
+  const lifetime = requests;
   const headers: Record<string, string> = local
     ? { "X-CPA-Local-Dashboard": "1" }
     : { Authorization: `Bearer ${key}` };
@@ -66,21 +69,21 @@ async function send(path: string, method: string, body?: unknown) {
       method,
       headers,
       body: body === undefined || body instanceof FormData || yaml ? (body as BodyInit) : JSON.stringify(body),
-      signal: AbortSignal.timeout(path.includes("/refresh") ? 300_000 : 30_000),
+      signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(path.includes("/refresh") ? 300_000 : 30_000)]),
       cache: "no-store",
       redirect: "error",
     });
   } catch (e) {
-    if (at === revision) hooks.meta(null);
+    if (lifetime.active) hooks.meta(null);
     throw new Error(
-      at !== revision
-        ? "Connection changed. Try again."
+      !lifetime.active
+        ? "Connection changed."
         : e instanceof Error && e.name === "TimeoutError"
-          ? "The server did not answer in time."
-          : "Cannot reach the server. Check that cliproxy is still running.",
+          ? "The server timed out."
+          : "Cannot reach cliproxy. Check that it is running.",
     );
   }
-  if (at !== revision) throw new Error("Connection changed. Try again.");
+  if (!lifetime.active) throw new Error("Connection changed.");
   hooks.meta(response.headers);
   return response;
 }
@@ -91,7 +94,7 @@ export async function api(
   body?: unknown,
   format: "json" | "text" | "blob" = "json",
 ): Promise<any> {
-  const at = revision;
+  const lifetime = requests;
   const response = await send(path, method, body);
   const ok = response.ok;
   const value = !ok
@@ -104,7 +107,7 @@ export async function api(
           ? {}
           : await response.json();
   // A body that finishes after sign-out or a reconnect belongs to the old session.
-  if (at !== revision) throw new Error("Connection changed. Try again.");
+  if (!lifetime.active) throw new Error("Connection changed.");
   if (ok) return value;
   if (response.status === 401) hooks.unauthorized();
   const error = new ApiError(

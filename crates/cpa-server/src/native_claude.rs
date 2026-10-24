@@ -128,7 +128,6 @@ pub(crate) struct State {
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
     secret: String,
     routing: Mutex<RoutingState>,
-    quota: quota::Cache,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
@@ -364,32 +363,13 @@ impl State {
         if let Some(q) = &self.config.fixture_quota {
             return Ok(q.clone());
         }
-        let key = hash(format!("{}:{}", a.id, a.token));
-        self.quota
-            .get(key, async {
-                let r = self
-                    .client
-                    .get("https://api.anthropic.com/api/oauth/usage")
-                    .bearer_auth(&a.token)
-                    .header("anthropic-beta", "oauth-2025-04-20")
-                    .header("user-agent", "claude-code/2.1.296")
-                    .timeout(Duration::from_secs(15))
-                    .send()
-                    .await?;
-                anyhow::ensure!(
-                    r.status() == StatusCode::OK,
-                    "Included quota availability not established"
-                );
-                let mut bytes = Vec::new();
-                let mut stream = r.bytes_stream();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    anyhow::ensure!(chunk.len() <= 1048576 - bytes.len(), "Usage response too large");
-                    bytes.extend_from_slice(&chunk);
-                }
-                let q: Value = serde_json::from_slice(&bytes)?;
-                Ok(q)
-            })
+        self.rt
+            .claude_usage
+            .get(
+                &a.token,
+                &self.client,
+                self.rt.deny_external.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .await
     }
 
@@ -773,7 +753,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
             }
             s.cool(&a, &model, status.as_u16(), delay).await?;
-            s.quota.invalidate(&hash(format!("{}:{}", a.id, a.token))).await;
+            s.rt.claude_usage.invalidate(&a.token).await;
             s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":"retryable_rejection","attempt":tried.len(),"retryAfterMs":delay}));
             continue;
         }
@@ -997,7 +977,6 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         tls: std::sync::RwLock::new(tls),
         secret,
         routing: Mutex::new(routing),
-        quota: Default::default(),
         sessions: Default::default(),
     });
     let plain = TcpListener::bind(("127.0.0.1", c.http_proxy_port))

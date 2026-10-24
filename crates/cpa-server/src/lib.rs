@@ -5,6 +5,7 @@ mod affinity;
 pub mod capabilities;
 mod classify;
 mod claude;
+mod claude_usage;
 mod codex_alpha;
 mod codex_models;
 mod config_diff;

@@ -1,4 +1,4 @@
-import { api, connect, disconnect, configValue, route, ApiError } from "./api";
+import { api, connect, disconnect, configValue, route, ApiError, requests } from "./api";
 import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
 
 export const sections = [
@@ -34,19 +34,18 @@ export class Res<T> {
   data = $state.raw<T>();
   error = $state.raw<unknown>(null);
   loading = $state(false);
-  #gen = 0;
   constructor(private read: () => Promise<T>) {}
   /** The latest started read wins; an older one finishing later is dropped. */
   async load(quiet = false) {
-    const gen = ++this.#gen;
+    const current = requests.latest(this);
     if (!quiet) this.loading = true;
     try {
       const data = await this.read();
-      if (gen === this.#gen) (this.data = data), (this.error = null);
+      if (current()) (this.data = data), (this.error = null);
     } catch (e) {
-      if (gen === this.#gen) this.error = e;
+      if (current()) this.error = e;
     } finally {
-      if (gen === this.#gen) this.loading = false;
+      if (current()) this.loading = false;
     }
   }
 }
@@ -93,6 +92,7 @@ class Store {
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
+    this.logout();
     this.meta = { version: "", commit: "", built: "" };
     connect(secret, {
       unauthorized: () => {
@@ -109,9 +109,13 @@ class Store {
         this.meta.built = h.get("x-cpa-build-date") || this.meta.built;
       },
     }, localDashboard);
+    const lifetime = requests;
     try {
-      this.config.data = await api("/config");
+      const config = await api("/config");
+      if (!lifetime.active) return;
+      this.config.data = config;
     } catch (e) {
+      if (!lifetime.active) return;
       disconnect();
       throw new Error(signInHelp(e));
     }
@@ -126,10 +130,13 @@ class Store {
     this.localDashboard = false;
     this.caps = {};
     this.#probed.clear();
-    this.config.data = this.creds.data = undefined;
+    for (const resource of [this.config, this.creds, this.native]) {
+      resource.data = undefined;
+      resource.error = null;
+      resource.loading = false;
+    }
     this.quota = {};
-    this.native.data = undefined;
-    this.native.error = null;
+    this.busy = false;
     this.dirty = false;
   }
   can(method: string, path: string) {
@@ -180,15 +187,17 @@ class Store {
   async act(work: () => Promise<unknown>, success = "") {
     if (this.busy) return false;
     this.busy = true;
+    const lifetime = requests;
     try {
       await work();
+      if (!lifetime.active) return false;
       if (success) this.notify(success);
       return true;
     } catch (e) {
-      this.notify(e instanceof Error ? e.message : String(e), true);
+      if (lifetime.active) this.notify(e instanceof Error ? e.message : String(e), true);
       return false;
     } finally {
-      this.busy = false;
+      if (lifetime.active) this.busy = false;
     }
   }
   /** One API write, optionally confirmed, followed by a reread. */
@@ -233,22 +242,5 @@ function signInHelp(e: unknown): string {
 
 /** Repeat a read while the tab is visible; never overlap calls. Returns a cleanup. */
 export function every(ms: number, work: () => Promise<unknown>, immediate = false) {
-  let running = false, stopped = false;
-  const run = async () => {
-    if (running || stopped || document.hidden || !store.logged) return;
-    running = true;
-    try {
-      await work();
-    } finally {
-      running = false;
-    }
-  };
-  const timer = setInterval(run, ms);
-  document.addEventListener("visibilitychange", run);
-  if (immediate) queueMicrotask(run);
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-    document.removeEventListener("visibilitychange", run);
-  };
+  return requests.every(ms, work, immediate);
 }

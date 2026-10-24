@@ -1959,3 +1959,37 @@ async fn native_status_identifies_a_server_without_a_native_router() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn claude_usage_rejects_missing_account_and_cannot_reach_live_provider_in_tests() {
+    let f = Fixture::from_yaml("claude-usage-guard", |auth, hash| {
+        std::fs::write(
+            auth.join("synthetic.json"),
+            r#"{"type":"claude","access_token":"synthetic-token"}"#,
+        )
+        .unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let index = cpa_core::config::credentials::auth_index(&f.rt.store().snapshot()[0]);
+    let (base, server) = f.server().await;
+    let client = wreq::Client::builder().no_proxy().build().unwrap();
+    for (query, expected) in [
+        ("".to_owned(), 400),
+        ("?auth_index=missing".to_owned(), 404),
+        (format!("?auth_index={index}"), 502),
+    ] {
+        let response = client
+            .get(format!("{base}/v8/management/observability/claude/usage{query}"))
+            .bearer_auth("fake-management-only")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected);
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("synthetic-token"));
+    }
+    server.abort();
+}

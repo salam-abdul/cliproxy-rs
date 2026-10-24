@@ -137,6 +137,38 @@ fn credential(state: &Management, index: &str) -> Option<Arc<Credential>> {
         .find(|c| credentials::auth_index(c) == index)
 }
 
+pub(crate) async fn claude_usage(
+    State(state): State<Arc<Management>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(index) = query.get("auth_index").filter(|s| !s.is_empty()) else {
+        return fail(StatusCode::BAD_REQUEST, "auth_index is required");
+    };
+    let Some(auth) = credential(&state, index) else {
+        return fail(StatusCode::NOT_FOUND, "auth not found");
+    };
+    if auth.provider != "claude" || auth.disabled {
+        return fail(StatusCode::BAD_REQUEST, "An enabled Claude credential is required");
+    }
+    let token = super::api_call::token_for(&auth);
+    let Some(client) = super::api_call::client_for(&state, Some(&auth), "") else {
+        return fail(StatusCode::BAD_GATEWAY, "Usage transport unavailable");
+    };
+    match state
+        .rt
+        .claude_usage
+        .get(
+            &token,
+            &client,
+            state.rt.deny_external.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .await
+    {
+        Ok(usage) => map_json(StatusCode::OK, &usage),
+        Err(error) => fail(StatusCode::BAD_GATEWAY, &error.to_string()),
+    }
+}
+
 pub(crate) async fn providers() -> Response {
     map_json(StatusCode::OK, &json!({"providers": []}))
 }

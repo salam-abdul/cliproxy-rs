@@ -42,6 +42,7 @@ pub struct Runtime {
     pool_offsets: Mutex<HashMap<String, usize>>,
     /// Usage records for `GET /observability/usage/queue` (management configures it).
     usage: Arc<crate::usage::UsageQueue>,
+    pub(crate) claude_usage: crate::claude_usage::ClaudeUsage,
     pub(crate) native_state: RwLock<std::sync::Weak<crate::native_claude::State>>,
     pub(crate) native_events: crate::native_claude::diagnostics::Diagnostics,
     /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
@@ -91,6 +92,7 @@ impl Runtime {
             usage: Arc::default(),
             native_events: Default::default(),
             native_state: Default::default(),
+            claude_usage: Default::default(),
             local_model: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
