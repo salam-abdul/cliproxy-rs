@@ -58,6 +58,7 @@ export function check(a: Data, automatic = false): Promise<void> {
 
 async function read(a: Data, lifetime: Lifetime) {
   const p = provider(a);
+  store.quotaPending[quotaKey(a)] = true;
   try {
     let raw: Data;
     const header: Data = {
@@ -104,6 +105,8 @@ async function read(a: Data, lifetime: Lifetime) {
       ...store.quota[quotaKey(a)],
       error: e instanceof Error ? e.message : String(e),
     };
+  } finally {
+    if (lifetime.active) store.quotaPending[quotaKey(a)] = false;
   }
 }
 

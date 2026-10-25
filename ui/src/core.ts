@@ -161,74 +161,9 @@ export function buckets(a: Data): Buckets | null {
     failed: rows.map((b) => Number(b.failed) || 0),
   };
 }
-export function sumBuckets(list: (Buckets | null)[]): Buckets | null {
-  const known = list.filter((b): b is Buckets => !!b);
-  if (!known.length) return null;
-  const n = Math.max(...known.map((b) => b.total.length));
-  const add = (k: keyof Buckets) =>
-    Array.from({ length: n }, (_, i) =>
-      known.reduce((s, b) => s + (b[k][i - (n - b[k].length)] || 0), 0),
-    );
-  return { total: add("total"), failed: add("failed") };
-}
 export const sum = (v: number[]) => v.reduce((a, b) => a + b, 0);
 /** Map a count to five steps; any non-zero count is at least step 1. */
 export const level = (n: number, max: number) => (n <= 0 || max <= 0 ? 0 : Math.max(1, Math.ceil((n / max) * 4)));
-
-// Usage records also carry client keys, IPs, and response bodies. Keep display fields only.
-export type Event = {
-  at: number;
-  latency: number;
-  ttft: number;
-  failed: boolean;
-  status: number;
-  model: string;
-  provider: string;
-  auth: string;
-  id: string;
-  input: number;
-  output: number;
-};
-export function cleanEvent(raw: Data): Event {
-  const t = Date.parse(String(raw.timestamp));
-  return {
-    at: Number.isNaN(t) ? Date.now() : t,
-    latency: Number(raw.latency_ms) || 0,
-    ttft: Number(raw.ttft_ms) || 0,
-    failed: raw.failed === true,
-    status: Number(raw.fail?.status_code) || (raw.failed === true ? 0 : 200),
-    model: String(raw.alias || raw.model || "unknown"),
-    provider: String(raw.provider || "unknown"),
-    auth: String(raw.auth_index || ""),
-    id: String(raw.request_id || ""),
-    input: Number(raw.tokens?.input_tokens) || 0,
-    output: Number(raw.tokens?.output_tokens) || 0,
-  };
-}
-const median = (v: number[]) => {
-  const s = v.filter((n) => n > 0).sort((a, b) => a - b);
-  return s.length ? s[Math.floor((s.length - 1) / 2)] : null;
-};
-export function usageStats(events: Event[]) {
-  const models = new Map<string, { model: string; count: number; failed: number; input: number; output: number }>();
-  for (const e of events) {
-    const m = models.get(e.model) || { model: e.model, count: 0, failed: 0, input: 0, output: 0 };
-    m.count++;
-    m.failed += +e.failed;
-    m.input += e.input;
-    m.output += e.output;
-    models.set(e.model, m);
-  }
-  return {
-    count: events.length,
-    failed: events.filter((e) => e.failed).length,
-    latency: median(events.map((e) => e.latency)),
-    ttft: median(events.map((e) => e.ttft)),
-    input: sum(events.map((e) => e.input)),
-    output: sum(events.map((e) => e.output)),
-    models: [...models.values()].sort((a, b) => b.count - a.count),
-  };
-}
 
 /**
  * One usage window. `used` is percent used, or null when the limit has no ceiling (an
@@ -275,17 +210,13 @@ export function quotaWindows(p: string, payload: Data): Window[] {
 }
 
 const percent = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? clamp(v) : null);
-/**
- * Claude's legacy buckets, titled as Claude Code's /usage titles them. Anthropic also sends
- * placeholders and buckets Claude Code never shows (iguana_necktie, tangelo,
- * omelette_promotional, seven_day_omelette, seven_day_cowork, seven_day_oauth_apps); they
- * are skipped. cinder_cove has no known title and shows as "Other limit" when set.
- */
+/** Included limits used by routing; provider placeholders are omitted. */
 const claudeBuckets: [string, string][] = [
-  ["five_hour", "Current session"],
-  ["seven_day", "Current week (all models)"],
-  ["seven_day_sonnet", "Current week (Sonnet only)"],
-  ["seven_day_opus", "Current week (Opus only)"],
+  ["five_hour", "5-hour limit"],
+  ["seven_day", "7-day limit (all models)"],
+  ["seven_day_sonnet", "7-day limit (Sonnet only)"],
+  ["seven_day_opus", "7-day limit (Opus only)"],
+  ["seven_day_oauth_apps", "7-day limit (OAuth apps)"],
   ["cinder_cove", "Other limit"],
 ];
 function money(minor: number, places: number, currency: string): string {
@@ -316,9 +247,9 @@ export function claudeWindows(payload: Data): Window[] {
         if (String(l?.group) !== g || used === null) continue;
         const model = l.scope?.model?.display_name;
         const label =
-          l.kind === "session" ? "Current session"
-          : l.kind === "weekly_all" ? "Current week (all models)"
-          : l.kind === "weekly_scoped" && model ? `Current week (${model} only)`
+          l.kind === "session" ? "5-hour limit"
+          : l.kind === "weekly_all" ? "7-day limit (all models)"
+          : l.kind === "weekly_scoped" && model ? `7-day limit (${model} only)`
           : "";
         if (label) out.push({ label, used, reset: l.resets_at || "" });
       }
@@ -368,7 +299,7 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
       });
     }
   else if (p === "claude")
-    for (const [w, label] of [["5h", "Current session"], ["7d", "Current week (all models)"]]) {
+    for (const [w, label] of [["5h", "5-hour limit"], ["7d", "7-day limit (all models)"]]) {
       const source = `anthropic-ratelimit-unified-${w}-`;
       const raw = sig[source + "utilization"], used = Number(raw);
       if (typeof raw !== "string" || !raw.trim() || !Number.isFinite(used) || used < 0) continue;

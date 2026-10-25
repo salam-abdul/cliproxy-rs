@@ -1,33 +1,51 @@
-import { api, connect, disconnect, configValue, route, ApiError, requests } from "./api";
+import {
+  api,
+  connect,
+  disconnect,
+  configValue,
+  route,
+  ApiError,
+  requests,
+} from "./api";
 import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
 
 export const sections = [
   ["overview", "Overview", ["overview"]],
-  ["credentials", "Accounts", ["credentials", "quotas", "providers", "connect"]],
-  ["usage", "Usage", ["usage"]],
-  ["logs", "Logs", ["logs"]],
-  ["config", "Settings", ["config", "keys", "models", "payload", "system"]],
-  ["use", "Use with tools", ["use"]],
+  ["credentials", "Accounts", ["credentials", "connect"]],
+  ["activity", "Activity", ["activity", "logs"]],
+  [
+    "config",
+    "Settings",
+    ["config", "providers", "keys", "models", "payload", "system", "use"],
+  ],
 ] as const;
 
 export const pages = [
   ["overview", "Overview"],
   ["use", "Use with tools"],
-  ["credentials", "Credentials"],
+  ["credentials", "Accounts"],
   ["providers", "Provider keys"],
   ["keys", "Client keys"],
   ["models", "Models"],
   ["payload", "Payload rules"],
   ["quotas", "Quotas"],
   ["", ""],
-  ["usage", "Usage"],
+  ["activity", "Requests"],
   ["logs", "Logs"],
   ["", ""],
   ["config", "Configuration"],
   ["system", "System"],
 ] as const;
-const routes = new Set<string>([...pages.map((p) => p[0]).filter(Boolean), "connect"]);
-const aliases: Record<string, string> = { oauth: "connect", configuration: "config" };
+const routes = new Set<string>([
+  ...pages.map((p) => p[0]).filter(Boolean),
+  "connect",
+]);
+const aliases: Record<string, string> = {
+  oauth: "connect",
+  configuration: "config",
+  quotas: "credentials",
+  usage: "activity",
+};
 
 /** A server read with honest loading, error and not-available states. */
 export class Res<T> {
@@ -41,7 +59,7 @@ export class Res<T> {
     if (!quiet) this.loading = true;
     try {
       const data = await this.read();
-      if (current()) (this.data = data), (this.error = null);
+      if (current()) ((this.data = data), (this.error = null));
     } catch (e) {
       if (current()) this.error = e;
     } finally {
@@ -73,7 +91,11 @@ class Store {
    * contract, so only other servers are probed for gaps; nothing Rust-specific is assumed.
    */
   kind = $derived(
-    this.meta.version.startsWith("cliproxy-rs") ? "rust" : this.meta.commit || this.meta.built ? "go" : "unknown",
+    this.meta.version.startsWith("cliproxy-rs")
+      ? "rust"
+      : this.meta.commit || this.meta.built
+        ? "go"
+        : "unknown",
   );
   online = $state(true);
   busy = $state(false);
@@ -81,34 +103,55 @@ class Store {
   toast = $state<{ text: string; bad: boolean } | null>(null);
   /** "METHOD /path" → false when the server does not implement it. */
   caps = $state<Record<string, false>>({});
-  native = new Res<Data>(() => api("/observability/native/status"));
+  model = $state("claude-sonnet-4-6");
+  now = $state(Date.now());
+  quotaPending = $state<Record<string, boolean>>({});
+  native = new Res<Data>(() =>
+    api(`/observability/native/status?model=${encodeURIComponent(this.model)}`),
+  );
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> =>
-    reconcile(this.creds.data || [], (await api("/credentials")).files || [], (a) => `${a.name}\u0000${a.auth_index}`),
+    reconcile(
+      this.creds.data || [],
+      (await api("/credentials")).files || [],
+      (a) => `${a.name}\u0000${a.auth_index}`,
+    ),
   );
   /** Live quota checks made in this tab, by auth index. */
-  quota = $state<Record<string, { at: number; windows: Window[]; error?: string } | { error: string }>>({});
+  quota = $state<
+    Record<
+      string,
+      { at: number; windows: Window[]; error?: string } | { error: string }
+    >
+  >({});
   #probed = new Set<string>();
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
     this.logout();
     this.meta = { version: "", commit: "", built: "" };
-    connect(secret, {
-      unauthorized: () => {
-        if (!this.logged) return;
-        this.logout();
-        this.notify("The management key was rejected. Sign in again.", true);
+    connect(
+      secret,
+      {
+        unauthorized: () => {
+          if (!this.logged) return;
+          this.logout();
+          this.notify("The management key was rejected. Sign in again.", true);
+        },
+        missing: (method, path) => (this.caps[`${method} ${path}`] = false),
+        meta: (h) => {
+          this.online = !!h;
+          if (!h) return;
+          this.meta.version =
+            h.get("x-cpa-version") ||
+            h.get("x-server-version") ||
+            this.meta.version;
+          this.meta.commit = h.get("x-cpa-commit") || this.meta.commit;
+          this.meta.built = h.get("x-cpa-build-date") || this.meta.built;
+        },
       },
-      missing: (method, path) => (this.caps[`${method} ${path}`] = false),
-      meta: (h) => {
-        this.online = !!h;
-        if (!h) return;
-        this.meta.version = h.get("x-cpa-version") || h.get("x-server-version") || this.meta.version;
-        this.meta.commit = h.get("x-cpa-commit") || this.meta.commit;
-        this.meta.built = h.get("x-cpa-build-date") || this.meta.built;
-      },
-    }, localDashboard);
+      localDashboard,
+    );
     const lifetime = requests;
     try {
       const config = await api("/config");
@@ -136,6 +179,7 @@ class Store {
       resource.loading = false;
     }
     this.quota = {};
+    this.quotaPending = {};
     this.busy = false;
     this.dirty = false;
   }
@@ -164,7 +208,11 @@ class Store {
     const next = parse(location.hash);
     if (next.page === this.route.page && next.arg === this.route.arg) return;
     if (this.dirty && !confirm("Discard unsaved changes?")) {
-      history.replaceState(null, "", `#${this.route.page}${this.route.arg ? `/${this.route.arg}` : ""}`);
+      history.replaceState(
+        null,
+        "",
+        `#${this.route.page}${this.route.arg ? `/${this.route.arg}` : ""}`,
+      );
       return;
     }
     this.dirty = false;
@@ -194,14 +242,22 @@ class Store {
       if (success) this.notify(success);
       return true;
     } catch (e) {
-      if (lifetime.active) this.notify(e instanceof Error ? e.message : String(e), true);
+      if (lifetime.active)
+        this.notify(e instanceof Error ? e.message : String(e), true);
       return false;
     } finally {
       if (lifetime.active) this.busy = false;
     }
   }
   /** One API write, optionally confirmed, followed by a reread. */
-  call(method: string, path: string, body: unknown, done: string, ask = "", after = () => this.creds.load(true)) {
+  call(
+    method: string,
+    path: string,
+    body: unknown,
+    done: string,
+    ask = "",
+    after = () => this.creds.load(true),
+  ) {
     if (ask && !confirm(ask)) return Promise.resolve(false);
     return this.act(async () => {
       await api(path, method, body);
@@ -212,12 +268,19 @@ class Store {
    * Replace one config value after confirming nobody changed it since it was read. `unset`
    * is what an absent value reads as (an empty list or map unless given).
    */
-  async replace(path: string, before: unknown, next: unknown, unset: unknown = Array.isArray(before) ? [] : {}) {
+  async replace(
+    path: string,
+    before: unknown,
+    next: unknown,
+    unset: unknown = Array.isArray(before) ? [] : {},
+  ) {
     const url = fieldPath(path);
     const latest = await configValue(url, unset);
     if (!equal(latest, before)) {
       await this.config.load(true);
-      throw new Error("This setting changed on the server. Nothing was written; the page now shows the server copy.");
+      throw new Error(
+        "This setting changed on the server. Nothing was written; the page now shows the server copy.",
+      );
     }
     await api(url, "PUT", next);
     await this.config.load(true);
@@ -228,19 +291,25 @@ export const store = new Store();
 
 /** What to do about a failed sign-in, for each answer Go and cliproxy-rs give. */
 function signInHelp(e: unknown): string {
-  if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e);
+  if (!(e instanceof ApiError))
+    return e instanceof Error ? e.message : String(e);
   const m = e.message;
   if (e.status === 404 || /key not set/.test(m))
     return "The management API is off on this server. Set management.secret-key in the server's config.yaml (or start it with MANAGEMENT_PASSWORD), then restart it.";
   if (/remote management disabled/.test(m))
     return "This server accepts the dashboard only from its own machine. Open it there, or set management.allow-remote: true in config.yaml with a strong key.";
-  if (/banned/i.test(m)) return `${m}. Too many wrong keys came from this address.`;
+  if (/banned/i.test(m))
+    return `${m}. Too many wrong keys came from this address.`;
   if (e.status === 401)
     return "That key is not right. Use the plain text you set as management.secret-key: on first start the server replaces it in config.yaml with a hash, so the file no longer shows it.";
   return m;
 }
 
 /** Repeat a read while the tab is visible; never overlap calls. Returns a cleanup. */
-export function every(ms: number, work: () => Promise<unknown>, immediate = false) {
+export function every(
+  ms: number,
+  work: () => Promise<unknown>,
+  immediate = false,
+) {
   return requests.every(ms, work, immediate);
 }

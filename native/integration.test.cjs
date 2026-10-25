@@ -179,7 +179,11 @@ test("native transport honors manager toggles, committed rotation and durable af
   assert.equal(seen.at(-1).headers.authorization, "Bearer fixture-a");
   await ctl.toggle(config, "a", false);
   if (process.env.NATIVE_MANAGER_TEST_BINARY) {
-    const status = await require("./credentials.cjs").management(config, "/v8/management/observability/native/status");
+    const status = await require("./credentials.cjs").management(config, "/v8/management/observability/native/status?model=claude-sonnet-4-6");
+    assert.equal(status.model, "claude-sonnet-4-6");
+    assert.ok(status.validUntil > status.observedAt);
+    assert.equal(status.accounts.find(a => a.id === "a").availability, "disabled");
+    assert.equal(status.accounts.find(a => a.id === "b").availability, "included");
     assert.equal(status.enabled, true);
     assert.equal(status.accounts.find(a => a.id === "a").disabled, true);
     assert.equal(status.accounts.find(a => a.id === "a").includedQuota, null);

@@ -95,4 +95,6 @@ Antigravity follows CLIProxyAPI `6fecc6e`, plus these v8.0.27 changes: the Claud
 
 ## Native diagnostics and routing
 
+Native management status accepts an optional `model` and reports per-account admission availability, included quota windows and a bounded status validity time. The dashboard uses this model-specific status; missing or expired status never implies availability.
+
 Native CONNECT adds a bounded, nondestructive event view with stream-aware outcomes and per-request timings. It prefers quota headroom for new sessions, supports shadow selection, scopes overload cooldowns to an account/model pair, bounds retry hints and attempts, and expires idle affinity. Diagnostics use bounded background writes; durable routing changes remain atomic. The translating scheduler separately excludes accounts with observed exhausted quota before applying any selection strategy or session affinity. See [native operation](../native/README.md#diagnostics-and-retention) for configuration and limits.

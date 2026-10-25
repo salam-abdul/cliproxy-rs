@@ -5,6 +5,7 @@ mod observation;
 mod policy;
 mod quota;
 mod routing;
+mod status;
 #[cfg(test)]
 use observation::UsageScanner;
 use observation::{Exchange, Observation};
@@ -29,7 +30,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -512,39 +513,6 @@ impl State {
             Ok(())
         })
         .await?
-    }
-    pub(crate) async fn status(self: &Arc<Self>) -> anyhow::Result<Value> {
-        let mut all = Vec::new();
-        let allow_extra = self.allow_extra_usage();
-        let mut ready = false;
-        for a in self.quota_accounts(self.accounts()?).await {
-            ready |= a.enabled
-                && (self.included_available(&a, &a.quota, "claude") || allow_extra && quota::extra_available(&a.quota));
-            let q = (!a.quota.is_null()).then_some(&a.quota);
-            all.push(json!({"id":a.id,"fileId":a.file_id,"name":a.name,"enabled":a.enabled,"disabled":a.disabled,"expired":a.expired,"includedQuota":q.map(|q|json!({"fiveHour":q["five_hour"]["utilization"],"fiveHourResetsAt":q["five_hour"]["resets_at"],"weekly":q["seven_day"]["utilization"],"weeklyResetsAt":q["seven_day"]["resets_at"],"eligible":self.included_available(&a,q,"claude")}))}));
-        }
-        let ready = !self.config.qualification && ready;
-        let state = self.clone();
-        let counts = tokio::task::spawn_blocking(move || {
-            let mut counts = BTreeMap::new();
-            for id in state.routing.lock().unwrap().affinity.accounts() {
-                *counts.entry(id.clone()).or_insert(0) += 1;
-            }
-            counts
-        })
-        .await?;
-        let snapshot = self.rt.native_events.snapshot();
-        let recent: Vec<_> = snapshot["events"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|e| e["type"] == "inference")
-            .take(10)
-            .cloned()
-            .collect();
-        Ok(
-            json!({"enabled":true,"allowExtraUsage":allow_extra,"selectionStrategy":"soonest-reset","ready":ready,"ownerReady":true,"proxyReady":true,"qualification":self.config.qualification,"accounts":all,"affinity":counts.into_iter().map(|(a,n)|json!({"account":a,"sessions":n})).collect::<Vec<_>>(),"recent":recent}),
-        )
     }
 }
 async fn handle(s: Arc<State>, req: Request<Incoming>, diagnostics: bool) -> Response {

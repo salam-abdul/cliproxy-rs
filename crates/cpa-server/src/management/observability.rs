@@ -121,7 +121,14 @@ pub(crate) async fn usage_queue(State(state): State<Arc<Management>>, RawQuery(r
     super::json_ordered(StatusCode::OK, &Value::Array(records))
 }
 
-pub(crate) async fn native_status(State(state): State<Arc<Management>>) -> Response {
+pub(crate) async fn native_status(
+    State(state): State<Arc<Management>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let model = query.get("model").map(String::as_str).unwrap_or("claude");
+    if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
+        return fail(StatusCode::BAD_REQUEST, "Invalid model");
+    }
     let native = state
         .rt
         .native_state
@@ -131,7 +138,7 @@ pub(crate) async fn native_status(State(state): State<Arc<Management>>) -> Respo
     let Some(native) = native else {
         return super::json_ordered(StatusCode::OK, &json!({"enabled":false}));
     };
-    match native.status().await {
+    match native.status_for(model).await {
         Ok(status) => super::json_ordered(StatusCode::OK, &status),
         Err(_) => fail(StatusCode::SERVICE_UNAVAILABLE, "Native routing status unavailable"),
     }

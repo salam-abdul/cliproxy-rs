@@ -1,11 +1,13 @@
 <script lang="ts">
   import { api, text } from "./api";
-  import { every, store } from "./store.svelte";
+  import { store } from "./store.svelte";
 
   let saving = $state(false);
-  $effect(() => every(15_000, async () => {
-    if (!saving) await store.native.load(true);
-  }));
+  const known = $derived(
+    typeof store.native.data?.allowExtraUsage === "boolean" &&
+      !store.native.error &&
+      !(store.native.data?.validUntil <= store.now),
+  );
 
   async function toggle() {
     if (!store.native.data || saving) return;
@@ -24,11 +26,33 @@
 
 {#if store.native.data?.enabled}
   <section class="section" aria-label="Claude routing">
-    <h2>Claude routing</h2>
+    <h3>Claude spending</h3>
     <div class="row">
-      <button class="key" role="switch" aria-checked={!!store.native.data.allowExtraUsage} disabled={saving || !!store.native.error} onclick={toggle}>Allow paid overage: {store.native.data.allowExtraUsage ? "On" : "Off"}</button>
-      <span class="note">Use included quota across enabled Claude accounts first. When off, wait for a reset once all included quota is exhausted.</span>
+      {#if known}<button
+          class="key"
+          role="switch"
+          aria-checked={!!store.native.data.allowExtraUsage}
+          disabled={saving ||
+            !!store.native.error ||
+            store.native.data.validUntil <= store.now}
+          onclick={toggle}
+          ><span class="switch-track" aria-hidden="true"><span></span></span
+          >Allow paid overage: {saving
+            ? "Saving…"
+            : store.native.data.allowExtraUsage
+              ? "On"
+              : "Off"}</button
+        >{:else}<span class="muted"
+          >Paid overage policy unavailable · waiting for status</span
+        >{/if}
+      <span class="note"
+        >Applies to all enabled Claude accounts. Included quota is used first.
+        When off, wait for a reset rather than use paid extra usage. This does
+        not change provider billing settings or set a spending cap.</span
+      >
     </div>
-    {#if store.native.error}<p class="note error">Could not refresh the Claude routing policy.</p>{/if}
+    {#if store.native.error}<p class="note error">
+        Could not refresh the Claude routing policy.
+      </p>{/if}
   </section>
 {/if}

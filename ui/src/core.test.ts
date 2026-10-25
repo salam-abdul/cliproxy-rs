@@ -4,7 +4,6 @@ import { test } from "node:test";
 import {
   ago,
   buckets,
-  cleanEvent,
   credState,
   equal,
   fieldPath,
@@ -17,8 +16,6 @@ import {
   snippet,
   span,
   strategy,
-  sumBuckets,
-  usageStats,
 } from "./core.ts";
 
 const now = Date.parse("2026-10-02T12:00:00Z");
@@ -64,13 +61,10 @@ test("credential state: disabled wins, only live cooldowns count, model cooldown
   assert.deepEqual(credState({ status: "pending" }, now), { lamp: "off", label: "pending", detail: "" });
 });
 
-test("traffic buckets: absent history stays absent; sums align to the newest bucket", () => {
+test("traffic buckets: absent history stays absent", () => {
   assert.equal(buckets({ name: "rust.json" }), null);
-  assert.equal(sumBuckets([null, null]), null);
   const a = buckets({ recent_requests: [{ success: 1 }, { success: 2, failed: 1 }, { success: 3 }] });
-  const b = buckets({ recent_requests: [{ success: 10 }, { failed: 20 }] });
   assert.deepEqual(a, { total: [1, 3, 3], failed: [0, 1, 0] });
-  assert.deepEqual(sumBuckets([a, null, b]), { total: [1, 13, 23], failed: [0, 1, 20] });
 });
 
 test("grille levels: zero is dark, any traffic is visible, the peak is full", () => {
@@ -78,33 +72,9 @@ test("grille levels: zero is dark, any traffic is visible, the peak is full", ()
   assert.equal(level(5, 0), 0);
 });
 
-test("usage events keep display fields only and summarise by model", () => {
-  const raw = {
-    timestamp: "2026-10-02T11:59:59Z",
-    latency_ms: 100,
-    ttft_ms: 40,
-    failed: true,
-    fail: { status_code: 529, body: "upstream said secret things" },
-    api_key: "sk-client-secret",
-    client_ip: "203.0.113.9",
-    user_agent: "tool/1.0",
-    model: "claude-sonnet-4-5",
-    alias: "daily",
-    tokens: { input_tokens: 10, output_tokens: 5 },
-  };
-  const e = cleanEvent(raw);
-  assert.deepEqual(Object.keys(e).sort(), ["at", "auth", "failed", "id", "input", "latency", "model", "output", "provider", "status", "ttft"]);
-  assert.equal(JSON.stringify(e).includes("secret"), false);
-  assert.deepEqual([e.model, e.status, e.at], ["daily", 529, Date.parse(raw.timestamp)]);
-  const s = usageStats([e, cleanEvent({ model: "m", latency_ms: 0 }), cleanEvent({ model: "m", latency_ms: 300, ttft_ms: 0 })]);
-  assert.deepEqual([s.count, s.failed, s.latency, s.ttft], [3, 1, 100, 40]);
-  assert.deepEqual(s.models.map((m) => [m.model, m.count]), [["m", 2], ["daily", 1]]);
-  assert.equal(usageStats([]).latency, null);
-});
-
 test("quota is percent used, not remaining; unknown payloads stay empty", () => {
   assert.deepEqual(quotaWindows("claude", { five_hour: { utilization: 37, resets_at: "later" }, seven_day: null }), [
-    { label: "Current session", used: 37, reset: "later" },
+    { label: "5-hour limit", used: 37, reset: "later" },
   ]);
   assert.equal(quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 24, reset_at: 1000 } } })[0].used, 24);
   // Codex windows are named by their length; without one, by their slot.
@@ -134,7 +104,7 @@ test("Claude usage: the limits list, as Claude Code titles it", () => {
       { kind: "session", group: "session", percent: 44, resets_at: "2026-07-27T10:00:00+00:00", scope: null, is_active: true },
       { kind: "weekly_scoped", group: "weekly", percent: 64, resets_at: "2026-07-28T10:00:00+00:00", scope: { model: { id: null, display_name: "Fable" } }, is_active: true },
       { kind: "weekly_scoped", group: "weekly", percent: null, resets_at: null, scope: { model: { id: null, display_name: "Opus" } }, is_active: false },
-      { kind: "session", group: "session", percent: 7, resets_at: null, scope: null, label: "Current week (all models)" },
+      { kind: "session", group: "session", percent: 7, resets_at: null, scope: null, label: "7-day limit (all models)" },
     ],
     five_hour: { utilization: 99, resets_at: null },
     seven_day_opus: { utilization: 88, resets_at: null },
@@ -142,10 +112,10 @@ test("Claude usage: the limits list, as Claude Code titles it", () => {
     extra_usage: { is_enabled: true, monthly_limit: 10000, used_credits: 1250, utilization: 12.5, currency: "USD" },
   };
   assert.deepEqual(quotaWindows("claude", withLimits), [
-    { label: "Current week (all models)", used: 31, reset: "2026-07-28T10:00:00+00:00" },
-    { label: "Current week (Fable only)", used: 64, reset: "2026-07-28T10:00:00+00:00" },
-    { label: "Current session", used: 44, reset: "2026-07-27T10:00:00+00:00" },
-    { label: "Current session", used: 7, reset: "" },
+    { label: "7-day limit (all models)", used: 31, reset: "2026-07-28T10:00:00+00:00" },
+    { label: "7-day limit (Fable only)", used: 64, reset: "2026-07-28T10:00:00+00:00" },
+    { label: "5-hour limit", used: 44, reset: "2026-07-27T10:00:00+00:00" },
+    { label: "5-hour limit", used: 7, reset: "" },
     { label: "Extra usage", used: 12.5, reset: "", detail: "$12.50 of $100.00" },
   ]);
 });
@@ -161,11 +131,11 @@ test("Claude usage: legacy buckets when there is no limits list", () => {
       extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 300, utilization: null, currency: "USD" },
     }),
     [
-      { label: "Current session", used: 12, reset: "2026-05-03T06:50Z" },
-      { label: "Current week (all models)", used: 70, reset: "2026-05-04T00:00Z" },
-      { label: "Current week (Sonnet only)", used: 38, reset: "2026-05-04T00:00Z" },
+      { label: "5-hour limit", used: 12, reset: "2026-05-03T06:50Z" },
+      { label: "7-day limit (all models)", used: 70, reset: "2026-05-04T00:00Z" },
+      { label: "7-day limit (Sonnet only)", used: 38, reset: "2026-05-04T00:00Z" },
       // A real 0 is a real 0%; only null is hidden.
-      { label: "Current week (Opus only)", used: 0, reset: "2026-05-04T00:00Z" },
+      { label: "7-day limit (Opus only)", used: 0, reset: "2026-05-04T00:00Z" },
       { label: "Other limit", used: 5, reset: "" },
       { label: "Extra usage", used: null, reset: "", detail: "$3.00 spent, no limit" },
     ],
@@ -187,7 +157,7 @@ test("Claude usage: placeholders and skipped buckets never show, null is never 0
     cinder_cove: null,
     extra_usage: { is_enabled: false, monthly_limit: 5000, used_credits: 100, utilization: 2 },
   };
-  assert.deepEqual(quotaWindows("claude", placeholders), [{ label: "Current session", used: 23, reset: "2026-05-03T06:50Z" }]);
+  assert.deepEqual(quotaWindows("claude", placeholders), [{ label: "5-hour limit", used: 23, reset: "2026-05-03T06:50Z" }, {label:"7-day limit (OAuth apps)", used:3, reset:""}]);
   assert.deepEqual(quotaWindows("claude", { tangelo: null, iguana_necktie: null, omelette_promotional: null, limits: [] }), []);
 });
 
@@ -343,8 +313,8 @@ test("Claude response headers provide live included windows without treating mis
     "Anthropic-Ratelimit-Unified-Overage-Status":"rejected",
   }};
   assert.deepEqual(signalWindows("claude", quota), [
-    {label:"Current session",used:42,reset:"2026-10-02T14:00:00.000Z",source:"anthropic-ratelimit-unified-5h-"},
-    {label:"Current week (all models)",used:100,reset:"2026-10-03T14:00:00.000Z",source:"anthropic-ratelimit-unified-7d-"},
+    {label:"5-hour limit",used:42,reset:"2026-10-02T14:00:00.000Z",source:"anthropic-ratelimit-unified-5h-"},
+    {label:"7-day limit (all models)",used:100,reset:"2026-10-03T14:00:00.000Z",source:"anthropic-ratelimit-unified-7d-"},
   ]);
   for (const raw of [undefined, "", " ", "Infinity", "NaN", "-0.1"]) {
     assert.deepEqual(signalWindows("claude", {signals:{"anthropic-ratelimit-unified-5h-utilization":raw}}), []);
