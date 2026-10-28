@@ -18,6 +18,8 @@ Tests define these intentional differences from the Go references in [Compatibil
 
 ## Deliberate differences
 
+- Malformed gjson string values retain this fork's `\ufffd` replacement spelling when marshaled; Go can emit literal U+FFFD instead. The decoded value is the same. Raw passthrough is unchanged.
+
 - Credential refresh/reload follows the newer lifecycle fixes in Go `d5816d5e`, `5fe203d5`, `57a12996` and Rust `95773e7f`/`ffbc0fc2`: unrelated edits retain rotated tokens; credential replacement (including A→B→A) or deletion invalidates an older refresh. Identity comparison also covers built-in account/client/device selectors and nested token fields; no Sign in with ChatGPT partition handling is added. Incomplete scans preserve loaded credentials and active quota cooldowns; true deletions still apply. The watcher records hashes of bytes actually read.
 - Credential writes follow Rust `898f884e` (Go `8a01bc02`): per-credential serialization keeps disk I/O outside the selection lock. This fork holds an exclusive reload gate across scan and publication instead of importing plugin-oriented snapshot machinery. Uploads, retyping, deletion and login saves share that gate; metadata-only edits preserve existing credential versions.
 

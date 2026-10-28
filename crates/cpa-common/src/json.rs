@@ -2766,7 +2766,8 @@ pub fn set_items<S: AsRef<[u8]>>(out: &mut Vec<u8>, path: &(impl JsonPath + ?Siz
 /// What gjson's `Result.Value()` returns, as Go code then edits and marshals it: objects
 /// keep the first duplicate key, strings keep gjson's unescaped bytes (invalid UTF-8
 /// marshals as `\ufffd`), numbers are float64 and non-container JSON is nil.
-#[derive(Debug, Clone, PartialEq)]
+/// Conversion, marshal, clone, comparison and drop use heap stacks.
+#[derive(Debug)]
 pub enum AnyValue {
     Null,
     Bool(bool),
@@ -2776,66 +2777,279 @@ pub enum AnyValue {
     Object(std::collections::BTreeMap<Vec<u8>, AnyValue>),
 }
 
+impl PartialEq for AnyValue {
+    fn eq(&self, other: &Self) -> bool {
+        let mut pending = vec![(self, other)];
+        while let Some((a, b)) = pending.pop() {
+            match (a, b) {
+                (Self::Null, Self::Null) => {}
+                (Self::Bool(a), Self::Bool(b)) if a == b => {}
+                (Self::Number(a), Self::Number(b)) if a == b => {}
+                (Self::String(a), Self::String(b)) if a == b => {}
+                (Self::Array(a), Self::Array(b)) if a.len() == b.len() => pending.extend(a.iter().zip(b)),
+                (Self::Object(a), Self::Object(b)) if a.len() == b.len() => {
+                    for ((key_a, a), (key_b, b)) in a.iter().zip(b) {
+                        if key_a != key_b {
+                            return false;
+                        }
+                        pending.push((a, b));
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+impl Clone for AnyValue {
+    fn clone(&self) -> Self {
+        let mut cloned = Self::Null;
+        let mut pending = vec![(self, &mut cloned)];
+        while let Some((source, target)) = pending.pop() {
+            *target = match source {
+                Self::Null => Self::Null,
+                Self::Bool(b) => Self::Bool(*b),
+                Self::Number(n) => Self::Number(*n),
+                Self::String(s) => Self::String(s.clone()),
+                Self::Array(items) => Self::Array((0..items.len()).map(|_| Self::Null).collect()),
+                Self::Object(map) => Self::Object(map.keys().map(|key| (key.clone(), Self::Null)).collect()),
+            };
+            match (source, target) {
+                (Self::Array(items), Self::Array(copies)) => pending.extend(items.iter().zip(copies.iter_mut())),
+                (Self::Object(map), Self::Object(copies)) => pending.extend(map.values().zip(copies.values_mut())),
+                _ => {}
+            }
+        }
+        cloned
+    }
+}
+
+impl Drop for AnyValue {
+    fn drop(&mut self) {
+        let mut pending = match self {
+            Self::Array(items) if !items.is_empty() => std::mem::take(items),
+            Self::Object(map) if !map.is_empty() => std::mem::take(map).into_values().collect(),
+            _ => return,
+        };
+        while let Some(mut value) = pending.pop() {
+            match &mut value {
+                Self::Array(items) => pending.append(items),
+                Self::Object(map) => pending.extend(std::mem::take(map).into_values()),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Index gjson.go's `squash` boundaries without rescanning each nested subtree.
+/// It counts parentheses and mismatched closers too. Malformed tokens can expose an
+/// opener inside what looked like a string, so index every opener independently.
+fn any_container_spans(raw: &[u8]) -> Vec<(usize, usize)> {
+    let marks: Vec<usize> = raw
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| matches!(c, b'{' | b'[' | b'(' | b'}' | b']' | b')' | b'"').then_some(i))
+        .collect();
+    let n = marks.len();
+    // First unpaired closer after each mark, skipping strings and nested containers.
+    let mut stops = vec![n; n + 1];
+    let mut quote = n;
+    let mut spans = vec![];
+    for i in (0..n).rev() {
+        let at = marks[i];
+        match raw[at] {
+            b'}' | b']' | b')' => stops[i] = i,
+            b'"' => {
+                stops[i] = if quote == n { n } else { stops[quote + 1] };
+                if at == 0 || raw[at - 1] != b'\\' || !backslashes_before(raw, at, 0).is_multiple_of(2) {
+                    quote = i;
+                }
+            }
+            open => {
+                let close = stops[i + 1];
+                if open != b'(' {
+                    spans.push((at, if close == n { raw.len() } else { marks[close] + 1 }));
+                }
+                stops[i] = if close == n { n } else { stops[close + 1] };
+            }
+        }
+    }
+    spans.reverse();
+    spans
+}
+
 impl AnyValue {
     pub fn from_res(r: &Res<'_>) -> Self {
+        if r.kind != Kind::Json {
+            return Self::scalar(r);
+        }
+        let raw = r.raw.as_ref();
+        let Some(start) = raw.iter().position(|&c| c > b' ') else {
+            return Self::Null;
+        };
+        if !matches!(raw[start], b'{' | b'[') {
+            return Self::Null;
+        }
+        struct Frame {
+            value: AnyValue,
+            key: Option<Vec<u8>>,
+            next: usize,
+            end: usize,
+        }
+        impl Frame {
+            fn new(open: u8, start: usize, end: usize) -> Self {
+                Self {
+                    value: if open == b'[' {
+                        AnyValue::Array(vec![])
+                    } else {
+                        AnyValue::Object(Default::default())
+                    },
+                    key: None,
+                    next: start + 1,
+                    end,
+                }
+            }
+            fn insert(&mut self, value: AnyValue) {
+                match &mut self.value {
+                    AnyValue::Array(items) => items.push(value),
+                    AnyValue::Object(map) => {
+                        map.insert(self.key.take().unwrap(), value);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let spans = any_container_spans(raw);
+        let mut span = 0;
+        let mut frames = vec![Frame::new(raw[start], start, raw.len())];
+        loop {
+            let frame = frames.last_mut().unwrap();
+            let at = frame.next;
+            if at >= frame.end || matches!(raw[at], b']' | b'}') {
+                let value = frames.pop().unwrap().value;
+                if let Some(parent) = frames.last_mut() {
+                    parent.insert(value);
+                    continue;
+                }
+                return value;
+            }
+            let rest = &raw[at..frame.end];
+            let token = match raw[at] {
+                b'{' | b'[' => {
+                    while spans[span].0 < at {
+                        span += 1;
+                    }
+                    let end = spans[span].1.min(frame.end);
+                    span += 1;
+                    json_res(raw, at, end)
+                }
+                b'n' | b't' | b'f' => literal_res(rest, 0, tolit(rest).len()),
+                b'0'..=b'9' | b'-' => number_res(rest, 0, tonum(rest).len()),
+                b'"' => {
+                    let (raw, s) = tostr(rest);
+                    Res {
+                        kind: Kind::String,
+                        raw: Cow::Borrowed(raw),
+                        s,
+                        ..Res::default()
+                    }
+                }
+                _ => {
+                    frame.next += 1;
+                    continue;
+                }
+            };
+            frame.next += token.raw.len();
+            if let Self::Object(map) = &frame.value {
+                match &frame.key {
+                    None => {
+                        frame.key = Some(token.s.to_vec());
+                        continue;
+                    }
+                    Some(key) if map.contains_key(key) => {
+                        frame.key = None;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if token.kind == Kind::Json {
+                let end = frame.next;
+                frames.push(Frame::new(raw[at], at, end));
+            } else {
+                frame.insert(Self::scalar(&token));
+            }
+        }
+    }
+
+    fn scalar(r: &Res<'_>) -> Self {
         match r.kind {
-            Kind::Null => Self::Null,
             Kind::True => Self::Bool(true),
             Kind::False => Self::Bool(false),
             Kind::Number => Self::Number(r.num),
             Kind::String => Self::String(r.s.to_vec()),
-            Kind::Json => match r.raw.iter().find(|&&c| c > b' ' || c == b'{' || c == b'[') {
-                Some(b'{') => {
-                    let mut map = std::collections::BTreeMap::new();
-                    for (key, value) in array_or_map(&r.raw, b'{', 0).1 {
-                        map.entry(key).or_insert_with(|| Self::from_res(&value));
-                    }
-                    Self::Object(map)
-                }
-                Some(b'[') => Self::Array(array_or_map(&r.raw, b'[', 0).0.iter().map(Self::from_res).collect()),
-                _ => Self::Null,
-            },
+            _ => Self::Null,
         }
     }
 
     /// `json.Marshal`: sorted keys, HTML-escaped strings. `None` for NaN or infinite
     /// numbers, which Marshal rejects.
     pub fn marshal(&self) -> Option<Vec<u8>> {
+        enum Open<'a> {
+            Array(std::slice::Iter<'a, AnyValue>, bool),
+            Object(std::collections::btree_map::Iter<'a, Vec<u8>, AnyValue>, bool),
+        }
         let mut out = vec![];
-        self.write(&mut out)?;
-        Some(out)
-    }
-
-    fn write(&self, out: &mut Vec<u8>) -> Option<()> {
-        match self {
-            Self::Null => out.extend_from_slice(b"null"),
-            Self::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
-            Self::Number(n) => out.extend_from_slice(json_float(*n)?.as_bytes()),
-            Self::String(s) => marshal_str(out, s, true),
-            Self::Array(items) => {
-                out.push(b'[');
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b',');
+        let mut stack = vec![];
+        let mut next = Some(self);
+        loop {
+            if let Some(value) = next.take() {
+                match value {
+                    Self::Null => out.extend_from_slice(b"null"),
+                    Self::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+                    Self::Number(n) => out.extend_from_slice(json_float(*n)?.as_bytes()),
+                    Self::String(s) => marshal_str(&mut out, s, true),
+                    Self::Array(items) => {
+                        out.push(b'[');
+                        stack.push(Open::Array(items.iter(), true));
                     }
-                    item.write(out)?;
+                    Self::Object(map) => {
+                        out.push(b'{');
+                        stack.push(Open::Object(map.iter(), true));
+                    }
                 }
-                out.push(b']');
             }
-            Self::Object(map) => {
-                out.push(b'{');
-                for (i, (key, value)) in map.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b',');
+            match stack.last_mut() {
+                None => return Some(out),
+                Some(Open::Array(items, first)) => match items.next() {
+                    Some(item) => {
+                        if !std::mem::take(first) {
+                            out.push(b',');
+                        }
+                        next = Some(item);
                     }
-                    marshal_str(out, key, true);
-                    out.push(b':');
-                    value.write(out)?;
-                }
-                out.push(b'}');
+                    None => {
+                        stack.pop();
+                        out.push(b']');
+                    }
+                },
+                Some(Open::Object(items, first)) => match items.next() {
+                    Some((key, item)) => {
+                        if !std::mem::take(first) {
+                            out.push(b',');
+                        }
+                        marshal_str(&mut out, key, true);
+                        out.push(b':');
+                        next = Some(item);
+                    }
+                    None => {
+                        stack.pop();
+                        out.push(b'}');
+                    }
+                },
             }
         }
-        Some(())
     }
 
     /// `out, _ = sjson.SetBytes(out, path, value)` for this value: scalars use sjson's
