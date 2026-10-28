@@ -1038,10 +1038,9 @@ impl Pending {
 /// A part kept as is, through Go's map round trip: sorted keys, float64 numbers, the
 /// signature as `thoughtSignature` and `inline_data` as `inlineData`.
 fn normalized_part(part: &Res<'_>) -> Vec<u8> {
-    let mut map = match GoValue::parse_f64(part.raw()) {
-        Some(GoValue::Object(map)) => map,
-        _ => Default::default(),
-    };
+    let mut map = GoValue::parse_f64(part.raw())
+        .and_then(|v| v.into_object().ok())
+        .unwrap_or_default();
     let mut signature = part.get("thoughtSignature").bytes().into_owned();
     if signature.is_empty() {
         signature = part.get("thought_signature").bytes().into_owned();

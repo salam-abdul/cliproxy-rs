@@ -70,10 +70,7 @@ fn catalogs_match_go() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| match GoValue::from_json(m) {
-            GoValue::Object(map) => map,
-            other => panic!("not an object: {other:?}"),
-        })
+        .map(|m| GoValue::from_json(m).into_object().expect("an object"))
         .collect();
     let registry = Recorded(&fixture);
     let patch_table = &fixture["apply_patch"];

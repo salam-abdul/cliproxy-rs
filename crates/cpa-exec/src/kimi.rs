@@ -1141,7 +1141,7 @@ fn resolve_refs(root: &GoValue, value: &GoValue, active: &mut std::collections::
                 active.insert(reference.clone());
                 let resolved = resolve_refs(root, target, active);
                 active.remove(reference);
-                if let GoValue::Object(mut out) = resolved {
+                if let Ok(mut out) = resolved.into_object() {
                     for (key, item) in node {
                         if key != "$ref" {
                             out.insert(key.clone(), resolve_refs(root, item, active));

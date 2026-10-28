@@ -701,7 +701,7 @@ pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u
     } else {
         session
     };
-    let Some(GoValue::Object(mut map)) = GoValue::parse_f64(session) else {
+    let Some(Ok(mut map)) = GoValue::parse_f64(session).map(GoValue::into_object) else {
         return Err(SessionError::Invalid("session must be a valid JSON object".into()));
     };
     let string = |map: &BTreeMap<String, GoValue>, key: &str| match map.get(key) {
@@ -805,7 +805,7 @@ pub fn client_secret_lifetime(expires_after: Option<&(String, i64)>) -> Result<D
 
 /// `realtimeSessionResponse`: the client session with `id`, `object` and `expires_at`.
 pub fn session_response(session: &[u8], id: &str, expires_at: i64) -> Option<GoValue> {
-    let Some(GoValue::Object(mut map)) = GoValue::parse_f64(session) else {
+    let Some(Ok(mut map)) = GoValue::parse_f64(session).map(GoValue::into_object) else {
         return None;
     };
     map.insert("id".into(), GoValue::String(id.into()));

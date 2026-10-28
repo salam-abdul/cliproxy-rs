@@ -256,7 +256,7 @@ pub fn parse_jwt_identity(token: &str) -> (String, String) {
     let Ok(raw) = GO_URL_ENCODING.decode(padded) else {
         return Default::default();
     };
-    let Some(GoValue::Object(claims)) = GoValue::parse_f64(&raw) else {
+    let Some(Ok(claims)) = GoValue::parse_f64(&raw).map(GoValue::into_object) else {
         return Default::default();
     };
     let claim = |k: &str| match claims.get(k) {
@@ -786,10 +786,10 @@ pub fn saved_document(
     mut record: BTreeMap<String, GoValue>,
     existing: Option<&[u8]>,
 ) -> Result<BTreeMap<String, GoValue>, String> {
-    let existing = existing.and_then(GoValue::parse_f64).and_then(|v| match v {
-        GoValue::Object(map) if !map.is_empty() => Some(map),
-        _ => None,
-    });
+    let existing = existing
+        .and_then(GoValue::parse_f64)
+        .and_then(|v| v.into_object().ok())
+        .filter(|map| !map.is_empty());
     let mut disabled = false;
     if let Some(existing) = existing {
         if let Some(GoValue::Bool(b)) = existing.get("disabled") {

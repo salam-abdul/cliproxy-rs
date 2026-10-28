@@ -174,21 +174,20 @@ fn first_json_value(data: &[u8]) -> Result<&[u8], String> {
 /// `json.Unmarshal(body, &map[string]any)`: `None` for `null`.
 fn decode_map(data: &[u8]) -> Result<Option<std::collections::BTreeMap<String, GoValue>>, String> {
     meta_wire::check_valid(data)?;
-    match GoValue::parse_f64(data) {
-        Some(GoValue::Object(map)) => Ok(Some(map)),
-        Some(GoValue::Null) => Ok(None),
-        Some(GoValue::Array(_)) => {
+    let value = GoValue::parse_f64(data).map(GoValue::into_object);
+    match value {
+        Some(Ok(map)) => Ok(Some(map)),
+        Some(Err(GoValue::Null)) => Ok(None),
+        Some(Err(GoValue::Array(_))) => {
             Err("json: cannot unmarshal array into Go value of type map[string]interface {}".into())
         }
-        Some(GoValue::String(_)) => {
+        Some(Err(GoValue::String(_))) => {
             Err("json: cannot unmarshal string into Go value of type map[string]interface {}".into())
         }
-        Some(GoValue::Bool(_)) => {
+        Some(Err(GoValue::Bool(_))) => {
             Err("json: cannot unmarshal bool into Go value of type map[string]interface {}".into())
         }
-        Some(GoValue::Number(_)) => {
-            Err("json: cannot unmarshal number into Go value of type map[string]interface {}".into())
-        }
+        Some(Err(_)) => Err("json: cannot unmarshal number into Go value of type map[string]interface {}".into()),
         None => Err("json: cannot unmarshal number into Go value of type float64".into()),
     }
 }

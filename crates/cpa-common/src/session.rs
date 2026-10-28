@@ -1313,9 +1313,12 @@ pub fn derive_id(format: Format, payload: &[u8], caller_scope: &str) -> String {
     }
     // Go `json.Unmarshal` into `map[string]any`: a JSON null decodes to an empty map.
     let body = match GoValue::parse_f64(payload) {
-        Some(GoValue::Object(body)) => body,
         Some(GoValue::Null) => Object::new(),
-        _ => return String::new(),
+        Some(value) => match value.into_object() {
+            Ok(body) => body,
+            Err(_) => return String::new(),
+        },
+        None => return String::new(),
     };
     let resource = if matches!(format, Format::Gemini | Format::Antigravity) {
         let request = match body.get("request") {
@@ -1533,6 +1536,9 @@ fn append_instruction(instructions: &mut Vec<String>, value: &GoValue) {
 
 type Root = (Vec<String>, Vec<Part>);
 
+/// A JSON null to borrow (`GoValue` implements `Drop`, so `&GoValue::Null` is not promoted).
+static NULL: GoValue = GoValue::Null;
+
 fn array(value: Option<&GoValue>) -> &[GoValue] {
     match value {
         Some(GoValue::Array(items)) => items,
@@ -1549,7 +1555,7 @@ fn messages_root(body: &Object, top_level_system: bool) -> Root {
         let GoValue::Object(message) = message else {
             continue;
         };
-        let content = message.get("content").unwrap_or(&GoValue::Null);
+        let content = message.get("content").unwrap_or(&NULL);
         match lower(message.get("role")).as_str() {
             "system" | "developer" => append_instruction(&mut instructions, content),
             "user" => {
@@ -1577,7 +1583,7 @@ fn responses_root(body: &Object) -> Root {
                 let GoValue::Object(item) = item else {
                     continue;
                 };
-                let content = item.get("content").unwrap_or(&GoValue::Null);
+                let content = item.get("content").unwrap_or(&NULL);
                 match lower(item.get("role")).as_str() {
                     "system" | "developer" => append_instruction(&mut instructions, content),
                     "user" => {

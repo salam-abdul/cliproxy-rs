@@ -704,11 +704,11 @@ pub fn import(auth_dir: &Path, key_path: &str, prefix: &str) -> Result<PathBuf, 
         )
     })?;
     // json.Unmarshal into map[string]any: numbers become float64.
-    let mut sa = match GoValue::parse_f64(&data) {
-        Some(GoValue::Object(sa)) => sa,
+    let mut sa = match GoValue::parse_f64(&data).map(GoValue::into_object) {
+        Some(Ok(sa)) => sa,
         // `null` leaves the map nil, which NormalizeServiceAccountMap rejects.
-        Some(GoValue::Null) => return Err("vertex-import: service account payload is empty".into()),
-        Some(other) => {
+        Some(Err(GoValue::Null)) => return Err("vertex-import: service account payload is empty".into()),
+        Some(Err(other)) => {
             let kind = match other {
                 GoValue::Array(_) => "array",
                 GoValue::String(_) => "string",

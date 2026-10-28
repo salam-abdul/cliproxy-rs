@@ -38,13 +38,10 @@ fn frames_decode_like_go_read_json() {
 fn messages_encode_like_go_write_json() {
     let fixture = fixture();
     for v in fixture["encode"].as_array().unwrap() {
-        let payload =
-            v.get("payload")
-                .and_then(Value::as_object)
-                .map(|p| match GoValue::from_json(&Value::Object(p.clone())) {
-                    GoValue::Object(map) => map,
-                    _ => unreachable!(),
-                });
+        let payload = v
+            .get("payload")
+            .and_then(Value::as_object)
+            .map(|p| GoValue::from_json(&Value::Object(p.clone())).into_object().unwrap());
         let msg = Message {
             id: v["id"].as_str().unwrap().into(),
             kind: v["type"].as_str().unwrap().into(),

@@ -201,8 +201,8 @@ fn issue(
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         return response;
     };
-    let Some(GoValue::Object(mut session)) =
-        live::session_response(&client, &created.grant.principal, created.expires_at)
+    let Some(Ok(mut session)) =
+        live::session_response(&client, &created.grant.principal, created.expires_at).map(GoValue::into_object)
     else {
         return realtime_error(
             500,

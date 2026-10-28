@@ -202,15 +202,11 @@ fn templates() -> Option<Arc<Templates>> {
         return templates.clone();
     }
     let parsed = GoValue::parse_f64(&raw).and_then(|root| {
-        let GoValue::Object(mut root) = root else {
-            return None;
-        };
-        let GoValue::Array(models) = root.remove("models")? else {
-            return None;
-        };
+        let mut root = root.into_object().ok()?;
+        let models = root.remove("models")?.into_array().ok()?;
         let mut by_slug = HashMap::new();
         for model in models {
-            let GoValue::Object(model) = model else {
+            let Ok(model) = model.into_object() else {
                 continue;
             };
             let slug = string(&model, "slug");

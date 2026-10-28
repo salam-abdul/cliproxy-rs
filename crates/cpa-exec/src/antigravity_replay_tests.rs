@@ -225,3 +225,20 @@ fn invalid_signature_400_clears_the_entry_it_read() {
         );
     }
 }
+
+#[test]
+fn system_lane_handles_the_depth_limit() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            let deep = |level: &str| format!(r#"{{"system":{}1{}}}"#, level.repeat(4_999), "}]".repeat(4_999));
+            let marked = system_lane(deep(r#"[{"cache_control":{"type":"ephemeral"},"t":"#).as_bytes());
+            let plain = system_lane(deep(r#"[{"t":"#).as_bytes());
+            assert_eq!(marked.len(), 32);
+            assert_eq!(marked, plain);
+            assert_ne!(plain, system_lane(deep(r#"[{"u":"#).as_bytes()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

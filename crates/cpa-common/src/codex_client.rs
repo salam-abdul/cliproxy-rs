@@ -453,7 +453,8 @@ fn restore_value(value: &mut crate::json::GoValue) -> bool {
                 map.insert("namespace".into(), GoValue::String(NAMESPACE.into()));
                 changed = true;
             }
-            if let Some(GoValue::String(name)) = map.get("name").cloned() {
+            if let Some(GoValue::String(name)) = map.get("name") {
+                let name = name.clone();
                 if name == OPTIMIZED_NAMESPACE && item_type == "namespace" {
                     map.insert("name".into(), GoValue::String(NAMESPACE.into()));
                     changed = true;

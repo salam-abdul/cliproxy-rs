@@ -108,13 +108,15 @@ impl Message {
                     msg.kind = gj::go_unquote(item.raw()).unwrap_or_default();
                     Ok(())
                 }
-                (Some("payload"), gj::Kind::Json) if item.is_object() => match GoValue::parse_f64(item.raw()) {
-                    Some(GoValue::Object(map)) => {
-                        msg.payload.get_or_insert_with(BTreeMap::new).extend(map);
-                        Ok(())
+                (Some("payload"), gj::Kind::Json) if item.is_object() => {
+                    match GoValue::parse_f64(item.raw()).map(GoValue::into_object) {
+                        Some(Ok(map)) => {
+                            msg.payload.get_or_insert_with(BTreeMap::new).extend(map);
+                            Ok(())
+                        }
+                        _ => Err("json: cannot unmarshal number into Go value of type float64".to_owned()),
                     }
-                    _ => Err("json: cannot unmarshal number into Go value of type float64".to_owned()),
-                },
+                }
                 (Some(name), _) => Err(format!(
                     "json: cannot unmarshal {} into Go struct field Message.{name}",
                     meta_wire::kind_name(&item)
