@@ -31,8 +31,11 @@ async fn server_with(management_password: Option<&str>, credentials: Vec<cpa_cor
     let dir = std::env::temp_dir().join(format!("cpa-resp-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.yaml");
-    let yaml = "observability:\n  usage:\n    usage-statistics-enabled: true\n";
-    std::fs::write(&path, yaml).unwrap();
+    let yaml = format!(
+        "auth-dir: {}\nobservability:\n  usage:\n    usage-statistics-enabled: true\n",
+        dir.display()
+    );
+    std::fs::write(&path, &yaml).unwrap();
     let executors = Executors {
         claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
         codex: Default::default(),
@@ -41,7 +44,7 @@ async fn server_with(management_password: Option<&str>, credentials: Vec<cpa_cor
         google: Default::default(),
     };
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse(yaml).unwrap(),
+        Config::parse(&yaml).unwrap(),
         credentials,
         executors,
     ));
@@ -125,6 +128,35 @@ async fn connect(addr: std::net::SocketAddr) -> BufReader<TcpStream> {
 async fn auth(conn: &mut BufReader<TcpStream>) {
     command(conn, &["AUTH", PASSWORD]).await;
     assert_eq!(line(conn).await, "+OK");
+}
+
+#[tokio::test]
+async fn excessive_frames_are_rejected_before_auth_and_listener_keeps_serving() {
+    let s = server(Some(PASSWORD)).await;
+    let mut long_line = b"*1\r\n+".to_vec();
+    long_line.extend(vec![b'x'; 65539]);
+    for (frame, expected) in [
+        (b"*1025\r\n".to_vec(), "-ERR protocol error"),
+        (b"*1\r\n$65537\r\n".to_vec(), "-ERR bulk string too large"),
+        (b"*1\r\n$-2\r\n".to_vec(), "-ERR protocol error"),
+        (long_line, "-ERR protocol error"),
+    ] {
+        let mut conn = connect(s.addr).await;
+        conn.get_mut().write_all(&frame).await.unwrap();
+        assert_eq!(line(&mut conn).await, expected);
+        assert_eq!(line(&mut conn).await, "");
+    }
+    let mut conn = connect(s.addr).await;
+    auth(&mut conn).await;
+    command(&mut conn, &["LPOP", "usage"]).await;
+    assert_eq!(bulk(&mut conn).await, None);
+    command(&mut conn, &["SUBSCRIBE", "errors"]).await;
+    assert_eq!(
+        pubsub(&mut conn).await,
+        ("subscribe".into(), "errors".into(), ":1".into())
+    );
+    conn.get_mut().write_all(b"*1025\r\n").await.unwrap();
+    assert_eq!(line(&mut conn).await, "-ERR protocol error");
 }
 
 /// Go `TestRedisProtocol_ManagementDisabled_RejectsConnection`: closed, not ignored.

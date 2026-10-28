@@ -27,6 +27,7 @@ Keep the listener on loopback, configure separate client and management keys, an
 - [Client setup](docs/CLIENTS.md): translating endpoint examples.
 - [Account routing](docs/MULTI-ACCOUNT.md): affinity, selection and cooldowns.
 - [Compatibility](docs/PARITY.md) and [deliberate differences](docs/DIFFERENCES-FROM-GO.md).
+- [Upstream review checkpoints and port backlog](docs/UPSTREAM-REVIEW.md).
 - [Benchmarks](docs/BENCHMARKS.md) and [optional cache telemetry](docs/CLAUDE-CACHE-TELEMETRY.md).
 - [Go migration](docs/MIGRATING-FROM-GO.md): credential ownership and configuration compatibility.
 

@@ -32,6 +32,7 @@ pub const REDIRECT_URI: &str = "http://localhost:54545/callback";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const ROLES_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/roles";
+const HTTP_FAILURE: &str = "Claude OAuth acquisition failed";
 
 type RefreshResult = Shared<BoxFuture<'static, Result<MetadataPatch, ExecError>>>;
 
@@ -115,7 +116,7 @@ impl OAuth {
         };
         // Never expose a control-plane body: providers may echo tokens in errors.
         let response = into_response(response).await.map_err(|error| {
-            let mut safe = ExecError::local(error.status, error.scope, "Claude OAuth acquisition failed");
+            let mut safe = ExecError::local(error.status, error.scope, HTTP_FAILURE);
             safe.retry_after = backoff.or(error.retry_after);
             safe
         })?;
@@ -235,9 +236,17 @@ impl OAuth {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_secs(attempt)).await;
             }
-            // isClaudeRefreshRetryable: 5xx and transport failures; never a 429.
+            // Go c163bae4: only an explicit HTTP server error is retryable. Transport,
+            // body-read and decoding failures may already have consumed the refresh token.
             match self.refresh_once(refresh).await {
-                Err(error) if error.status >= 500 && attempt < 2 => continue,
+                Err(error)
+                    if error.status >= 500
+                        && error.scope == FailureScope::Credential
+                        && error.body == HTTP_FAILURE
+                        && attempt < 2 =>
+                {
+                    continue;
+                }
                 result => return result,
             }
         }

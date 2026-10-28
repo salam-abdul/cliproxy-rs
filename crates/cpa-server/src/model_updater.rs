@@ -64,8 +64,11 @@ pub fn plan(local_model: bool, home_enabled: bool) -> Plan {
 /// call more than once: one updater of each kind runs. Cost while no Codex, Devin or
 /// Antigravity credential exists: one parked task that looks at the credentials'
 /// providers after each change to the set. In Home mode the local store stays empty, so
-/// every updater starts at once, as in Go.
+/// every updater starts at once, as in Go. Test runtimes start no remote updaters.
 pub fn start(rt: &Arc<Runtime>, home_enabled: bool) {
+    if rt.deny_external.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let plan = plan(rt.local_model(), home_enabled);
     // Updaters that serve one provider, each started by that provider's first credential.
     let mut wanted: Vec<(&'static str, fn())> = Vec::new();
@@ -125,9 +128,9 @@ pub fn start(rt: &Arc<Runtime>, home_enabled: bool) {
 }
 
 /// A Codex client asked for its model catalog: start the catalog's updater, unless
-/// `--local-model` keeps every catalog local.
+/// `--local-model` or the test runtime's network guard keeps every catalog local.
 pub(crate) fn codex_client_catalog_wanted(rt: &Runtime) {
-    if !rt.local_model() {
+    if !rt.local_model() && !rt.deny_external.load(std::sync::atomic::Ordering::Relaxed) {
         cpa_exec::codex_catalog_updater::start_codex_client_models_updater();
     }
 }
@@ -208,6 +211,36 @@ pub async fn refresh(urls: &[String], label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn isolated_runtime() -> Arc<Runtime> {
+        let dir = std::env::temp_dir().join(format!("cpa-updater-{}", uuid::Uuid::new_v4()));
+        let cfg = cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.display())).unwrap();
+        Arc::new(crate::testing::runtime(
+            cfg,
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ))
+    }
+
+    #[test]
+    fn test_runtime_start_does_not_spawn() {
+        let rt = isolated_runtime();
+        // No Tokio executor: attempting to spawn any updater fails before it can dial.
+        start(&rt, false);
+        start(&rt, true);
+    }
+
+    #[test]
+    fn test_runtime_catalog_request_does_not_spawn() {
+        let rt = isolated_runtime();
+        assert_eq!(crate::codex_models::response(&rt, "0.130.0").status(), 200);
+    }
 
     /// Go `modelCatalogUpdaterPlan` (cmd/server/main.go).
     #[test]

@@ -222,6 +222,99 @@ async fn a_late_joiner_keeps_its_own_retry_budget() {
 }
 
 #[tokio::test]
+async fn ambiguous_refresh_failures_are_not_retried() {
+    let response =
+        |headers: &str, body: &str| format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{headers}\r\n{body}").into_bytes();
+    let cases = [
+        ("lost response", Vec::new()),
+        ("truncated body", response("Content-Length: 100\r\n", "{")),
+        (
+            "invalid gzip",
+            response("Content-Encoding: gzip\r\nContent-Length: 8\r\n", "not gzip"),
+        ),
+        ("invalid JSON", response("Content-Length: 8\r\n", "not json")),
+        ("missing token", response("Content-Length: 2\r\n", "{}")),
+        (
+            "missing expiry",
+            response("Content-Length: 30\r\n", r#"{"access_token":"fake-access"}"#),
+        ),
+    ];
+    let results = futures_util::future::join_all(cases.into_iter().map(|(name, raw)| async move {
+        let (error, calls) = refresh_against_raw(raw).await;
+        assert!(!error.to_string().contains("fake-refresh"));
+        assert!(!error.to_string().contains("fake-access"));
+        assert!(error.headers.is_empty());
+        (name, calls)
+    }))
+    .await;
+    assert!(
+        results.iter().all(|(_, calls)| *calls == 1),
+        "token exchanges: {results:?}"
+    );
+}
+
+async fn refresh_against_raw(raw: Vec<u8>) -> (ExecError, usize) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/token", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn({
+        let calls = calls.clone();
+        async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                    assert!(headers.len() < 8192);
+                }
+                let headers = String::from_utf8(headers).unwrap();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                calls.fetch_add(1, Ordering::SeqCst);
+                socket.write_all(&raw).await.unwrap();
+            }
+        }
+    });
+    let oauth = OAuth::with_endpoints(
+        wreq::Client::builder()
+            .http1_only()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+        &url,
+        &url,
+        &url,
+    );
+    let error = oauth.refresh("fake-refresh-raw").await.unwrap_err();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    (error, calls.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn explicit_server_refresh_errors_remain_retryable() {
+    for status in [500, 503, 599] {
+        let mock = Arc::new(Mock {
+            token_statuses: Mutex::new([status].into()),
+            ..Default::default()
+        });
+        let oauth = service(mock.clone()).await;
+        let patch = oauth.refresh("fake-refresh-server-error").await.unwrap();
+        assert_eq!(patch.set["refresh_token"], "fake-rotated");
+        assert_eq!(mock.token_calls.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
 async fn a_canceled_caller_stops_retrying() {
     let mock = Arc::new(Mock {
         token_statuses: Mutex::new([503].into()),

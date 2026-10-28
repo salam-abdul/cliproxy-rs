@@ -13,6 +13,17 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 
 use crate::management::Management;
 
+#[cfg(test)]
+#[path = "resp_tests.rs"]
+mod tests;
+
+// internal/api/redis_queue_protocol.go at 888f2382: frame budgets count argument
+// payload bytes, excluding RESP framing and before UTF-8 replacement.
+const MAX_ARRAY_LEN: i64 = 1024;
+const MAX_BULK_LEN: usize = 64 << 10;
+const MAX_FRAME_BYTES: usize = 64 << 10;
+const MAX_LINE_LEN: usize = 64 << 10;
+
 /// Go `isRedisRESPPrefix`.
 pub(crate) fn is_resp_prefix(byte: u8) -> bool {
     matches!(byte, b'*' | b'$' | b'+' | b'-' | b':')
@@ -24,6 +35,7 @@ enum ReadError {
     Eof,
     UnexpectedEof,
     Protocol,
+    BulkTooLarge,
     Io(std::io::Error),
 }
 
@@ -34,6 +46,7 @@ impl ReadError {
             ReadError::Eof => None,
             ReadError::UnexpectedEof => Some("unexpected EOF".into()),
             ReadError::Protocol => Some("protocol error".into()),
+            ReadError::BulkTooLarge => Some("bulk string too large".into()),
             ReadError::Io(e) => Some(e.to_string()),
         }
     }
@@ -41,34 +54,49 @@ impl ReadError {
 
 /// Go `readRESPLine`: up to `\n`, without `\n` and one `\r`. A line cut off by the end
 /// of the stream is `io.EOF`, as `bufio.Reader.ReadString` reports it.
-async fn read_line<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result<String, ReadError> {
+async fn read_line<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result<Vec<u8>, ReadError> {
     let mut buf = Vec::new();
-    reader.read_until(b'\n', &mut buf).await.map_err(ReadError::Io)?;
+    // Allow CRLF plus one byte to detect overflow without awaiting an unbounded line.
+    reader
+        .take((MAX_LINE_LEN + 3) as u64)
+        .read_until(b'\n', &mut buf)
+        .await
+        .map_err(ReadError::Io)?;
+    if buf.len() > MAX_LINE_LEN + 2 {
+        return Err(ReadError::Protocol);
+    }
     if buf.pop() != Some(b'\n') {
         return Err(ReadError::Eof);
     }
     if buf.last() == Some(&b'\r') {
         buf.pop();
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    if buf.len() > MAX_LINE_LEN {
+        return Err(ReadError::Protocol);
+    }
+    Ok(buf)
 }
 
 /// Go `strconv.Atoi`.
-fn atoi(s: &str) -> Option<i64> {
-    s.parse().ok()
+fn atoi(s: &[u8]) -> Option<i64> {
+    std::str::from_utf8(s).ok()?.parse().ok()
 }
 
-/// Go `readRESPBulkString`; a negative length is the empty string.
-// ponytail: lengths above MAX_REQUEST_BYTES are refused as protocol errors; Go
-// allocates whatever the client declares.
-async fn read_bulk<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result<String, ReadError> {
+/// Go `readRESPBulkStringWithBudget`; -1 is the empty string.
+async fn read_bulk<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    remaining: &mut usize,
+) -> Result<String, ReadError> {
     let length = atoi(&read_line(reader).await?).ok_or(ReadError::Protocol)?;
-    if length < 0 {
+    if length < -1 {
+        return Err(ReadError::Protocol);
+    }
+    if length == -1 {
         return Ok(String::new());
     }
     let length = usize::try_from(length).map_err(|_| ReadError::Protocol)?;
-    if length > crate::MAX_REQUEST_BYTES {
-        return Err(ReadError::Protocol);
+    if length > MAX_BULK_LEN || length > *remaining {
+        return Err(ReadError::BulkTooLarge);
     }
     // Go `io.ReadFull`: EOF when nothing arrived, "unexpected EOF" when part did.
     let mut buf = vec![0u8; length + 2];
@@ -84,6 +112,7 @@ async fn read_bulk<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result<St
         return Err(ReadError::Protocol);
     }
     buf.truncate(length);
+    *remaining -= length;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -98,9 +127,10 @@ async fn read_command<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result
         return Err(ReadError::Protocol);
     }
     let count = atoi(&read_line(reader).await?)
-        .filter(|n| *n >= 0)
+        .filter(|n| (0..=MAX_ARRAY_LEN).contains(n))
         .ok_or(ReadError::Protocol)?;
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(count as usize);
+    let mut remaining = MAX_FRAME_BYTES;
     for _ in 0..count {
         let kind = match reader.read_u8().await {
             Ok(b) => b,
@@ -108,8 +138,15 @@ async fn read_command<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result
             Err(e) => return Err(ReadError::Io(e)),
         };
         args.push(match kind {
-            b'$' => read_bulk(reader).await?,
-            b'+' | b':' => read_line(reader).await?,
+            b'$' => read_bulk(reader, &mut remaining).await?,
+            b'+' | b':' => {
+                let line = read_line(reader).await?;
+                if line.len() > remaining {
+                    return Err(ReadError::Protocol);
+                }
+                remaining -= line.len();
+                String::from_utf8_lossy(&line).into_owned()
+            }
             _ => return Err(ReadError::Protocol),
         });
     }
@@ -297,7 +334,7 @@ where
                 // Go `parsePopCount`: a count that does not parse is 0.
                 let count = match args.len() {
                     2 => Some((1, false)),
-                    3 => Some((atoi(args[2].trim()).unwrap_or(0), true)),
+                    3 => Some((atoi(args[2].trim().as_bytes()).unwrap_or(0), true)),
                     _ => None,
                 };
                 match count {
