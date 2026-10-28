@@ -21,15 +21,18 @@ These are inclusive boundaries for screened default-branch history, not merge or
   walkers from R `541b8e47`/`e563f51a`, plus iterative clone/equality. Go's 10000-depth
   limit and wire semantics are covered; 261 tests, formatting and clippy passed on
   2026-10-28. Remaining recursive paths are split below.
+- **U08b — `ca733eb`**: iterative AnyValue conversion/marshal/drop/clone/equality
+  and Claude-to-OpenAI tool-schema normalization. Deep and malformed inputs retain
+  gjson behavior; 60000 generated cases preserved the previous output bytes. On
+  2026-10-28, 133 tests, formatting and clippy passed.
 
 ## Pick up next
 
-**Next: U08b**, then U08c and U04. Source prefixes below refer to the repositories
+**Next: U08c**, then U04. Source prefixes below refer to the repositories
 above. Preserve the acceptance boundaries when splitting work.
 
 | ID | Work and acceptance boundaries | Starting commits |
 | --- | --- | --- |
-| U08b | Remove AnyValue conversion/marshal/drop recursion; conversion at depth 10000 still overflows. Preserve gjson's first-duplicate-key, permissive input, invalid UTF-8 and nonfinite-number behavior. Include small-stack regressions and translator fixtures. | Local `cpa-common/src/json.rs`; not covered by R `541b8e47`/`e563f51a` |
 | U08c | Remove remaining recursive GoValue walkers in Codex namespace restoration, Gemini/Kimi schema processing and Antigravity replay normalization. Audit serde conversion/debug boundaries separately; add deep-input tests at the consuming paths. | Local `codex_client.rs`, `gemini_schema.rs`, `kimi.rs`, `antigravity_replay.rs` |
 | U04 | Reauthorize established Responses WebSockets after client-key changes, including normal/duplex turns; retain the bound principal. | G `b9bb031d`, `3e7a21e2`, `6340fe43` |
 | U05 | Split incomplete Claude streams, relay cancellation, AI Studio event framing and Codex multiline SSE. Preserve partial output and terminal errors; never replay ambiguous inference. | G `4f2e5270`, `30780351`, `0fe4cc2c`, `90fe5b23`; R `dcb7336b`, `1639d8d6`, `24c32be3` |
