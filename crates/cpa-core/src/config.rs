@@ -285,12 +285,16 @@ fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
-        let mut config = Self::parse(&text)?;
+        Self::load_text(path, &std::fs::read_to_string(path)?)
+    }
+
+    /// Load already-read text, so a watcher can hash the same bytes that were parsed.
+    pub fn load_text(path: &Path, text: &str) -> anyhow::Result<Self> {
+        let mut config = Self::parse(text)?;
         if !config.management.secret_key.is_empty() && !is_bcrypt(&config.management.secret_key) {
             let hash = bcrypt::hash(&config.management.secret_key, 10)?;
             // Go hashes in memory and persists best-effort (a read-only mount starts).
-            let _ = persist_secret_hash(path, &text, &hash);
+            let _ = persist_secret_hash(path, text, &hash);
             config.management.secret_key = hash.clone();
             if let Some(management) = config.document.get_mut("management").and_then(Value::as_mapping_mut) {
                 management.insert(Value::from("secret-key"), Value::from(hash));

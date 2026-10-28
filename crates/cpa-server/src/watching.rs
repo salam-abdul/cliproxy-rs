@@ -21,7 +21,7 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use cpa_core::config::{Config, credentials};
-use cpa_core::credential::{Credential, Source};
+
 use sha2::{Digest, Sha256};
 
 use crate::fs_events::{Events, Targets};
@@ -44,6 +44,7 @@ struct Snapshot {
     /// `None` when the config file cannot be read (missing).
     config: Option<Hash>,
     auth: BTreeMap<PathBuf, Hash>,
+    directory_incomplete: bool,
 }
 
 /// File metadata that changes with any write or replacement.
@@ -125,20 +126,57 @@ fn observe(state: &Management, cache: &mut HashCache) -> Snapshot {
     seen.push(state.path.clone());
     let mut auth = BTreeMap::new();
     let dir = state.rt.config().auth_dir.clone();
-    // An unreadable auth dir is an empty set, as in reload.
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        if !meta.is_file() || !is_auth_json(&path) {
-            continue;
+    let mut directory_incomplete = false;
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => {
+                        directory_incomplete = true;
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                if !is_auth_json(&path) {
+                    continue;
+                }
+                let hash = match std::fs::metadata(&path) {
+                    Ok(meta) if meta.is_file() => cache.hash(&path, &meta, now).unwrap_or_default(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    _ => Hash::default(),
+                };
+                seen.push(path.clone());
+                auth.insert(path, hash);
+            }
         }
-        // An unreadable file is present but unknown; reload skips it.
-        let hash = cache.hash(&path, &meta, now).unwrap_or_default();
-        seen.push(path.clone());
-        auth.insert(path, hash);
+        Err(error) => directory_incomplete = error.kind() != std::io::ErrorKind::NotFound,
+    }
+    if directory_incomplete {
+        remember_unreadable_directory(state, &dir, &mut auth);
     }
     cache.0.retain(|path, _| seen.contains(path));
-    Snapshot { config, auth }
+    Snapshot {
+        config,
+        auth,
+        directory_incomplete,
+    }
+}
+
+// Keep known members present with an unknown hash during enumeration failure. This
+// also preserves the evidence needed to report a later real deletion to remote stores.
+fn remember_unreadable_directory(state: &Management, dir: &Path, auth: &mut BTreeMap<PathBuf, Hash>) {
+    let incomplete = credentials::AuthScan {
+        directory_incomplete: true,
+        ..Default::default()
+    };
+    for credential in state.rt.store().snapshot() {
+        if let cpa_core::credential::Source::File(path) = &credential.source
+            && incomplete.preserves(dir, path)
+        {
+            auth.entry(dir.join(path.file_name().unwrap_or_default())).or_default();
+        }
+    }
 }
 
 /// Go's per-event log lines for auth files that changed between two snapshots.
@@ -152,7 +190,11 @@ fn log_auth_changes(before: &Snapshot, after: &Snapshot) {
         };
         tracing::info!("auth file changed ({op}): {}, processing incrementally", name(path));
     }
-    for path in before.auth.keys().filter(|p| !after.auth.contains_key(*p)) {
+    for path in before
+        .auth
+        .keys()
+        .filter(|p| !after.directory_incomplete && !after.auth.contains_key(*p))
+    {
         tracing::info!("auth file changed (REMOVE): {}, processing incrementally", name(path));
     }
 }
@@ -263,7 +305,7 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 let state = state.clone();
                 let current = current.clone();
                 move || {
-                    let loaded = catch_unwind(AssertUnwindSafe(|| reload_config(&state, read_config)));
+                    let loaded = catch_unwind(AssertUnwindSafe(|| reload_snapshot(&state, read_config, &current)));
                     let _ = catch_unwind(AssertUnwindSafe(|| {
                         events.retarget(&targets(&state, Some(&current)));
                     }));
@@ -271,14 +313,17 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
                 }
             })
             .await;
-            let loaded = match reloaded {
+            let (loaded, read) = match reloaded {
                 Ok((loaded, returned)) => {
                     events = returned;
-                    loaded
+                    match loaded {
+                        Ok((loaded, read)) => (Ok(loaded), Some(read)),
+                        Err(()) => (Err(()), None),
+                    }
                 }
                 Err(_) => {
                     events = Events::default();
-                    Err(())
+                    (Err(()), None)
                 }
             };
             if loaded.is_err() {
@@ -310,9 +355,18 @@ pub fn start(state: &Arc<Management>) -> tokio::task::JoinHandle<()> {
             }
             // Applied once either way: a failed config load retries on its next change,
             // as Go retries on its next file event, rather than every tick.
-            applied = Some(current);
+            applied = Some(record(&mut cache, current, read));
         }
     })
+}
+
+// Record the read, not the earlier observation: a restored edit must trigger another reload.
+fn record(cache: &mut HashCache, observed: Snapshot, read: Option<Snapshot>) -> Snapshot {
+    let read = read.unwrap_or_else(|| observed.clone());
+    if read != observed {
+        *cache = HashCache::default();
+    }
+    read
 }
 
 /// What the watch should cover: the config file, the auth folder of the published
@@ -422,39 +476,54 @@ pub fn reload(state: &Management) -> Result<(), ReloadError> {
 /// Return the config actually accepted under the disk lock, not a later runtime
 /// snapshot possibly replaced by management. None is an auth-only/empty reload.
 fn reload_config(state: &Management, read_config: bool) -> Result<Option<Config>, ReloadError> {
+    reload_snapshot(state, read_config, &Snapshot::default()).0
+}
+
+fn reload_snapshot(
+    state: &Management,
+    read_config: bool,
+    observed: &Snapshot,
+) -> (Result<Option<Config>, ReloadError>, Snapshot) {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-    let (mut config, config_error, accepted) = match read_config.then(|| std::fs::metadata(&state.path)) {
+    let _gate = state.rt.store().reload_guard();
+    let mut read = Snapshot {
+        config: observed.config,
+        auth: BTreeMap::new(),
+        directory_incomplete: false,
+    };
+    let (mut config, config_error, accepted) = match read_config.then(|| std::fs::read(&state.path)) {
         None => ((*state.rt.config()).clone(), None, false),
-        Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Missing(error)), false),
-        // Go ignores an empty config write.
-        Some(Ok(meta)) if meta.len() == 0 => ((*state.rt.config()).clone(), None, false),
-        Some(Ok(_)) => match Config::load(&state.path) {
-            Ok(config) => (config, None, true),
-            Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
-        },
+        Some(Err(error)) => {
+            read.config = None;
+            ((*state.rt.config()).clone(), Some(ReloadError::Missing(error)), false)
+        }
+        Some(Ok(data)) => {
+            read.config = Some(Sha256::digest(&data).into());
+            match (!data.is_empty()).then(|| {
+                std::str::from_utf8(&data)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|text| Config::load_text(&state.path, text))
+            }) {
+                None => ((*state.rt.config()).clone(), None, false),
+                Some(Ok(cfg)) => (cfg, None, true),
+                Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
+            }
+        }
     };
     state.lock_auth_dir(&mut config);
-    let mut files = credentials::from_auth_dir(&config);
-    // A malformed in-place auth write is not a deletion. Keep the last good value;
-    // actual removal and a valid disabled update are reconciled normally.
-    for existing in state.rt.store().snapshot() {
-        if let Source::File(path) = &existing.source
-            && path.parent() == Some(config.auth_dir.as_path())
-            && path.exists()
-            && !files.iter().any(|c| c.id == existing.id)
-            && std::fs::read(path).ok().is_some_and(|data| {
-                serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&data).is_err()
-            })
-        {
-            files.push(Credential::clone(&existing));
-        }
-    }
+    let scan = credentials::scan_auth_dir(&config);
+    read.directory_incomplete = scan.directory_incomplete;
+    let incomplete = scan.incomplete.clone();
     let result = accepted.then(|| config.clone());
-    state.publish(config, Some(files));
-    match config_error {
-        Some(error) => Err(error),
-        None => Ok(result),
+    let auth_dir = config.auth_dir.clone();
+    read.auth = state.publish_locked(config, Some(scan));
+    for path in incomplete {
+        read.auth.entry(path).or_default();
     }
+    if read.directory_incomplete {
+        remember_unreadable_directory(state, &auth_dir, &mut read.auth);
+    }
+    (config_error.map_or(Ok(result), Err), read)
 }
 
 #[cfg(test)]
@@ -495,6 +564,145 @@ mod tests {
         assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_scans_preserve_credentials_but_real_deletions_apply() {
+        let (state, dir) = state();
+        let path = dir.join("account.json");
+        let original = r#"{"type":"claude","access_token":"fake"}"#;
+        std::fs::write(&path, original).unwrap();
+        reload(&state).unwrap();
+        let revision = state.rt.store().get("account.json").unwrap().revision;
+        // A path that cannot be read as a file is an incomplete scan, not removal.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        reload(&state).unwrap();
+        assert_eq!(state.rt.store().get("account.json").map(|c| c.revision), Some(revision));
+        std::fs::remove_dir(&path).unwrap();
+        reload(&state).unwrap();
+        assert!(state.rt.store().get("account.json").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_auth_directory_keeps_credentials_and_publishes_config() {
+        let (state, dir) = state();
+        let auth = dir.join("auth");
+        std::fs::create_dir(&auth).unwrap();
+        let config = |port| format!("port: {port}\nauth-dir: {}\n", auth.display());
+        std::fs::write(&state.path, config(9001)).unwrap();
+        std::fs::write(auth.join("account.json"), r#"{"type":"claude","access_token":"fake"}"#).unwrap();
+        reload(&state).unwrap();
+        let saved = dir.join("saved");
+        std::fs::rename(&auth, &saved).unwrap();
+        std::fs::write(&auth, "not a directory").unwrap();
+        std::fs::write(&state.path, config(9002)).unwrap();
+        reload(&state).unwrap();
+        assert_eq!(state.rt.config().port, 9002);
+        assert!(state.rt.store().get("account.json").is_some());
+        std::fs::remove_file(&auth).unwrap();
+        std::fs::create_dir(&auth).unwrap();
+        reload(&state).unwrap();
+        assert!(state.rt.store().get("account.json").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applied_hashes_follow_loaded_bytes_and_revisit_restored_observations() {
+        let (state, dir) = state();
+        let auth = dir.join("account.json");
+        let config_a = format!("port: 9001\nauth-dir: {}\n", dir.display());
+        let config_b = format!("port: 9002\nauth-dir: {}\n", dir.display());
+        let auth_a = r#"{"type":"claude","access_token":"fake-a"}"#;
+        let auth_b = r#"{"type":"claude","access_token":"fake-b"}"#;
+        std::fs::write(&state.path, &config_a).unwrap();
+        std::fs::write(&auth, auth_a).unwrap();
+        let mut cache = HashCache::default();
+        let observed = observe(&state, &mut cache);
+        std::fs::write(&state.path, &config_b).unwrap();
+        std::fs::write(&auth, auth_b).unwrap();
+        let (result, read) = reload_snapshot(&state, true, &observed);
+        assert_eq!(result.unwrap().unwrap().port, 9002);
+        let applied = record(&mut cache, observed.clone(), Some(read));
+        assert!(cache.0.is_empty());
+        assert_eq!(applied.config, Some(Sha256::digest(config_b.as_bytes()).into()));
+        assert_eq!(applied.auth[&auth], <[u8; 32]>::from(Sha256::digest(auth_b.as_bytes())));
+        std::fs::write(&state.path, &config_a).unwrap();
+        std::fs::write(&auth, auth_a).unwrap();
+        let restored = observe(&state, &mut cache);
+        assert!(restored != applied, "restored observations must trigger a reload");
+        reload_snapshot(&state, true, &restored).0.unwrap();
+        assert_eq!(state.rt.config().port, 9001);
+        assert_eq!(
+            state.rt.store().get("account.json").unwrap().str("access_token"),
+            Some("fake-a")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fallback_reload_hash_uses_the_observed_relative_path() {
+        let (state, dir) = state();
+        let relative = PathBuf::from(format!(".cpa-fallback-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&relative).unwrap();
+        let path = relative.join("account.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::write(&state.path, format!("auth-dir: {}\n", relative.display())).unwrap();
+        state
+            .fallbacks
+            .lock()
+            .unwrap()
+            .insert(std::path::absolute(&path).unwrap());
+        reload(&state).unwrap();
+        let observed = observe(&state, &mut HashCache::default());
+        let (_, read) = reload_snapshot(&state, true, &observed);
+        std::fs::remove_dir_all(&relative).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            read == observed,
+            "fallback reads must not add a second absolute hash key"
+        );
+        assert_eq!(state.rt.store().snapshot().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watcher_distinguishes_unreadable_paths_from_their_later_deletion() {
+        let (state, dir) = state();
+        let path = dir.join("account.json");
+        std::fs::write(&path, r#"{"type":"claude","access_token":"fake"}"#).unwrap();
+        reload(&state).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let unreadable = observe(&state, &mut HashCache::default());
+        let (_, read) = reload_snapshot(&state, true, &unreadable);
+        assert!(read == unreadable);
+        std::fs::remove_dir(&path).unwrap();
+        let deleted = observe(&state, &mut HashCache::default());
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            unreadable != deleted,
+            "deleting a previously unreadable file must trigger a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_distinguishes_failed_directory_scans_from_a_missing_directory() {
+        let (state, dir) = state();
+        let auth = dir.join("auth");
+        std::fs::write(&auth, "not a directory").unwrap();
+        std::fs::write(&state.path, format!("auth-dir: {}\n", auth.display())).unwrap();
+        reload(&state).unwrap();
+        let unreadable = observe(&state, &mut HashCache::default());
+        let (_, read) = reload_snapshot(&state, true, &unreadable);
+        assert!(read == unreadable);
+        std::fs::remove_file(&auth).unwrap();
+        let deleted = observe(&state, &mut HashCache::default());
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            unreadable != deleted,
+            "removing an unreadable auth directory must trigger a reload"
+        );
     }
 
     #[derive(Clone, Default)]

@@ -880,6 +880,7 @@ fn store_file(state: &Management, name: &str, data: &[u8]) -> Result<(), String>
         serde_json::to_vec(&persisted).map_err(|e| e.to_string())?
     };
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+    let _gate = state.rt.store().reload_guard();
     write_file(&dst, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
     {
         let mut fallbacks = state.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -889,7 +890,7 @@ fn store_file(state: &Management, name: &str, data: &[u8]) -> Result<(), String>
             fallbacks.remove(&dst);
         }
     }
-    resync(state);
+    state.publish_locked((*state.rt.config()).clone(), None);
     Ok(())
 }
 
@@ -1058,8 +1059,9 @@ pub(crate) async fn delete(State(state): State<Arc<Management>>, RawQuery(raw): 
     let q = Query::parse(raw);
     tokio::task::spawn_blocking(move || {
         let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let _gate = state.rt.store().reload_guard();
         let response = delete_sync(&state, &q, &body);
-        resync(&state);
+        state.publish_locked((*state.rt.config()).clone(), None);
         response
     })
     .await
@@ -1536,7 +1538,15 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
             // `type` picks the executor, so the store refuses it in place; Go allows it
             // and the file's next synthesis picks the new provider. Write the file the
             // way Go's store does and re-synthesize.
-            // ponytail: no revision check against a concurrent token refresh here.
+            let _gate = state.rt.store().reload_guard();
+            let Some(current) = state.rt.store().get(&target.id) else {
+                return patch_error(Some(crate::runtime::PatchError::NotFound));
+            };
+            if current.revision != target.revision {
+                return patch_error(Some(crate::runtime::PatchError::Stale {
+                    current: current.revision,
+                }));
+            }
             let Some(path) = path_of(&target).map(Path::to_path_buf) else {
                 return patch_error(None);
             };
@@ -1549,7 +1559,7 @@ pub(crate) async fn fields(State(state): State<Arc<Management>>, body: Bytes) ->
             return match written {
                 Ok(()) => {
                     note_disabled(&state, &target.id, disabled_note);
-                    resync(&state);
+                    state.publish_locked((*state.rt.config()).clone(), None);
                     reply(StatusCode::OK, [("status", "ok".into())])
                 }
                 Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to update auth: {e}")),

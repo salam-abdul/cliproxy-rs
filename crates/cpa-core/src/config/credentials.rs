@@ -1268,32 +1268,97 @@ pub fn oauth_excluded(cfg: &Config) -> HashMap<String, Vec<String>> {
 /// Like Go's `FileSynthesizer`, an unreadable or missing directory is an empty set:
 /// it must never block publishing the rest of a valid config.
 pub fn from_auth_dir(cfg: &Config) -> Vec<Credential> {
+    scan_auth_dir(cfg).credentials
+}
+
+/// One scan, including failures that must not be mistaken for credential deletion.
+#[derive(Default)]
+pub struct AuthScan {
+    pub credentials: Vec<Credential>,
+    pub incomplete: HashSet<PathBuf>,
+    /// Missing directories are complete empty scans; other enumeration errors are incomplete.
+    pub directory_incomplete: bool,
+    /// SHA-256 of the exact bytes parsed, keyed as directory entries were observed.
+    pub read: BTreeMap<PathBuf, [u8; 32]>,
+}
+
+impl AuthScan {
+    pub fn preserves(&self, dir: &Path, path: &Path) -> bool {
+        let absolute = |p: &Path| {
+            std::fs::canonicalize(p)
+                .or_else(|_| std::path::absolute(p))
+                .unwrap_or_else(|_| p.to_path_buf())
+        };
+        path.parent().is_some_and(|parent| absolute(parent) == absolute(dir))
+            && (self.directory_incomplete || self.incomplete.iter().any(|p| absolute(p) == absolute(path)))
+    }
+}
+
+/// Read credentials once, retaining enough evidence for safe reloads and watcher bookkeeping.
+pub fn scan_auth_dir(cfg: &Config) -> AuthScan {
+    let mut scan = AuthScan::default();
     let entries = match std::fs::read_dir(&cfg.auth_dir) {
         Ok(entries) => entries,
         Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
+            scan.directory_incomplete = e.kind() != std::io::ErrorKind::NotFound;
+            if scan.directory_incomplete {
                 tracing::warn!(dir = %cfg.auth_dir.display(), error = %e, "cannot read auth dir");
             }
-            return Vec::new();
+            return scan;
         }
     };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path: PathBuf = entry.path();
-        if entry.file_type().is_ok_and(|t| t.is_dir())
-            || !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json")
-        {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                scan.directory_incomplete = true;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !entry.file_name().to_string_lossy().to_lowercase().ends_with(".json") {
             continue;
         }
-        let Ok(data) = std::fs::read(&path) else { continue };
+        let data = match read_regular(&path) {
+            Ok(data) => data,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    scan.incomplete.insert(path);
+                }
+                continue;
+            }
+        };
+        scan.read.insert(path.clone(), Sha256::digest(&data).into());
+        if serde_json::from_slice::<Map<String, Json>>(&data).is_err() {
+            scan.incomplete.insert(path);
+            continue;
+        }
         match from_file(cfg, &cfg.auth_dir, &path, &data) {
-            Ok(Some(c)) => out.push(c),
+            Ok(Some(c)) => scan.credentials.push(c),
             Ok(None) => {}
-            Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping auth file"),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipping auth file");
+                scan.incomplete.insert(path);
+            }
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
+    scan.credentials.sort_by(|a, b| a.id.cmp(&b.id));
+    scan
+}
+
+/// Reject non-regular paths before reading credential bytes.
+pub fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::other("credential path is not a regular file"));
+    }
+    let mut file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("credential path is not a regular file"));
+    }
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    Ok(data)
 }
 
 /// All runtime credentials for a config: auth files, then config API keys.

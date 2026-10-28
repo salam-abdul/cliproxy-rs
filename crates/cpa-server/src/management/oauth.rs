@@ -346,12 +346,16 @@ async fn save_if_pending<T: Send + 'static>(
 ) -> Outcome {
     let auth_dir = state.rt.config().auth_dir.clone();
     let (guard, sid, provider) = (state.clone(), sid.to_owned(), provider.to_owned());
-    let saved = tokio::task::spawn_blocking(move || {
-        // Checked on the blocking thread itself, right before the write.
+    let saved = tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+        let _disk = guard.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let _gate = guard.rt.store().reload_guard();
+        // Check after waiting for writers, immediately before saving.
         if !guard.oauth.is_pending(&sid, &provider) {
             return Ok(None);
         }
-        write(auth_dir, value).map(Some)
+        let path = write(auth_dir, value)?;
+        guard.publish_locked((*guard.rt.config()).clone(), None);
+        Ok(Some(path))
     })
     .await;
     match saved {
@@ -364,10 +368,6 @@ async fn save_if_pending<T: Send + 'static>(
 fn settle(state: &Management, sid: &str, outcome: Outcome) {
     match outcome {
         Outcome::Saved => {
-            {
-                let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
-                state.publish((*state.rt.config()).clone(), None);
-            }
             state.oauth.complete(sid);
         }
         Outcome::Cancelled => {}

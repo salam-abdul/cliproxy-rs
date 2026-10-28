@@ -18,6 +18,9 @@ Tests define these intentional differences from the Go references in [Compatibil
 
 ## Deliberate differences
 
+- Credential refresh/reload follows the newer lifecycle fixes in Go `d5816d5e`, `5fe203d5`, `57a12996` and Rust `95773e7f`/`ffbc0fc2`: unrelated edits retain rotated tokens; credential replacement (including A→B→A) or deletion invalidates an older refresh. Identity comparison also covers built-in account/client/device selectors and nested token fields; no Sign in with ChatGPT partition handling is added. Incomplete scans preserve loaded credentials and active quota cooldowns; true deletions still apply. The watcher records hashes of bytes actually read.
+- Credential writes follow Rust `898f884e` (Go `8a01bc02`): per-credential serialization keeps disk I/O outside the selection lock. This fork holds an exclusive reload gate across scan and publication instead of importing plugin-oriented snapshot machinery. Uploads, retyping, deletion and login saves share that gate; metadata-only edits preserve existing credential versions.
+
 - Claude OAuth refresh follows Go `c163bae4`: only explicit HTTP server errors are retried. Transport, body-read, decompression, invalid JSON and missing-token-field failures are ambiguous and are not replayed; existing single-flight and 429 blocking remain.
 - Incoming RESP commands follow Go `888f2382`: at most 1,024 arguments, 64 KiB per line/bulk and 64 KiB total argument payload (excluding framing). Invalid negative bulk lengths are rejected before allocation. These limits apply before authentication and during subscriptions; outbound usage records are unchanged.
 - Test runtimes suppress every automatic remote model updater, including startup/Home and on-demand Codex catalog refresh. Explicit catalog-refresh tests use loopback sources and private auth directories.

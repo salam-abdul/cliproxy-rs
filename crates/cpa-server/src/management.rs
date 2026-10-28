@@ -173,17 +173,40 @@ impl Management {
     /// Publishes a config and everything Go derives from it on reload: scheduler
     /// policy, management availability, and the credential set (auth-dir files plus
     /// config API keys). `files` replaces the auth-dir scan when the caller already
-    /// has a reconciled list. Callers hold `disk`. Infallible on purpose: access
+    /// has scanned it under the reload gate. Callers hold `disk`. Infallible on purpose: access
     /// settings of a valid config (a rotated or removed secret) always take effect.
-    pub(crate) fn publish(&self, cfg: Config, files: Option<Vec<Credential>>) {
-        let mut cfg = cfg;
+    pub(crate) fn publish(&self, cfg: Config, files: Option<credentials::AuthScan>) {
+        let _gate = self.rt.store().reload_guard();
+        self.publish_locked(cfg, files);
+    }
+
+    /// Caller holds `disk` and the store's exclusive reload gate through the scan and publication.
+    pub(crate) fn publish_locked(
+        &self,
+        mut cfg: Config,
+        files: Option<credentials::AuthScan>,
+    ) -> std::collections::BTreeMap<PathBuf, [u8; 32]> {
         self.lock_auth_dir(&mut cfg);
-        let mut all = files.unwrap_or_else(|| credentials::from_auth_dir(&cfg));
+        let mut scan = files.unwrap_or_else(|| credentials::scan_auth_dir(&cfg));
+        let mut all = std::mem::take(&mut scan.credentials);
+        for existing in self.rt.store().snapshot() {
+            if let Source::File(path) = &existing.source
+                && scan.preserves(&cfg.auth_dir, path)
+                && !all.iter().any(|c| c.id == existing.id)
+            {
+                all.push(Credential::clone(&existing));
+            }
+        }
         // Fallbacks follow their file: gone with it, replaced once a synthesizer
         // claims it, otherwise rebuilt from its current content.
         let mut fallbacks = self.fallbacks.lock().unwrap_or_else(PoisonError::into_inner);
         fallbacks.retain(|path| {
-            let Ok(data) = std::fs::read(path) else { return false };
+            if scan.preserves(&cfg.auth_dir, path) {
+                return true;
+            }
+            let Ok(data) = credentials::read_regular(path) else {
+                return false;
+            };
             // Uploads record absolute paths; a relative auth-dir scans relative ones.
             let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
             if all
@@ -194,6 +217,15 @@ impl Management {
             }
             match credentials::upload_fallback(&cfg.auth_dir, path, &data) {
                 Some(c) => {
+                    use sha2::{Digest, Sha256};
+                    let scanned_path = cfg.auth_dir.join(path.file_name().unwrap_or_default());
+                    if std::fs::canonicalize(&scanned_path)
+                        .ok()
+                        .zip(std::fs::canonicalize(path).ok())
+                        .is_some_and(|(a, b)| a == b)
+                    {
+                        scan.read.insert(scanned_path, Sha256::digest(&data).into());
+                    }
                     all.push(c);
                     true
                 }
@@ -207,9 +239,10 @@ impl Management {
         self.rt.usage_queue().configure(self.access.available(), &cfg);
         let policy = policy(&cfg);
         self.rt.publish_config_and_policy(cfg, policy);
-        self.rt.store().reconcile(all);
+        self.rt.store().reconcile_locked(all);
         // Go's watcher calls redisqueue.NotifyUsageRefresh after every client reload.
         self.rt.usage_queue().notify_usage_refresh();
+        scan.read
     }
 }
 

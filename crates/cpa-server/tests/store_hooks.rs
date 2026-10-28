@@ -252,3 +252,33 @@ async fn management_deletes_reach_the_store_and_its_errors_reach_the_client() {
         server.abort();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_mirror_does_not_report_deletion_but_its_removal_does() {
+    let f = fixture("unreadable-mirror", false);
+    let path = f.mirror.join("account.json");
+    std::fs::write(&path, r#"{"type":"claude","access_token":"fake"}"#).unwrap();
+    watching::reload(&f.state).unwrap();
+    let watcher = watching::start(&f.state);
+    f.settle().await;
+    let saved = f.dir.join("saved-auths");
+    std::fs::rename(&f.mirror, &saved).unwrap();
+    std::fs::write(&f.mirror, "not a directory").unwrap();
+    std::fs::write(f.dir.join("config.yaml"), config_text(&f.dir, 5)).unwrap();
+    f.wait_for("config during unreadable scan", |calls| calls.contains(&Call::Config))
+        .await;
+    assert!(f.rt.store().get("account.json").is_some());
+    assert!(
+        !f.calls()
+            .iter()
+            .any(|c| matches!(c, Call::Auth(m, _) if m.starts_with("Remove")))
+    );
+    std::fs::remove_file(&f.mirror).unwrap();
+    std::fs::write(f.dir.join("config.yaml"), config_text(&f.dir, 7)).unwrap();
+    f.wait_for("actual removal", |calls| {
+        calls.contains(&Call::Auth("Remove auth account.json".into(), vec![path.clone()]))
+    })
+    .await;
+    assert!(f.rt.store().get("account.json").is_none());
+    watcher.abort();
+}

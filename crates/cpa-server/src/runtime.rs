@@ -26,6 +26,10 @@ use crate::refresh::RefreshState;
 use crate::registry::Registry;
 use crate::scheduler::{Policy, Scheduler};
 
+mod credential_updates;
+
+use credential_updates::Version;
+
 /// The config snapshot and credential epoch a registry was built from.
 type RegistryCache = (Arc<Config>, (u64, u64, u64), Arc<Registry>);
 
@@ -424,15 +428,19 @@ impl Runtime {
         failed: Option<u64>,
     ) -> Result<Arc<Credential>, ExecError> {
         let lock = self.store.prepare_lock(id);
-        let _guard = lock.lock().await;
+        let guard = lock.lock_owned().await;
         // Another request may have prepared it while we waited.
-        let current = self.store.get(id).filter(|c| !c.disabled).ok_or_else(|| {
-            ExecError::local(
-                409,
-                FailureScope::Request,
-                "credential removed or disabled during preparation",
-            )
-        })?;
+        let (current, version) = self
+            .store
+            .get_versioned(id)
+            .filter(|(c, _)| !c.disabled)
+            .ok_or_else(|| {
+                ExecError::local(
+                    409,
+                    FailureScope::Request,
+                    "credential removed or disabled during preparation",
+                )
+            })?;
         match failed {
             Some(revision) if current.revision != revision => return Ok(current),
             Some(_) => {}
@@ -441,19 +449,20 @@ impl Runtime {
         }
         let patch = self.executors.prepare(&self.for_executor(&current), cfg).await?;
         let store = self.store.clone();
-        let revision = current.revision;
-        let id = id.to_owned();
-        tokio::task::spawn_blocking(move || store.apply_patch(&id, revision, &patch))
-            .await
-            .map_err(|e| PatchError::Io(e.to_string()))
-            .and_then(|r| r)
-            .map_err(|e| {
-                ExecError::local(
-                    500,
-                    FailureScope::Request,
-                    format!("committing prepared credential: {e:?}"),
-                )
-            })
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            store.apply_refresh(&current, version, &patch)
+        })
+        .await
+        .map_err(|e| PatchError::Io(e.to_string()))
+        .and_then(|r| r)
+        .map_err(|e| {
+            ExecError::local(
+                500,
+                FailureScope::Request,
+                format!("committing prepared credential: {e:?}"),
+            )
+        })
     }
 
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
@@ -911,12 +920,17 @@ struct Inner {
     creds: Vec<Arc<Credential>>,
     /// Last revision handed out. Revisions are never reused.
     generation: u64,
+    versions: HashMap<String, Version>,
     /// Bumped on every reconcile and patch, including pure removals.
     epoch: u64,
 }
 
 pub struct CredentialStore {
     inner: RwLock<Inner>,
+    // Lock order: management disk -> reload -> per-ID writer -> brief inner access.
+    // Selection never takes reload or writer locks.
+    reload: RwLock<()>,
+    write_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     policy: RwLock<Arc<Policy>>,
     scheduler: Mutex<Scheduler>,
     attempts: AtomicU64,
@@ -942,15 +956,19 @@ impl CredentialStore {
         let mut inner = Inner {
             creds: Vec::new(),
             generation: 0,
+            versions: HashMap::new(),
             epoch: 0,
         };
         for mut cred in credentials {
             inner.generation += 1;
             cred.revision = inner.generation;
+            inner.register(None, &cred);
             inner.creds.push(Arc::new(cred));
         }
         Arc::new(Self {
             inner: RwLock::new(inner),
+            reload: RwLock::default(),
+            write_locks: Mutex::default(),
             policy: RwLock::new(Arc::new(Policy::default())),
             scheduler: Mutex::default(),
             attempts: AtomicU64::new(0),
@@ -1087,14 +1105,10 @@ impl CredentialStore {
                 return;
             }
         }
-        // The store write lock serializes this with `apply_patch`: a refresh committed
-        // after this request started must not be overwritten with the older token.
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let Some(slot) = inner
-            .creds
-            .iter_mut()
-            .find(|c| c.id == credential.id && c.revision == credential.revision)
-        else {
+        let _gate = self.reload.read().unwrap_or_else(PoisonError::into_inner);
+        let lock = self.write_lock(&credential.id);
+        let _own = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(slot) = self.get(&credential.id).filter(|c| c.revision == credential.revision) else {
             return;
         };
         let mut metadata = slot.metadata.clone();
@@ -1116,12 +1130,17 @@ impl CredentialStore {
             // `disabled` is false, numbers are float64), so memory takes the written
             // form and the watcher's reload finds nothing changed.
             if let Ok(written) = serde_json::from_slice::<Map<String, Value>>(&bytes) {
-                let mut next = Credential::clone(slot);
+                let mut next = Credential::clone(&slot);
                 next.metadata = written;
-                *slot = Arc::new(next);
+                let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+                let index = inner
+                    .creds
+                    .iter()
+                    .position(|c| c.id == credential.id)
+                    .expect("writer owns credential");
+                inner.creds[index] = Arc::new(next);
             }
         }
-        drop(inner);
         self.persisted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1423,51 +1442,6 @@ impl CredentialStore {
         locks.entry(id.to_owned()).or_default().clone()
     }
 
-    /// Applies a metadata change if the credential is still at `expected_revision`.
-    /// File-backed credentials are written atomically (0600) before memory changes.
-    /// Blocking: call from `spawn_blocking` in async code.
-    pub fn apply_patch(
-        &self,
-        id: &str,
-        expected_revision: u64,
-        patch: &MetadataPatch,
-    ) -> Result<Arc<Credential>, PatchError> {
-        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
-        let generation = inner.generation + 1;
-        let slot = inner
-            .creds
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or(PatchError::NotFound)?;
-        if slot.revision != expected_revision {
-            return Err(PatchError::Stale { current: slot.revision });
-        }
-        if patch.remove.iter().any(|k| k == "type")
-            || patch
-                .set
-                .get("type")
-                .is_some_and(|t| t.as_str() != Some(slot.provider.as_str()))
-        {
-            return Err(PatchError::TypeIsImmutable);
-        }
-        let Source::File(path) = &slot.source else {
-            return Err(PatchError::ConfigBacked);
-        };
-        let mut next = Credential::clone(slot);
-        patch.apply(&mut next.metadata);
-        next.refresh_derived();
-        next.revision = generation;
-        // Go `FileTokenStore.Save` always records the disabled state.
-        next.metadata.insert("disabled".into(), Value::Bool(next.disabled));
-        write_atomic(path, &next.metadata).map_err(|e| PatchError::Io(e.to_string()))?;
-        *slot = Arc::new(next);
-        let committed = slot.clone();
-        inner.generation = generation;
-        inner.epoch += 1;
-        self.changed.send_replace(());
-        Ok(committed)
-    }
-
     /// Replaces a config-backed or runtime-only credential in memory if it is still at
     /// `expected_revision`: Go's `Manager.Update` never persists config API keys (the
     /// next config publish re-synthesizes them) or `runtime_only` auths. `NotFound`
@@ -1477,6 +1451,7 @@ impl CredentialStore {
         next: Credential,
         expected_revision: u64,
     ) -> Result<Arc<Credential>, PatchError> {
+        let _gate = self.reload_guard();
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let generation = inner.generation + 1;
         let slot = inner
@@ -1490,8 +1465,10 @@ impl CredentialStore {
         let mut next = next;
         next.source = slot.source.clone();
         next.revision = generation;
+        let previous = slot.clone();
         *slot = Arc::new(next);
         let committed = slot.clone();
+        inner.register(Some(&previous), &committed);
         inner.generation = generation;
         // Registrations depend on the credential (prefix, models): invalidate the
         // registry cache like `apply_patch` does.
@@ -1507,6 +1484,12 @@ impl CredentialStore {
     /// Replaces the credential set (watcher reload, management import/delete). Unchanged
     /// credentials keep their revision; new and changed ones get fresh revisions.
     pub fn reconcile(&self, credentials: Vec<Credential>) {
+        let _gate = self.reload_guard();
+        self.reconcile_locked(credentials);
+    }
+
+    /// Caller holds the exclusive reload gate, including any scan supplying this set.
+    pub(crate) fn reconcile_locked(&self, credentials: Vec<Credential>) {
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let mut next = Vec::with_capacity(credentials.len());
         for mut cred in credentials {
@@ -1515,6 +1498,8 @@ impl CredentialStore {
                 None => {
                     inner.generation += 1;
                     cred.revision = inner.generation;
+                    let previous = inner.creds.iter().find(|c| c.id == cred.id).cloned();
+                    inner.register(previous.as_deref(), &cred);
                     next.push(Arc::new(cred));
                 }
             }
@@ -1528,6 +1513,7 @@ impl CredentialStore {
             .cloned()
             .collect();
         next.extend(runtime);
+        inner.versions.retain(|id, _| next.iter().any(|c| &c.id == id));
         inner.creds = next;
         inner.epoch += 1;
         self.changed.send_replace(());
@@ -1543,6 +1529,7 @@ impl CredentialStore {
     /// Adds a runtime-only credential (Go's auth add for a `/v1/ws` relay session)
     /// unless one with its ID is already active. Additive API for the relay route.
     pub fn add_runtime(&self, mut credential: Credential) -> bool {
+        let _gate = self.reload_guard();
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         if inner.creds.iter().any(|c| c.id == credential.id && !c.disabled) {
             return false;
@@ -1550,6 +1537,7 @@ impl CredentialStore {
         inner.creds.retain(|c| c.id != credential.id);
         inner.generation += 1;
         credential.revision = inner.generation;
+        inner.register(None, &credential);
         inner.creds.push(Arc::new(credential));
         inner.epoch += 1;
         self.changed.send_replace(());
@@ -1563,12 +1551,14 @@ impl CredentialStore {
     /// Removes a credential when its relay session ends (Go's auth delete). Additive
     /// API for the relay route.
     pub fn remove_runtime(&self, id: &str) {
+        let _gate = self.reload_guard();
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let before = inner.creds.len();
         inner.creds.retain(|c| !(c.id == id && c.source == Source::Runtime));
         if inner.creds.len() == before {
             return;
         }
+        inner.versions.remove(id);
         inner.epoch += 1;
         self.changed.send_replace(());
         self.scheduler
@@ -1677,6 +1667,8 @@ fn write_atomic(path: &Path, metadata: &Map<String, Value>) -> std::io::Result<(
 
 /// Replaces `path` with `bytes` through an exclusively created 0600 sibling.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    credential_updates::tests::stall_write(path);
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
