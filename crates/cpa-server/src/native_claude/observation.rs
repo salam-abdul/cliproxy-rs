@@ -9,6 +9,91 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub(super) type ResponseStream<E = wreq::Error> =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, E>> + Send>>;
+
+/// Inspect only a complete, bounded rejection, retaining original chunks for forwarding.
+pub(super) async fn inspect_rejection<E: Send + 'static>(
+    mut stream: ResponseStream<E>,
+    status: u16,
+    encoding: &str,
+) -> (ResponseStream<E>, bool) {
+    use futures_util::StreamExt;
+    const LIMIT: usize = 65536;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let mut replay = Vec::new();
+    let mut body = Vec::new();
+    let mut complete = false;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(None) => {
+                complete = true;
+                break;
+            }
+            Ok(Some(Ok(bytes))) => {
+                if bytes.is_empty() {
+                    continue;
+                }
+                let fits = bytes.len() <= LIMIT.saturating_sub(body.len());
+                if fits {
+                    body.extend_from_slice(&bytes);
+                }
+                replay.push(Ok(bytes));
+                if !fits {
+                    break;
+                }
+            }
+            Ok(Some(Err(error))) => {
+                replay.push(Err(error));
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let entitlement = if complete {
+        bounded_error_json(&body, encoding)
+            .await
+            .is_some_and(|value| crate::classify::is_model_entitlement(status, &value))
+    } else {
+        false
+    };
+    (Box::pin(futures_util::stream::iter(replay).chain(stream)), entitlement)
+}
+
+async fn bounded_error_json(body: &[u8], encoding: &str) -> Option<Value> {
+    use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
+    let reader: Box<dyn AsyncRead + Unpin + Send + '_> = match encoding {
+        "" | "identity" => Box::new(body),
+        "gzip" => {
+            let mut decoder = GzipDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
+        "br" => {
+            let mut decoder = BrotliDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
+        "deflate" => {
+            let mut decoder = ZlibDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
+        "zstd" => {
+            let mut decoder = ZstdDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
+        _ => return None,
+    };
+    let mut decoded = Vec::new();
+    reader.take(65537).read_to_end(&mut decoded).await.ok()?;
+    if decoded.len() > 65536 {
+        return None;
+    }
+    serde_json::from_slice(&decoded).ok()
+}
+
 #[derive(Default)]
 pub(super) struct UsageScanner {
     line: Vec<u8>,
@@ -427,6 +512,117 @@ impl Drop for Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn chunks(bytes: Vec<u8>) -> ResponseStream<std::io::Error> {
+        Box::pin(futures_util::stream::iter(
+            bytes
+                .chunks(7)
+                .map(|b| Ok(axum::body::Bytes::copy_from_slice(b)))
+                .collect::<Vec<_>>(),
+        ))
+    }
+    async fn collected(stream: ResponseStream<std::io::Error>) -> Vec<u8> {
+        use futures_util::StreamExt;
+        stream.map(|b| b.unwrap()).collect::<Vec<_>>().await.concat()
+    }
+    #[tokio::test]
+    async fn entitlement_inspection_preserves_chunks_and_rejects_incomplete_or_unstructured_errors() {
+        let cases = [
+            (400, r#"{"error":{"code":"model_not_supported"}}"#, true),
+            (422, r#"{"error":{"type":"model_not_found"}}"#, true),
+            (403, r#"{"error":{"code":"model_access_denied"}}"#, true),
+            (
+                404,
+                r#"{"error":{"message":"Model is not available for your plan"}}"#,
+                true,
+            ),
+            (401, r#"{"error":{"code":"model_access_denied"}}"#, false),
+            (
+                403,
+                r#"{"error":{"type":"permission_error","message":"Forbidden"}}"#,
+                false,
+            ),
+            (
+                403,
+                r#"{"error":{"type":"rate_limit_error","code":"model_access_denied"}}"#,
+                false,
+            ),
+            (404, r#"{"error":{"code":"model_access_denied"}"#, false),
+            (404, "model_not_found", false),
+        ];
+        for (status, raw, expected) in cases {
+            let (stream, entitlement) = inspect_rejection(chunks(raw.as_bytes().to_vec()), status, "").await;
+            assert_eq!(entitlement, expected, "{raw}");
+            assert_eq!(collected(stream).await, raw.as_bytes());
+        }
+        let mut oversized = br#"{"error":{"code":"model_access_denied"},"padding":""#.to_vec();
+        oversized.extend(vec![b'x'; 65536]);
+        oversized.extend_from_slice(b"\"}");
+        let (stream, entitlement) = inspect_rejection(chunks(oversized.clone()), 403, "").await;
+        assert!(!entitlement);
+        assert_eq!(collected(stream).await, oversized);
+
+        use futures_util::StreamExt;
+        let stream =
+            chunks(br#"{"error":{"code":"model_access_denied"}}"#.to_vec()).chain(futures_util::stream::once(async {
+                Err(std::io::Error::other("truncated"))
+            }));
+        let (mut stream, entitlement) = inspect_rejection(Box::pin(stream), 404, "").await;
+        assert!(!entitlement);
+        let mut saw_error = false;
+        while let Some(item) = stream.next().await {
+            saw_error |= item.is_err();
+        }
+        assert!(saw_error);
+    }
+    #[tokio::test]
+    async fn compressed_entitlement_inspection_bounds_decoded_bytes_and_preserves_wire_bytes() {
+        use async_compression::tokio::bufread::GzipEncoder;
+        for extra in [0, 65536] {
+            let mut raw = br#"{"error":{"code":"model_access_denied"},"padding":""#.to_vec();
+            raw.extend(vec![b'x'; extra]);
+            raw.extend_from_slice(b"\"}");
+            let mut gzip = Vec::new();
+            GzipEncoder::new(raw.as_slice()).read_to_end(&mut gzip).await.unwrap();
+            for truncated in [false, true] {
+                let mut wire = gzip.clone();
+                if truncated {
+                    wire.truncate(wire.len() - 3);
+                }
+                let (stream, entitlement) = inspect_rejection(chunks(wire.clone()), 403, "gzip").await;
+                assert_eq!(entitlement, extra == 0 && !truncated);
+                assert_eq!(collected(stream).await, wire);
+            }
+        }
+        let raw = br#"{"error":{"code":"model_access_denied"}}"#;
+        let mut members = Vec::new();
+        GzipEncoder::new(raw.as_slice())
+            .read_to_end(&mut members)
+            .await
+            .unwrap();
+        GzipEncoder::new(b"trailing junk".as_slice())
+            .read_to_end(&mut members)
+            .await
+            .unwrap();
+        let (stream, entitlement) = inspect_rejection(chunks(members.clone()), 403, "gzip").await;
+        assert!(!entitlement);
+        assert_eq!(collected(stream).await, members);
+        let (stream, entitlement) = inspect_rejection(chunks(raw.to_vec()), 403, "unknown").await;
+        assert!(!entitlement);
+        assert_eq!(collected(stream).await, raw);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn inspection_deadline_preserves_remaining_stream_without_classifying() {
+        use futures_util::StreamExt;
+        let raw = br#"{"error":{"code":"model_access_denied"}}"#;
+        let stream = futures_util::stream::once(async { Ok::<_, std::io::Error>(axum::body::Bytes::from_static(raw)) })
+            .chain(futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(axum::body::Bytes::from_static(b" "))
+            }));
+        let (stream, entitlement) = inspect_rejection(Box::pin(stream), 404, "").await;
+        assert!(!entitlement);
+        assert_eq!(collected(stream).await, [raw.as_slice(), b" "].concat());
+    }
     #[test]
     fn usage_retains_only_bounded_numeric_counters() {
         let mut scan = UsageScanner::default();

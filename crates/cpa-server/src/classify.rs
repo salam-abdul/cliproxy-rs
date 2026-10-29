@@ -195,11 +195,23 @@ fn model_support_message(text: &str) -> bool {
 
 /// `isModelSupportError`.
 pub fn is_model_support(status: u16, text: &str) -> bool {
-    // SAP 84d9e570: explicit model entitlement is distinct from permissions and quota.
     if let Some(value) = json_body(text) {
-        let detail = value.get("error").unwrap_or(&value);
-        let codes = [detail.get("code"), detail.get("type")];
-        if codes.iter().filter_map(|v| v.and_then(Value::as_str)).any(|code| {
+        if quota_error(&value) {
+            return false;
+        }
+        if is_model_entitlement(status, &value) {
+            return true;
+        }
+    }
+    explicit_model_not_found(text, "") || (matches!(status, 400 | 404 | 422) && model_support_message(text))
+}
+
+fn quota_error(value: &Value) -> bool {
+    let detail = value.get("error").unwrap_or(value);
+    [detail.get("code"), detail.get("type")]
+        .iter()
+        .filter_map(|v| v.and_then(Value::as_str))
+        .any(|code| {
             matches!(
                 code,
                 "insufficient_quota"
@@ -208,39 +220,45 @@ pub fn is_model_support(status: u16, text: &str) -> bool {
                     | "rate_limit_exceeded"
                     | "rate_limit_error"
             )
-        }) {
-            return false;
+        })
+}
+
+/// Explicit structured evidence that a model is unavailable to this account.
+pub(crate) fn is_model_entitlement(status: u16, value: &Value) -> bool {
+    if quota_error(value) {
+        return false;
+    }
+    let detail = value.get("error").unwrap_or(value);
+    let codes = [detail.get("code"), detail.get("type")];
+    if matches!(status, 400 | 403 | 404 | 422) {
+        if codes
+            .iter()
+            .filter_map(|v| v.and_then(Value::as_str))
+            .any(|code| matches!(code, "model_not_found" | "model_not_supported" | "model_access_denied"))
+        {
+            return true;
         }
-        if matches!(status, 400 | 403 | 404 | 422) {
-            if codes
-                .iter()
-                .filter_map(|v| v.and_then(Value::as_str))
-                .any(|code| matches!(code, "model_not_found" | "model_not_supported" | "model_access_denied"))
-            {
-                return true;
-            }
-            let message = detail
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_lowercase();
-            if message.contains("model")
-                && [
-                    "not supported for your account",
-                    "not supported for this account",
-                    "not available for your plan",
-                    "not available for your account",
-                    "do not have access to model",
-                    "does not have access to model",
-                ]
-                .iter()
-                .any(|phrase| message.contains(phrase))
-            {
-                return true;
-            }
+        let message = detail
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_lowercase();
+        if message.contains("model")
+            && [
+                "not supported for your account",
+                "not supported for this account",
+                "not available for your plan",
+                "not available for your account",
+                "do not have access to model",
+                "does not have access to model",
+            ]
+            .iter()
+            .any(|phrase| message.contains(phrase))
+        {
+            return true;
         }
     }
-    explicit_model_not_found(text, "") || (matches!(status, 400 | 404 | 422) && model_support_message(text))
+    false
 }
 
 /// `isInvalidGrantError`.

@@ -170,21 +170,29 @@ impl Cooldowns {
     pub fn cool(&mut self, account: &str, model: &str, status: u16, delay: Option<u64>, at: u64) {
         let until = at.saturating_add(delay.unwrap_or(if status == 429 { 60000 } else { 15000 }));
         if matches!(status, 503 | 529) {
-            let models = self.models.entry(account.into()).or_default();
-            models.retain(|_, until| *until > at);
-            // ponytail: cap live model cooldowns at 128 per account; use a bounded per-model store if needed.
-            if models.len() >= 128 && !models.contains_key(model) {
-                let until = models.values().copied().max().unwrap_or(until).max(until);
-                let entry = self.accounts.entry(account.into()).or_default();
-                *entry = (*entry).max(until);
-                return;
-            }
-            let entry = models.entry(model.into()).or_default();
-            *entry = (*entry).max(until);
+            self.cool_model(account, model, delay, at);
         } else {
             let entry = self.accounts.entry(account.into()).or_default();
             *entry = (*entry).max(until);
         }
+    }
+
+    pub fn cool_model(&mut self, account: &str, model: &str, delay: Option<u64>, at: u64) {
+        let until = at.saturating_add(delay.unwrap_or(15000));
+        let models = self.models.entry(account.into()).or_default();
+        models.retain(|_, until| *until > at);
+        // ponytail: retain 128 model cooldowns per account; evict the earliest expiry until a larger bounded store is needed.
+        if models.len() >= 128
+            && !models.contains_key(model)
+            && let Some(oldest) = models
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(model, _)| model.clone())
+        {
+            models.remove(&oldest);
+        }
+        let entry = models.entry(model.into()).or_default();
+        *entry = (*entry).max(until);
     }
 }
 
@@ -193,6 +201,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn entitlement_cooldown_isolates_models_and_accounts_even_at_capacity() {
+        let mut cooldowns = Cooldowns::default();
+        for model in 0..130 {
+            cooldowns.cool_model("a", &format!("model-{model}"), Some(1000 + model), 1000);
+        }
+        assert_eq!(cooldowns.models["a"].len(), 128);
+        assert_eq!(cooldowns.account_until("a"), 0);
+        assert_eq!(cooldowns.until("a", "unaffected"), 0);
+        assert_eq!(cooldowns.until("b", "model-129"), 0);
+        assert_eq!(cooldowns.until("a", "model-129"), 2129);
+        cooldowns.cool_model("a", "model-129", Some(1), 1001);
+        assert_eq!(cooldowns.until("a", "model-129"), 2129);
+        for status in [401, 403, 429] {
+            let mut cooldowns = Cooldowns::default();
+            cooldowns.cool("a", "opus", status, None, 1000);
+            assert!(cooldowns.until("a", "sonnet") > 1000);
+            assert_eq!(cooldowns.until("b", "opus"), 0);
+        }
+    }
     #[test]
     fn routing_state_keeps_legacy_disk_format_and_private_atomic_writes() {
         let legacy = json!({

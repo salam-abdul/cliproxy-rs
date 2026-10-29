@@ -1,6 +1,8 @@
 //! Opt-in native Claude CONNECT transport. Unlike the API translator, inference
 //! bodies and feature headers are never shaped; only the inference credential changes.
 pub(crate) mod diagnostics;
+#[cfg(test)]
+mod entitlement_tests;
 mod observation;
 mod policy;
 mod quota;
@@ -17,13 +19,13 @@ use routing::RoutingState;
 use crate::Runtime;
 use anyhow::Context;
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode},
     response::Response,
 };
 use base64::Engine;
 use btls::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
@@ -500,14 +502,25 @@ impl State {
             }
         }
     }
-    async fn cool(self: &Arc<Self>, a: &Account, model: &str, status: u16, delay: Option<u64>) -> anyhow::Result<()> {
+    async fn cool(
+        self: &Arc<Self>,
+        a: &Account,
+        model: &str,
+        status: u16,
+        delay: Option<u64>,
+        model_only: bool,
+    ) -> anyhow::Result<()> {
         let s = self.clone();
         let account = a.id.clone();
         let model = model.to_owned();
         tokio::task::spawn_blocking(move || {
             let mut routing = s.routing.lock().unwrap();
             let mut next = routing.clone();
-            next.cooldowns.cool(&account, &model, status, delay, now());
+            if model_only {
+                next.cooldowns.cool_model(&account, &model, delay, now());
+            } else {
+                next.cooldowns.cool(&account, &model, status, delay, now());
+            }
             next.persist(&s.config.database)?;
             *routing = next;
             Ok(())
@@ -689,7 +702,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         let r = match result {
             Ok(r) => r,
             Err(upstream_error) => {
-                s.cool(&a, &model, 0, None).await?;
+                s.cool(&a, &model, 0, None, false).await?;
                 s.rt.store().note_activity(&a.file_id, false);
                 // Log only classifications, never error Display strings containing URLs or credentials.
                 let failure_kind = if upstream_error.is_timeout() {
@@ -714,23 +727,36 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             .claude
             .quota()
             .observe_model(a.quota_id(), &model, r.headers());
-        if [401, 403, 429, 503, 529].contains(&status.as_u16()) {
-            let delay = policy::retry_delay(r.headers().get("retry-after").and_then(|v| v.to_str().ok()), now());
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
-                rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
-            }
-            s.cool(&a, &model, status.as_u16(), delay).await?;
-            s.rt.claude_usage.invalidate(&a.token).await;
-            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":"retryable_rejection","attempt":tried.len(),"retryAfterMs":delay}));
-            continue;
-        }
         let h = headers(r.headers(), None);
         let encoding = h
             .get("content-encoding")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_owned();
+        let stream: observation::ResponseStream = Box::pin(r.bytes_stream());
+        let (stream, entitlement) = if matches!(status.as_u16(), 400 | 403 | 404 | 422) {
+            observation::inspect_rejection(stream, status.as_u16(), &encoding).await
+        } else {
+            (stream, false)
+        };
+        if entitlement || [401, 403, 429, 503, 529].contains(&status.as_u16()) {
+            let delay = policy::retry_delay(h.get("retry-after").and_then(|v| v.to_str().ok()), now());
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
+                rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
+            }
+            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
+            if !entitlement {
+                s.rt.claude_usage.invalidate(&a.token).await;
+            }
+            let outcome = if entitlement {
+                "model_entitlement"
+            } else {
+                "retryable_rejection"
+            };
+            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
+            continue;
+        }
         let facts = Exchange {
             request_id,
             sse: h.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| {
@@ -750,8 +776,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             started: request_started,
         };
         let record = Observation::new(s.clone(), facts, &encoding);
-        let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, wreq::Error>> + Send>> =
-            Box::pin(r.bytes_stream());
         let stream = futures_util::stream::unfold(
             (stream, Some(record), guard),
             |(mut stream, mut record, guard)| async move {
