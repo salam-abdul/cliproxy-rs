@@ -18,6 +18,12 @@ Tests define these intentional differences from the Go references in [Compatibil
 
 ## Deliberate differences
 
+- Config concurrency follows Go `fa68946a`; ETag/If-Match also covers legacy YAML uploads. Management saves atomically replace the symlink target with mode 0600. The existing secondary best-effort plaintext-secret hash persistence is unchanged.
+- Error handling follows the newer header/stream ports: client-visible addons are separate from classification headers. Locally generated incomplete-stream, successful-response body-read and relay-disconnect failures stop before custom continue rules can replay inference; empty streams do not cool credentials. Declared upstream errors retain their configured handling.
+- Claude per-minute rate errors follow Go `db1bab01`: a single usable Retry-After stays short when no quota status declares a window. Struct-field order, duplicate merging and null handling match Go.
+- Translating paths recognize explicit model-entitlement codes/messages from SAP `84d9e570`, excluding quota and generic permission errors. Their cooldowns remain account/model scoped.
+- Gemini/Antigravity argument cleanup preserves the entire original argument document when duplicate container prefixes or recognized path operators make reads and writes ambiguous. Go may partially strip placeholders in those cases; ordinary cases follow its final schema/argument fixes. Tests retain the separate Go and fork expectations.
+
 - Malformed gjson string values retain this fork's `\ufffd` replacement spelling when marshaled; Go can emit literal U+FFFD instead. The decoded value is the same. Raw passthrough is unchanged.
 
 - Credential refresh/reload follows the newer lifecycle fixes in Go `d5816d5e`, `5fe203d5`, `57a12996` and Rust `95773e7f`/`ffbc0fc2`: unrelated edits retain rotated tokens; credential replacement (including A→B→A) or deletion invalidates an older refresh. Identity comparison also covers built-in account/client/device selectors and nested token fields; no Sign in with ChatGPT partition handling is added. Incomplete scans preserve loaded credentials and active quota cooldowns; true deletions still apply. The watcher records hashes of bytes actually read.

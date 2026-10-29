@@ -16,7 +16,7 @@ These are inclusive boundaries for screened default-branch history, not merge or
 - **U02 + U14 credential locking — `28f94dc`**: preserve refresh results across
   metadata edits, fence replaced identities, retain credentials on incomplete scans,
   and move disk writes outside the selection lock. On 2026-10-28, 106 focused tests,
-  formatting and clippy passed. U14 config concurrency remains below.
+  formatting and clippy passed.
 - **U08 core — `67fbb4d`**: iterative GoValue decode/marshal/drop and built-in
   walkers from R `541b8e47`/`e563f51a`, plus iterative clone/equality. Go's 10000-depth
   limit and wire semantics are covered; 261 tests, formatting and clippy passed on
@@ -25,26 +25,38 @@ These are inclusive boundaries for screened default-branch history, not merge or
   and Claude-to-OpenAI tool-schema normalization. Deep and malformed inputs retain
   gjson behavior; 60000 generated cases preserved the previous output bytes. On
   2026-10-28, 133 tests, formatting and clippy passed.
+- **U14 config + U15 — `1962b30`**: conditional config writes, atomic management
+  saves, cross-platform log paths and `value` query redaction. On 2026-10-29,
+  61 focused control-plane tests and the management routing golden passed.
+- **U11, U12 + U09 requests/responses — `8fbb788`**: batched element-local
+  wildcard payload edits, cached tool mappings, wrapped MCP-name restoration, explicit tool
+  concurrency and context-window stop reasons. Gemini tool caching was already
+  present; its behavior was verified.
+- **U13 + U08c walkers — `8856586`**: bounded shared reference expansion, final
+  schema/argument semantics, indexed argument edits and iterative consuming
+  walkers. Ambiguous argument paths preserve the original document, as recorded
+  in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md). Schema batching remains below.
+- **U04, U05, U06 + split admission fixes — `42af939`**: per-turn WebSocket
+  authorization, stream completion/framing/cancellation, error-header isolation
+  and no replay after locally detected incomplete responses. Includes U09 prompt
+  overflow, U10 per-minute throttling and S01 translating-path entitlement errors.
+  Connection setup and native entitlement handling remain below.
+
+Validation on **2026-10-29**: 318 selected executor tests, 145 server unit tests,
+55 protocol/admission integration tests and 61 control-plane tests passed.
+The common/translate suites passed, including 11224 translator vectors and
+2079 final-Go schema outputs. Affected-crate clippy, CLI checks and formatting
+passed. These are focused checks, not a whole-workspace run.
 
 ## Pick up next
 
-**Next: U08c**, then U04. Source prefixes below refer to the repositories
-above. Preserve the acceptance boundaries when splitting work.
+Only unfinished work is listed. Source prefixes refer to the repositories above.
 
-| ID | Work and acceptance boundaries | Starting commits |
+| ID | Work and acceptance boundaries | Starting points |
 | --- | --- | --- |
-| U08c | Remove remaining recursive GoValue walkers in Codex namespace restoration, Gemini/Kimi schema processing and Antigravity replay normalization. Audit serde conversion/debug boundaries separately; add deep-input tests at the consuming paths. | Local `codex_client.rs`, `gemini_schema.rs`, `kimi.rs`, `antigravity_replay.rs` |
-| U04 | Reauthorize established Responses WebSockets after client-key changes, including normal/duplex turns; retain the bound principal. | G `b9bb031d`, `3e7a21e2`, `6340fe43` |
-| U05 | Split incomplete Claude streams, relay cancellation, AI Studio event framing and Codex multiline SSE. Preserve partial output and terminal errors; never replay ambiguous inference. | G `4f2e5270`, `30780351`, `0fe4cc2c`, `90fe5b23`; R `dcb7336b`, `1639d8d6`, `24c32be3` |
-| U06 | Separate internal classification headers from downstream non-direct errors and stop bootstrap retry loops. Keep direct headers and scheduler Retry-After. | R `b5ae1ea3` **plus** `7e76e295` |
-| U09 | Respect explicit tool concurrency and context-window stop reasons; split request and response changes. Review actual prompt-overflow errors separately. | G `99d1698f`, `c2dfec28`, `d495e24c`, `43f27e3a` |
-| U10 | Separate per-minute throttling from subscription exhaustion. Independently assess connection-setup timeouts; retain fresh quota checks and native CONNECT's no-retry policy. | R `b2ea411e`; G `db1bab01`, `345cc9d5`, `b3dc6c3f` |
-| U11 | Make wildcard payload edits linear and cache tool-name mappings per stream. Preserve untouched bytes and measure large-body scaling. | R `34a2dab6`; G `95e15777`, `74e7ff60`, `83189e5f`, `f4a2d040`, `3b153145` |
-| U12 | Restore fully wrapped MCP tool names on translated Claude requests; keep ambiguous-name rejection. | R `954e6e76`; G `02fc76b1` |
-| U13 | Port schema cleanup and translated arguments together. Include later Go fixes so implicitly open empty objects retain real arguments; cover reference siblings and array items. | R `0ccf7e4d`, `81afb744`; G `e1fb2521`, `29150a22`, `b2fda98e` |
-| U14 config | Add ETag/If-Match concurrency checks without the unrelated management bundle; preserve byte-preserving config edits. Independent of credential locking. | R `49c23c50`; G `fa68946a` |
-| U15 | Harden request-log filename components across platforms; keep the shared redacting sink. | G `179d43dc` |
-| S01 | Adapt explicit model-entitlement error classification on translating paths. Native handling requires separate bounded inspection, unchanged bytes and model-scoped cooldowns. | S `84d9e570` |
+| U08c — schema batching | Remove repeated whole-schema path scans/rebuilds from the legacy cleaner using an indexed document and batched edits. Preserve the 2079 Go outputs, complex-path behavior and consuming-path depth tests; add bounded deep/wide scaling regressions. Ordinary walkers, reference expansion and serde/debug boundary audit are complete. Do not port the 1 GiB stack workaround. | Local `cpa-common/src/gemini_schema.rs`, `schema_path.rs`; R `541b8e47`, `e563f51a`, `0ccf7e4d` |
+| U10 — connection setup | Assess bounded connection-setup settings separately from the completed per-minute fix. Prove timeout/retry behavior occurs before request-body transmission. Retain fresh quota checks and native CONNECT's no-retry policy. | R `b2ea411e`; G `345cc9d5`, `b3dc6c3f` |
+| S01 — native entitlement | Reconcile concurrent native changes before adding bounded error inspection and account/model-scoped cooldowns. Preserve response bytes and no replay. Translating-path classification is complete. | S `84d9e570`; local `native_claude/` |
 
 ## Handoff
 
