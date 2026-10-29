@@ -554,14 +554,19 @@ pub struct ExecError {
     pub scope: FailureScope,
     /// Upstream error body (bounded), or a message for locally generated errors.
     pub body: Bytes,
-    /// Upstream response headers, for the scheduler and passthrough policy. The server
-    /// never emits these by default. Boxed: errors are the cold path.
+    /// Upstream response headers for classification, scheduling and direct responses.
+    /// Boxed: errors are the cold path.
     pub headers: Box<HeaderMap>,
     /// Scheduler hint parsed from upstream. Not permission to send `Retry-After` downstream.
     pub retry_after: Option<Duration>,
     /// Send status, body and filtered headers to the client unchanged instead of the
     /// route's normal error shape (claude_executor_fast_error.go).
     pub direct: bool,
+    /// Headers this error hands the client under `requests.passthrough-headers` (Go
+    /// `ErrorMessage.Addon`, filled only from errors with `Headers()`: Codex and xAI
+    /// WebSocket error frames and stream bootstrap failures). `headers` stays the
+    /// classification copy, sent only for a direct response.
+    pub addon: Option<Box<HeaderMap>>,
 }
 
 impl ExecError {
@@ -573,6 +578,7 @@ impl ExecError {
             headers: Box::default(),
             retry_after: None,
             direct: false,
+            addon: None,
         }
     }
 }

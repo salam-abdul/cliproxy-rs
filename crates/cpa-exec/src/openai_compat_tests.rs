@@ -635,11 +635,51 @@ async fn terminal_errors_flush_pending_frames_first() {
         (vec![Err(ExecError::local(502, FailureScope::Transport, "cut"))], 502),
     ] {
         let lines: ExecStream = futures_util::stream::iter(lines).boxed();
-        let out: Vec<_> = frames(lines, Box::new(Pending), true, Default::default(), Default::default())
-            .collect()
-            .await;
+        let out: Vec<_> = frames(
+            lines,
+            Box::new(Pending),
+            Format::OpenAIResponse,
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].as_ref().unwrap(), &Bytes::from_static(b"event: pending\n\n"));
         assert_eq!(out[1].as_ref().unwrap_err().status, status);
+    }
+}
+
+#[tokio::test]
+async fn claude_target_eof_requires_openai_finish_reason_or_done() {
+    for (data, expected_error) in [
+        (
+            r#"{"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}"#,
+            true,
+        ),
+        (r#"{"choices":[{"finish_reason":"stop"}]}"#, false),
+        ("[DONE]", false),
+    ] {
+        let lines = futures_util::stream::iter([Ok(Bytes::from(format!("data: {data}"))), Ok(Bytes::new())]).boxed();
+        let out: Vec<_> = frames(
+            lines,
+            Box::new(Pending),
+            Format::Claude,
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        if expected_error {
+            let error = out
+                .last()
+                .expect("EOF error")
+                .as_ref()
+                .expect_err("missing terminal must fail");
+            assert_eq!(error.status, 502);
+            assert_eq!(error.scope, FailureScope::Request);
+        } else {
+            assert!(out.iter().all(Result::is_ok), "{out:?}");
+        }
     }
 }

@@ -456,6 +456,66 @@
     ]
   },
   {
+    "name": "ws_request_fault_headers",
+    "config": "host: \"\"\n",
+    "credentials": [
+      {
+        "id": "codex-ws.json",
+        "attributes": {
+          "api_key": "sk-fake-ws",
+          "websockets": "true"
+        },
+        "models": [
+          "gpt-fixture"
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "send": "{\"type\":\"response.create\",\"model\":\"gpt-fixture\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"huge\"}]}]}",
+        "read": "close",
+        "upstream": [
+          {
+            "events": [
+              "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"too long\"},\"headers\":{\"x-request-id\":\"req-1\"}}"
+            ]
+          }
+        ],
+        "frames": [
+          {
+            "text": "{\"type\":\"error\",\"status\":400,\"headers\":{\"X-Request-Id\":\"req-1\"},\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}"
+          },
+          {
+            "close": 1006,
+            "reason": "unexpected EOF"
+          }
+        ]
+      }
+    ],
+    "upstream": [
+      {
+        "kind": "ws_dial",
+        "headers": {
+          "authorization": "Bearer sk-fake-ws",
+          "connection": "Upgrade",
+          "conversation_id": "70cbe0cf-4e79-509c-a0fb-cefb3454059d",
+          "openai-beta": "responses_websockets=2026-02-06",
+          "originator": "codex-tui",
+          "sec-websocket-extensions": "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+          "sec-websocket-key": "Q5z/qF1SF29o9Duudnt0sQ==",
+          "sec-websocket-version": "13",
+          "session_id": "70cbe0cf-4e79-509c-a0fb-cefb3454059d",
+          "upgrade": "websocket",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
+        }
+      },
+      {
+        "kind": "ws_frame",
+        "body": "{\"model\":\"gpt-fixture\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"huge\"}]}],\"stream\":true,\"store\":false,\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"tools\":[{\"type\":\"image_generation\",\"output_format\":\"png\"}],\"prompt_cache_key\":\"70cbe0cf-4e79-509c-a0fb-cefb3454059d\",\"type\":\"response.create\"}"
+      }
+    ]
+  },
+  {
     "name": "ws_quota_silent_close",
     "config": "host: \"\"\n",
     "credentials": [

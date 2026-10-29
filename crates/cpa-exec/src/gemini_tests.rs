@@ -875,3 +875,43 @@ async fn apply_patch_hooks_follow_go_order() {
     );
     assert_eq!(*seen.lock().unwrap(), [r#"{"a":1}"#, r#"{"b":2}"#, "finalize"]);
 }
+
+#[tokio::test]
+async fn claude_target_eof_requires_gemini_finish_signal() {
+    for terminal in [
+        None,
+        Some(r#"{"candidates":[{"finishReason":"STOP"}]}"#),
+        Some(r#"{"response":{"promptFeedback":{"blockReason":"SAFETY"}}}"#),
+    ] {
+        let req =
+            request(&serde_json::json!({"op":"stream","source":"claude","model":"gemini-2.5-flash","payload":"{}"}));
+        let output = Output::new(&req, Format::Gemini, b"{}");
+        let mut lines = vec![Ok(Bytes::from_static(
+            br#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}"#,
+        ))];
+        if let Some(terminal) = terminal {
+            lines.push(Ok(Bytes::from(format!("data: {terminal}"))));
+        }
+        let out: Vec<_> = gemini_lines(futures_util::stream::iter(lines).boxed(), output, Format::Gemini)
+            .collect()
+            .await;
+        if terminal.is_none() {
+            let error = out
+                .last()
+                .unwrap()
+                .as_ref()
+                .expect_err("missing finishReason must fail");
+            assert_eq!(error.status, 502);
+            assert_eq!(error.scope, FailureScope::Request);
+            let forwarded = out
+                .iter()
+                .filter_map(|item| item.as_ref().ok())
+                .flat_map(|bytes| bytes.iter().copied())
+                .collect::<Vec<_>>();
+            assert!(String::from_utf8_lossy(&forwarded).contains("partial"));
+            assert!(!String::from_utf8_lossy(&forwarded).contains("message_stop"));
+        } else {
+            assert!(out.iter().all(Result::is_ok), "{out:?}");
+        }
+    }
+}

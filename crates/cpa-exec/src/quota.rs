@@ -72,7 +72,7 @@ pub(crate) fn shared_rejection(headers: &HeaderMap) -> bool {
 /// rejection cools only the model, like any other 429.
 pub(crate) fn classify(mut error: ExecError, model_level_cooling: bool) -> ExecError {
     if (400..600).contains(&error.status) {
-        error.retry_after = rate_limit_reset(&error.headers);
+        error.retry_after = rate_limit_reset_for_error(&error.headers, &error.body);
     }
     if error.status == 429 {
         let value: serde_json::Value = serde_json::from_slice(&error.body).unwrap_or_default();
@@ -96,9 +96,88 @@ pub(crate) fn classify(mut error: ExecError, model_level_cooling: bool) -> ExecE
     error
 }
 
-/// `ParseClaudeRateLimitReset` now, with Go's 1–30 s fuzz.
-pub(crate) fn rate_limit_reset(headers: &HeaderMap) -> Option<Duration> {
-    reset(headers, SystemTime::now(), fuzz())
+/// Go db1bab01: an explicit per-minute envelope cannot inherit an unclassified quota reset.
+pub(crate) fn rate_limit_reset_for_error(headers: &HeaderMap, body: &[u8]) -> Option<Duration> {
+    let now = SystemTime::now();
+    let quota_status = ["status", "5h-status", "7d-status", "7d_oi-status", "overage-status"]
+        .iter()
+        .any(|suffix| {
+            headers
+                .get_all(format!("anthropic-ratelimit-unified-{suffix}"))
+                .iter()
+                .any(|v| !String::from_utf8_lossy(v.as_bytes()).trim().is_empty())
+        });
+    let mut values = headers.get_all("retry-after").iter();
+    let short = match (values.next(), values.next()) {
+        (Some(value), None) => value
+            .to_str()
+            .ok()
+            .and_then(|raw| retry_after(raw, now))
+            .and_then(|at| at.duration_since(now).ok())
+            .is_some_and(|delay| !delay.is_zero() && delay <= MAX_WINDOW),
+        _ => false,
+    };
+    if quota_status || !short || !per_minute_body(body) {
+        return reset(headers, now, fuzz());
+    }
+    let mut headers = headers.clone();
+    headers.remove("anthropic-ratelimit-unified-reset");
+    reset(&headers, now, fuzz())
+}
+
+fn per_minute_body(body: &[u8]) -> bool {
+    use cpa_common::gostr::GoStr;
+    use cpa_common::json as gj;
+    fn key_is(key: &[u8], escaped: bool, expected: &str) -> bool {
+        use cpa_common::gostr::GoStr;
+        if escaped {
+            String::from_utf8_lossy(&cpa_common::json::unescape(key)).go_eq_fold(expected)
+        } else {
+            String::from_utf8_lossy(key).go_eq_fold(expected)
+        }
+    }
+    if !gj::std_valid(body) || body.trim_ascii().first() != Some(&b'{') {
+        return false;
+    }
+    let (mut kind, mut message) = (String::new(), String::new());
+    let mut valid = true;
+    // Decode struct fields in document order: duplicate objects merge, null preserves
+    // fields, and a type error survives a later valid duplicate, as in encoding/json.
+    gj::object_members(body, |key, escaped, error| {
+        if !key_is(key, escaped, "error") || error == b"null" {
+            return true;
+        }
+        if error.first() != Some(&b'{') {
+            valid = false;
+            return false;
+        }
+        gj::object_members(error, |key, escaped, value| {
+            let target = if key_is(key, escaped, "type") {
+                &mut kind
+            } else if key_is(key, escaped, "message") {
+                &mut message
+            } else {
+                return true;
+            };
+            if value == b"null" {
+                return true;
+            }
+            match gj::go_unquote(value) {
+                Some(text) => *target = text,
+                None => valid = false,
+            }
+            valid
+        });
+        valid
+    });
+    valid
+        && kind == "rate_limit_error"
+        && [
+            "this request would exceed the requests per minute rate limit. please try again later.",
+            "this request would exceed the input tokens per minute rate limit. please try again later.",
+            "this request would exceed the output tokens per minute rate limit. please try again later.",
+        ]
+        .contains(&message.trim().go_lower().as_str())
 }
 
 fn fuzz() -> Duration {
@@ -265,6 +344,105 @@ impl Observations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_minute_limits_keep_short_retry_windows() {
+        let horizon = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+        for metric in ["requests", "input tokens", "output tokens"] {
+            let mut error = ExecError::local(429, FailureScope::Model, "");
+            error.headers = Box::new(headers(&[
+                ("retry-after", "5"),
+                ("anthropic-ratelimit-unified-reset", &horizon.to_string()),
+            ]));
+            error.body = format!(r#"{{"error":{{"type":"rate_limit_error","message":"This request would exceed the {metric} per minute rate limit. Please try again later."}}}}"#).into();
+            let result = classify(error, false);
+            assert!(
+                result
+                    .retry_after
+                    .is_some_and(|delay| delay >= Duration::from_secs(5) && delay <= Duration::from_secs(35)),
+                "{metric}: {:?}",
+                result.retry_after
+            );
+        }
+    }
+
+    #[test]
+    fn minute_envelopes_preserve_go_field_merging_and_decode_errors() {
+        let horizon = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+        let message = "This request would exceed the requests per minute rate limit. Please try again later.";
+        for (body, short) in [
+            (
+                format!(r#"{{"ERROR":{{"TYPE":"rate_limit_error","MESSAGE":"{message}"}}}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"error":{{"type":"rate_limit_error","message":"{message}"}},"error":null}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"error":{{"type":"rate_limit_error"}},"error":{{"message":"{message}"}}}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"error":{{"type":"rate_limit_error","message":"{message}","message":null}}}}"#),
+                true,
+            ),
+            (
+                format!(r#"{{"error":{{"type":"rate_limit_error","message":1,"message":"{message}"}}}}"#),
+                false,
+            ),
+        ] {
+            let mut error = ExecError::local(429, FailureScope::Model, "");
+            error.headers = Box::new(headers(&[
+                ("retry-after", "5"),
+                ("anthropic-ratelimit-unified-reset", &horizon.to_string()),
+            ]));
+            error.body = body.into();
+            let delay = classify(error, false).retry_after.unwrap();
+            assert_eq!(delay <= Duration::from_secs(35), short);
+        }
+    }
+
+    #[test]
+    fn ambiguous_minute_errors_keep_conservative_quota_windows() {
+        let horizon = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600;
+        let minute = "This request would exceed the requests per minute rate limit. Please try again later.";
+        let body = format!(r#"{{"error":{{"type":"rate_limit_error","message":"{minute}"}}}}"#);
+        for case in 0..5 {
+            let mut error = ExecError::local(429, FailureScope::Model, "");
+            error.headers = Box::new(headers(&[
+                ("retry-after", "5"),
+                ("anthropic-ratelimit-unified-reset", &horizon.to_string()),
+            ]));
+            error.body = body.clone().into();
+            match case {
+                0 => {
+                    error
+                        .headers
+                        .insert("anthropic-ratelimit-unified-5h-status", "rejected".parse().unwrap());
+                }
+                1 => {
+                    error.headers.append("retry-after", "5".parse().unwrap());
+                }
+                2 => {
+                    error.headers.insert("retry-after", "0".parse().unwrap());
+                }
+                3 => {
+                    error.body =
+                        format!(r#"{{"error":{{"type":"rate_limit_error","message":"Not {minute}"}}}}"#).into();
+                }
+                _ => {
+                    error.body = format!(r#"{{"error":{{"type":"other_error","message":"{minute}"}}}}"#).into();
+                }
+            }
+            assert!(
+                classify(error, false)
+                    .retry_after
+                    .is_some_and(|delay| delay > Duration::from_secs(3500)),
+                "case {case}"
+            );
+        }
+    }
 
     fn headers(values: &[(&str, &str)]) -> HeaderMap {
         values

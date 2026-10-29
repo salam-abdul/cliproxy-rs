@@ -161,7 +161,21 @@ async fn go_reference_scenarios() {
             s["output"].as_str().map(norm),
             "{name}: output"
         );
-        let want_stream = client_bytes(client, alt, s["chunks"].as_array().map_or(&[][..], Vec::as_slice));
+        // G30780351 makes packed frames equivalent to the separately recorded frames.
+        let expected = match name {
+            "stream_openai_two_events_one_chunk" => {
+                scenarios.iter().find(|s| s["name"] == "stream_openai_sse").unwrap()
+            }
+            "stream_gemini_two_events_one_chunk" => {
+                scenarios.iter().find(|s| s["name"] == "stream_gemini_sse").unwrap()
+            }
+            _ => s,
+        };
+        let want_stream = client_bytes(
+            client,
+            alt,
+            expected["chunks"].as_array().map_or(&[][..], Vec::as_slice),
+        );
         assert_eq!(
             norm(&String::from_utf8_lossy(&streamed)),
             norm(&String::from_utf8_lossy(&want_stream)),
@@ -282,4 +296,182 @@ fn colon_spacing_matches_go_rules() {
     );
     assert_eq!(ensure_colon_spaced_json(b"data: {\"a\":1}"), b"data: {\"a\":1}");
     assert_eq!(ensure_colon_spaced_json(b"  "), b"  ");
+}
+
+#[tokio::test]
+async fn multiframe_relay_chunks_preserve_every_translation_and_usage_frame() {
+    use cpa_core::exec::{UsageObserver, UsageSink};
+    #[derive(Default)]
+    struct Observed(std::sync::Mutex<Vec<Vec<u8>>>);
+    impl UsageObserver for Observed {
+        fn response_body(&self, _: Format, _: &[u8]) {}
+        fn request(&self, _: Format, _: &[u8]) {}
+        fn response_line(&self, _: Format, data: &[u8]) {
+            self.0.lock().unwrap().push(data.to_vec());
+        }
+    }
+    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    let created = regex::Regex::new(r#""created(_at)?": ?1[0-9]{9}([,}])"#).unwrap();
+    let norm = |bytes: &[u8]| {
+        created
+            .replace_all(&String::from_utf8_lossy(bytes), r#""created$1":<unix>$2"#)
+            .into_owned()
+    };
+    for name in ["stream_openai_bare", "stream_claude_bare", "stream_responses_bare"] {
+        let scenario = fixture["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap();
+        let relay = Arc::new(Relay::default());
+        let (session, mut frames) = relay.connect_as(CHANNEL.into());
+        let executor = AiStudioExecutor { relay };
+        let observed = Arc::new(Observed::default());
+        let mut req = request(scenario);
+        req.usage = UsageSink::new(observed.clone());
+        let mut packed = String::from(": keepalive\r\n\r\n");
+        for reply in scenario["replies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["type"] == "stream_chunk")
+        {
+            let payload = reply["payload"]["data"].as_str().unwrap();
+            packed += &format!("event: message\r\nid: synthetic\r\ndata: {payload}\r\n\r\n");
+        }
+        let browser = async {
+            let sent = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let id = serde_json::from_str::<Value>(&sent).unwrap()["id"].clone();
+            for (kind, payload) in [
+                ("stream_start", serde_json::json!({"status":200})),
+                ("stream_chunk", serde_json::json!({"data": packed})),
+                ("stream_end", serde_json::json!({})),
+            ] {
+                session
+                    .receive(
+                        serde_json::json!({"id":id,"type":kind,"payload":payload})
+                            .to_string()
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        let run = async {
+            let cfg = Config::default();
+            let credential = Credential::relay_session(CHANNEL);
+            let response = executor.execute(&credential, req, &cfg).await.unwrap();
+            let ResponseBody::Stream(mut stream) = response.body else {
+                panic!("expected stream");
+            };
+            let mut out = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                out.extend_from_slice(&chunk.unwrap());
+            }
+            out
+        };
+        let (_, actual) = tokio::join!(browser, run);
+        let format = Format::parse(scenario["source"].as_str().unwrap()).unwrap();
+        let expected = client_bytes(format, false, scenario["chunks"].as_array().unwrap());
+        assert_eq!(norm(&actual), norm(&expected), "{name}");
+        let lines = observed.0.lock().unwrap();
+        assert_eq!(lines.len(), 2, "{name}: observe each frame");
+        assert!(String::from_utf8_lossy(lines.last().unwrap()).contains("candidatesTokenCount"));
+    }
+}
+
+#[test]
+fn relay_frames_preserve_bare_json_and_sse_data_boundaries() {
+    for bare in [b"{\n  \"nested\": {\n\n\"value\":1}}".as_slice(), b"[DONE]"] {
+        assert_eq!(split_relay_frames(bare), [bare.to_vec()]);
+    }
+    assert_eq!(
+        split_relay_frames(
+            b": comment\r\n\r\nevent: message\r\nid: synthetic\r\ndata: {\"a\":1}\r\n\r\nretry: 1\ndata: {\"b\":2}"
+        ),
+        [b"data: {\"a\":1}\n\n".to_vec(), b"data: {\"b\":2}\n\n".to_vec()]
+    );
+    assert_eq!(
+        split_relay_frames(b"data: {\n data: \"value\":1}\n\n"),
+        [b"data: {\ndata: \"value\":1}\n\n".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn relay_disconnect_is_terminal_but_declared_browser_error_keeps_upstream_policy() {
+    for (streaming, disconnected) in [(true, true), (true, false), (false, true), (false, false)] {
+        let relay = Arc::new(Relay::default());
+        let (session, mut frames) = relay.connect_as(CHANNEL.into());
+        let executor = AiStudioExecutor { relay };
+        let req = request(
+            &serde_json::json!({"op":if streaming {"stream"} else {"execute"},"source":"openai","model":"gemini-2.5-flash","payload":"{}"}),
+        );
+        let browser = async {
+            let sent = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let id = serde_json::from_str::<Value>(&sent).unwrap()["id"].clone();
+            session
+                .receive(
+                    serde_json::json!({"id":id,"type":"stream_start","payload":{"status":200}})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            if disconnected {
+                session.close("synthetic disconnect");
+            } else {
+                session
+                    .receive(
+                        serde_json::json!({"id":id,"type":"error","payload":{"error":"declared failure"}})
+                            .to_string()
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        let run = async {
+            match executor
+                .execute(&Credential::relay_session(CHANNEL), req, &Config::default())
+                .await
+            {
+                Err(error) => error,
+                Ok(response) => {
+                    let ResponseBody::Stream(stream) = response.body else {
+                        panic!("expected stream");
+                    };
+                    stream
+                        .collect::<Vec<_>>()
+                        .await
+                        .last()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap_err()
+                        .clone()
+                }
+            }
+        };
+        let (_, error) = tokio::join!(browser, run);
+        assert_eq!(
+            error.scope,
+            if disconnected {
+                FailureScope::Request
+            } else {
+                FailureScope::Credential
+            }
+        );
+        assert!(error.headers.is_empty());
+        assert!(String::from_utf8_lossy(&error.body).contains(if disconnected {
+            "synthetic disconnect"
+        } else {
+            "declared failure"
+        }));
+    }
 }

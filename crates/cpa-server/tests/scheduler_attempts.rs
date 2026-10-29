@@ -24,6 +24,7 @@ enum Mode {
     Transport,
     BeforeCommit,
     AfterCommit,
+    EmptyStream,
 }
 
 struct Mock {
@@ -37,6 +38,7 @@ async fn upstream(State(mock): State<Arc<Mock>>, req: Request) -> Response {
     let token = req.headers()["authorization"].to_str().unwrap().to_owned();
     mock.seen.lock().unwrap().push(token.clone());
     match mock.mode {
+        Mode::EmptyStream => ([("content-type", "text/event-stream")], "").into_response(),
         Mode::Quota => (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")], "quota").into_response(),
         Mode::FirstFails if token == "Bearer fake-a" => {
             (StatusCode::SERVICE_UNAVAILABLE, "first failed").into_response()
@@ -128,8 +130,10 @@ impl Fixture {
                 )
             })
             .collect();
+        let mut config = Config::parse("").unwrap();
+        config.auth_dir = std::env::temp_dir().join(format!("cpa-scheduler-{}", uuid::Uuid::new_v4()));
         let rt = Arc::new(cpa_server::testing::runtime(
-            Config::parse("").unwrap(),
+            config,
             credentials,
             Executors {
                 claude: ClaudeExecutor::new(upstream_url).unwrap(),
@@ -327,28 +331,31 @@ async fn stop_continue_and_force_cooldown_are_independent() {
 }
 
 #[tokio::test]
-async fn transport_and_precommit_faults_fail_over_without_poisoning() {
-    for mode in [Mode::Transport, Mode::BeforeCommit] {
-        let fixture = Fixture::new(mode, &[serde_json::json!({}), serde_json::json!({})], Policy::default()).await;
-        for _ in 0..2 {
-            let response = fixture.request(matches!(mode, Mode::BeforeCommit)).await;
-            assert_eq!(response.status().as_u16(), 200);
-            let text = response.text().await.unwrap();
-            assert!(!text.contains("partial"));
-        }
-        assert_eq!(
-            fixture.seen(),
-            ["Bearer fake-a", "Bearer fake-b", "Bearer fake-a", "Bearer fake-b"]
-        );
-        assert_eq!(
-            fixture.rt.store().stats(),
-            AttemptStats {
-                success: 2,
-                failure: 2,
-                cancelled: 0
-            }
-        );
+async fn transport_faults_fail_over_without_poisoning() {
+    let fixture = Fixture::new(
+        Mode::Transport,
+        &[serde_json::json!({}), serde_json::json!({})],
+        Policy::default(),
+    )
+    .await;
+    for _ in 0..2 {
+        let response = fixture.request(false).await;
+        assert_eq!(response.status().as_u16(), 200);
+        let text = response.text().await.unwrap();
+        assert!(!text.contains("partial"));
     }
+    assert_eq!(
+        fixture.seen(),
+        ["Bearer fake-a", "Bearer fake-b", "Bearer fake-a", "Bearer fake-b"]
+    );
+    assert_eq!(
+        fixture.rt.store().stats(),
+        AttemptStats {
+            success: 2,
+            failure: 2,
+            cancelled: 0
+        }
+    );
 }
 
 #[tokio::test]
@@ -379,4 +386,181 @@ async fn postcommit_stream_fault_is_terminal_and_never_replayed() {
             cancelled: 0
         }
     );
+}
+
+/// Go conductor_stream.go and conductor_execution.go: a bootstrap failure that a
+/// request-scoped rule stops comes back as an error, not as a stream, so the handler's
+/// `bootstrap-retries` never re-run it; an unstopped one is re-run.
+#[tokio::test]
+async fn stopped_bootstrap_failure_skips_bootstrap_retries() {
+    let calls = Arc::new(Mutex::new(0));
+    let failed = r#"data: {"type":"response.failed","response":{"error":{"type":"server_error","status":503,"message":"boom"}}}"#;
+    let app = axum::Router::new()
+        .fallback(move |State(calls): State<Arc<Mutex<usize>>>| async move {
+            *calls.lock().unwrap() += 1;
+            (
+                [
+                    ("content-type", "text/event-stream"),
+                    ("cache-control", "upstream-bootstrap"),
+                ],
+                format!("{failed}\n\n"),
+            )
+                .into_response()
+        })
+        .with_state(calls.clone());
+    let (upstream_url, upstream) = serve(app).await;
+    let stop = serde_json::json!([{"status":503,"match":["boom"],"action":"stop"}]);
+    for (rules, expected_calls) in [(Some(stop), 1), (None, 2)] {
+        *calls.lock().unwrap() = 0;
+        let mut metadata = serde_json::json!({"type":"codex","disable_cooling":true});
+        if let Some(rules) = &rules {
+            metadata["request_scoped_errors"] = rules.clone();
+        }
+        let mut credential = Credential::from_file(
+            Path::new("/mock"),
+            &Path::new("/mock").join("codex.json"),
+            metadata.as_object().unwrap().clone(),
+        )
+        .unwrap();
+        for (k, v) in [
+            ("api_key", "sk-fake"),
+            ("base_url", upstream_url.as_str()),
+            ("auth_kind", "apikey"),
+        ] {
+            credential.attributes.insert(k.into(), v.into());
+        }
+        let config = "routing:\n  retry:\n    request-retry: 0\nrequests:\n  passthrough-headers: true\n  streaming:\n    bootstrap-retries: 1\n";
+        let mut config = Config::parse(config).unwrap();
+        config.auth_dir = std::env::temp_dir().join(format!("cpa-bootstrap-{}", uuid::Uuid::new_v4()));
+        let rt = Arc::new(cpa_server::testing::runtime(
+            config,
+            vec![cpa_server::testing::local(credential)],
+            Executors {
+                claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let (url, proxy) = serve(router(rt)).await;
+        let response = wreq::Client::new()
+            .post(format!("{url}/v1/responses"))
+            .body(r#"{"model":"gpt-5.5","stream":true,"input":"hi"}"#)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let addon = response.headers().get("cache-control").is_some();
+        let text = response.text().await.unwrap();
+        assert_eq!(
+            addon,
+            rules.is_none(),
+            "only nonstopping bootstrap errors expose stream addons"
+        );
+        assert_eq!(status, 503, "{text}");
+        assert_eq!(*calls.lock().unwrap(), expected_calls, "rules {rules:?}");
+        proxy.abort();
+    }
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn ambiguous_bootstrap_eof_never_replays_even_with_continue_rules() {
+    for mode in [Mode::EmptyStream, Mode::BeforeCommit] {
+        let continue_rule = serde_json::json!({"request_scoped_errors":[{"status":502,"action":"continue","match":["upstream"]}], "disable_cooling":true});
+        let fixture = Fixture::new(mode, &[continue_rule.clone(), continue_rule], Policy::default()).await;
+        let mut config = Config::parse(
+            "routing:\n  retry:\n    request-retry: 2\nrequests:\n  streaming:\n    bootstrap-retries: 2\n",
+        )
+        .unwrap();
+        config.auth_dir = fixture.rt.config().auth_dir.clone();
+        fixture.rt.publish_config(config);
+        let response = fixture.request(true).await;
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, 502, "{body}");
+        assert_eq!(
+            fixture.seen(),
+            ["Bearer fake-a"],
+            "ambiguous inference must never replay"
+        );
+    }
+}
+
+#[tokio::test]
+async fn successful_empty_compat_stream_never_replays() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let app = axum::Router::new().fallback(move || {
+        let seen = seen.clone();
+        async move {
+            seen.fetch_add(1, Ordering::SeqCst);
+            (
+                [
+                    ("content-type", "text/event-stream"),
+                    ("cache-control", "internal-empty"),
+                ],
+                "",
+            )
+                .into_response()
+        }
+    });
+    let (upstream_url, upstream) = serve(app).await;
+    let mut config=Config::parse(&format!("config-version: 8\nrouting:\n  retry:\n    request-retry: 2\nrequests:\n  passthrough-headers: true\n  streaming:\n    bootstrap-retries: 2\napi-keys:\n  openai-compatibility:\n    - name: Empty\n      base-url: {upstream_url}/v1\n      models: [{{name: empty-model}}]\n      keys: [{{api-key: fake-a}}, {{api-key: fake-b}}]\n")).unwrap();
+    config.auth_dir = std::env::temp_dir().join(format!("cpa-empty-{}", uuid::Uuid::new_v4()));
+    let mut credentials = cpa_core::config::credentials::from_config(&config);
+    assert_eq!(credentials.len(), 2);
+    for credential in &mut credentials {
+        credential.metadata.insert("disable_cooling".into(), true.into());
+        credential.metadata.insert(
+            "request_scoped_errors".into(),
+            serde_json::json!([{"status":500,"match":["empty_stream"],"action":"continue"}]),
+        );
+    }
+    let rt = Arc::new(cpa_server::testing::runtime(
+        config,
+        credentials,
+        Executors {
+            claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let (url, proxy) = serve(router(rt)).await;
+    for (path, body, expected_status) in [
+        (
+            "/v1/chat/completions",
+            r#"{"model":"empty-model","stream":true,"messages":[{"role":"user","content":"fixture"}]}"#,
+            500,
+        ),
+        (
+            "/v1/responses",
+            r#"{"model":"empty-model","stream":true,"input":"fixture"}"#,
+            502,
+        ),
+    ] {
+        calls.store(0, Ordering::SeqCst);
+        let response = wreq::Client::new()
+            .post(format!("{url}{path}"))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let addon = response.headers().get("cache-control").is_some();
+        let body = response.text().await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "accepted empty inference must never replay: {path} {status} {body}"
+        );
+        assert_eq!(status, expected_status, "{body}");
+        assert!(!addon, "terminal local errors keep classification headers private");
+    }
+    proxy.abort();
+    upstream.abort();
 }

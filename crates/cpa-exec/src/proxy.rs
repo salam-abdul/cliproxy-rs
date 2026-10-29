@@ -677,7 +677,7 @@ impl RawUpstream {
         Upstream {
             status: self.status,
             headers: self.headers,
-            body: self.body.map(|r| r.map_err(body_error)).boxed(),
+            body: crate::upstream::body_after_response(self.status, self.body.map(|r| r.map_err(body_error)).boxed()),
         }
     }
 
@@ -697,7 +697,7 @@ impl RawUpstream {
         Upstream {
             status: self.status,
             headers: self.headers,
-            body: self.body.map(move |r| r.map_err(map)).boxed(),
+            body: crate::upstream::body_after_response(self.status, self.body.map(move |r| r.map_err(map)).boxed()),
         }
     }
 }
@@ -1450,6 +1450,51 @@ pub type SharedGoClients = Arc<GoClients>;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn successful_body_reads_are_terminal_in_both_http_adapters() {
+        for status in [200, 206, 299, 302, 400, 503] {
+            for scanned in [false, true] {
+                let body = futures_util::stream::iter([
+                    Ok(Bytes::from_static(b"partial")),
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "synthetic truncation",
+                    )),
+                ])
+                .boxed();
+                let raw = RawUpstream {
+                    status,
+                    version: http::Version::HTTP_11,
+                    headers: HeaderMap::new(),
+                    body,
+                };
+                let upstream = if scanned { raw.scanned() } else { raw.sanitized() };
+                let out = upstream.body.collect::<Vec<_>>().await;
+                assert_eq!(out[0].as_ref().unwrap().as_ref(), b"partial");
+                let error = out[1].as_ref().unwrap_err();
+                assert_eq!(
+                    error.scope,
+                    if (200..300).contains(&status) {
+                        FailureScope::Request
+                    } else {
+                        FailureScope::Transport
+                    },
+                    "status={status}, scanned={scanned}"
+                );
+                assert_eq!(error.status, 502);
+                assert_eq!(
+                    error.body.as_ref(),
+                    if scanned {
+                        b"unexpected EOF".as_slice()
+                    } else {
+                        b"upstream request failed"
+                    }
+                );
+                assert!(error.headers.is_empty());
+            }
+        }
+    }
+
     use super::*;
 
     /// A body read line by line fails with Go's scanner text `unexpected EOF` only when
@@ -1504,7 +1549,7 @@ mod tests {
                     error.status,
                     error.scope
                 ),
-                (want.to_owned(), 502, FailureScope::Transport),
+                (want.to_owned(), 502, FailureScope::Request),
                 "{head:?} reset={reset}"
             );
         }

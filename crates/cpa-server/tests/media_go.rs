@@ -235,13 +235,25 @@ fn canonical_form(s: &str) -> String {
 #[tokio::test]
 async fn media_routes_match_go() {
     let fixture: Fixture = serde_json::from_str(include_str!("fixtures/media_go.json")).expect("fixture parses");
+    replay_media_fixture(fixture).await;
+}
+
+#[tokio::test]
+async fn passthrough_error_headers_match_go() {
+    let fixture = serde_json::from_str(include_str!("fixtures/passthrough_errors_go.json")).unwrap();
+    replay_media_fixture(fixture).await;
+}
+
+async fn replay_media_fixture(fixture: Fixture) {
+    static REGISTRY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _registry = REGISTRY.lock().await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let upstream = Arc::new(Capture::default());
     tokio::spawn(capture(listener, upstream.clone(), addr.clone()));
 
-    let auth_dir = std::env::temp_dir().join(format!("cpa-media-{}", std::process::id()));
+    let auth_dir = std::env::temp_dir().join(format!("cpa-test-{}", uuid::Uuid::new_v4()));
     let config = fixture
         .config
         .replace("UPSTREAM", &addr)
@@ -324,11 +336,22 @@ async fn media_routes_match_go() {
             .collect();
 
         let mut diffs = Vec::new();
-        if status != s.status {
-            diffs.push(format!("status: go {} rust {status}", s.status));
+        let framing = s.name == "compat_stream_empty";
+        // Empty accepted streams are terminal here: no inference replay or stream addon.
+        let expected_status = s.status;
+        if status != expected_status {
+            diffs.push(format!("status: expected {expected_status} rust {status}"));
         }
-        let compare_body = !STATUS_ONLY.contains(&s.name.as_str());
+        let compare_body = !STATUS_ONLY.contains(&s.name.as_str()) && !framing;
         let mut want_headers = s.response_headers.clone();
+        if framing {
+            want_headers.remove("Cache-Control");
+            let error = serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            assert_eq!(
+                error,
+                serde_json::json!({"error":{"message":"empty_stream: upstream stream closed before first payload","type":"server_error","code":"internal_server_error"}})
+            );
+        }
         if !compare_body {
             headers.remove("Content-Length");
             want_headers.remove("Content-Length");
@@ -339,7 +362,10 @@ async fn media_routes_match_go() {
         if compare_body && (response != s.response || response_b64 != s.response_b64) {
             diffs.push(format!("body:\n  go   {}\n  rust {response}", s.response));
         }
-        if !compare_body && let Some(diff) = gateway_error_diff(&s.response, &response) {
+        if !compare_body
+            && !framing
+            && let Some(diff) = gateway_error_diff(&s.response, &response)
+        {
             diffs.push(diff);
         }
         if requests != s.requests {

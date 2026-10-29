@@ -447,6 +447,12 @@ async fn upstream_request_fault_is_shown_then_closed() {
     run("ws_request_fault_exposed").await;
 }
 
+/// v8.0.35: the error frame's `headers` come back on the error event, canonicalized.
+#[tokio::test]
+async fn upstream_request_fault_keeps_its_frame_headers() {
+    run("ws_request_fault_headers").await;
+}
+
 #[tokio::test]
 async fn quota_failure_closes_silently() {
     run("ws_quota_silent_close").await;
@@ -653,6 +659,7 @@ fn every_go_scenario_has_a_test() {
             "previous_not_found_then_create",
             "prewarm_then_followup",
             "ws_request_fault_exposed",
+            "ws_request_fault_headers",
             "ws_quota_silent_close",
             "ws_continuation_needs_replay",
             "ws_upstream_closes_between_turns",

@@ -224,10 +224,17 @@ async fn non_stream_captured(
     relayed: &HttpRequest,
 ) -> Result<wsrelay::HttpResponse, ExecError> {
     capture_request(capture, credential, relayed);
-    let resp = relay.non_stream(&credential.id, relayed).await.map_err(|e| {
-        capture.record(CaptureEvent::ResponseError(&e));
-        plain_error(e)
-    })?;
+    let resp = relay
+        .non_stream_with_origin(&credential.id, relayed)
+        .await
+        .map_err(|error| {
+            capture.record(CaptureEvent::ResponseError(&error.message));
+            if error.origin == wsrelay::StreamErrorOrigin::Disconnected {
+                ExecError::local(500, FailureScope::Request, error.message)
+            } else {
+                plain_error(error.message)
+            }
+        })?;
     capture_metadata(capture, resp.status, &resp.headers);
     if !resp.body.is_empty() {
         capture.record(CaptureEvent::ResponseChunk(&resp.body));
@@ -291,10 +298,11 @@ impl AiStudioExecutor {
         };
         capture_request(&capture, credential, &relayed);
         let mut events = self.relay.stream(&credential.id, &relayed).await.map_err(fail)?;
-        let first = events
-            .recv()
-            .await
-            .ok_or_else(|| fail("wsrelay: stream closed before start".into()))?;
+        let first = events.recv().await.ok_or_else(|| {
+            let message = "wsrelay: stream closed before start";
+            capture.record(CaptureEvent::ResponseError(message));
+            ExecError::local(500, FailureScope::Request, message)
+        })?;
         if first.status > 0 && first.status != 200 {
             capture_metadata(&capture, first.status, &first.headers);
             if !first.payload.is_empty() {
@@ -424,16 +432,26 @@ impl Events {
     }
 
     fn process(&mut self, event: Option<StreamEvent>) {
-        // The relay ends every stream with a terminal event; a vanished one ends it too.
         let Some(event) = event else {
-            let end = self.output.end();
-            self.emit(end);
-            self.ended = true;
+            self.capture.record(CaptureEvent::ResponseError(
+                "wsrelay: stream closed before terminal event",
+            ));
+            self.fail(ExecError::local(
+                502,
+                FailureScope::Request,
+                "wsrelay: stream closed before terminal event",
+            ));
             return;
         };
         if let Some(error) = event.error {
             self.capture.record(CaptureEvent::ResponseError(&error));
-            self.fail(plain_error(format!("wsrelay: {error}")));
+            let message = format!("wsrelay: {error}");
+            let error = if event.error_origin == wsrelay::StreamErrorOrigin::Disconnected {
+                ExecError::local(500, FailureScope::Request, message)
+            } else {
+                plain_error(message)
+            };
+            self.fail(error);
             return;
         }
         let status_event = matches!(event.kind.as_str(), wsrelay::STREAM_START | wsrelay::HTTP_RESPONSE);
@@ -444,10 +462,14 @@ impl Events {
         match event.kind.as_str() {
             wsrelay::STREAM_CHUNK if !event.payload.is_empty() => {
                 self.capture.record(CaptureEvent::ResponseChunk(&event.payload));
-                let filtered = crate::gemini_stream::filter_sse_usage_metadata(&event.payload);
-                self.output.usage.response_line(Format::Gemini, &filtered);
-                let translated = self.output.translate(&filtered);
-                self.emit(translated);
+                for frame in split_relay_frames(&event.payload) {
+                    let filtered = crate::gemini_stream::filter_sse_usage_metadata(&frame);
+                    self.output.usage.response_line(Format::Gemini, &filtered);
+                    let translated = self.output.translate(&filtered);
+                    if self.emit(translated) {
+                        return;
+                    }
+                }
             }
             wsrelay::STREAM_END => {
                 let end = self.output.end();
@@ -472,6 +494,55 @@ impl Events {
             _ => {}
         }
     }
+}
+
+// Go `splitRelayFrames`: translate SSE data frames separately; bare JSON stays whole.
+fn split_relay_frames(payload: &[u8]) -> Vec<Vec<u8>> {
+    let start = payload
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(payload.len());
+    let trimmed = &payload[start..];
+    if ![b"data:".as_slice(), b"event:", b"id:", b"retry:", b":"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return vec![payload.to_vec()];
+    }
+    let mut normalized = Vec::with_capacity(payload.len());
+    let mut index = 0;
+    while index < payload.len() {
+        if payload[index..].starts_with(b"\r\n") {
+            index += 1;
+        }
+        normalized.push(payload[index]);
+        index += 1;
+    }
+    let mut frames = Vec::new();
+    let mut frame = Vec::new();
+    for line in normalized.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            if !frame.is_empty() {
+                frame.push(b'\n');
+                frames.push(std::mem::take(&mut frame));
+            }
+        } else {
+            let start = line
+                .iter()
+                .position(|byte| !matches!(byte, b' ' | b'\t'))
+                .unwrap_or(line.len());
+            let line = &line[start..];
+            if line.starts_with(b"data:") {
+                frame.extend_from_slice(line);
+                frame.push(b'\n');
+            }
+        }
+    }
+    if !frame.is_empty() {
+        frame.push(b'\n');
+        frames.push(frame);
+    }
+    frames
 }
 
 /// The provider key AI Studio sessions register under.

@@ -365,9 +365,10 @@ async fn wrong_methods_are_gin_no_route() {
 }
 
 /// `requests.passthrough-headers` (Go `downstreamHeadersFromExecutor`,
-/// `WriteUpstreamHeaders`, `WriteErrorResponse` addon): off by default; on, filtered
-/// upstream headers fill what the handler did not set, and an error's upstream
-/// headers come along. Filter expectations are the Go golden `upstream_headers`.
+/// `WriteUpstreamHeaders`): off by default; on, filtered upstream headers fill what the
+/// handler did not set. A Claude status error has no `Headers()`, so its upstream headers
+/// never come along (`passthrough_errors_go.json` has the Go goldens). Filter
+/// expectations are the Go golden `upstream_headers`.
 #[tokio::test]
 async fn passthrough_headers_follow_go() {
     let body = format!(r#"{{"model":"{MODEL}","max_tokens":5,"messages":[{{"role":"user","content":"hi"}}]}}"#);
@@ -389,7 +390,7 @@ async fn passthrough_headers_follow_go() {
         let bad = proxy(&config, vec![oauth("a.json", "fake-hdr-bad", serde_json::json!({}))]).await;
         let (status, headers, _) = post(&bad.url, "/v1/messages", &body).await;
         assert_eq!(status, 400);
-        assert_eq!(headers.get("x-upstream-id").is_some(), enabled, "{headers:?}");
+        assert!(headers.get("x-upstream-id").is_none(), "{headers:?}");
     }
 }
 

@@ -138,7 +138,8 @@ pub enum RemoteErrorKind {
 #[derive(Debug, Clone)]
 pub struct RemoteError {
     pub error: ExecError,
-    pub code: String,
+    /// Boxed to keep the error small (it travels in `Result`s).
+    pub code: Box<str>,
     pub kind: RemoteErrorKind,
 }
 
@@ -146,7 +147,7 @@ impl RemoteError {
     pub fn plain(error: ExecError, code: &str) -> Self {
         Self {
             error,
-            code: code.to_owned(),
+            code: code.into(),
             kind: RemoteErrorKind::Plain,
         }
     }

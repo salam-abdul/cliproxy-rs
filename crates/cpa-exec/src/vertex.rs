@@ -324,17 +324,22 @@ fn strip_tool_call_ids(body: Vec<u8>, source: Format) -> Vec<u8> {
 
 /// Vertex hands every scanned line, prefixes and blank lines included, to the
 /// translator; then the tool-input finalization and `[DONE]`.
-struct RawLines(Output);
+struct RawLines(Output, bool);
 
 impl LineState for RawLines {
     fn line(&mut self, line: &[u8]) -> Emit {
         // Go's reporter sees each raw line (model and usage, unfiltered).
         self.0.usage.response_line(Format::Gemini, line);
+        self.1 |= g::gemini_stream_has_finish_signal(line);
         self.0.translate(&g::line_event(line))
     }
 
     fn end(&mut self) -> Emit {
-        self.0.end_with_done()
+        self.0.end_with_finish_signal(self.1)
+    }
+
+    fn end_after_error(&mut self) -> Emit {
+        self.0.finalize()
     }
 
     fn flush(&mut self) -> Vec<Bytes> {
@@ -489,7 +494,7 @@ impl VertexExecutor {
         }
         let output = Output::new(req, Format::Gemini, &body);
         let lines = g::captured_lines(proxy::lines(upstream.body, g::MAX_LINE), capture.clone());
-        let stream = g::drive(lines, RawLines(output));
+        let stream = g::drive(lines, RawLines(output, false));
         Ok(ExecResponse {
             status: 200,
             headers: response_headers,

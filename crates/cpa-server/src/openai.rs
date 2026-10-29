@@ -643,6 +643,21 @@ fn stream_error_class(status: u16) -> (&'static str, &'static str) {
     }
 }
 
+fn nested_error_code(mut detail: Value) -> Value {
+    let existing = detail.get("code").filter(|v| !v.is_null());
+    if existing.is_some_and(|v| !gojson::trim(&gojson::gjson_string(Some(v))).is_empty()) {
+        return detail;
+    }
+    if detail["type"] == "invalid_request_error"
+        && detail["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("prompt is too long"))
+    {
+        detail["code"] = "context_length_exceeded".into();
+    }
+    detail
+}
+
 /// Go `openAIResponsesStreamErrorDetail`.
 fn stream_error_detail(status: u16, text: &str) -> Value {
     let (mut code, kind) = stream_error_class(status);
@@ -656,10 +671,10 @@ fn stream_error_detail(status: u16, text: &str) -> Value {
     let code_owned;
     if let Some(p) = &payload {
         if let Some(e) = p.get("error").filter(|e| e.is_object()) {
-            return e.clone();
+            return nested_error_code(e.clone());
         }
         if let Some(e) = p.get("response").and_then(|r| r.get("error")).filter(|e| e.is_object()) {
-            return e.clone();
+            return nested_error_code(e.clone());
         }
         if let Some(m) = p
             .get("message")
@@ -1009,6 +1024,62 @@ pub async fn compact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_overflow_stream_errors_get_a_context_code() {
+        for wrapper in ["error", "response.error"] {
+            for (code, expected) in [
+                (None, "context_length_exceeded"),
+                (Some(""), "context_length_exceeded"),
+                (Some("upstream_code"), "upstream_code"),
+            ] {
+                let mut error = serde_json::json!({"type":"invalid_request_error", "message":"prompt is too long: 210000 tokens > 200000 maximum"});
+                if let Some(code) = code {
+                    error["code"] = code.into();
+                }
+                let body = if wrapper == "error" {
+                    serde_json::json!({"error":error})
+                } else {
+                    serde_json::json!({"response":{"error":error}})
+                };
+                let detail = stream_error_detail(400, &body.to_string());
+                assert_eq!(detail["code"], expected);
+                assert_eq!(detail["type"], "invalid_request_error");
+            }
+        }
+        for error in [
+            serde_json::json!({"type":"invalid_request_error", "message":"some other error"}),
+            serde_json::json!({"type":"server_error", "message":"prompt is too long"}),
+        ] {
+            let body = serde_json::json!({"error":error});
+            assert!(stream_error_detail(400, &body.to_string()).get("code").is_none());
+        }
+    }
+
+    #[test]
+    fn prompt_overflow_after_pre_payload_keepalive_keeps_nested_code() {
+        for codex in [false, true] {
+            let mut writer = ResponsesSse::new(codex);
+            assert!(!writer.heartbeat().is_empty());
+            let error = ExecError::local(
+                400,
+                cpa_core::exec::FailureScope::Request,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: fixture","code":null}}"#,
+            );
+            let frames = writer.error(&error);
+            assert_eq!(frames.len(), 1);
+            let text = String::from_utf8_lossy(&frames[0]);
+            let data = text.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+            let body: Value = serde_json::from_str(data).unwrap();
+            let detail = if codex {
+                &body["response"]["error"]
+            } else {
+                &body["error"]
+            };
+            assert_eq!(detail["code"], "context_length_exceeded");
+            assert_eq!(detail["type"], "invalid_request_error");
+        }
+    }
 
     #[test]
     fn completions_request_conversion_matches_go() {

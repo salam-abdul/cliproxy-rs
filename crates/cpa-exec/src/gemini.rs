@@ -80,6 +80,7 @@ pub(crate) fn status_err(status: u16, message: impl Into<Bytes>) -> ExecError {
         headers: Box::default(),
         retry_after: None,
         direct: false,
+        addon: None,
     }
 }
 
@@ -822,6 +823,21 @@ impl Output {
         emit
     }
 
+    pub(crate) fn end_with_finish_signal(&mut self, saw_finish: bool) -> Emit {
+        if self.client != Format::Claude || saw_finish {
+            return self.end_with_done();
+        }
+        let mut emit = self.finalize();
+        if emit.stop.is_none() {
+            let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before finishReason");
+            self.capture.record(CaptureEvent::ResponseError(
+                "upstream stream closed before finishReason",
+            ));
+            emit.stop = Some(error);
+        }
+        emit
+    }
+
     /// One Go `TranslateStreamWithClaudeInputTokens` call, framed for the client, then
     /// helps.StopApplyPatchStream: an apply_patch failure ends the stream after the
     /// event's frames.
@@ -843,7 +859,7 @@ impl Output {
     /// helps.EndApplyPatchStream: the translator's tool-input finalization when the
     /// upstream transport ends, before any synthetic `[DONE]`. Go writes these chunks
     /// without the usage and token post-processing of translated chunks.
-    fn finalize(&mut self) -> Emit {
+    pub(crate) fn finalize(&mut self) -> Emit {
         let mut out = self.translator.finalize_tool_input();
         self.frame(&mut out);
         self.checked(out)
@@ -961,7 +977,13 @@ pub(crate) fn drive<S: LineState>(lines: ExecStream, state: S) -> ExecStream {
                 };
                 ready.extend(emit.out.into_iter().map(Ok));
                 let error = match (emit.stop, scanned) {
-                    (Some(error), _) | (None, Some(Err(error))) => error,
+                    (Some(error), _) => error,
+                    (None, Some(Err(mut error))) => {
+                        if error.scope == FailureScope::Transport && error.headers.is_empty() {
+                            error.scope = FailureScope::Request;
+                        }
+                        error
+                    }
                     _ => continue,
                 };
                 ready.extend(state.flush().into_iter().map(Ok));
@@ -979,11 +1001,13 @@ pub(crate) fn drive<S: LineState>(lines: ExecStream, state: S) -> ExecStream {
 struct GeminiLines {
     output: Output,
     upstream: Format,
+    saw_finish: bool,
 }
 
 impl LineState for GeminiLines {
     fn line(&mut self, line: &[u8]) -> Emit {
         if self.upstream != Format::Antigravity {
+            self.saw_finish |= gemini_stream_has_finish_signal(line);
             let filtered = sse::filter_sse_usage_metadata(line);
             // Go observes the response model on the raw line and usage on the filtered
             // payload; the filter only drops non-terminal usageMetadata, which the model
@@ -1028,17 +1052,15 @@ impl LineState for GeminiLines {
     }
 
     fn end(&mut self) -> Emit {
-        self.output.end_with_done()
+        if self.upstream == Format::Antigravity {
+            self.output.end_with_done()
+        } else {
+            self.output.end_with_finish_signal(self.saw_finish)
+        }
     }
 
-    /// Gemini translates `[DONE]` before checking the scanner; Antigravity finalizes
-    /// tool input only, so a truncated stream never reads as a completed one.
     fn end_after_error(&mut self) -> Emit {
-        if self.upstream == Format::Antigravity {
-            self.output.finalize()
-        } else {
-            self.output.end_with_done()
-        }
+        self.output.finalize()
     }
 
     fn flush(&mut self) -> Vec<Bytes> {
@@ -1046,9 +1068,41 @@ impl LineState for GeminiLines {
     }
 }
 
+/// Go `geminiStreamHasFinishSignal`, including prompt-blocked completions.
+pub(crate) fn gemini_stream_has_finish_signal(line: &[u8]) -> bool {
+    let Some(payload) = sse::json_payload(line) else {
+        return false;
+    };
+    [
+        "candidates.#.finishReason",
+        "response.candidates.#.finishReason",
+        "promptFeedback.blockReason",
+        "response.promptFeedback.blockReason",
+    ]
+    .iter()
+    .any(|path| {
+        let value = gj::get(payload, path);
+        if value.is_array() {
+            value
+                .array()
+                .iter()
+                .any(|item| !cpa_common::gostr::trim_space(&item.bytes()).is_empty())
+        } else {
+            value.exists() && !cpa_common::gostr::trim_space(&value.bytes()).is_empty()
+        }
+    })
+}
+
 /// [`GeminiLines`] over `lines` for an `upstream` (Gemini or Antigravity) stream.
 pub(crate) fn gemini_lines(lines: ExecStream, output: Output, upstream: Format) -> ExecStream {
-    drive(lines, GeminiLines { output, upstream })
+    drive(
+        lines,
+        GeminiLines {
+            output,
+            upstream,
+            saw_finish: false,
+        },
+    )
 }
 
 /// The Antigravity stream loop's line handling before a payload is used (Go v8.0.27,

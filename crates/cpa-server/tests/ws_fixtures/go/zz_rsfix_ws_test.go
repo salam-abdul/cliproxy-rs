@@ -563,6 +563,15 @@ func rsfixWSScenarios() []rsfixWSScenario {
 			},
 		},
 		{
+			// v8.0.35: the frame's headers come back on the error event (statusErrWithHeaders,
+			// ErrorMessage.Addon), rebuilt in Go's order with the name canonicalized.
+			Name: "ws_request_fault_headers", Config: cfg, Creds: []rsfixWSCred{ws},
+			Steps: []rsfixWSStep{
+				{Send: `{"type":"response.create","model":"gpt-fixture","input":[` + user("huge") + `]}`, Read: "close",
+					Upstream: []rsfixWSReply{{Events: []string{`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"},"headers":{"x-request-id":"req-1"}}`}}}},
+			},
+		},
+		{
 			Name: "ws_quota_silent_close", Config: cfg, Creds: []rsfixWSCred{ws},
 			Steps: []rsfixWSStep{
 				{Send: `{"type":"response.create","model":"gpt-fixture","input":[` + user("hi") + `]}`, Read: "close",

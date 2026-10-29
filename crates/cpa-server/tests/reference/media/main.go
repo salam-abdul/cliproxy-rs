@@ -3,7 +3,7 @@
 // server. Run it inside a loopback-only network namespace; it never contacts a provider
 // and every key is fake.
 //
-// Usage: media <go-server-binary> <output.json>
+// Usage: media <go-server-binary> <output.json> [errors]
 package main
 
 import (
@@ -220,9 +220,13 @@ func freePort() int {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: media <go-server-binary> <output.json>")
+	if len(os.Args) != 3 && (len(os.Args) != 4 || os.Args[3] != "errors") {
+		fmt.Fprintln(os.Stderr, "usage: media <go-server-binary> <output.json> [errors]")
 		os.Exit(2)
+	}
+	config, all := Config, scenarios()
+	if len(os.Args) == 4 {
+		config, all = ErrorsConfig, errorScenarios()
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -242,7 +246,7 @@ func main() {
 		panic(err)
 	}
 	port := freePort()
-	cfg := strings.NewReplacer("UPSTREAM", cap.addr, "PORT", strconv.Itoa(port), "AUTHDIR", authDir).Replace(Config)
+	cfg := strings.NewReplacer("UPSTREAM", cap.addr, "PORT", strconv.Itoa(port), "AUTHDIR", authDir).Replace(config)
 	cfgPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		panic(err)
@@ -271,7 +275,6 @@ func main() {
 		panic("go server did not start:\n" + logs.String())
 	}
 
-	all := scenarios()
 	for i := range all {
 		s := &all[i]
 		cap.mu.Lock()
@@ -321,7 +324,7 @@ func main() {
 			s.Requests = []string{}
 		}
 	}
-	data, err := json.MarshalIndent(map[string]any{"config": Config, "scenarios": all}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"config": config, "scenarios": all}, "", "  ")
 	if err != nil {
 		panic(err)
 	}

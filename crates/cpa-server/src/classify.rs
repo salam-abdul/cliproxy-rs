@@ -47,12 +47,12 @@ pub fn go_status(e: &ExecError) -> u16 {
     }
 }
 
-/// Go's `empty_stream` error: a stream that ended before its first payload. Statusless,
-/// so it cools the credential like an unclassified failure and renders as 500.
+/// An accepted stream without a first payload is ambiguous inference. Keep Go's
+/// statusless 500 response, but make the failure terminal without account cooldown.
 pub fn empty_stream() -> ExecError {
     ExecError::local(
         0,
-        FailureScope::Credential,
+        FailureScope::Request,
         "empty_stream: upstream stream closed before first payload",
     )
 }
@@ -195,6 +195,51 @@ fn model_support_message(text: &str) -> bool {
 
 /// `isModelSupportError`.
 pub fn is_model_support(status: u16, text: &str) -> bool {
+    // SAP 84d9e570: explicit model entitlement is distinct from permissions and quota.
+    if let Some(value) = json_body(text) {
+        let detail = value.get("error").unwrap_or(&value);
+        let codes = [detail.get("code"), detail.get("type")];
+        if codes.iter().filter_map(|v| v.and_then(Value::as_str)).any(|code| {
+            matches!(
+                code,
+                "insufficient_quota"
+                    | "quota_exceeded"
+                    | "usage_limit_reached"
+                    | "rate_limit_exceeded"
+                    | "rate_limit_error"
+            )
+        }) {
+            return false;
+        }
+        if matches!(status, 400 | 403 | 404 | 422) {
+            if codes
+                .iter()
+                .filter_map(|v| v.and_then(Value::as_str))
+                .any(|code| matches!(code, "model_not_found" | "model_not_supported" | "model_access_denied"))
+            {
+                return true;
+            }
+            let message = detail
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_lowercase();
+            if message.contains("model")
+                && [
+                    "not supported for your account",
+                    "not supported for this account",
+                    "not available for your plan",
+                    "not available for your account",
+                    "do not have access to model",
+                    "does not have access to model",
+                ]
+                .iter()
+                .any(|phrase| message.contains(phrase))
+            {
+                return true;
+            }
+        }
+    }
     explicit_model_not_found(text, "") || (matches!(status, 400 | 404 | 422) && model_support_message(text))
 }
 
@@ -443,6 +488,60 @@ fn missing_phrase(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_empty_stream_is_terminal_without_account_cooldown() {
+        let error = empty_stream();
+        assert_eq!(error.scope, FailureScope::Request);
+        assert!(error.headers.is_empty());
+        assert_eq!(go_status(&error), 0);
+        assert_eq!(response_status(&error), 500);
+        assert!(is_request_invalid(&error));
+        let credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/mock"),
+            std::path::Path::new("/mock/credential.json"),
+            serde_json::json!({"type":"claude"}).as_object().unwrap().clone(),
+        )
+        .unwrap();
+        let mut scheduler = crate::scheduler::Scheduler::default();
+        let now = std::time::Instant::now();
+        scheduler.record(
+            &credential,
+            "m",
+            &crate::runtime::Outcome::Failure(error),
+            &crate::scheduler::Policy::default(),
+            now,
+        );
+        assert!(scheduler.wait(&credential, "m", now).is_none());
+    }
+
+    #[test]
+    fn entitlement_evidence_excludes_generic_permission_and_quota_errors() {
+        for (status, body) in [
+            (403, r#"{"error":{"code":"model_access_denied"}}"#),
+            (422, r#"{"error":{"type":"model_not_supported"}}"#),
+            (
+                403,
+                r#"{"error":{"message":"This model is not available for your plan"}}"#,
+            ),
+        ] {
+            assert!(is_model_support(status, body), "{status} {body}");
+        }
+        for (status, body) in [
+            (403, r#"{"error":{"message":"permission denied"}}"#),
+            (
+                403,
+                r#"{"error":{"code":"insufficient_quota","message":"This model is not available for your plan"}}"#,
+            ),
+            (
+                400,
+                r#"{"error":{"type":"rate_limit_error","message":"This model is not available for your plan"}}"#,
+            ),
+            (500, r#"{"error":{"code":"model_access_denied"}}"#),
+        ] {
+            assert!(!is_model_support(status, body), "{status} {body}");
+        }
+    }
     use bytes::Bytes;
 
     fn upstream(status: u16, body: &str) -> ExecError {

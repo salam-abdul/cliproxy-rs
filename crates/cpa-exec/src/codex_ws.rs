@@ -602,7 +602,10 @@ pub(crate) fn ws_error(payload: &str, model_level_cooling: bool) -> Option<ExecE
     ]
     .iter()
     .any(|p| gjson::get(payload, p).str().trim() == "websocket_connection_limit_reached");
+    // Go `statusErrWithHeaders`: the frame's headers reach the client under passthrough.
+    let addon = (!headers.is_empty()).then(|| Box::new(headers.clone()));
     let mut error = response::status_error_raw(status, &out, headers, model_level_cooling);
+    error.addon = addon;
     if error.retry_after.is_none() && connection_limit {
         error.retry_after = Some(Duration::ZERO);
     }

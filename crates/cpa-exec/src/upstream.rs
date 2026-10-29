@@ -22,6 +22,22 @@ pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
     ExecError::local(502, FailureScope::Transport, "upstream request failed")
 }
 
+/// A failed body read after success cannot establish whether inference completed.
+pub(crate) fn body_read_error_after_response(status: u16, mut error: ExecError) -> ExecError {
+    if (200..300).contains(&status) && error.scope == FailureScope::Transport && error.headers.is_empty() {
+        error.scope = FailureScope::Request;
+    }
+    error
+}
+
+pub(crate) fn body_after_response(status: u16, body: ExecStream) -> ExecStream {
+    if !(200..300).contains(&status) {
+        return body;
+    }
+    body.map(move |item| item.map_err(|error| body_read_error_after_response(status, error)))
+        .boxed()
+}
+
 /// A response whose body went through Go's Claude `decodeResponseBody`. `body` is
 /// the decoded stream, or the decoder-construction error text Go reports.
 pub(crate) struct Decoded {
@@ -37,7 +53,9 @@ pub(crate) async fn decode_upstream(upstream: crate::proxy::Upstream) -> Decoded
     let encoding = content_encoding(&headers);
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::CONTENT_LENGTH);
-    let body = decode_body(upstream.body.map(|r| r.map_err(std::io::Error::other)), &encoding).await;
+    let body = decode_body(upstream.body.map(|r| r.map_err(std::io::Error::other)), &encoding)
+        .await
+        .map(|body| body_after_response(upstream.status, body));
     Decoded {
         status: upstream.status,
         headers,
@@ -64,6 +82,7 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
     let body = decode_body(res.bytes_stream().map(|r| r.map_err(std::io::Error::other)), &encoding)
         .await
         .map_err(|_| decode_error())?;
+    let body = body_after_response(status, body);
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::CONTENT_LENGTH);
     if !(200..300).contains(&status) {
@@ -75,6 +94,7 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
             headers: Box::new(headers),
             body,
             direct: false,
+            addon: None,
         });
     }
     let is_sse = headers
@@ -457,5 +477,99 @@ mod tests {
         let stream = decoded(body, &HeaderMap::new()).await.unwrap();
         let items: Vec<_> = stream.collect().await;
         assert_eq!(items[0].as_ref().unwrap_err().scope, FailureScope::Transport);
+    }
+
+    #[tokio::test]
+    async fn successful_response_read_errors_are_terminal_without_reclassifying_other_origins() {
+        for status in [199, 200, 204, 206, 299, 302, 400, 503] {
+            for (scope, classified) in [
+                (FailureScope::Transport, false),
+                (FailureScope::Transport, true),
+                (FailureScope::Credential, false),
+                (FailureScope::Model, false),
+                (FailureScope::Request, false),
+            ] {
+                let mut error = ExecError::local(502, scope, "synthetic body read failure");
+                if classified {
+                    error.headers.insert("x-classification", "retained".parse().unwrap());
+                }
+                let original = error.clone();
+                let upstream = crate::proxy::Upstream {
+                    status,
+                    headers: HeaderMap::new(),
+                    body: futures_util::stream::iter([Ok(Bytes::from_static(b"partial")), Err(error)]).boxed(),
+                };
+                let decoded = decode_upstream(upstream).await;
+                assert_eq!(decoded.status, status);
+                let items = decoded.body.unwrap().collect::<Vec<_>>().await;
+                let partial = items
+                    .iter()
+                    .filter_map(|item| item.as_ref().ok())
+                    .flat_map(|bytes| bytes.iter().copied())
+                    .collect::<Vec<_>>();
+                assert_eq!(partial, b"partial");
+                let error = items.last().unwrap().as_ref().unwrap_err();
+                let expected = if (200..300).contains(&status) && scope == FailureScope::Transport && !classified {
+                    FailureScope::Request
+                } else {
+                    scope
+                };
+                assert_eq!(
+                    error.scope, expected,
+                    "status={status}, scope={scope:?}, classified={classified}"
+                );
+                assert_eq!(error.status, original.status);
+                assert_eq!(error.body, original.body);
+                assert_eq!(error.headers, original.headers);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn into_response_fences_only_successful_body_reads_for_buffered_and_sse() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for status in [200, 206, 400, 503] {
+            for sse in [true, false] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await.unwrap();
+                    let kind = if sse { "text/event-stream" } else { "application/json" };
+                    socket.write_all(format!("HTTP/1.1 {status} test\r\nContent-Type: {kind}\r\nContent-Length: 100\r\nConnection: close\r\n\r\ndata: partial").as_bytes()).await.unwrap();
+                });
+                let response = wreq::Client::new()
+                    .get(format!("http://{address}/fixture"))
+                    .send()
+                    .await
+                    .unwrap();
+                let error = match into_response(response).await {
+                    Err(error) => error,
+                    Ok(response) => match response.body {
+                        ResponseBody::Stream(stream) => {
+                            let items = stream.collect::<Vec<_>>().await;
+                            assert!(
+                                items.first().is_some_and(Result::is_err),
+                                "failure before first SSE payload"
+                            );
+                            items.into_iter().find_map(Result::err).expect("read failure")
+                        }
+                        ResponseBody::Buffered(_) => panic!("truncated body accepted"),
+                    },
+                };
+                assert_eq!(
+                    error.scope,
+                    if (200..300).contains(&status) {
+                        FailureScope::Request
+                    } else {
+                        FailureScope::Transport
+                    },
+                    "status={status}, sse={sse}"
+                );
+                assert!(error.headers.is_empty());
+                server.await.unwrap();
+            }
+        }
     }
 }

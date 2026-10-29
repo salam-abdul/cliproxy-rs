@@ -4,7 +4,7 @@
 //! trailing CR dropped), MCP aliases are restored per line, and each blank line ends
 //! an event. The relay stops after the event carrying `message_stop`, so anything an
 //! upstream appends after the terminal event is never forwarded. A transport read
-//! failure before `message_stop` becomes Go's `unexpected EOF`.
+//! failure before `message_stop` becomes Go's `unexpected EOF`; clean truncation is 502.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,13 +19,28 @@ use crate::rawjson;
 /// Go `bufio.Scanner` buffer limit (50 MB).
 const MAX_LINE: usize = 52_428_800;
 
-/// `observeClaudeStreamLine`.
-fn observe(line: &[u8], message_id: &mut String, completed: &mut bool) {
-    let line = line.trim_ascii();
-    let Some(payload) = line.strip_prefix(b"data:") else {
-        return;
+/// Go `observeClaudeSSEEvent`: only a complete event decides completion or failure.
+fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &mut Option<ExecError>) {
+    let trim = cpa_common::gostr::trim_space;
+    let data: Vec<&[u8]> = event
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            trim(line)
+                .strip_prefix(b"data:")
+                .map(trim)
+                .filter(|data| !data.is_empty())
+        })
+        .collect();
+    let has_data = !data.is_empty();
+    let payload = if has_data {
+        data.join(&b'\n')
+    } else {
+        trim(event).to_vec()
     };
-    let Ok(payload) = std::str::from_utf8(payload.trim_ascii()) else {
+    if !has_data && !payload.starts_with(b"{") {
+        return;
+    }
+    let Ok(payload) = std::str::from_utf8(&payload) else {
         return;
     };
     if !gjson::valid(payload) {
@@ -39,6 +54,20 @@ fn observe(line: &[u8], message_id: &mut String, completed: &mut bool) {
             }
         }
         "message_stop" => *completed = true,
+        "message" if !has_data && !rawjson::string(payload, "stop_reason").trim().is_empty() => {
+            let id = rawjson::string(payload, "id");
+            if !id.trim().is_empty() {
+                *message_id = id.trim().to_owned();
+            }
+            *completed = true;
+        }
+        "error" if has_data && error.is_none() => {
+            *error = Some(ExecError::local(
+                502,
+                crate::upstream::scope_for(502),
+                payload.to_owned(),
+            ));
+        }
         _ => {}
     }
 }
@@ -76,9 +105,7 @@ struct Relay {
     message_id: String,
     completed: bool,
     finished: bool,
-    /// Translated clients: end on the `message_stop` data line itself, as Go's
-    /// translated loop does, instead of waiting for the event's blank line.
-    eager_terminal: bool,
+    upstream_error: Option<ExecError>,
     done: Option<OnComplete>,
     /// Go's usage reporter: every upstream line, before alias restore.
     usage: cpa_core::exec::UsageSink,
@@ -93,7 +120,6 @@ impl Relay {
         if self.finished {
             return false;
         }
-        observe(line, &mut self.message_id, &mut self.completed);
         // reporter.ObserveResponseModel and StreamUsageBuffer.ObserveClaudeStream.
         self.usage.response_line(cpa_core::format::Format::Claude, line);
         self.capture.record(cpa_core::exec::CaptureEvent::ResponseChunk(line));
@@ -108,15 +134,20 @@ impl Relay {
         };
         self.event.extend_from_slice(&restored);
         self.event.extend_from_slice(b"\n");
-        if self.eager_terminal && self.completed {
-            self.flush();
-            self.finish();
-            return false;
-        }
-        if restored.trim_ascii().is_empty() {
+        if cpa_common::gostr::trim_space(&restored).is_empty() {
+            observe(
+                &self.event,
+                &mut self.message_id,
+                &mut self.completed,
+                &mut self.upstream_error,
+            );
             self.flush();
             if self.completed {
                 self.finish();
+                return false;
+            }
+            if let Some(error) = self.upstream_error.take() {
+                self.fail(error);
                 return false;
             }
         }
@@ -194,12 +225,22 @@ impl Relay {
         if self.finished {
             return;
         }
+        observe(
+            &self.event,
+            &mut self.message_id,
+            &mut self.completed,
+            &mut self.upstream_error,
+        );
         self.flush();
-        if !self.completed
-            && let Some(mut error) = error
-        {
-            if error.scope == FailureScope::Transport {
+        if !self.completed {
+            // A submitted inference may have completed remotely; local truncation cannot replay.
+            let read_error = error.is_some();
+            let mut error = error.or_else(|| self.upstream_error.take()).unwrap_or_else(|| {
+                ExecError::local(502, FailureScope::Request, "upstream stream closed before message_stop")
+            });
+            if read_error {
                 error.body = Bytes::from_static(b"unexpected EOF");
+                error = crate::upstream::body_read_error_after_response(200, error);
             }
             self.capture_error(&error);
             self.ready.push_back(Err(error));
@@ -218,10 +259,10 @@ pub(crate) fn relay(
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
 ) -> ExecStream {
-    relay_with(body, reverse, done, false, usage, capture)
+    relay_with(body, reverse, done, usage, capture)
 }
 
-/// [`relay`] for a translated client: the stream ends on the `message_stop` data line.
+/// [`relay`] for a translated client; terminal events are observed before translation.
 pub(crate) fn relay_translated(
     body: ExecStream,
     reverse: Arc<Reverse>,
@@ -229,14 +270,13 @@ pub(crate) fn relay_translated(
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
 ) -> ExecStream {
-    relay_with(body, reverse, done, true, usage, capture)
+    relay_with(body, reverse, done, usage, capture)
 }
 
 fn relay_with(
     body: ExecStream,
     reverse: Arc<Reverse>,
     done: OnComplete,
-    eager_terminal: bool,
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
 ) -> ExecStream {
@@ -251,7 +291,7 @@ fn relay_with(
         message_id: String::new(),
         completed: false,
         finished: false,
-        eager_terminal,
+        upstream_error: None,
         done: Some(done),
     };
     futures_util::stream::unfold(relay, |mut st| async move {
@@ -337,9 +377,16 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
 /// `claudeMessageIDFromSSE`: the message ID only when the buffered stream completed.
 pub(crate) fn buffered_message_id(data: &[u8]) -> String {
     let (mut id, mut completed) = (String::new(), false);
+    let mut event = Vec::new();
     for line in data.split(|b| *b == b'\n') {
-        observe(line, &mut id, &mut completed);
+        event.extend_from_slice(line);
+        event.push(b'\n');
+        if cpa_common::gostr::trim_space(line).is_empty() {
+            observe(&event, &mut id, &mut completed, &mut None);
+            event.clear();
+        }
     }
+    observe(&event, &mut id, &mut completed, &mut None);
     if completed { id } else { String::new() }
 }
 
@@ -401,39 +448,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn translated_streams_end_on_the_message_stop_line() {
-        // Go's translated loop breaks right after the message_stop data line; the
-        // native loop waits for the event's blank line. The upstream stays open.
+    async fn translated_streams_wait_for_a_complete_terminal_event() {
         let input = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n";
-        let open = || {
-            futures_util::stream::iter([Ok(Bytes::from_static(input))])
+        for translated in [false, true] {
+            let open = futures_util::stream::iter([Ok(Bytes::from_static(input))])
                 .chain(futures_util::stream::pending())
-                .boxed()
-        };
-        let out: Vec<_> = relay_translated(
-            open(),
-            Arc::default(),
-            Box::new(|_| {}),
-            Default::default(),
-            Default::default(),
-        )
-        .map(Result::unwrap)
-        .collect()
-        .await;
-        assert_eq!(
-            out[1],
-            Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n")
-        );
-        let mut native = relay(
-            open(),
-            Arc::default(),
-            Box::new(|_| {}),
-            Default::default(),
-            Default::default(),
-        );
-        assert!(native.next().await.is_some());
-        let waited = tokio::time::timeout(std::time::Duration::from_millis(50), native.next()).await;
-        assert!(waited.is_err(), "native output waits for the blank line");
+                .boxed();
+            let mut stream = if translated {
+                relay_translated(
+                    open,
+                    Arc::default(),
+                    Box::new(|_| {}),
+                    Default::default(),
+                    Default::default(),
+                )
+            } else {
+                relay(
+                    open,
+                    Arc::default(),
+                    Box::new(|_| {}),
+                    Default::default(),
+                    Default::default(),
+                )
+            };
+            assert!(stream.next().await.is_some());
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]
@@ -485,6 +529,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert_eq!(out[1].as_ref().unwrap().as_ref(), b"event: x\ndata: {\n");
         assert_eq!(out[2].as_ref().unwrap_err().body.as_ref(), b"unexpected EOF");
+        assert_eq!(out[2].as_ref().unwrap_err().scope, FailureScope::Request);
     }
 
     #[tokio::test]
@@ -521,5 +566,147 @@ mod tests {
                 "",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn clean_eof_without_message_stop_preserves_partial_then_fails() {
+        for bytes in [
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\npartial".as_slice(),
+            b"data: [DONE]\n\n",
+        ] {
+            let body = futures_util::stream::iter([Ok(Bytes::copy_from_slice(bytes))]).boxed();
+            let out: Vec<_> = relay(
+                body,
+                Arc::default(),
+                Box::new(|_| panic!("incomplete")),
+                Default::default(),
+                Default::default(),
+            )
+            .collect()
+            .await;
+            let error = out
+                .last()
+                .expect("terminal error")
+                .as_ref()
+                .expect_err("EOF is incomplete");
+            assert_eq!(error.status, 502);
+            assert_eq!(error.scope, FailureScope::Request);
+            assert!(error.headers.is_empty());
+            assert_eq!(error.body.as_ref(), b"upstream stream closed before message_stop");
+            let forwarded: Vec<u8> = out[..out.len() - 1]
+                .iter()
+                .flat_map(|item| item.as_ref().unwrap().iter().copied())
+                .collect();
+            let mut expected = bytes.to_vec();
+            if !expected.ends_with(b"\n") {
+                expected.push(b'\n');
+            }
+            assert_eq!(forwarded, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn split_claude_events_observe_completion_and_error_once() {
+        let bytes = b"event: message_start\ndata: {\"type\":\"message_start\",\ndata: \"message\":{\"id\":\"split-message\"}}\n\nevent: message_stop\ndata: {\"type\":\ndata: \"message_stop\"}\n\nevent: discarded\n\n";
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let callback = seen.clone();
+        let out: Vec<_> = relay(
+            chunks(vec![Ok(bytes)]),
+            Arc::default(),
+            Box::new(move |id| *callback.lock().unwrap() = Some(id)),
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        assert!(out.iter().all(Result::is_ok));
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("split-message"));
+        assert_eq!(out.len(), 2);
+        assert_eq!(buffered_message_id(bytes), "split-message");
+        let bytes = b"event: error\ndata: {\"type\":\"error\",\ndata: \"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic failure\"}}\n\n";
+        let out: Vec<_> = relay(
+            chunks(vec![Ok(bytes)]),
+            Arc::default(),
+            Box::new(|_| panic!("not complete")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].as_ref().unwrap().as_ref(), bytes);
+        let error = out[1].as_ref().unwrap_err();
+        assert_eq!(error.status, 502);
+        assert!(String::from_utf8_lossy(&error.body).contains("synthetic failure"));
+    }
+
+    #[tokio::test]
+    async fn bare_terminal_messages_and_unterminated_errors_follow_event_semantics() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let callback = seen.clone();
+        let bytes = br#"{"type":"message","id":"bare-message","stop_reason":"end_turn"}"#;
+        let out: Vec<_> = relay(
+            chunks(vec![Ok(bytes)]),
+            Arc::default(),
+            Box::new(move |id| *callback.lock().unwrap() = Some(id)),
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        assert!(out.iter().all(Result::is_ok));
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("bare-message"));
+        assert_eq!(buffered_message_id(bytes), "bare-message");
+
+        let bytes = b"data: {\"type\":\"message\",\"id\":\"not-terminal\",\"stop_reason\":\"end_turn\"}\n\n";
+        let out: Vec<_> = relay(
+            chunks(vec![Ok(bytes)]),
+            Arc::default(),
+            Box::new(|_| panic!("SSE still needs message_stop")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        assert_eq!(out.last().unwrap().as_ref().unwrap_err().status, 502);
+
+        let bytes = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"synthetic failure\"}}";
+        let out: Vec<_> = relay(
+            chunks(vec![Ok(bytes)]),
+            Arc::default(),
+            Box::new(|_| panic!("error is not completion")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect()
+        .await;
+        assert_eq!(out.len(), 2);
+        assert!(out[0].is_ok());
+        let error = out[1].as_ref().unwrap_err();
+        assert_eq!(error.status, 502);
+        assert_eq!(
+            error.body.as_ref(),
+            br#"{"type":"error","error":{"message":"synthetic failure"}}"#
+        );
+    }
+    #[tokio::test]
+    async fn terminal_read_origin_keeps_unexpected_eof_text_after_scope_fencing() {
+        let body = chunks(vec![
+            Ok(b"data: {}\n\npartial"),
+            Err(ExecError::local(502, FailureScope::Request, "upstream request failed")),
+        ]);
+        let out = relay(
+            body,
+            Arc::default(),
+            Box::new(|_| panic!("not complete")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let error = out.last().unwrap().as_ref().unwrap_err();
+        assert_eq!(error.scope, FailureScope::Request);
+        assert_eq!(error.body.as_ref(), b"unexpected EOF");
+        assert_eq!(out[1].as_ref().unwrap().as_ref(), b"partial\n");
     }
 }

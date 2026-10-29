@@ -1118,3 +1118,88 @@ async fn queued_create_keeps_the_namespace_state_until_written() {
     );
     drop(stream);
 }
+
+#[tokio::test]
+async fn client_model_authorizes_rewritten_duplex_turns_without_replay() {
+    const STEER: &str = r#"{ "type":"response.steer", "previous_response_id":"r2", "model":"ignored-model", "input":[], "opaque":1e+02 }"#;
+    let upstream = Scripted::start(|mut c| async move {
+        if c.read().await.is_empty() {
+            return;
+        }
+        c.write(CREATED).await;
+        c.write(COMPLETED).await;
+        let continuation = c.read().await;
+        if gjson::get(&continuation, "model").str() != "provider-model" {
+            c.error(format!("continuation: {continuation}"));
+        }
+        c.write(r#"{"type":"response.created","response":{"id":"r2","output":[]}}"#)
+            .await;
+        let steer = c.read().await;
+        if steer != STEER {
+            c.error(format!("steer changed: {steer}"));
+        }
+        c.write(r#"{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r2"}}"#)
+            .await;
+        c.idle().await;
+    })
+    .await;
+    let client = Client::new("client-model-bound");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    client.executor.attach_steering(
+        &client.session,
+        SteeringInput::new(client.frames.clone(), |_| true).with_authorizer(move |payload, principal| {
+            captured
+                .lock()
+                .unwrap()
+                .push((String::from_utf8_lossy(payload).into_owned(), principal.to_owned()));
+            Ok(None)
+        }),
+    );
+    let mut req = request(r#"{"model":"rewritten-model","input":[]}"#);
+    req.model = "provider-model".into();
+    req.requested_model = "client-alias".into();
+    req.execution_session = Some(client.session.clone());
+    let session = ExecSession {
+        id: client.session.clone(),
+        continuation: false,
+        lease: None,
+    };
+    let mut config = Config::parse(STEERING).unwrap();
+    config.auth_dir = std::env::temp_dir().join(format!("cpa-duplex-{}", uuid::Uuid::new_v4()));
+    let response = client
+        .executor
+        .execute_in_session(&credential(&upstream.url), req, &config, &session)
+        .await
+        .unwrap();
+    let ResponseBody::Stream(mut stream) = response.body else {
+        panic!("stream")
+    };
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("response.created"));
+    client
+        .send(r#"{"type":"response.create","model":"client-alias","input":[]}"#)
+        .await;
+    client.send(STEER).await;
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .expect("duplex frame")
+            .unwrap();
+        if String::from_utf8_lossy(&next).contains("response.steer.accepted") {
+            break;
+        }
+    }
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    for (payload, principal) in seen.lock().unwrap().iter() {
+        assert_eq!(gjson::get(payload, "model").str(), "client-alias");
+        assert_eq!(principal, "client-key-FAKE");
+    }
+    drop(stream);
+    upstream.finish().await;
+}

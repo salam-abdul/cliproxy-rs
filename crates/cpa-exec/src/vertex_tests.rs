@@ -515,3 +515,41 @@ fn responses_tool_call_ids_are_stripped_like_go() {
     // Other sources keep their IDs.
     assert_eq!(strip_tool_call_ids(with.to_vec(), Format::Gemini), with.to_vec());
 }
+
+#[tokio::test]
+async fn claude_target_eof_requires_vertex_finish_signal() {
+    for terminal in [
+        None,
+        Some(r#"{"candidates":[{"finishReason":"STOP"}]}"#),
+        Some(r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#),
+    ] {
+        let req =
+            request(&serde_json::json!({"op":"stream","source":"claude","model":"gemini-2.5-flash","payload":"{}"}));
+        let output = Output::new(&req, Format::Gemini, b"{}");
+        let mut lines = vec![Ok(Bytes::from_static(
+            br#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}"#,
+        ))];
+        if let Some(terminal) = terminal {
+            lines.push(Ok(Bytes::from(format!("data: {terminal}"))));
+        }
+        let out: Vec<_> = g::drive(futures_util::stream::iter(lines).boxed(), RawLines(output, false))
+            .collect()
+            .await;
+        if terminal.is_none() {
+            let error = out
+                .last()
+                .unwrap()
+                .as_ref()
+                .expect_err("missing finishReason must fail");
+            assert_eq!(error.status, 502);
+            assert_eq!(error.scope, FailureScope::Request);
+            assert!(
+                !out.iter()
+                    .filter_map(|item| item.as_ref().ok())
+                    .any(|bytes| String::from_utf8_lossy(bytes).contains("message_stop"))
+            );
+        } else {
+            assert!(out.iter().all(Result::is_ok), "{out:?}");
+        }
+    }
+}

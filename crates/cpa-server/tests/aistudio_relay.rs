@@ -20,7 +20,8 @@ const ANSWER: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"tex
 async fn serve(rt: Arc<Runtime>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move { axum::serve(listener, router(rt)).await.unwrap() });
+    let app = router(rt);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     addr
 }
 
@@ -32,7 +33,8 @@ fn runtime(config: &str) -> Arc<Runtime> {
         openai: Default::default(),
         google: Default::default(),
     };
-    let config = Config::parse(config).unwrap();
+    let mut config = Config::parse(config).unwrap();
+    config.auth_dir = std::env::temp_dir().join(format!("cpa-aistudio-{}", uuid::Uuid::new_v4()));
     Arc::new(cpa_server::testing::runtime(config, Vec::new(), executors))
 }
 
@@ -179,4 +181,62 @@ async fn ws_auth_off_admits_browsers_without_a_key() {
     // Turning ws-auth on ends the sessions that connected without a key.
     rt.publish_config(Config::parse("access:\n  api-keys: [client-key]\n").unwrap());
     assert!(relay_credentials(&rt, 0).await.is_empty());
+}
+
+#[tokio::test]
+async fn relay_disconnect_after_stream_start_never_replays() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let rt = runtime("routing:\n  retry:\n    request-retry: 2\nrequests:\n  streaming:\n    bootstrap-retries: 2\n");
+    let addr = serve(rt.clone()).await;
+    let relay = rt.executors.google.aistudio.relay.clone();
+    let (first, mut a) = relay.connect_as("aistudio-first".into());
+    let (second, mut b) = relay.connect_as("aistudio-second".into());
+    relay_credentials(&rt, 2).await;
+    for credential in rt.store().snapshot() {
+        let mut credential = (*credential).clone();
+        let revision = credential.revision;
+        credential.metadata.insert("request_scoped_errors".into(), serde_json::json!([{"status":502,"action":"continue","match":["wsrelay"]},{"status":500,"action":"continue","match":["wsrelay"]}]));
+        rt.store().replace_config_backed(credential, revision).unwrap();
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let browser = tokio::spawn(async move {
+        loop {
+            let (frame, session) = tokio::select! {
+                frame = a.recv() => (frame, &first),
+                frame = b.recv() => (frame, &second),
+            };
+            let Some(frame) = frame else { break };
+            let frame: Value = serde_json::from_str(&frame).unwrap();
+            if frame["type"] != "http_request" {
+                continue;
+            }
+            seen.fetch_add(1, Ordering::SeqCst);
+            let start = serde_json::json!({"id":frame["id"],"type":"stream_start","payload":{"status":200,"headers":{"content-type":["text/event-stream"]}}});
+            session.receive(start.to_string().as_bytes()).await.unwrap();
+            session.close("wsrelay: fixture browser disconnected");
+        }
+    });
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        wreq::Client::new()
+            .post(format!(
+                "http://{addr}/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+            ))
+            .body(r#"{"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}"#)
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "accepted relay inference must never replay: {status} {body}"
+    );
+    assert_eq!(status, 500, "{body}");
+    browser.abort();
+    relay.stop();
 }

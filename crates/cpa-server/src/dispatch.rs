@@ -555,6 +555,7 @@ enum Upstream {
     Error(HeaderMap),
 }
 
+/// Only errors carrying Go `Headers()` expose an addon; classification headers stay private.
 fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upstream> {
     if !respond::passthrough_headers(cfg) {
         return None;
@@ -563,7 +564,7 @@ fn upstream_headers(cfg: &Config, result: &Result<Done, Failure>) -> Option<Upst
         Ok(Done::Buffered { headers, .. } | Done::Stream { headers, .. }) => {
             Some(Upstream::Success(respond::filter_upstream_headers(headers)))
         }
-        Err(Failure::Exec(error)) if !error.direct => Some(Upstream::Error((*error.headers).clone())),
+        Err(Failure::Exec(error)) if !error.direct => error.addon.as_deref().cloned().map(Upstream::Error),
         Err(_) => None,
     }
 }
@@ -785,14 +786,14 @@ impl From<Failure> for RunError {
 #[derive(Clone)]
 struct Fault {
     error: ExecError,
-    bootstrap: bool,
+    bootstrap: Option<Box<HeaderMap>>,
 }
 
 impl Fault {
     fn into_run_error(self) -> RunError {
         RunError {
             failure: Failure::Exec(self.error),
-            bootstrap: self.bootstrap,
+            bootstrap: self.bootstrap.is_some(),
         }
     }
 }
@@ -929,10 +930,7 @@ async fn run_routed(
                 Err(AcquireError::Prepare { id, error }) => {
                     attempted.push(id.clone());
                     selection.exclude.push(id);
-                    last = Some(Fault {
-                        error,
-                        bootstrap: false,
-                    });
+                    last = Some(Fault { error, bootstrap: None });
                     continue;
                 }
                 Err(AcquireError::Cooldown { wait, cause }) => {
@@ -1142,7 +1140,7 @@ impl RemoteFault {
             upstream: classify::upstream_attempted(&fault.error),
             invalid: classify::is_request_invalid(&fault.error),
             failure: Failure::Exec(fault.error),
-            bootstrap: fault.bootstrap,
+            bootstrap: fault.bootstrap.is_some(),
             stop,
             kind: crate::remote::RemoteErrorKind::Plain,
             exhausted: None,
@@ -1643,13 +1641,7 @@ async fn remote_round(
                     ),
                     Err(error) => {
                         lease.complete(Outcome::Failure(error.clone()));
-                        (
-                            Attempt::Next(Fault {
-                                error,
-                                bootstrap: false,
-                            }),
-                            true,
-                        )
+                        (Attempt::Next(Fault { error, bootstrap: None }), true)
                     }
                 }
             };
@@ -1659,7 +1651,7 @@ async fn remote_round(
                 _ = cancelled => (
                     Attempt::Next(Fault {
                         error: crate::remote::cancelled_error(),
-                        bootstrap: false,
+                        bootstrap: None,
                     }),
                     false,
                 ),
@@ -2040,10 +2032,7 @@ async fn attempt(
                 if let Some(t) = tracker.take() {
                     t.fail(&error);
                 }
-                Fault {
-                    error,
-                    bootstrap: false,
-                }
+                Fault { error, bootstrap: None }
             }
         };
         let error = &fault.error;
@@ -2069,13 +2058,24 @@ async fn attempt(
         } else {
             Outcome::Failure(error.clone())
         };
-        let stop = if action.matched {
-            action.stop
-        } else {
-            (target.compact && classify::is_compact_fault(error)) || classify::is_request_invalid(error)
-        };
-        // A credential-wide quota ends this credential's model pool.
-        if stop || i + 1 == target.models.len() || classify::credential_scoped(error) {
+        // A local request failure is terminal even when a custom rule says continue:
+        // stream truncation can represent inference already accepted upstream.
+        let local_terminal = error.scope == cpa_core::exec::FailureScope::Request && error.headers.is_empty();
+        let stop = local_terminal
+            || if action.matched {
+                action.stop
+            } else {
+                (target.compact && classify::is_compact_fault(error)) || classify::is_request_invalid(error)
+            };
+        // Go returns stopping bootstrap failures directly, outside handler bootstrap retries.
+        let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
+        let mut fault = fault;
+        if stop {
+            fault.bootstrap = None;
+        } else if let Some(headers) = &fault.bootstrap {
+            fault.error.addon = Some(headers.clone());
+        }
+        if last_here {
             // Go `End`: the socket that retained the pick closes before the release.
             drop(guard.take());
             lease.complete(outcome);
@@ -2273,13 +2273,16 @@ fn attempt_request(
 
 /// Bootstraps a stream (first event before committing) or buffers a body.
 async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<Done, Fault> {
-    let fault = |error| Fault { error, bootstrap: true };
     match response.body {
         ResponseBody::Buffered(body) => Ok(Done::Buffered {
             headers: response.headers,
             body,
         }),
         ResponseBody::Stream(mut stream) if call.stream => {
+            let fault = |error| Fault {
+                error,
+                bootstrap: Some(Box::new(response.headers.clone())),
+            };
             let first = loop {
                 match stream.next().await {
                     Some(Ok(bytes)) if bytes.is_empty() => continue,
@@ -2298,10 +2301,7 @@ async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<D
         ResponseBody::Stream(mut stream) => {
             let mut body = BytesMut::new();
             while let Some(event) = stream.next().await {
-                body.extend_from_slice(&event.map_err(|error| Fault {
-                    error,
-                    bootstrap: false,
-                })?);
+                body.extend_from_slice(&event.map_err(|error| Fault { error, bootstrap: None })?);
             }
             Ok(Done::Buffered {
                 headers: response.headers,
@@ -2399,6 +2399,16 @@ fn rewrite_lines(payload: &Bytes, target: &str) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classification_headers_stay_internal_without_an_addon() {
+        let cfg = Config::parse("requests:\n  passthrough-headers: true\n").unwrap();
+        let mut error = ExecError::local(503, cpa_core::exec::FailureScope::Credential, "failed");
+        error
+            .headers
+            .insert("x-upstream-classification", "internal".parse().unwrap());
+        assert!(upstream_headers(&cfg, &Err(Failure::Exec(error))).is_none());
+    }
 
     /// Go finds a direct response through the Home round marker: the raw upstream
     /// answer goes out unchanged, without the safe `Retry-After`.

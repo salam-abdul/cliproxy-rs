@@ -42,6 +42,7 @@ const WRITE_QUEUE: usize = 16;
 const OUTBOX: usize = 16;
 
 type Enabled = dyn Fn(&str) -> bool + Send + Sync;
+type Authorizer = dyn Fn(&[u8], &str) -> Result<Option<Bytes>, ExecError> + Send + Sync;
 
 /// The queue of a downstream connection's client frames, in arrival order. A bounded
 /// channel backpressures the client; the connection's own loop reads it between turns.
@@ -52,6 +53,7 @@ pub type ClientFrames = Arc<tokio::sync::Mutex<mpsc::Receiver<Bytes>>>;
 pub struct SteeringInput {
     frames: ClientFrames,
     enabled: Box<Enabled>,
+    authorize: Option<Box<Authorizer>>,
 }
 
 impl SteeringInput {
@@ -62,7 +64,36 @@ impl SteeringInput {
         Self {
             frames,
             enabled: Box::new(enabled),
+            authorize: None,
         }
+    }
+    /// Rechecks client access for each business frame, retaining the stream's principal.
+    pub fn with_authorizer(
+        mut self,
+        authorize: impl Fn(&[u8], &str) -> Result<Option<Bytes>, ExecError> + Send + Sync + 'static,
+    ) -> Self {
+        self.authorize = Some(Box::new(authorize));
+        self
+    }
+
+    fn authorize_payload(
+        &self,
+        payload: &str,
+        bound_model: &str,
+        upstream_model: &str,
+        principal: &str,
+        force: bool,
+    ) -> Result<Option<Bytes>, ExecError> {
+        let Some(authorize) = &self.authorize else {
+            return Ok(None);
+        };
+        let explicit = gjson::get(payload, "model").str().trim().to_owned();
+        let auth_payload = if !bound_model.is_empty() && (force || explicit.is_empty() || explicit == upstream_model) {
+            set_str(payload, "model", bound_model)
+        } else {
+            payload.to_owned()
+        };
+        authorize(auth_payload.as_bytes(), principal)
     }
 }
 
@@ -135,7 +166,7 @@ pub(super) struct Duplex {
     exec_session: String,
     initial: Prepared,
     /// The bootstrap request's client model (Go `initial.originalPayload` `model`).
-    initial_model: String,
+    bound_model: String,
     /// Creates sent upstream and not yet started or rejected, oldest first.
     pending: VecDeque<Prepared>,
     /// Parents of steers written and not yet acknowledged.
@@ -241,8 +272,12 @@ impl Duplex {
     ) -> ExecStream {
         // Turns on a session are serialised, so no other stream holds the frames.
         let frames = input.frames.clone().lock_owned().await;
-        let initial_model = gjson::get(&String::from_utf8_lossy(&req.original_body), "model")
-            .str()
+        let original = String::from_utf8_lossy(&req.original_body);
+        let original_model = gjson::get(&original, "model").str().trim().to_owned();
+        let bound_model = [req.requested_model.trim(), original_model.as_str(), req.model.trim()]
+            .into_iter()
+            .find(|m| !m.is_empty())
+            .unwrap_or_default()
             .to_owned();
         let (writes, queue) = mpsc::channel(WRITE_QUEUE);
         let writer = tokio::spawn(write_loop(
@@ -267,7 +302,7 @@ impl Duplex {
             current: initial.clone(),
             pending: VecDeque::from([initial.clone()]),
             initial,
-            initial_model,
+            bound_model,
             unacknowledged: Vec::new(),
             accepted: HashMap::new(),
             response_id: String::new(),
@@ -357,6 +392,26 @@ impl Duplex {
         (self.input.enabled)(&self.credential.id)
     }
 
+    fn authorize(&mut self, payload: &str, force: bool) -> bool {
+        match self.input.authorize_payload(
+            payload,
+            &self.bound_model,
+            &self.req.model,
+            &self.req.caller.principal,
+            force,
+        ) {
+            Ok(None) => true,
+            Ok(Some(error)) => {
+                self.outbox.push_back(Ok(error));
+                false
+            }
+            Err(error) => {
+                self.fail(error);
+                false
+            }
+        }
+    }
+
     /// Go's local `reject`: an `error` event; the socket stays usable.
     fn reject(&mut self, message: &str) {
         let message = cpa_common::json::quote(message);
@@ -429,6 +484,9 @@ impl Duplex {
         let kind = gjson::get(&payload, "type").str().to_owned();
         match kind.as_str() {
             "response.steer" => {
+                if !self.authorize(&payload, true) {
+                    return;
+                }
                 let parent = gjson::get(&payload, "previous_response_id").str().to_owned();
                 if !self.response_settings.contains_key(&parent) && !self.pending.is_empty() {
                     // `waitFor(len(pending) == 0)`: its settings may belong to a create
@@ -464,6 +522,9 @@ impl Duplex {
 
     /// `processCreatePayload`.
     async fn create(&mut self, mut payload: String) {
+        if !self.authorize(&payload, false) {
+            return;
+        }
         let append = gjson::get(&payload, "type").str() == "response.append";
         let mut parent = gjson::get(&payload, "previous_response_id").str().trim().to_owned();
         if append && parent.is_empty() && !self.response_id.is_empty() {
@@ -475,13 +536,13 @@ impl Duplex {
             return;
         }
         let model = gjson::get(&payload, "model").str().trim().to_owned();
-        if !model.is_empty() && model != self.req.model && model != self.initial_model {
+        if !model.is_empty() && model != self.req.model && model != self.bound_model {
             self.fail(ExecError::replay_required());
             return;
         }
         if model.is_empty() {
             let model = if self.req.model.is_empty() {
-                self.initial_model.trim()
+                self.bound_model.trim()
             } else {
                 self.req.model.as_str()
             };
@@ -741,6 +802,53 @@ impl Duplex {
             // until an explicit continuation supplies them.
             "response.steer.pending" => self.waiting_parent = parent,
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod authorizer_tests {
+    use super::*;
+
+    #[test]
+    fn duplex_authorization_uses_client_model_and_bound_principal() {
+        let (_, rx) = mpsc::channel(1);
+        let frames = Arc::new(tokio::sync::Mutex::new(rx));
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let input = SteeringInput::new(frames, |_| true).with_authorizer(move |payload, principal| {
+            captured
+                .lock()
+                .unwrap()
+                .push((String::from_utf8_lossy(payload).into_owned(), principal.to_owned()));
+            Ok(None)
+        });
+        for (payload, force, expected) in [
+            (r#"{"type":"response.create","input":[]}"#, false, "client-alias"),
+            (
+                r#"{"type":"response.append","model":"provider-model","input":[]}"#,
+                false,
+                "client-alias",
+            ),
+            (
+                r#"{"type":"response.create","model":"other","input":[]}"#,
+                false,
+                "other",
+            ),
+            (
+                r#"{"type":"response.steer","model":"other","input":[]}"#,
+                true,
+                "client-alias",
+            ),
+        ] {
+            input
+                .authorize_payload(payload, "client-alias", "provider-model", "client-principal", force)
+                .unwrap();
+            let seen = seen.lock().unwrap();
+            let (authorized, principal) = seen.last().unwrap();
+            assert_eq!(gjson::get(authorized, "model").str(), expected);
+            assert_eq!(principal, "client-principal");
+            assert!(authorized.contains("\"input\":[]"));
         }
     }
 }

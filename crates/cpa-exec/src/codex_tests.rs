@@ -1108,8 +1108,11 @@ async fn capture_keeps_each_sites_read_error_policy() {
     let result = executor()
         .execute(&oauth_credential(&url), req, &Config::default())
         .await;
+    let error = result.err().expect("post-success body read failure");
+    assert_eq!(error.scope, FailureScope::Request);
+    assert!(error.headers.is_empty());
     let taps = tap.taps();
-    assert!(taps.len() > 2, "{taps:?} {:?}", result.err());
+    assert!(taps.len() > 2, "{taps:?} {error:?}");
     assert_eq!(
         taps[2],
         Tap::Chunk(
@@ -1189,5 +1192,210 @@ async fn direct_images_return_the_read_error_of_a_broken_error_body() {
             [Tap::Error(String::from_utf8_lossy(&error.body).into_owned())],
             "stream={stream}: {taps:?}"
         );
+    }
+}
+
+/// A streamed (or buffered, `stream: false`) Responses request whose upstream sends `sse`:
+/// the client frames and the in-stream error, or the attempt's error.
+async fn through_sse(sse: &str, stream: bool, buffering: bool) -> Result<(Vec<String>, Option<ExecError>), ExecError> {
+    let mock = Mock::start().await;
+    mock.script(
+        "/responses",
+        vec![Reply {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: sse.into(),
+        }],
+    );
+    let synthetic = serde_json::json!({
+        "source": "openai-response",
+        "model": "gpt-5.4",
+        "payload": r#"{"model":"gpt-5.4","input":"hello"}"#,
+        "stream": stream,
+        "attributes": {"api_key": "test"},
+    });
+    let cfg = Config::parse(&format!("codex:\n  stream-bootstrap-buffering: {buffering}\n")).unwrap();
+    let response = executor()
+        .execute(&credential(&synthetic, &mock.url), request(&synthetic), &cfg)
+        .await?;
+    let (mut frames, mut failure) = (Vec::new(), None);
+    match response.body {
+        ResponseBody::Stream(mut body) => {
+            while let Some(item) = body.next().await {
+                match item {
+                    Ok(frame) => frames.push(String::from_utf8(frame.to_vec()).unwrap()),
+                    Err(error) => failure = Some(error),
+                }
+            }
+        }
+        ResponseBody::Buffered(body) => frames.push(String::from_utf8(body.to_vec()).unwrap()),
+    }
+    Ok((frames, failure))
+}
+
+const SPLIT_CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-5.4\"}}\n\n";
+/// Go's `codexOverloadEvent`: an overload that fails the attempt over during bootstrap.
+const SPLIT_OVERLOAD: &str = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"service_unavailable_error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\",\"param\":null},\"sequence_number\":2}\n\n";
+
+/// Go's `codex_executor_sse_events_test.go` (7795de19) for events whose data spans several
+/// `data:` lines: a split event reads as its one-line form, stream and non-stream, with
+/// and without bootstrap buffering, and an invalid split stays invalid.
+#[tokio::test]
+async fn split_sse_events_read_as_one_event() {
+    let completed = r#"{"type":"response.completed","response":{"id":"resp_split","object":"response","model":"gpt-5.4","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}"#;
+    let cut = completed.find(r#""output":"#).unwrap();
+    let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n";
+    let one_line = format!("{SPLIT_CREATED}{delta}event: response.completed\ndata: {completed}\n\n");
+    let split = format!(
+        "{SPLIT_CREATED}{delta}event: response.completed\ndata: {}\ndata: {}\n\n",
+        &completed[..cut],
+        &completed[cut..]
+    );
+    for buffering in [false, true] {
+        // TestCodexExecuteStreamTreatsAnEventSplitAcrossDataLinesAsOneEvent
+        let want = through_sse(&one_line, true, buffering).await.unwrap();
+        let got = through_sse(&split, true, buffering).await.unwrap();
+        assert!(want.1.is_none() && want.0.last().unwrap().contains("response.completed"));
+        assert_eq!(got.0, want.0, "buffering={buffering}");
+        assert!(got.1.is_none());
+        // TestCodexExecuteStreamMinimalReproFromIssue6575 and
+        // TestCodexExecuteStreamAssemblesSplitEventsWithAndWithoutBootstrapBuffering
+        for sse in [
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"status\":\"in_progress\",\"output\":[]}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\ndata: \"output\":[]}}\n\n".to_owned(),
+            format!("{SPLIT_CREATED}data: {{\"type\":\"response.in_progress\",\"response\":{{\"id\":\"resp_split\",\"output\":[\ndata: {{\"x\":1}},\ndata: {{\"x\":1}}]}}}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_split\",\"status\":\"completed\",\ndata: \"output\":[]}}}}\n\n"),
+        ] {
+            let (frames, failure) = through_sse(&sse, true, buffering).await.unwrap();
+            assert!(failure.is_none(), "{failure:?}");
+            assert!(!frames.iter().any(|f| f.contains("data: {\"x\":1},")), "{frames:?}");
+            let last = frames.last().unwrap().trim_end();
+            assert!(last.contains("\"response.completed\""), "{last}");
+            let data = last.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+            assert!(serde_json::from_str::<Value>(data).is_ok(), "{last}");
+        }
+    }
+
+    // TestCodexExecuteNonStreamReadsAnEventSplitAcrossDataLines, CRLF included.
+    let sse = format!(
+        "event: response.completed\r\ndata: {}\r\ndata: {}\r\n\r\n",
+        &completed[..cut],
+        &completed[cut..]
+    );
+    let (frames, failure) = through_sse(&sse, false, false).await.unwrap();
+    assert!(failure.is_none());
+    let body: Value = serde_json::from_str(&frames[0]).unwrap();
+    assert_eq!(body["id"], "resp_split", "{body}");
+    assert_eq!(body["output"].as_array().unwrap().len(), 1, "{body}");
+}
+
+/// Go's bootstrap budget tests for split events (7795de19): a split handshake that passes
+/// the 48-line or 1 MiB budget while it is being collected releases the stream, so the
+/// overload after it arrives in-stream instead of failing over, and the lines before the
+/// failure in its event are delivered.
+#[tokio::test]
+async fn split_sse_events_spend_the_bootstrap_budget() {
+    let open = "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_split\",\"items\":[\n";
+    // TestCodexExecuteStreamSplitHandshakeExceedingLineBudgetReleasesBootstrapWithoutFailover
+    let over_lines = format!(
+        "{SPLIT_CREATED}{open}{}data: ]}}}}\n\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(50)
+    );
+    // TestCodexExecuteStreamEventExceedsBudgetWhileAssemblingReleasesStream: the event
+    // reaches 48 lines while collected, and the overload follows without a blank line.
+    let no_blank = format!(
+        "{SPLIT_CREATED}{open}{}data: {{\"key_at_boundary\":123}},\ndata: {{\"key_after_boundary\":456}}\ndata: ]}}}}\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(43)
+    );
+    // TestCodexExecuteStreamMixedFramingCommentInsideSplitEventCountsBudget
+    let comments = format!(
+        "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}: keepalive-1\n: keepalive-2\n{SPLIT_OVERLOAD}data: ]}}}}\n\n",
+        "data: \n".repeat(46)
+    );
+    // TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream
+    let large = format!("data: \"{}\",\n", "x".repeat(250 * 1024));
+    let over_bytes = format!(
+        "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: \"last\"]}}\n\n{SPLIT_OVERLOAD}",
+        large.repeat(5)
+    );
+    // An overload that precedes a long split payload in its event decides first.
+    let overload_first = format!(
+        "{SPLIT_CREATED}{}\n{open}{}data: ]}}}}\n\n",
+        SPLIT_OVERLOAD.trim_end(),
+        "data: \n".repeat(60)
+    );
+    let error = through_sse(&overload_first, true, true).await.expect_err("fails over");
+    assert_eq!(error.status, 503, "{error:?}");
+    // Control: a split handshake within the budget still lets the overload fail over.
+    let within = format!(
+        "{SPLIT_CREATED}{open}{}data: ]}}}}\n{SPLIT_OVERLOAD}",
+        "data: \n".repeat(10)
+    );
+    let error = through_sse(&within, true, true).await.expect_err("fails over");
+    assert_eq!(error.status, 503, "{error:?}");
+    // Each delivered line spends the budget before the next is read, and a handshake may
+    // fill it exactly (outcomes recorded from Go v8.0.35): 47 comments and the overload's
+    // `event:` line are 48 held lines; one comment of raw plus translated bytes equal to
+    // 1 MiB is held, so the overload after it fails over.
+    let overload_data = SPLIT_OVERLOAD.strip_prefix("event: error\n").unwrap();
+    let comment = |len: usize| format!(": {}\n", "p".repeat(len - 2));
+    // A completed 40-line split event, its blank line and `n` comments.
+    let split_40 = |n: usize| {
+        format!(
+            "data: {{\"type\":\"response.in_progress\",\"items\":[\n{}data: ]}}\n\n{}{SPLIT_OVERLOAD}",
+            "data: \n".repeat(38),
+            ": k\n".repeat(n)
+        )
+    };
+    for (name, sse) in [
+        ("47 comments", format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(47))),
+        ("40 split lines and 6 comments", split_40(6)),
+        ("1 MiB exactly", format!("{}{overload_data}", comment(512 * 1024))),
+    ] {
+        let error = through_sse(&sse, true, true)
+            .await
+            .expect_err(&format!("{name}: fails over"));
+        assert_eq!(error.status, 503, "{name}: {error:?}");
+    }
+    // Go sends a delta as read, which starts the stream before the overload after it in
+    // the same event is seen.
+    let delta_first =
+        format!("{SPLIT_CREATED}data: {{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}}\n{SPLIT_OVERLOAD}");
+    // A split handshake that completes over the byte budget (600 KB read plus 600 KB
+    // translated) releases the stream before the overload after it is read.
+    let completed_over_bytes = format!(
+        "data: {{\"type\":\"response.in_progress\",\"response\":{{\"model\":\"gpt-5.4\"}},\"pad\":\"{}\",\ndata: \"n\":0}}\n{SPLIT_OVERLOAD}",
+        "x".repeat(600_000)
+    );
+    let comments_48 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(48));
+    let comments_49 = format!("{}{SPLIT_OVERLOAD}", ": k\n".repeat(49));
+    let over_one_mib = format!("{}{overload_data}", comment(512 * 1024 + 1));
+    let split_40_and_7 = split_40(7);
+    for (name, sse) in [
+        ("completed over the byte budget", &completed_over_bytes),
+        ("48 comments", &comments_48),
+        ("49 comments", &comments_49),
+        ("1 MiB and one byte", &over_one_mib),
+        ("40 split lines and 7 comments", &split_40_and_7),
+        ("delta first", &delta_first),
+        ("line budget", &over_lines),
+        ("no blank line", &no_blank),
+        ("comments", &comments),
+        ("byte budget", &over_bytes),
+    ] {
+        let (frames, failure) = through_sse(sse, true, true)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: the attempt failed over: {e:?}"));
+        assert!(failure.is_some(), "{name}: the failure arrives in-stream");
+        if name == "delta first" {
+            assert!(frames.iter().any(|f| f.contains("\"delta\":\"hi\"")), "{frames:?}");
+        }
+        if name == "no blank line" {
+            let progress = frames.iter().find(|f| f.contains("response.in_progress")).unwrap();
+            let data = progress.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                value["response"]["items"],
+                serde_json::json!([{"key_at_boundary": 123}, {"key_after_boundary": 456}])
+            );
+        }
     }
 }

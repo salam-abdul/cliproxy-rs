@@ -681,12 +681,9 @@ async fn apply_patch_failures_end_streams_like_go() {
     let (out, log) = probe(vec![Ok("a")], StreamEnd::Chat, false).await;
     assert_eq!(out, ["frame a", "frame [DONE]", "finished"]);
     assert_eq!(log, ["event a", "finalize", "event [DONE]", "finish"]);
-    // A scan error still gets [DONE] first (Go's loop just ends), then flush and the error.
+    // G4f2e5270 reports a scan error before synthesizing completion.
     let (out, _) = probe(vec![Ok("a"), Err(())], StreamEnd::Chat, false).await;
-    assert_eq!(
-        out,
-        ["frame a", "frame [DONE]", "finished", "flushed", "ERR 502 scan failed"]
-    );
+    assert_eq!(out, ["frame a", "flushed", "ERR 502 scan failed"]);
     // Native Responses translated for another client: no finalize and no [DONE].
     let (out, log) = probe(vec![Ok("a")], StreamEnd::Responses, true).await;
     assert_eq!(out, ["frame a", "finished"]);
@@ -760,4 +757,11 @@ async fn request_capture_matches_go() {
         let _ = downstream(result).await;
         crate::kimi_fixture::assert_capture_like_go(name, &fx, &capture, &mock.url, &masked(&fx));
     }
+}
+
+#[tokio::test]
+async fn scanner_failure_never_synthesizes_successful_done() {
+    let (out, log) = probe(vec![Ok("a"), Err(())], StreamEnd::Chat, false).await;
+    assert_eq!(out, ["frame a", "flushed", "ERR 502 scan failed"]);
+    assert_eq!(log, ["event a", "finalize"]);
 }

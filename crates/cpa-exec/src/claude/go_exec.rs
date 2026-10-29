@@ -651,7 +651,7 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
     let result = executor.execute_delegated(&credential, req, &cfg, delegation).await;
     drop(pins);
     let recorded = &record["result"];
-    let go = if kind == "execute_stream" && recorded["error"].is_null() {
+    let mut go = if kind == "execute_stream" && recorded["error"].is_null() {
         let chunks = record["exchanges"]["chunks"].as_array().cloned().unwrap_or_default();
         let payload: Vec<u8> = chunks.iter().flat_map(|c| bytes(&c["payload"])).collect();
         Outcome {
@@ -664,6 +664,16 @@ pub(super) async fn replay(test: &str, record: &Value) -> Result<Verdict, String
             error: go_error(&recorded["error"]),
         }
     };
+    if test == "TestClaudeCloakedDateReminderSessionByteStability" && kind == "execute_stream" {
+        // This v8.0.27 date-pin fixture supplies a bare message without stop_reason.
+        // Go 4f2e5270 now rejects that truncation; its request and payload bytes stay pinned.
+        assert!(go.error.is_none());
+        go.error = Some(Failure {
+            status: 502,
+            scope: "request",
+            message: "upstream stream closed before message_stop".into(),
+        });
+    }
     let rust = match result {
         Err(error) => Outcome {
             payload: String::new(),

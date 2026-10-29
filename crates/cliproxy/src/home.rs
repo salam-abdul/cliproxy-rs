@@ -356,7 +356,7 @@ impl Dispatcher {
             }
             return Err(RemoteError {
                 error: failure,
-                code: error.code.clone(),
+                code: error.code.as_str().into(),
                 kind,
             });
         }
@@ -4812,7 +4812,7 @@ mod tests {
                 Ok(_) => panic!("{reply} was accepted"),
                 Err(error) => error,
             };
-            assert_eq!(error.code, code, "{reply}");
+            assert_eq!(&*error.code, code, "{reply}");
             assert!(!matches!(error.kind, RemoteErrorKind::Busy { .. }), "{reply}");
             assert_eq!(picker.fenced(), fenced, "{reply}");
             assert_eq!(picker.in_flight(), 0, "the scope ended: {reply}");
@@ -4911,7 +4911,7 @@ mod tests {
             Ok(_) => panic!("a drained registry dispatched"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "home_unavailable");
+        assert_eq!(&*error.code, "home_unavailable");
         assert!(rpops(&home).is_empty(), "Home was never asked");
     }
 

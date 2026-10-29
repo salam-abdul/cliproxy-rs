@@ -764,3 +764,59 @@ async fn pinned_continuation_later_quota_failure_asks_for_replay() {
     .await;
     assert_eq!(frames, [DELTA, "close 1012 upstream requires HTTP replay"]);
 }
+
+#[tokio::test]
+async fn turn_access_clones_post_body_without_upgrade_headers() {
+    use super::TurnAccess;
+    let dir = std::env::temp_dir().join(format!("cpa-test-{}", uuid::Uuid::new_v4()));
+    let mut cfg = Config::parse("api-keys: [client-key]\n").unwrap();
+    cfg.auth_dir = dir.clone();
+    let rt = Arc::new(crate::testing::runtime(
+        cfg,
+        vec![],
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let mut headers = axum::http::HeaderMap::new();
+    for (key, value) in [
+        ("authorization", "Bearer client-key"),
+        ("connection", "upgrade"),
+        ("upgrade", "websocket"),
+        ("sec-websocket-key", "fixture"),
+        ("sec-websocket-version", "13"),
+        ("sec-websocket-extensions", "permessage-deflate"),
+        ("content-length", "999"),
+    ] {
+        headers.insert(key, value.parse().unwrap());
+    }
+    let mut access = TurnAccess::new(rt, headers.clone());
+    access.uri = "/v1/responses?key=ignored".parse().unwrap();
+    let payload = br#"{ "input": [], "opaque": 1e+02 }"#;
+    let request = access.request(payload, "client-model");
+    assert_eq!(request.method(), "POST");
+    assert_eq!(request.uri().query(), Some("key=ignored"));
+    for key in [
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "content-length",
+    ] {
+        assert!(!request.headers().contains_key(key));
+        assert!(headers.contains_key(key));
+    }
+    let body = axum::body::to_bytes(request.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(cpa_common::json::get(&body, "model").str(), "client-model");
+    assert!(String::from_utf8_lossy(&body).contains("\"opaque\": 1e+02"));
+    let caller = access
+        .authenticate(payload, "client-model")
+        .unwrap_or_else(|_| panic!("authorized"))
+        .unwrap();
+    assert_eq!(caller.principal, "client-key");
+}

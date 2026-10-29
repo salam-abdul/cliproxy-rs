@@ -1826,6 +1826,26 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    #[test]
+    fn entitlement_cooldown_stays_bound_to_the_requested_account_and_model() {
+        let c = cred("restricted", serde_json::json!({}));
+        let other = cred("available", serde_json::json!({}));
+        let mut scheduler = Scheduler::default();
+        let now = Instant::now();
+        let error = ExecError::local(
+            403,
+            FailureScope::Credential,
+            r#"{"error":{"code":"model_access_denied"}}"#,
+        );
+        scheduler.record(&c, "blocked-model", &Outcome::Failure(error), &Policy::default(), now);
+        assert_eq!(
+            scheduler.wait(&c, "blocked-model", now),
+            Some(Duration::from_secs(43200))
+        );
+        assert_eq!(scheduler.wait(&c, "other-model", now), None);
+        assert_eq!(scheduler.wait(&other, "blocked-model", now), None);
+    }
+
     fn tag<'a>(creds: &[&'a Credential]) -> Vec<(&'a Credential, &'static str)> {
         creds.iter().map(|c| (*c, "claude")).collect()
     }

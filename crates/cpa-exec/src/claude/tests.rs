@@ -426,7 +426,8 @@ fn assert_go_error(name: &str, scenario: &Value, info: &serde_json::Map<String, 
         .or(info.get("direct_status").and_then(Value::as_u64))
         .map(|s| s as u16);
     let flag = |k: &str| info[k].as_bool().unwrap();
-    let scope = if flag("request_scoped") {
+    // Deliberate difference: a decoder failure after success cannot safely replay inference.
+    let scope = if name == "decode-unsupported-200" || flag("request_scoped") {
         FailureScope::Request
     } else if flag("credential_scoped") {
         FailureScope::Credential
@@ -1792,4 +1793,24 @@ async fn refused_versions_log_only_when_the_identity_is_replaced() {
         profile::refused_logged(&oauth.id),
         "the baseline identity went upstream"
     );
+}
+
+#[tokio::test]
+async fn decoder_construction_failure_after_success_is_not_replayable() {
+    let error = finish(
+        Decoded {
+            status: 200,
+            headers: http::HeaderMap::new(),
+            body: Err("synthetic decoder construction failure".into()),
+        },
+        false,
+        false,
+        &Default::default(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.scope, FailureScope::Request);
+    assert_eq!(error.status, 500);
+    assert_eq!(error.body.as_ref(), b"synthetic decoder construction failure");
 }

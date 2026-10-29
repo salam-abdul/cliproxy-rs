@@ -157,6 +157,7 @@ async fn upgrade(
     peer: dispatch::Peer,
     matched: axum::extract::MatchedPath,
     headers: HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     let Ok(ws) = ws else {
@@ -170,6 +171,7 @@ async fn upgrade(
         .filter(|v| !v.is_empty())
         .and_then(|v| HeaderValue::from_str(v).ok());
     let mut connection = Connection::new(rt, caller, headers);
+    connection.access.uri = uri;
     // Go `request_path` metadata: gin FullPath of the upgrade route.
     connection.request_path = matched.as_str().to_owned();
     connection.peer = dispatch::peer(peer);
@@ -210,6 +212,8 @@ struct Failure {
     /// The raw upstream `error` event, sent as-is when exposed.
     payload: Option<String>,
     replay: bool,
+    /// Go `ErrorMessage.Addon`: copied into the error event.
+    addon: Option<Box<HeaderMap>>,
 }
 
 impl Failure {
@@ -219,6 +223,7 @@ impl Failure {
             text: String::from_utf8_lossy(&e.body).into_owned(),
             payload: None,
             replay: e.is_replay_required(),
+            addon: e.addon.clone(),
         }
     }
 
@@ -229,6 +234,7 @@ impl Failure {
                 text: classify::error_text(e),
                 payload: None,
                 replay: e.is_replay_required(),
+                addon: e.addon.clone(),
             },
             other => Self::local(other.status(), &other.text()),
         }
@@ -240,13 +246,79 @@ impl Failure {
             text: text.into(),
             payload: None,
             replay: false,
+            addon: None,
         }
+    }
+}
+
+#[derive(Clone)]
+struct TurnAccess {
+    rt: Arc<Runtime>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+}
+
+impl TurnAccess {
+    fn new(rt: Arc<Runtime>, mut headers: HeaderMap) -> Self {
+        let remove: Vec<_> = headers
+            .keys()
+            .filter(|k| {
+                matches!(k.as_str(), "upgrade" | "connection" | "content-length")
+                    || k.as_str().starts_with("sec-websocket-")
+            })
+            .cloned()
+            .collect();
+        for key in remove {
+            headers.remove(key);
+        }
+        Self {
+            rt,
+            uri: axum::http::Uri::from_static("/v1/responses"),
+            headers,
+        }
+    }
+
+    fn request(&self, payload: &[u8], model: &str) -> axum::extract::Request {
+        let mut body = payload.to_vec();
+        if !model.is_empty()
+            && cpa_common::json::std_valid(payload)
+            && cpa_common::json::get(payload, "model").str().trim().is_empty()
+        {
+            cpa_common::json::set_str(&mut body, "model", model);
+        }
+        let mut request = axum::extract::Request::new(axum::body::Body::from(body));
+        *request.method_mut() = axum::http::Method::POST;
+        *request.uri_mut() = self.uri.clone();
+        *request.headers_mut() = self.headers.clone();
+        request
+    }
+
+    fn authenticate(&self, payload: &[u8], model: &str) -> Result<Option<Caller>, Failure> {
+        let (_, access) = crate::access::authenticate_request(&self.rt, self.request(payload, model));
+        match access {
+            Ok(crate::access::Access::Open) => Ok(None),
+            Ok(crate::access::Access::Granted { caller, .. }) => Ok(Some(caller)),
+            Err(denied) => Err(Failure::local(denied.status, denied.message)),
+        }
+    }
+
+    fn authorize(&self, payload: &[u8], bound: &str) -> Option<Bytes> {
+        let failure = match self.authenticate(payload, "") {
+            Ok(Some(caller)) if !caller.principal.is_empty() && caller.principal != bound => Some(Failure::local(
+                401,
+                "client credential changed during the websocket stream; reconnect",
+            )),
+            Ok(_) => None,
+            Err(failure) => Some(failure),
+        };
+        failure.map(|f| Bytes::from(error_payload(f.status, &f.text, None)))
     }
 }
 
 struct Connection {
     rt: Arc<Runtime>,
     caller: Caller,
+    access: TurnAccess,
     headers: HeaderMap,
     /// Go `request_path` metadata for payload rules.
     request_path: String,
@@ -437,6 +509,7 @@ impl Connection {
     fn new(rt: Arc<Runtime>, caller: Caller, headers: HeaderMap) -> Self {
         Self {
             tool_key: tools::session_key(&headers),
+            access: TurnAccess::new(rt.clone(), headers.clone()),
             rt,
             caller,
             headers,
@@ -478,10 +551,12 @@ impl Connection {
             // `WithWebsocketAuthCheck`. ponytail: Go falls back to the execution session's
             // snapshot of a credential removed since; a missing credential counts as enabled.
             let enabled = move |id: &str| store.get(id).is_none_or(|c| !c.disabled);
-            self.rt
-                .executors
-                .codex
-                .attach_steering(&self.session, SteeringInput::new(frames.clone(), enabled));
+            let access = self.access.clone();
+            self.rt.executors.codex.attach_steering(
+                &self.session,
+                SteeringInput::new(frames.clone(), enabled)
+                    .with_authorizer(move |payload, bound| Ok(access.authorize(payload, bound))),
+            );
             self.steering = true;
             Client::queued(stream, tx, frames)
         } else {
@@ -568,6 +643,17 @@ impl Connection {
         if request_model.is_empty() {
             request_model = field(&self.last_request, "model");
         }
+        match self.access.authenticate(payload.as_bytes(), &request_model) {
+            Ok(Some(caller)) => self.caller = caller,
+            Ok(None) => {}
+            Err(failure) => {
+                return if send_text(socket, error_payload(failure.status, &failure.text, None)).await {
+                    Flow::Next
+                } else {
+                    Flow::End
+                };
+            }
+        }
         self.revalidate_pin(&request_model);
 
         let mut use_upstream_ws = self.uses_upstream_websocket(&request_model);
@@ -638,7 +724,7 @@ impl Connection {
             Ok(pair) => pair,
             Err(error) => {
                 // Request-shape errors keep the connection open.
-                let frame = error_payload(error.status, &error.message);
+                let frame = error_payload(error.status, &error.message, None);
                 return match send_text(socket, frame).await {
                     true => Flow::Next,
                     false => Flow::End,
@@ -1060,6 +1146,7 @@ impl Connection {
                         text: payload.trim().to_owned(),
                         payload: Some(payload.trim().to_owned()),
                         replay: false,
+                        addon: None,
                     };
                     close_for_failure(socket, &failure).await;
                     return Forwarded::End;
@@ -1192,7 +1279,7 @@ async fn close_for_failure(socket: &mut Sink, failure: &Failure) {
         let payload = failure
             .payload
             .clone()
-            .unwrap_or_else(|| error_payload(failure.status, &failure.text));
+            .unwrap_or_else(|| error_payload(failure.status, &failure.text, failure.addon.as_deref()));
         socket.event("response", payload.as_bytes());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     } else {
@@ -1211,7 +1298,7 @@ async fn close_for_upstream_loss(socket: &mut Sink, error: &ExecError) {
     if let Some((code, reason)) = close_code(&failure) {
         close_with_code(socket, code, &reason).await;
     } else if exposed(&failure) {
-        let payload = error_payload(failure.status, &failure.text);
+        let payload = error_payload(failure.status, &failure.text, failure.addon.as_deref());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     }
     socket.terminate(CLOSE_SENT);

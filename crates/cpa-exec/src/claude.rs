@@ -635,7 +635,10 @@ async fn finish(
     if (200..300).contains(&status) {
         let body = body.map_err(|m| {
             capture.record(CaptureEvent::ResponseError(&m));
-            fast_request_error(fast, plain_error(m))
+            fast_request_error(
+                fast,
+                crate::upstream::body_read_error_after_response(status, plain_error(m)),
+            )
         })?;
         return Ok(RawResponse {
             status,
@@ -732,10 +735,13 @@ fn upstream_error(
             } else {
                 FailureScope::Request
             },
-            retry_after: rate_limited.then(|| quota::rate_limit_reset(&headers)).flatten(),
+            retry_after: rate_limited
+                .then(|| quota::rate_limit_reset_for_error(&headers, &body))
+                .flatten(),
             headers: Box::new(headers),
             body,
             direct: true,
+            addon: None,
         };
     }
     let error = ExecError {
@@ -749,6 +755,7 @@ fn upstream_error(
             body
         },
         direct: false,
+        addon: None,
     };
     quota::classify(error, model_level_cooling)
 }

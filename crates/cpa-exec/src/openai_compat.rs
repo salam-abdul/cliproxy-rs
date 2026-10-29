@@ -350,13 +350,7 @@ impl OpenAICompatExecutor {
                     })
                     .boxed();
             }
-            let stream = frames(
-                lines,
-                translator,
-                req.response_format == Format::OpenAIResponse,
-                capture,
-                req.usage.clone(),
-            );
+            let stream = frames(lines, translator, req.response_format, capture, req.usage.clone());
             return Ok(ExecResponse {
                 status: 200,
                 headers: response_headers,
@@ -632,11 +626,12 @@ fn trim(bytes: &[u8]) -> &[u8] {
 /// every frame, and the terminal rules for `[DONE]` and EOF.
 struct Frames {
     translator: Box<dyn StreamTranslator>,
-    responses: bool,
+    client: Format,
     event: String,
     data: Vec<Vec<u8>>,
     ready: VecDeque<Result<Bytes, ExecError>>,
     seen_done: bool,
+    saw_finish_reason: bool,
     failed: bool,
     capture: wire::Capture,
     usage: cpa_core::exec::UsageSink,
@@ -706,6 +701,12 @@ impl Frames {
         if !done && let Some(status) = payload::stream_data_error(payload_bytes, &event) {
             return self.fail_payload(status, String::from_utf8_lossy(payload_bytes));
         }
+        if !done {
+            self.saw_finish_reason |= gj::get(payload_bytes, "choices")
+                .array()
+                .iter()
+                .any(|choice| !trim(&choice.get("finish_reason").bytes()).is_empty());
+        }
         let mut line = b"data: ".to_vec();
         line.extend_from_slice(payload_bytes);
         if self.translate(&line) {
@@ -762,8 +763,11 @@ impl Frames {
             return;
         }
         if !self.seen_done {
-            if self.responses {
-                self.fail(502, "upstream stream closed before [DONE]");
+            if self.client == Format::OpenAIResponse || (self.client == Format::Claude && !self.saw_finish_reason) {
+                let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before [DONE]");
+                self.capture.error(&error);
+                wire::publish_failure(&self.usage, &error);
+                self.terminal(error);
                 return;
             }
             if self.translate(b"data: [DONE]") {
@@ -786,17 +790,18 @@ impl Frames {
 fn frames(
     lines: ExecStream,
     translator: Box<dyn StreamTranslator>,
-    responses: bool,
+    client: Format,
     capture: wire::Capture,
     usage: cpa_core::exec::UsageSink,
 ) -> ExecStream {
     let state = Frames {
         translator,
-        responses,
+        client,
         event: String::new(),
         data: Vec::new(),
         ready: VecDeque::new(),
         seen_done: false,
+        saw_finish_reason: false,
         failed: false,
         capture,
         usage,
@@ -824,7 +829,10 @@ fn frames(
                         ended = true;
                     }
                 }
-                Some(Err(error)) => {
+                Some(Err(mut error)) => {
+                    if error.scope == FailureScope::Transport && error.headers.is_empty() {
+                        error.scope = FailureScope::Request;
+                    }
                     // Go ends apply_patch input before reporting the scan error.
                     if !state.end_tool_input() {
                         state.capture.error(&error);

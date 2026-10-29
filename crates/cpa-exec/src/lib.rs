@@ -43,6 +43,7 @@ pub mod codex_quota;
 mod codex_replay;
 mod codex_request;
 mod codex_response;
+mod codex_sse;
 #[cfg(test)]
 mod codex_testkit;
 mod codex_tls;
