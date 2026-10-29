@@ -9,44 +9,26 @@ These are inclusive boundaries for screened default-branch history, not merge or
 | R — [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs) | `master` | `0ccf7e4da7676994a8f342d7de5deb6f1362123c` |
 | S — [sub-api-proxy](https://github.com/DarkEden-coding/sub-api-proxy) | `main` | `b9c875c3d9060a55f9caf377d6b87d1ffc4b0008` |
 
-## Completed
+## Completed ports
 
-- **U07, U01, U03 — `cc3ffc1`**: test catalog isolation, Claude OAuth retry safety,
-  RESP limits. Independently reviewed; 47 focused tests passed again on 2026-10-28.
-- **U02 + U14 credential locking — `28f94dc`**: preserve refresh results across
-  metadata edits, fence replaced identities, retain credentials on incomplete scans,
-  and move disk writes outside the selection lock. On 2026-10-28, 106 focused tests,
-  formatting and clippy passed.
-- **U08 core — `67fbb4d`**: iterative GoValue decode/marshal/drop and built-in
-  walkers from R `541b8e47`/`e563f51a`, plus iterative clone/equality. Go's 10000-depth
-  limit and wire semantics are covered; 261 tests, formatting and clippy passed on
-  2026-10-28. Remaining recursive paths are split below.
-- **U08b — `ca733eb`**: iterative AnyValue conversion/marshal/drop/clone/equality
-  and Claude-to-OpenAI tool-schema normalization. Deep and malformed inputs retain
-  gjson behavior; 60000 generated cases preserved the previous output bytes. On
-  2026-10-28, 133 tests, formatting and clippy passed.
-- **U14 config + U15 — `1962b30`**: conditional config writes, atomic management
-  saves, cross-platform log paths and `value` query redaction. On 2026-10-29,
-  61 focused control-plane tests and the management routing golden passed.
-- **U11, U12 + U09 requests/responses — `8fbb788`**: batched element-local
-  wildcard payload edits, cached tool mappings, wrapped MCP-name restoration, explicit tool
-  concurrency and context-window stop reasons. Gemini tool caching was already
-  present; its behavior was verified.
-- **U13 + U08c walkers — `8856586`**: bounded shared reference expansion, final
-  schema/argument semantics, indexed argument edits and iterative consuming
-  walkers. Ambiguous argument paths preserve the original document, as recorded
-  in [DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md). Schema batching remains below.
-- **U04, U05, U06 + split admission fixes — `42af939`**: per-turn WebSocket
-  authorization, stream completion/framing/cancellation, error-header isolation
-  and no replay after locally detected incomplete responses. Includes U09 prompt
-  overflow, U10 per-minute throttling and S01 translating-path entitlement errors.
-  Connection setup and native entitlement handling remain below.
+Implementation details live in the resolving commits. Partial IDs
+retain their unfinished work below.
 
-Validation on **2026-10-29**: 318 selected executor tests, 145 server unit tests,
-55 protocol/admission integration tests and 61 control-plane tests passed.
-The common/translate suites passed, including 11224 translator vectors and
-2079 final-Go schema outputs. Affected-crate clippy, CLI checks and formatting
-passed. These are focused checks, not a whole-workspace run.
+| IDs / completed portion | Fork commit | Result |
+| --- | --- | --- |
+| U07, U01, U03 | `cc3ffc1` | Isolated test catalogs, safe OAuth retry, RESP limits. |
+| U02 + U14 credentials | `28f94dc` | Preserve rotated credentials across edits and reloads. |
+| U08 core | `67fbb4d` | Stack-safe GoValue operations and built-in walkers. |
+| U08b | `ca733eb` | Stack-safe AnyValue operations and Claude tool-schema normalization. |
+| U14 config + U15 | `1962b30` | Conditional atomic config saves, log-path safety and query redaction. |
+| U11, U12 + U09 requests/responses | `8fbb788` | Payload batching, tool-name caching/restoration, concurrency and context stops. |
+| U13 + U08c walkers | `8856586` | Bounded references, schema/argument cleanup and iterative consuming walkers. |
+| U04, U05, U06 + U09 server, U10 rate limits, S01 translating | `42af939` | WebSocket reauthorization, stream/error delivery safety and scoped admission fixes. |
+
+Latest focused verification: **2026-10-29**. Executor, server, common/translate,
+reference fixtures, CLI checks, clippy and formatting passed. This was not a
+whole-workspace run or installation qualification. Intentional deviations are in
+[DIFFERENCES-FROM-GO.md](DIFFERENCES-FROM-GO.md).
 
 ## Pick up next
 
@@ -55,8 +37,8 @@ Only unfinished work is listed. Source prefixes refer to the repositories above.
 | ID | Work and acceptance boundaries | Starting points |
 | --- | --- | --- |
 | U08c — schema batching | Remove repeated whole-schema path scans/rebuilds from the legacy cleaner using an indexed document and batched edits. Preserve the 2079 Go outputs, complex-path behavior and consuming-path depth tests; add bounded deep/wide scaling regressions. Ordinary walkers, reference expansion and serde/debug boundary audit are complete. Do not port the 1 GiB stack workaround. | Local `cpa-common/src/gemini_schema.rs`, `schema_path.rs`; R `541b8e47`, `e563f51a`, `0ccf7e4d` |
-| U10 — connection setup | Assess bounded connection-setup settings separately from the completed per-minute fix. Prove timeout/retry behavior occurs before request-body transmission. Retain fresh quota checks and native CONNECT's no-retry policy. | R `b2ea411e`; G `345cc9d5`, `b3dc6c3f` |
-| S01 — native entitlement | Reconcile concurrent native changes before adding bounded error inspection and account/model-scoped cooldowns. Preserve response bytes and no replay. Translating-path classification is complete. | S `84d9e570`; local `native_claude/` |
+| U10 — connection setup | Assess bounded connection-setup settings separately from the completed per-minute fix. Prove any retry occurs before request-body transmission; an ambiguous timeout must remain terminal. Retain fresh quota checks and native CONNECT's no-retry policy. | R `b2ea411e`; G `345cc9d5`, `b3dc6c3f` |
+| S01 — native entitlement | Reconcile uncommitted native changes, then reuse the bounded error observer to distinguish explicit model entitlement from authentication/quota failures. Cool only that account/model; preserve response bytes and no replay. Translating-path classification is complete. | S `84d9e570`; local `native_claude/` |
 
 ## Handoff
 

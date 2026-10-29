@@ -70,10 +70,8 @@ Raw ClientHello TLS records, raw HTTP request heads, exact upstream body bytes,
 downstream status/header/body bytes and chunked transfer framing are retained as
 hex. Ordered/cased headers and parsed TLS fields are also readable JSON. JA3 and
 JA4 are calculated from the observed ClientHello, not the advertised User-Agent.
-The harness has 57 cases (`cases()` in `fixtures.py`). The committed
-[evidence archive](evidence/2026-10-02.json.gz) is from the first baseline run, when
-there were 33 cases, and holds their fixtures, observations, diffs and summary; use
-`gzip -dc` and `jq` to inspect it offline.
+The harness has 57 cases (`cases()` in `fixtures.py`). Generate captures from the
+current checkout; archived baseline captures do not establish current parity.
 The collector's Go-derived 508-byte fixture asserts JA3
 `d871d02cecbde59abbf8f4806134addf`; JA4 hashing follows
 [FoxIO's technical specification](https://github.com/FoxIO-LLC/ja4/blob/main/technical_details/JA4.md).
@@ -126,5 +124,4 @@ upstream requests, chunked upstream request bodies, proxy transport modes,
 Brotli/zstd, TLS 1.2 or performance/timing parity. The upstream intentionally
 negotiates HTTP/1.1 while recording the client's full offered ALPN. The disconnect
 case observes upstream writes failing before process shutdown, not internal
-lease completion or an exact cancellation deadline. The Rust transport-injection
-and runtime-observation gaps are described in the differential review.
+lease completion or an exact cancellation deadline.

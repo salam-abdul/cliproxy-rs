@@ -29,11 +29,12 @@ Keep the listener on loopback, configure separate client and management keys, an
 - [Compatibility](docs/PARITY.md) and [deliberate differences](docs/DIFFERENCES-FROM-GO.md).
 - [Upstream review checkpoints and port backlog](docs/UPSTREAM-REVIEW.md).
 - [Benchmarks](docs/BENCHMARKS.md) and [optional cache telemetry](docs/CLAUDE-CACHE-TELEMETRY.md).
-- [Go migration](docs/MIGRATING-FROM-GO.md): credential ownership and configuration compatibility.
 
 ## Development
 
 Use focused crate tests while iterating. Tests use private auth directories and local mock upstreams. CI also runs isolated Go/PostgreSQL comparisons and resource gates.
+
+Go files in test directories regenerate pinned upstream fixtures; Rust tests replay the recorded outputs. The three Go programs in `bench/` generate local test traffic. Go is needed for regeneration, those benchmarks and the differential harness; building or running the proxy does not require it.
 
 ```sh
 cargo fmt --all --check

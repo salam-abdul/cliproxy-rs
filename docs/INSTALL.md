@@ -38,6 +38,14 @@ Open `http://127.0.0.1:8317/management.html`, using the configured port. For aut
 
 If another machine needs access, use the [remote-access guidance](MULTI-ACCOUNT.md#reach-the-proxy-from-other-machines). Restrict trusted proxies explicitly. Model catalog downloads can be disabled with `--local-model`.
 
+## Existing Go configuration
+
+Built-in configuration and credential formats carry over; review [scope](PARITY.md)
+and [fork differences](DIFFERENCES-FROM-GO.md). Remove plugin flags and plugin-dependent
+routing. Stop the previous server before starting this fork with the same accounts:
+a copied auth directory still shares refresh tokens, and a backup may contain tokens
+that have since rotated.
+
 ## Local container
 
 ```sh
