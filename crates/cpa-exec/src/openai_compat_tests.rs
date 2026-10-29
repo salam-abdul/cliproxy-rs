@@ -466,8 +466,8 @@ async fn images_error_body_read_failure_is_logged_and_returned() {
         let error = executor.images(&cred, req, &path, &cfg).await.err().expect(name);
         assert_eq!(
             error.scope,
-            FailureScope::Transport,
-            "{name}: the read error, not the 429"
+            FailureScope::Request,
+            "{name}: the read error is terminal, not quota"
         );
         let events = capture.take();
         assert!(

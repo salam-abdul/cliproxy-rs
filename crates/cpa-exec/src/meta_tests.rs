@@ -793,7 +793,7 @@ async fn failed_error_body_read_is_not_classified_by_status() {
         .err()
         .unwrap();
     assert_ne!(error.status, 429);
-    assert_eq!(error.scope, FailureScope::Transport);
+    assert_eq!(error.scope, FailureScope::Request);
     assert_eq!(error.retry_after, None);
 }
 

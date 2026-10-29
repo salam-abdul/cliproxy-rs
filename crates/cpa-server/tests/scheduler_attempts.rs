@@ -331,28 +331,24 @@ async fn stop_continue_and_force_cooldown_are_independent() {
 }
 
 #[tokio::test]
-async fn transport_faults_fail_over_without_poisoning() {
+async fn ambiguous_response_failure_is_terminal_without_poisoning() {
     let fixture = Fixture::new(
         Mode::Transport,
         &[serde_json::json!({}), serde_json::json!({})],
         Policy::default(),
     )
     .await;
-    for _ in 0..2 {
-        let response = fixture.request(false).await;
-        assert_eq!(response.status().as_u16(), 200);
-        let text = response.text().await.unwrap();
-        assert!(!text.contains("partial"));
-    }
-    assert_eq!(
-        fixture.seen(),
-        ["Bearer fake-a", "Bearer fake-b", "Bearer fake-a", "Bearer fake-b"]
-    );
+    let response = fixture.request(false).await;
+    assert_eq!(response.status().as_u16(), 502);
+    let text = response.text().await.unwrap();
+    assert!(!text.contains("partial"));
+    assert_eq!(fixture.seen(), ["Bearer fake-a"]);
+    assert!(fixture.rt.store().cooldowns("a").is_empty());
     assert_eq!(
         fixture.rt.store().stats(),
         AttemptStats {
-            success: 2,
-            failure: 2,
+            success: 0,
+            failure: 1,
             cancelled: 0
         }
     );

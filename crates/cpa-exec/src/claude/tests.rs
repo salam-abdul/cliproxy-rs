@@ -23,16 +23,9 @@ fn set_clock(now: Option<&str>) {
     CLOCK.set(now.map(|now| chrono::DateTime::parse_from_rfc3339(now).unwrap().to_utc()));
 }
 
-/// The local date [`pin_today`] pinned for this thread.
+/// The local date pinned for this thread.
 pub(super) fn pinned_today() -> Option<String> {
     TODAY.with_borrow(Clone::clone)
-}
-
-/// Pins the date itself, for replays of a Go run that recorded only the date its clock
-/// gave in the credential's zone, until the returned guard drops.
-pub(super) fn pin_today(date: Option<&str>) -> Pins {
-    TODAY.with_borrow_mut(|today| *today = date.map(str::to_owned));
-    Pins
 }
 
 /// Releases this thread's clock and date pins when it drops, so a test that panics
@@ -46,7 +39,7 @@ impl Drop for Pins {
     }
 }
 
-/// The harness credential (harness/fixtures.py): fake, local-only.
+/// Synthetic local-only credential.
 fn harness_credential() -> Credential {
     let metadata = serde_json::json!({
         "type": "claude", "access_token": "sk-ant-oat01-FAKE-LOCAL-ONLY",
@@ -492,7 +485,7 @@ const FOLLOWS_V8_0_27: &[&str] = &[
 
 /// v8.0.27 scenarios where Go keeps an API key's caller system text top-level and
 /// cliproxy-rs moves it after the leading user run, as it does for every request
-/// (docs/DIFFERENCES-FROM-GO.md). Rust's body is compared with Go's after
+///. Rust's body is compared with Go's after
 /// [`with_relocated_system`].
 const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
     "apikey-cloak-system-single-user",
@@ -945,7 +938,7 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     // The selected content the cache is keyed on, in Anthropic's order (tools, system,
     // messages), up to and including message `upto`. The billing block (system.0)
     // carries a per-request signature, as in native Claude Code; that Anthropic leaves
-    // it out of the key is an upstream assumption, which bench/claude-cache-live.sh
+    // it out of the key is an upstream assumption, which tools/claude-cache-live.sh
     // confirms with real cache reads. The rolling breakpoint on the last message moves
     // on with each turn, so markers after the first two messages are left out here and
     // checked by path below.
@@ -1007,7 +1000,7 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
 /// in a system turn after the first user message, on the first turn and every later
 /// one, as for an OAuth login. Go v8.0.27 keeps it top-level while that user message
 /// ends the conversation and moves it on the second turn, which then misses the cache
-/// from the Claude Code identity block on (docs/DIFFERENCES-FROM-GO.md).
+/// from the Claude Code identity block on.
 #[tokio::test]
 async fn api_key_cloak_keeps_the_caller_prompt_in_place_across_turns() {
     let (base, sent) = recording_upstream().await;
@@ -1813,4 +1806,34 @@ async fn decoder_construction_failure_after_success_is_not_replayable() {
     assert_eq!(error.scope, FailureScope::Request);
     assert_eq!(error.status, 500);
     assert_eq!(error.body.as_ref(), b"synthetic decoder construction failure");
+}
+
+#[tokio::test]
+async fn translating_request_reads_connection_setup_bound_from_config_snapshot() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        socket.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.starts_with(b"CONNECT api.anthropic.com:443 "));
+        assert!(!bytes.windows(9).any(|bytes| bytes == b"synthetic"));
+    });
+    let executor = ClaudeExecutor::new("https://api.anthropic.com").unwrap();
+    let config = Config::parse(&format!("oauth: {{auth-dir: /synthetic-isolated-auth}}\nrequests: {{tls-handshake-timeout-seconds: 1, proxy-url: 'http://{address}'}}\n")).unwrap();
+    let credential = harness_credential();
+    let request = client_request(
+        r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"synthetic"}]}"#.into(),
+        Default::default(),
+    );
+    let error = tokio::time::timeout(Duration::from_secs(4), executor.execute(&credential, request, &config))
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+    assert_eq!(error.scope, FailureScope::Transport);
+    assert!(error.retry_after.is_none());
+    assert!(error.headers.is_empty());
+    server.await.unwrap();
 }

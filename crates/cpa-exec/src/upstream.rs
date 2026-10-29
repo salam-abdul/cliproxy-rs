@@ -18,22 +18,24 @@ pub(crate) const MAX_ERROR_BODY: usize = 64 * 1024;
 
 pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
     // wreq errors may include a URL with credential-bearing query parameters.
-    let _ = e;
-    ExecError::local(502, FailureScope::Transport, "upstream request failed")
+    // wreq tags only connection acquisition errors: HTTP headers/body have not been sent.
+    let scope = if e.is_connect() {
+        FailureScope::Transport
+    } else {
+        FailureScope::Request
+    };
+    ExecError::local(502, scope, "upstream request failed")
 }
 
-/// A failed body read after success cannot establish whether inference completed.
-pub(crate) fn body_read_error_after_response(status: u16, mut error: ExecError) -> ExecError {
-    if (200..300).contains(&status) && error.scope == FailureScope::Transport && error.headers.is_empty() {
+/// A failed response body read cannot establish whether inference completed.
+pub(crate) fn body_read_error_after_response(_status: u16, mut error: ExecError) -> ExecError {
+    if error.scope == FailureScope::Transport && error.headers.is_empty() {
         error.scope = FailureScope::Request;
     }
     error
 }
 
 pub(crate) fn body_after_response(status: u16, body: ExecStream) -> ExecStream {
-    if !(200..300).contains(&status) {
-        return body;
-    }
     body.map(move |item| item.map_err(|error| body_read_error_after_response(status, error)))
         .boxed()
 }
@@ -458,9 +460,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_failure_is_transport_not_quota_or_request() {
+    async fn invalid_request_is_terminal_and_raw_body_errors_keep_their_origin() {
         let error = wreq::Client::new().get("not a URL").send().await.unwrap_err();
-        assert_eq!(transport_error(error).scope, FailureScope::Transport);
+        assert_eq!(transport_error(error).scope, FailureScope::Request);
         let error = wreq::Client::new().get("not a URL").send().await.unwrap_err();
         let body = chunks(vec![
             Ok(Bytes::from_static(b"data: ok\n\n")),
@@ -480,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_response_read_errors_are_terminal_without_reclassifying_other_origins() {
+    async fn response_read_errors_are_terminal_without_reclassifying_explicit_origins() {
         for status in [199, 200, 204, 206, 299, 302, 400, 503] {
             for (scope, classified) in [
                 (FailureScope::Transport, false),
@@ -509,7 +511,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(partial, b"partial");
                 let error = items.last().unwrap().as_ref().unwrap_err();
-                let expected = if (200..300).contains(&status) && scope == FailureScope::Transport && !classified {
+                let expected = if scope == FailureScope::Transport && !classified {
                     FailureScope::Request
                 } else {
                     scope
@@ -558,15 +560,7 @@ mod tests {
                         ResponseBody::Buffered(_) => panic!("truncated body accepted"),
                     },
                 };
-                assert_eq!(
-                    error.scope,
-                    if (200..300).contains(&status) {
-                        FailureScope::Request
-                    } else {
-                        FailureScope::Transport
-                    },
-                    "status={status}, sse={sse}"
-                );
+                assert_eq!(error.scope, FailureScope::Request, "status={status}, sse={sse}");
                 assert!(error.headers.is_empty());
                 server.await.unwrap();
             }

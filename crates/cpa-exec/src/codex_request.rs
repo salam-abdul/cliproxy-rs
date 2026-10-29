@@ -220,6 +220,8 @@ pub(crate) struct View<'a> {
     /// keep idle chatgpt.com connections instead of Go's connection per request. Read
     /// from the config snapshot of each request, so a reload applies to the next one.
     pub chatgpt_keep_alive: bool,
+    /// `requests.tls-handshake-timeout-seconds` for chatgpt.com ([`crate::tls::handshake_timeout`]).
+    pub handshake: Option<std::time::Duration>,
 }
 
 impl<'a> View<'a> {
@@ -228,6 +230,7 @@ impl<'a> View<'a> {
         Self {
             proxy: crate::proxy::Proxy::effective(credential, cfg),
             chatgpt_keep_alive: chatgpt_keep_alive(cfg),
+            handshake: crate::tls::handshake_timeout(cfg),
             ..Self::new(credential)
         }
     }
@@ -260,6 +263,7 @@ impl<'a> View<'a> {
             proxy: crate::proxy::Proxy::Inherit,
             session: None,
             chatgpt_keep_alive: false,
+            handshake: None,
         }
     }
 
@@ -457,7 +461,7 @@ pub(crate) struct Shaped {
 // ponytail: the Claude-source reasoning replay cache is not applied here yet.
 // ponytail: each rule that edits the body returns a new copy while the previous one is
 // still alive, so a streamed 1.9 MB /v1/responses request peaks at 16.8 MB of live heap
-// (8.8x the body; alloc.codex.* in bench/budgets.txt). At that peak, heaptrack counted
+// (8.8x the body; alloc.codex.* in crates/cpa-server/tests/fixtures/allocation_limits.txt). At that peak, heaptrack counted
 // about four body-sized buffers from `sanitize_reasoning`'s edits, one each from
 // `translate_request`, `ensure_image_tool` and the route's
 // `rewrite_orphan_delegation_input`, and about three more in string formatting and JSON

@@ -200,11 +200,11 @@ impl ClaudeExecutor {
         self.oauth.prepare(credential, &Proxy::effective(credential, cfg)).await
     }
 
-    fn native_client(&self, proxy: &Proxy) -> Result<wreq::Client, ExecError> {
+    fn native_client(&self, proxy: &Proxy, handshake: Option<std::time::Duration>) -> Result<wreq::Client, ExecError> {
         match &self.native {
             Native::Fixed(client) => Ok(client.clone()),
             Native::Transport(t) => t
-                .clients(proxy)
+                .clients(proxy, handshake)
                 .map(|clients| clients.native.clone())
                 .map_err(|_| ExecError::local(502, FailureScope::Transport, "upstream request failed")),
         }
@@ -522,7 +522,7 @@ impl ClaudeExecutor {
         let route = |hop: &url::Url| {
             Ok(if tokens::first_party(hop.as_str()) {
                 Route {
-                    client: self.native_client(&ctx.proxy)?,
+                    client: self.native_client(&ctx.proxy, ctx.handshake)?,
                     order: Some(prepared.order.clone()),
                 }
             } else {
@@ -788,6 +788,7 @@ struct Ctx<'a> {
     base_url: String,
     first_party: bool,
     proxy: Proxy,
+    handshake: Option<std::time::Duration>,
     base_model: String,
     /// The model sent upstream (`upstreamModel`): the base model unless a delegating
     /// executor normalizes it.
@@ -993,6 +994,7 @@ impl<'a> Ctx<'a> {
             credential,
             first_party: tokens::first_party(&base_url),
             proxy: Proxy::effective(credential, cfg),
+            handshake: crate::tls::handshake_timeout(cfg),
             upstream_model: delegation.upstream_model.map_or_else(|| base.clone(), |f| f(&base)),
             kimi: kimi_upstream(&credential.provider, &base_url),
             log_provider: delegation.request_log_provider.unwrap_or("claude"),
@@ -1149,7 +1151,7 @@ impl<'a> Ctx<'a> {
 
     // ponytail: every rewrite that changes the body still returns a new copy of it, so a
     // cloaked 1.9 MB request allocates 32 buffers of 256 KiB or more and peaks at 5.1x its
-    // body (alloc.cloak.* in bench/budgets.txt). Recording the edits from one walk and
+    // body (alloc.cloak.* in crates/cpa-server/tests/fixtures/allocation_limits.txt). Recording the edits from one walk and
     // splicing them into one output, as signals.rs does for cache_control, is the way to
     // the 3x target.
     async fn prepare_messages(
@@ -1723,7 +1725,7 @@ impl<'a> Ctx<'a> {
         cloak::billing_header(&cloak::Billing {
             signed: true,
             // A forwarded newer release signs with its own version, as its User-Agent
-            // says (docs/DIFFERENCES-FROM-GO.md).
+            // says.
             version: &profile::billing_version(detect::header(headers, "user-agent"), confirmed, &self.settings),
             message: &message,
             entrypoint,
@@ -1966,9 +1968,5 @@ fn strip_attribution_system(body: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod go_exec;
-#[cfg(test)]
-mod go_unit;
 #[cfg(test)]
 mod tests;

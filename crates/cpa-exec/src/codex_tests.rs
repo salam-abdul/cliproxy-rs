@@ -571,7 +571,7 @@ async fn compact_failures_follow_gos_availability_neutral_policy() {
 }
 
 #[tokio::test]
-async fn truncated_error_body_is_a_transport_failure_not_an_auth_failure() {
+async fn truncated_error_body_is_terminal_without_classifying_as_auth_failure() {
     use axum::response::IntoResponse;
     let app = axum::Router::new().fallback(|| async {
         let broken = futures_util::stream::iter([
@@ -593,7 +593,7 @@ async fn truncated_error_body_is_a_transport_failure_not_an_auth_failure() {
         .await
         .err()
         .expect("transport error");
-    assert_eq!(error.scope, FailureScope::Transport, "{error}");
+    assert_eq!(error.scope, FailureScope::Request, "{error}");
     assert_ne!(error.status, 401);
 }
 

@@ -111,7 +111,7 @@ async fn capture() -> Vec<u8> {
     });
     let url = format!("https://chatgpt.com:{}/backend-api/codex/responses", address.port());
     // The default (keep-alive off), as Go dials it.
-    let client = transport.for_url(&url, &Proxy::Inherit, false);
+    let client = transport.for_url(&url, &Proxy::Inherit, false, None);
     assert!(client.post(&url).send().await.is_err(), "the listener never answers");
     capture.await.unwrap()
 }
@@ -368,7 +368,12 @@ async fn get_ok(transport: &Transport, url: &str, proxy: &Proxy) {
 }
 
 async fn get_ok_with(transport: &Transport, url: &str, proxy: &Proxy, keep_alive: bool) {
-    let response = transport.for_url(url, proxy, keep_alive).get(url).send().await.unwrap();
+    let response = transport
+        .for_url(url, proxy, keep_alive, None)
+        .get(url)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.bytes().await.unwrap(), "ok");
 }
@@ -404,7 +409,7 @@ async fn chatgpt_keep_alive_switch_applies_per_request() {
     let ((a, a_tunnels), (b, b_tunnels)) = (counting_proxy(up.addr).await, counting_proxy(up.addr).await);
     let pooled = || {
         let cache = transport.chrome.lock().unwrap();
-        cache.iter().filter(|((_, keep_alive), _)| *keep_alive).count()
+        cache.iter().filter(|((_, keep_alive, _), _)| *keep_alive).count()
     };
     for proxy in [&a, &b, &a, &b] {
         get_ok_with(&transport, &url, proxy, true).await;
@@ -429,7 +434,7 @@ async fn chatgpt_keep_alive_switch_applies_per_request() {
 
 /// Go dials a dedicated uTLS connection for every chatgpt.com request. With
 /// `chatgpt-keep-alive` on, the Chrome client keeps its connections instead
-/// (docs/DIFFERENCES-FROM-GO.md): sequential requests share one connection over HTTP/2
+///: sequential requests share one connection over HTTP/2
 /// and HTTP/1.1.
 #[tokio::test]
 async fn chatgpt_client_reuses_connections() {
@@ -555,4 +560,26 @@ async fn chatgpt_pools_are_isolated_per_proxy() {
         (1, 1, 3),
         "each proxy kept its own connection"
     );
+}
+
+#[test]
+fn connection_setup_bound_is_part_of_chrome_cache_key() {
+    let transport = Transport::new(Hooks::default());
+    let url = "https://chatgpt.com/fixture";
+    let short = Some(std::time::Duration::from_secs(1));
+    let long = Some(std::time::Duration::from_secs(2));
+    let _ = transport.for_url(url, &Proxy::Direct, true, short);
+    let _ = transport.for_url(url, &Proxy::Direct, true, long);
+    let _ = transport.for_url(url, &Proxy::Direct, true, None);
+    let _ = transport.for_url(url, &Proxy::Direct, true, short);
+    let cache = transport.chrome.lock().unwrap();
+    assert_eq!(cache.len(), 3);
+    assert_eq!(cache[0].0, (Proxy::Direct, true, short));
+    assert_eq!(cache[1].0, (Proxy::Direct, true, None));
+    assert_eq!(cache[2].0, (Proxy::Direct, true, long));
+    drop(cache);
+    let _ = transport.for_url(url, &Proxy::Direct, false, long);
+    let cache = transport.chrome.lock().unwrap();
+    assert_eq!(cache.len(), 1, "disabling keep-alive retires every pooled bound");
+    assert_eq!(cache[0].0, (Proxy::Direct, false, long));
 }

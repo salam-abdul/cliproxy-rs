@@ -2,12 +2,15 @@
 //!
 //! First-party Anthropic inference uses the deterministic Node/OpenSSL ClientHello
 //! with HTTP/1.1-only ALPN and a final pre_shared_key extension that stays silent
-//! until a session is cached. Clients are cached per effective proxy in a bounded
+//! until a session is cached. Clients are cached per proxy and setup bound in a bounded
 //! 64-entry LRU, and each owns its own 32-entry TLS session cache, so resumption
 //! never crosses proxy boundaries. OAuth acquisition has its own compact profile.
 //! Every other origin uses Go's standard transport from [`crate::proxy`].
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use cpa_core::config::Config;
 
 use crate::proxy::{Hooks, Proxy};
 use wreq::tls::session::LruTlsSessionCache;
@@ -24,7 +27,38 @@ pub(crate) struct Clients {
 /// Process-wide transport cache. Construct once per executor set.
 pub struct Transport {
     hooks: Hooks,
-    cache: Mutex<Vec<(Proxy, Arc<Clients>)>>,
+    /// By effective proxy and TLS handshake bound.
+    cache: Mutex<Vec<(ClientsKey, Arc<Clients>)>>,
+}
+
+type ClientsKey = (Proxy, Option<Duration>);
+
+/// `requests.tls-handshake-timeout-seconds` (Go `SDKConfig.TLSHandshakeTimeout`, v8.0.35
+/// 345cc9d5 and b3dc6c3f): the bound on TLS establishment through the Claude Code and
+/// Chrome transports. 0 or less turns it off; Go saturates values past its duration range.
+/// Read from each request's config snapshot, so a reload applies to the next dial.
+pub(crate) fn handshake_timeout(cfg: &Config) -> Option<Duration> {
+    let seconds = cfg
+        .document
+        .get("requests")?
+        .get("tls-handshake-timeout-seconds")?
+        .as_i64()?;
+    u64::try_from(seconds).ok().filter(|s| *s > 0).map(|s| match s {
+        // Past time.Duration's range Go saturates at math.MaxInt64 nanoseconds.
+        s if s > i64::MAX as u64 / 1_000_000_000 => Duration::from_nanos(i64::MAX as u64),
+        s => Duration::from_secs(s),
+    })
+}
+
+/// Bounds TLS establishment with `handshake`.
+// ponytail: wreq has no handshake-only hook, so the bound also covers DNS, the TCP connect
+// and a proxy CONNECT, which Go leaves unbounded; it never limits a request once its
+// connection is up. Upgrade path: a wreq connector hook around the TLS step.
+pub(crate) fn bound_handshake(builder: wreq::ClientBuilder, handshake: Option<Duration>) -> wreq::ClientBuilder {
+    match handshake {
+        Some(timeout) => builder.connect_timeout(timeout),
+        None => builder,
+    }
 }
 
 impl Transport {
@@ -36,28 +70,33 @@ impl Transport {
     }
 
     /// Clients for `proxy`, most recently used first; evicts the least recently used.
-    pub(crate) fn clients(&self, proxy: &Proxy) -> wreq::Result<Arc<Clients>> {
+    /// `handshake` bounds the native client's TLS establishment ([`handshake_timeout`]);
+    /// the OAuth profile is not Go's shared uTLS client and ignores it.
+    pub(crate) fn clients(&self, proxy: &Proxy, handshake: Option<Duration>) -> wreq::Result<Arc<Clients>> {
         let mut cache = self.cache.lock().expect("transport cache");
-        if let Some(i) = cache.iter().position(|(p, _)| p == proxy) {
+        if let Some(i) = cache.iter().position(|((p, h), _)| p == proxy && *h == handshake) {
             let entry = cache.remove(i);
             let clients = entry.1.clone();
             cache.insert(0, entry);
             return Ok(clients);
         }
         let clients = Arc::new(Clients {
-            native: self.build(Profile::Native, proxy)?,
-            oauth: self.build(Profile::OAuth, proxy)?,
+            native: self.build(Profile::Native, proxy, handshake)?,
+            oauth: self.build(Profile::OAuth, proxy, None)?,
         });
-        cache.insert(0, (proxy.clone(), clients.clone()));
+        cache.insert(0, ((proxy.clone(), handshake), clients.clone()));
         cache.truncate(TRANSPORT_CACHE);
         Ok(clients)
     }
 
-    fn build(&self, profile: Profile, proxy: &Proxy) -> wreq::Result<wreq::Client> {
-        let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+    fn build(&self, profile: Profile, proxy: &Proxy, handshake: Option<Duration>) -> wreq::Result<wreq::Client> {
+        let mut builder = bound_handshake(
+            wreq::Client::builder().redirect(wreq::redirect::Policy::none()),
+            handshake,
+        );
         builder = match profile {
             // Inference requests are timed for the usage record.
-            Profile::Native => crate::proxy::watch_connections(builder)
+            Profile::Native => crate::proxy::watch_connections(builder.retry(wreq::retry::Policy::never()))
                 .http1_only()
                 .tls_options(options(false))
                 .tls_session_cache(LruTlsSessionCache::new(SESSION_CACHE)),
@@ -141,7 +180,7 @@ mod tests {
             trust: None,
             resolve: vec![("claude-capture.test".into(), address)],
         });
-        let clients = transport.clients(&Proxy::Inherit).unwrap();
+        let clients = transport.clients(&Proxy::Inherit, None).unwrap();
         let client = if oauth { &clients.oauth } else { &clients.native };
         // The local listener closes after the ClientHello, so TLS must fail before HTTP.
         assert!(
@@ -252,7 +291,7 @@ mod tests {
         });
         let url = format!("https://{host}:{}/v1/messages", addr.port());
         for _ in 0..3 {
-            let clients = transport.clients(&Proxy::Inherit).unwrap();
+            let clients = transport.clients(&Proxy::Inherit, None).unwrap();
             let response = clients.native.post(&url).body("{}").send().await.unwrap();
             assert_eq!(response.bytes().await.unwrap(), "ok");
         }
@@ -260,17 +299,236 @@ mod tests {
     }
 
     #[test]
+    fn handshake_timeout_reads_the_root_key_and_its_legacy_spelling() {
+        let read = |yaml: &str| handshake_timeout(&cpa_core::config::Config::parse(yaml).unwrap());
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 7\n"),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(read("tls-handshake-timeout-seconds: 3\n"), Some(Duration::from_secs(3)));
+        assert_eq!(read("requests:\n  tls-handshake-timeout-seconds: 0\n"), None);
+        assert_eq!(read("requests:\n  tls-handshake-timeout-seconds: -5\n"), None);
+        assert_eq!(read("{}\n"), None);
+        assert_eq!(
+            read("tls-handshake-timeout-seconds: 3\nrequests: {tls-handshake-timeout-seconds: null}\n"),
+            None
+        );
+        for value in ["invalid", "true", "9223372036854775808"] {
+            assert!(
+                Config::parse(&format!("requests: {{tls-handshake-timeout-seconds: {value}}}\n")).is_err(),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            read("requests: {tls-handshake-timeout-seconds: 1.5}\n"),
+            Some(Duration::from_secs(1))
+        );
+        // The canonical key wins over the flat spelling, even at 0.
+        let both =
+            |v: u32| format!("tls-handshake-timeout-seconds: 7\nrequests:\n  tls-handshake-timeout-seconds: {v}\n");
+        assert_eq!(read(&both(12)), Some(Duration::from_secs(12)));
+        assert_eq!(read(&both(0)), None);
+        // The unreleased upstream.claude spelling is not an entry point.
+        assert_eq!(
+            read("upstream:\n  claude:\n    tls-handshake-timeout-seconds: 99\n"),
+            None
+        );
+        // Go saturates at the largest time.Duration (math.MaxInt64 nanoseconds).
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 9223372036854775807\n"),
+            Some(Duration::from_nanos(i64::MAX as u64))
+        );
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 9223372037\n"),
+            Some(Duration::from_nanos(i64::MAX as u64))
+        );
+        assert_eq!(
+            read("requests:\n  tls-handshake-timeout-seconds: 9223372036\n"),
+            Some(Duration::from_secs(9_223_372_036))
+        );
+    }
+
+    #[test]
+    fn connection_bound_separates_config_snapshots() {
+        let transport = Transport::new(Hooks::default());
+        let proxy = Proxy::Direct;
+        let config =
+            |seconds| Config::parse(&format!("requests: {{tls-handshake-timeout-seconds: {seconds}}}")).unwrap();
+        let a = transport.clients(&proxy, handshake_timeout(&config(1))).unwrap();
+        let b = transport.clients(&proxy, handshake_timeout(&config(2))).unwrap();
+        let disabled = transport.clients(&proxy, handshake_timeout(&config(0))).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &disabled));
+        assert!(Arc::ptr_eq(
+            &a,
+            &transport.clients(&proxy, handshake_timeout(&config(1))).unwrap()
+        ));
+    }
+
+    #[test]
     fn transport_lru_bound() {
         let t = Transport::new(Hooks::default());
-        let first = t.clients(&Proxy::Url("http://p0:1".into())).unwrap();
+        let first = t.clients(&Proxy::Url("http://p0:1".into()), None).unwrap();
         for i in 1..=TRANSPORT_CACHE {
-            t.clients(&Proxy::Url(format!("http://p{i}:1"))).unwrap();
+            t.clients(&Proxy::Url(format!("http://p{i}:1")), None).unwrap();
         }
         assert_eq!(t.cache.lock().unwrap().len(), TRANSPORT_CACHE);
         // p0 was least recently used and is rebuilt (a distinct client set).
-        let again = t.clients(&Proxy::Url("http://p0:1".into())).unwrap();
+        let again = t.clients(&Proxy::Url("http://p0:1".into()), None).unwrap();
         assert!(!Arc::ptr_eq(&first, &again));
-        let cached = t.clients(&Proxy::Url("http://p0:1".into())).unwrap();
+        let cached = t.clients(&Proxy::Url("http://p0:1".into()), None).unwrap();
         assert!(Arc::ptr_eq(&again, &cached));
+    }
+
+    fn setup_client(chrome: bool, hooks: Hooks, proxy: &Proxy, bound: Option<Duration>, url: &str) -> wreq::Client {
+        if chrome {
+            crate::codex_tls::Transport::new(hooks).for_url(url, proxy, false, bound)
+        } else {
+            Transport::new(hooks).clients(proxy, bound).unwrap().native.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_setup_timeout_covers_silent_tls_and_proxy_connect_without_sending_body() {
+        use tokio::io::AsyncWriteExt;
+        for chrome in [false, true] {
+            for proxy_mode in [0, 1, 2] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let (done, observed) = tokio::sync::oneshot::channel();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut captured = Vec::new();
+                    if proxy_mode != 0 {
+                        while !captured.ends_with(b"\r\n\r\n") {
+                            captured.push(socket.read_u8().await.unwrap());
+                        }
+                        assert!(captured.starts_with(b"CONNECT "));
+                        assert!(!captured.windows(6).any(|w| w == b"secret"));
+                        if proxy_mode == 2 {
+                            socket
+                                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    let mut remaining = Vec::new();
+                    socket.read_to_end(&mut remaining).await.unwrap();
+                    if proxy_mode != 1 {
+                        assert_eq!(remaining[0], 22, "ClientHello only before setup succeeds");
+                        assert!(!remaining.windows(6).any(|w| w == b"secret"));
+                    } else {
+                        assert!(remaining.is_empty(), "no TLS or inference before CONNECT succeeds");
+                    }
+                    done.send(()).unwrap();
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                            .await
+                            .is_err(),
+                        "no hidden retry"
+                    );
+                });
+                let url = format!("https://chatgpt.com:{}/fixture", address.port());
+                let proxy = if proxy_mode == 0 {
+                    Proxy::Direct
+                } else {
+                    Proxy::Url(format!("http://{address}"))
+                };
+                let hooks = Hooks {
+                    trust: None,
+                    resolve: vec![("chatgpt.com".into(), address)],
+                };
+                let client = setup_client(chrome, hooks, &proxy, Some(Duration::from_millis(100)), &url);
+                let error = tokio::time::timeout(Duration::from_secs(3), client.post(&url).body("secret").send())
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.is_timeout() && error.is_connect(), "{error:?}");
+                assert_eq!(
+                    crate::upstream::transport_error(error).scope,
+                    cpa_core::exec::FailureScope::Transport
+                );
+                observed.await.unwrap();
+                server.await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_setup_bound_and_oauth_profile_keep_waiting() {
+        for profile in 0..3 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                socket.read_to_end(&mut bytes).await.unwrap();
+                assert_eq!(bytes[0], 22);
+            });
+            let hooks = Hooks {
+                trust: None,
+                resolve: vec![("chatgpt.com".into(), address)],
+            };
+            let url = format!("https://chatgpt.com:{}/fixture", address.port());
+            let client = if profile == 2 {
+                Transport::new(hooks)
+                    .clients(&Proxy::Direct, Some(Duration::from_millis(30)))
+                    .unwrap()
+                    .oauth
+                    .clone()
+            } else {
+                setup_client(profile == 1, hooks, &Proxy::Direct, None, &url)
+            };
+            assert!(
+                tokio::time::timeout(Duration::from_millis(120), client.post(url).body("synthetic").send())
+                    .await
+                    .is_err()
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_setup_bound_never_limits_established_headers_or_stream() {
+        use tokio::io::AsyncWriteExt;
+        for chrome in [false, true] {
+            let host = "chatgpt.com";
+            let (ca, acceptor) = crate::test_tls::acceptor(&[host.into()], b"\x08http/1.1");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let ssl = btls::ssl::Ssl::new(acceptor.context()).unwrap();
+                let mut tls = tokio_btls::SslStream::new(ssl, socket).unwrap();
+                std::pin::Pin::new(&mut tls).accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(tls.read_u8().await.unwrap());
+                }
+                let mut body = [0; 6];
+                tls.read_exact(&mut body).await.unwrap();
+                assert_eq!(&body, b"secret");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlo")
+                    .await
+                    .unwrap();
+                tls.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                tls.write_all(b"ng").await.unwrap();
+                tls.flush().await.unwrap();
+            });
+            let hooks = Hooks {
+                trust: Some(wreq::tls::trust::CertStore::from_pem_stack(ca).unwrap()),
+                resolve: vec![(host.into(), address)],
+            };
+            let url = format!("https://{host}:{}/fixture", address.port());
+            let client = setup_client(chrome, hooks, &Proxy::Direct, Some(Duration::from_millis(150)), &url);
+            let response = tokio::time::timeout(Duration::from_secs(3), client.post(&url).body("secret").send())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.bytes().await.unwrap(), "long");
+            server.await.unwrap();
+        }
     }
 }

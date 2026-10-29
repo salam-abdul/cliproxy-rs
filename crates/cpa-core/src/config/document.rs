@@ -28,6 +28,10 @@ const PATHS: &[(&str, &str)] = &[
         "routing.cooldown.transient-error-cooldown-seconds",
     ),
     ("proxy-url", "requests.proxy-url"),
+    (
+        "tls-handshake-timeout-seconds",
+        "requests.tls-handshake-timeout-seconds",
+    ),
     ("passthrough-headers", "requests.passthrough-headers"),
     ("nonstream-keepalive-interval", "requests.nonstream-keepalive-interval"),
     ("streaming", "requests.streaming"),

@@ -233,10 +233,10 @@ impl CodexExecutor {
         body: Bytes,
     ) -> Result<crate::proxy::Upstream, ExecError> {
         let transport = &self.transport;
-        let (proxy, keep_alive) = (&view.proxy, view.chatgpt_keep_alive);
+        let (proxy, keep_alive, handshake) = (&view.proxy, view.chatgpt_keep_alive, view.handshake);
         let route = |hop: &url::Url| {
             Ok(crate::proxy::Route {
-                client: transport.for_url(hop.as_str(), proxy, keep_alive),
+                client: transport.for_url(hop.as_str(), proxy, keep_alive, handshake),
                 order: None,
             })
         };

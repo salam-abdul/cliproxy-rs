@@ -98,7 +98,7 @@ impl OAuth {
         match &self.source {
             Source::Fixed(client) => Ok(client.clone()),
             Source::Transport(t) => t
-                .clients(&self.proxy)
+                .clients(&self.proxy, None)
                 .map(|c| c.oauth.clone())
                 .map_err(|_| ExecError::local(502, FailureScope::Transport, "OAuth transport failed")),
         }

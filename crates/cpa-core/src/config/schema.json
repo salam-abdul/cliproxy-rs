@@ -369,7 +369,8 @@
               }
             }
           }
-        }
+        },
+        "tls-handshake-timeout-seconds": "int"
       }
     },
     "oauth": {

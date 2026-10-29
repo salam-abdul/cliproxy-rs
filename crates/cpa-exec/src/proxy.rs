@@ -323,7 +323,9 @@ impl GoClients {
             cache.insert(0, entry);
             return Some(client);
         }
-        let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+        let mut builder = wreq::Client::builder()
+            .redirect(wreq::redirect::Policy::none())
+            .retry(wreq::retry::Policy::never());
         if self.timed {
             builder = watch_connections(builder);
         }
@@ -349,7 +351,9 @@ pub fn default_client() -> wreq::Client {
 }
 
 fn plain_client(timed: bool) -> wreq::Client {
-    let mut builder = wreq::Client::builder().redirect(wreq::redirect::Policy::none());
+    let mut builder = wreq::Client::builder()
+        .redirect(wreq::redirect::Policy::none())
+        .retry(wreq::retry::Policy::never());
     if timed {
         builder = watch_connections(builder);
     }
@@ -556,7 +560,7 @@ pub struct Upstream {
 pub const MAX_ERROR_BODY: usize = 16 << 20;
 
 fn body_error(_: std::io::Error) -> ExecError {
-    ExecError::local(502, FailureScope::Transport, "upstream request failed")
+    ExecError::local(502, FailureScope::Request, "upstream request failed")
 }
 
 /// POSTs `body` the way Go's `http.Client.Do` does, following redirects itself: at
@@ -641,8 +645,8 @@ fn sanitize(error: SendError) -> ExecError {
     match error {
         SendError::Transport { error, .. } => crate::upstream::transport_error(error),
         SendError::Local { error, .. } => error,
-        // What `transport_error` makes of the transport's own timeout.
-        SendError::Timeout { .. } => ExecError::local(502, FailureScope::Transport, "upstream request failed"),
+        // A prior redirect may already have sent inference; keep deadlines terminal.
+        SendError::Timeout { .. } => ExecError::local(502, FailureScope::Request, "upstream request failed"),
     }
 }
 
@@ -836,7 +840,12 @@ async fn exchange(
     let (response, auto_gzip, dialled) = loop {
         // The URL Go's client reports for this hop.
         let hop_url = if sent == 0 { url.to_owned() } else { current.to_string() };
-        let hop = route(&current).map_err(|e| local(e, &hop_url))?;
+        let hop = route(&current).map_err(|mut error| {
+            if sent > 0 {
+                error.scope = FailureScope::Request;
+            }
+            local(error, &hop_url)
+        })?;
         let builder = hop
             .client
             .request(
@@ -899,9 +908,19 @@ async fn exchange(
             }
             None => (builder.send().await, false),
         };
-        let response = response.map_err(|error| SendError::Transport {
-            error,
-            url: hop_url.clone(),
+        let response = response.map_err(|error| {
+            if sent == 0 {
+                SendError::Transport {
+                    error,
+                    url: hop_url.clone(),
+                }
+            } else {
+                // An earlier redirect hop may have consumed the inference request.
+                local(
+                    ExecError::local(502, FailureScope::Request, "upstream request failed"),
+                    &hop_url,
+                )
+            }
         })?;
         if go_transport {
             remember_protocol(&current, response.version() == http::Version::HTTP_2);
@@ -926,7 +945,7 @@ async fn exchange(
             local(
                 ExecError::local(
                     500,
-                    FailureScope::Transport,
+                    FailureScope::Request,
                     format!("failed to parse Location header {location:?}"),
                 ),
                 &hop_url,
@@ -935,7 +954,7 @@ async fn exchange(
         // defaultCheckRedirect: len(via) >= 10.
         if sent >= 10 {
             return Err(local(
-                ExecError::local(500, FailureScope::Transport, "stopped after 10 redirects"),
+                ExecError::local(500, FailureScope::Request, "stopped after 10 redirects"),
                 &location,
             ));
         }
@@ -1451,6 +1470,86 @@ pub type SharedGoClients = Arc<GoClients>;
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn post_send_header_and_body_failures_are_terminal_without_hidden_replay() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for response in [
+            "",
+            "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\npartial",
+            "HTTP/1.1 503 Busy\r\nContent-Length: 20\r\n\r\npartial",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(socket.read_u8().await.unwrap());
+                }
+                let mut body = [0; 6];
+                socket.read_exact(&mut body).await.unwrap();
+                assert_eq!(&body, b"secret");
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+                drop(socket);
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err(),
+                    "inference was replayed"
+                );
+            });
+            let result = send(&default_client(), &url, GoHeaders::new(), "secret", None).await;
+            let error = match result {
+                Err(error) => error,
+                Ok(upstream) => upstream
+                    .body
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .find_map(Result::err)
+                    .unwrap(),
+            };
+            assert_eq!(error.scope, FailureScope::Request);
+            assert!(error.retry_after.is_none());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_failure_after_redirect_is_terminal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/target", target.local_addr().unwrap());
+        drop(target);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            let mut body = [0; 6];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"secret");
+            socket.write_all(format!("HTTP/1.1 307 Redirect\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "first hop was replayed"
+            );
+        });
+        let error = send(&default_client(), &url, GoHeaders::new(), "secret", None)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.scope, FailureScope::Request);
+        assert!(error.retry_after.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn successful_body_reads_are_terminal_in_both_http_adapters() {
         for status in [200, 206, 299, 302, 400, 503] {
             for scanned in [false, true] {
@@ -1472,15 +1571,7 @@ mod tests {
                 let out = upstream.body.collect::<Vec<_>>().await;
                 assert_eq!(out[0].as_ref().unwrap().as_ref(), b"partial");
                 let error = out[1].as_ref().unwrap_err();
-                assert_eq!(
-                    error.scope,
-                    if (200..300).contains(&status) {
-                        FailureScope::Request
-                    } else {
-                        FailureScope::Transport
-                    },
-                    "status={status}, scanned={scanned}"
-                );
+                assert_eq!(error.scope, FailureScope::Request, "status={status}, scanned={scanned}");
                 assert_eq!(error.status, 502);
                 assert_eq!(
                     error.body.as_ref(),
@@ -2137,8 +2228,8 @@ mod tests {
         assert_eq!(body.concat(), b"done");
         // Each hop is under the timeout, but the second ends past the shared deadline.
         match get(format!("http://{addr}/1")).await {
-            Err(SendError::Transport { error, url }) => {
-                assert!(error.is_timeout(), "{error:?}");
+            Err(SendError::Local { error, url }) => {
+                assert_eq!(error.scope, FailureScope::Request);
                 assert_eq!(url, format!("http://{addr}/2"));
             }
             Err(other) => panic!("{other:?}"),
@@ -2213,7 +2304,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        // `transport_error` reads nothing from the wreq error; any one will do.
+        // Both an invalid request and an elapsed exchange deadline are terminal.
         let any = default_client().get("not a url").send().await.unwrap_err();
         let transport = crate::upstream::transport_error(any);
         assert_eq!(

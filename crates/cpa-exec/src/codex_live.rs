@@ -1082,7 +1082,7 @@ impl CodexExecutor {
             Ok(Route {
                 client: self
                     .transport
-                    .for_url(next.as_str(), &view.proxy, view.chatgpt_keep_alive),
+                    .for_url(next.as_str(), &view.proxy, view.chatgpt_keep_alive, view.handshake),
                 order: None,
             })
         };
