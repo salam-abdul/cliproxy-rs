@@ -1,5 +1,86 @@
 //! Literal schema-path lookup and edits without call-stack descent. Complex gjson paths retain core semantics.
 use crate::json::{self as gj, Res};
+use std::ops::Range;
+
+/// Flat raw-span index: walking children never rescans their descendants.
+pub(crate) struct Document {
+    pub nodes: Vec<Node>,
+}
+
+pub(crate) struct Node {
+    pub span: Range<usize>,
+    pub children: Vec<(Vec<u8>, usize)>,
+}
+
+impl Document {
+    pub fn parse(raw: &[u8]) -> Option<Self> {
+        if !gj::valid(raw) {
+            return None;
+        }
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut open: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
+        let mut at = 0;
+        while at < raw.len() {
+            match raw[at] {
+                b' ' | b'\n' | b'\r' | b'\t' | b':' | b',' => at += 1,
+                b'}' | b']' => {
+                    let (node, _) = open.pop()?;
+                    at += 1;
+                    nodes[node].span.end = at;
+                }
+                _ => {
+                    let start = at;
+                    let container = matches!(raw[at], b'{' | b'[');
+                    if container {
+                        at += 1;
+                    } else if raw[at] == b'"' {
+                        at += 1;
+                        while at < raw.len() {
+                            match raw[at] {
+                                b'\\' => at += 2,
+                                b'"' => {
+                                    at += 1;
+                                    break;
+                                }
+                                _ => at += 1,
+                            }
+                        }
+                    } else {
+                        while at < raw.len() && !matches!(raw[at], b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t') {
+                            at += 1;
+                        }
+                    }
+                    if let Some((parent, key)) = open.last_mut()
+                        && raw[nodes[*parent].span.start] == b'{'
+                        && key.is_none()
+                    {
+                        *key = Some(gj::parse(&raw[start..at]).bytes().into_owned());
+                        continue;
+                    }
+                    let node = nodes.len();
+                    nodes.push(Node {
+                        span: start..at,
+                        children: Vec::new(),
+                    });
+                    if let Some((parent, key)) = open.last_mut() {
+                        nodes[*parent].children.push((key.take().unwrap_or_default(), node));
+                    }
+                    if container {
+                        open.push((node, None));
+                    }
+                }
+            }
+        }
+        (!nodes.is_empty()).then_some(Self { nodes })
+    }
+
+    pub fn field(&self, node: usize, key: &[u8]) -> Option<usize> {
+        self.nodes[node]
+            .children
+            .iter()
+            .find_map(|(name, child)| (name == key).then_some(*child))
+    }
+}
 fn special_path(path: &[u8]) -> bool {
     let mut escaped = false;
     path.iter().any(|&c| {

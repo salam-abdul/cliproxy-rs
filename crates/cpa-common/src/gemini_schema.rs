@@ -1,9 +1,8 @@
 //! JSON Schema cleaning for Gemini and Antigravity tool and response schemas
 //! (internal/util/gemini_schema.go).
 //!
-//! Like Go, this works on the schema text: it walks gjson paths, edits with sjson, and
-//! re-marshals through Go's `any` model only where Go does (malformed-object repair and
-//! local `$ref` inlining). Pass a single schema, never a whole request document.
+//! Ordinary schemas preserve raw formatting through indexed shallow edits. Complex
+//! schemas use literal keys and indexed semantic passes. Pass one schema, never a request.
 
 use crate::json::{self as gj, AnyValue, GoValue, Kind, Res};
 use crate::schema_path::{
@@ -11,6 +10,13 @@ use crate::schema_path::{
     set_str as schema_set_str, set_strs as schema_set_strs,
 };
 use std::collections::{BTreeMap, HashMap};
+
+#[path = "schema_indexed.rs"]
+mod indexed;
+
+#[cfg(test)]
+#[path = "schema_batching_tests.rs"]
+mod schema_batching_tests;
 
 const PLACEHOLDER_REASON_DESCRIPTION: &[u8] = b"Brief explanation of why you are calling this tool";
 
@@ -114,20 +120,241 @@ pub fn inline_local_refs(schema: &[u8]) -> Vec<u8> {
     inline_refs(schema.to_vec())
 }
 
-/// cleanJSONSchema.
-///
-/// ponytail: the legacy path passes rescan and rewrite the schema. The upgrade path is
-/// a raw-span document with indexed nodes and batched edits, preserving the exact fixtures.
+/// Clean a schema after normalization and budgeted local-reference inlining.
 fn clean(schema: &[u8], options: Options) -> Vec<u8> {
-    clean_inner(schema, options)
+    if let Some(cleaned) = clean_indexed(schema, options) {
+        return cleaned;
+    }
+    let normalized = normalize_malformed_schema_objects(schema.to_vec(), options.add_missing_array_items);
+    let inlined = inline_refs_for_clean(normalized);
+    clean_indexed(&inlined, options)
+        .or_else(|| indexed::clean(&inlined, options))
+        .unwrap_or(inlined)
 }
 
+fn plain_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+}
+
+fn ordinary_property(name: &[u8]) -> bool {
+    plain_name(name)
+        && !matches!(
+            name,
+            b"_" | b"reason"
+                | b"const"
+                | b"enum"
+                | b"properties"
+                | b"patternProperties"
+                | b"dependentSchemas"
+                | b"dependencies"
+                | b"definitions"
+        )
+}
+
+/// Index descendants once, run the ordered rules on shallow schemas, and expand the
+/// resulting holes once. Nested schemas use a wrapper to retain root-path differences.
+fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
+    use crate::schema_path::Document;
+    use std::collections::HashSet;
+
+    struct Hole {
+        map: bool,
+        key: Vec<u8>,
+        node: usize,
+    }
+    enum Piece {
+        Bytes(Vec<u8>),
+        Child(usize),
+    }
+    // The inliner can re-marshal the whole document even for a literal "$ref" value.
+    if contains_seq(raw, br#""$ref""#) {
+        return None;
+    }
+    let document = Document::parse(raw)?;
+    let nodes = &document.nodes;
+    let mut schemas = vec![0usize];
+    let mut holes: HashMap<usize, Vec<Hole>> = HashMap::new();
+    let mut cursor = 0;
+    while cursor < schemas.len() {
+        let node = schemas[cursor];
+        cursor += 1;
+        if raw[nodes[node].span.start] != b'{' {
+            return None;
+        }
+        // ponytail: raw-formatting preservation is limited to 128 schema fields and
+        // independent local rules. Other valid schemas use the literal-key arena passes.
+        if nodes[node].children.len() > 128 {
+            return None;
+        }
+        let mut seen = HashSet::new();
+        let mut children = Vec::new();
+        for (key, child) in &nodes[node].children {
+            if !seen.insert(key.as_slice())
+                || (!plain_name(key)
+                    && !matches!(
+                        key.as_slice(),
+                        b"$schema"
+                            | b"$id"
+                            | b"$anchor"
+                            | b"$vocabulary"
+                            | b"$dynamicRef"
+                            | b"$dynamicAnchor"
+                            | b"$comment"
+                            | b"$ref"
+                            | b"$defs"
+                    ))
+            {
+                return None;
+            }
+            let value = &nodes[*child];
+            let first = raw[value.span.start];
+            match key.as_slice() {
+                b"properties" => {
+                    if first != b'{' {
+                        return None;
+                    }
+                    let mut names = HashSet::new();
+                    for (name, schema) in &value.children {
+                        if !ordinary_property(name) || !names.insert(name.as_slice()) {
+                            return None;
+                        }
+                        children.push(Hole {
+                            map: true,
+                            key: name.clone(),
+                            node: *schema,
+                        });
+                    }
+                }
+                b"items" | b"additionalProperties" if first == b'{' => {
+                    children.push(Hole {
+                        map: false,
+                        key: key.clone(),
+                        node: *child,
+                    });
+                }
+                b"$ref" | b"$defs" | b"definitions" | b"allOf" | b"anyOf" | b"oneOf" | b"if" | b"then" | b"else"
+                | b"not" | b"schema" => return None,
+                b"type" if first == b'[' => return None,
+                b"required" if matches!(first, b't' | b'f') => return None,
+                b"required" if first == b'[' => {
+                    if value.children.iter().any(|(_, child)| {
+                        let text = &raw[nodes[*child].span.clone()];
+                        text.first() != Some(&b'"') || !plain_name(&gj::parse(text).bytes())
+                    }) {
+                        return None;
+                    }
+                }
+                _ if first == b'{' => return None,
+                _ if first == b'['
+                    && (!matches!(
+                        key.as_slice(),
+                        b"enum" | b"required" | b"examples" | b"default" | b"example" | b"const"
+                    ) || value
+                        .children
+                        .iter()
+                        .any(|(_, child)| matches!(raw[nodes[*child].span.start], b'{' | b'['))) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        for hole in &children {
+            schemas.push(hole.node);
+        }
+        holes.insert(node, children);
+    }
+
+    let mut pieces: HashMap<usize, Vec<Piece>> = HashMap::new();
+    for node in schemas {
+        let children = holes.remove(&node)?;
+        let span = if node == 0 {
+            0..raw.len()
+        } else {
+            nodes[node].span.clone()
+        };
+        let mut shallow = Vec::new();
+        let mut at = span.start;
+        for hole in &children {
+            shallow.extend_from_slice(&raw[at..nodes[hole.node].span.start]);
+            shallow.extend_from_slice(b"null");
+            at = nodes[hole.node].span.end;
+        }
+        shallow.extend_from_slice(&raw[at..span.end]);
+        let (cleaned, base) = if node == 0 {
+            (clean_normalized(shallow, options), None)
+        } else {
+            let wrapped = [br#"{"properties":{"v":"#.as_slice(), &shallow, b"}}"].concat();
+            (clean_normalized(wrapped, options), Some(b"v".as_slice()))
+        };
+        let local = Document::parse(&cleaned)?;
+        let root = if let Some(key) = base {
+            local.field(local.field(0, b"properties")?, key)?
+        } else {
+            0
+        };
+        let mut replacements = Vec::new();
+        let mut child_map: HashMap<&[u8], usize> = children
+            .iter()
+            .filter(|hole| hole.map)
+            .map(|hole| (hole.key.as_slice(), hole.node))
+            .collect();
+        for (key, value) in &local.nodes[root].children {
+            if key == b"properties" {
+                for (name, value) in &local.nodes[*value].children {
+                    if let Some(child) = child_map.remove(name.as_slice()) {
+                        replacements.push((local.nodes[*value].span.clone(), child));
+                    }
+                }
+            } else if let Some(hole) = children.iter().find(|hole| !hole.map && hole.key == *key) {
+                replacements.push((local.nodes[*value].span.clone(), hole.node));
+            }
+        }
+        let span = if node == 0 {
+            0..cleaned.len()
+        } else {
+            local.nodes[root].span.clone()
+        };
+        let mut at = span.start;
+        let mut output = Vec::new();
+        for (hole, child) in replacements {
+            output.push(Piece::Bytes(cleaned[at..hole.start].to_vec()));
+            output.push(Piece::Child(child));
+            at = hole.end;
+        }
+        output.push(Piece::Bytes(cleaned[at..span.end].to_vec()));
+        pieces.insert(node, output);
+    }
+    let mut output = Vec::with_capacity(raw.len());
+    let mut work = vec![Piece::Child(0)];
+    while let Some(piece) = work.pop() {
+        match piece {
+            Piece::Bytes(bytes) => output.extend_from_slice(&bytes),
+            Piece::Child(node) => work.extend(pieces.remove(&node)?.into_iter().rev()),
+        }
+    }
+    Some(output)
+}
+
+#[cfg(test)]
 fn clean_inner(schema: &[u8], options: Options) -> Vec<u8> {
-    let mut s = normalize_malformed_schema_objects(schema.to_vec(), options.add_missing_array_items);
+    clean_normalized(
+        normalize_malformed_schema_objects(schema.to_vec(), options.add_missing_array_items),
+        options,
+    )
+}
+
+fn clean_normalized(s: Vec<u8>, options: Options) -> Vec<u8> {
     // Every cleaner removes $defs/definitions later, so local references expand on every
     // route. Per request this costs one decode and re-encode of each schema with a
     // `"$ref"` (none without one), and up to the 256 KiB budget of copies.
-    s = inline_refs_for_clean(s);
+    clean_inlined(inline_refs_for_clean(s), options)
+}
+
+fn clean_inlined(mut s: Vec<u8>, options: Options) -> Vec<u8> {
     s = convert_refs_to_hints(s, options.antigravity_semantics);
     s = convert_const_to_enum(s);
     s = convert_enum_values_to_strings(s, options.force_enum_string_type);
@@ -496,19 +723,24 @@ fn is_non_object_type(t: Option<&GoValue>) -> bool {
     }
 }
 
-fn is_api_request_document(m: &Map) -> bool {
-    for key in [
-        "tools",
-        "contents",
-        "messages",
-        "functionDeclarations",
-        "function_declarations",
-    ] {
-        if matches!(m.get(key), Some(GoValue::Array(_))) {
-            return true;
+fn is_api_request_document(mut m: &Map) -> bool {
+    loop {
+        for key in [
+            "tools",
+            "contents",
+            "messages",
+            "functionDeclarations",
+            "function_declarations",
+        ] {
+            if matches!(m.get(key), Some(GoValue::Array(_))) {
+                return true;
+            }
+        }
+        match m.get("request") {
+            Some(GoValue::Object(request)) => m = request,
+            _ => return false,
         }
     }
-    matches!(m.get("request"), Some(GoValue::Object(r)) if is_api_request_document(r))
 }
 
 fn normalize_malformed_schema_objects(json: Vec<u8>, add_missing_array_items: bool) -> Vec<u8> {
@@ -765,7 +997,7 @@ fn convert_const_to_enum(mut json: Vec<u8>) -> Vec<u8> {
         if !value.exists() {
             continue;
         }
-        let enum_path = [trim_suffix(&p, b".const"), b".enum"].concat();
+        let enum_path = join_path(trim_suffix(&p, b".const"), b"enum");
         if !schema_get(&json, &enum_path).exists() {
             AnyValue::Array(vec![AnyValue::from_res(&value)]).set(&mut json, &enum_path);
         }
@@ -1505,10 +1737,24 @@ fn cleanup_required_fields(mut json: Vec<u8>) -> Vec<u8> {
             continue;
         }
         let names = required.array();
+        let mut literal_names = std::collections::HashSet::new();
+        let mut literal = true;
+        props.each(|key, _| {
+            let name = key.bytes();
+            literal &= plain_name(&name);
+            literal_names.insert(name.into_owned());
+            true
+        });
         let valid: Vec<Vec<u8>> = names
             .iter()
             .map(|r| r.bytes().into_owned())
-            .filter(|key| props.get(&escape_key(key)).exists())
+            .filter(|key| {
+                if literal && plain_name(key) {
+                    literal_names.contains(key)
+                } else {
+                    props.get(&escape_key(key)).exists()
+                }
+            })
             .collect();
         if valid.len() != names.len() {
             if valid.is_empty() {
@@ -1598,7 +1844,16 @@ fn add_empty_schema_placeholder(mut json: Vec<u8>) -> Vec<u8> {
         {
             continue;
         }
-        if !props.exists() || (props.is_object() && props.map().is_empty()) {
+        if !props.exists()
+            || (props.is_object() && {
+                let mut empty = true;
+                props.each(|_, _| {
+                    empty = false;
+                    false
+                });
+                empty
+            })
+        {
             let reason = join_path(&props_path, b"reason");
             schema_set_str(&mut json, &[&reason[..], b".type"].concat(), "string");
             schema_set_str(
