@@ -429,38 +429,83 @@ fn json_value(r: &Res<'_>) -> Option<GoValue> {
 }
 
 /// `antigravityNormalizeReplayToolValue`: object members equal to their schema default
-/// are dropped, recursively.
+/// are dropped at every depth.
 fn normalize_value(value: &GoValue, schema: Option<&GoValue>) -> GoValue {
-    let schema = match schema {
-        Some(GoValue::Object(map)) => Some(map),
-        _ => None,
-    };
-    match value {
-        GoValue::Object(map) => {
-            let properties = match schema.and_then(|s| s.get("properties")) {
-                Some(GoValue::Object(properties)) => Some(properties),
-                _ => None,
-            };
-            let mut out = BTreeMap::new();
-            for (key, child) in map {
-                let child_schema = properties.and_then(|p| p.get(key));
-                let normalized = normalize_value(child, child_schema);
-                if let Some(GoValue::Object(property)) = child_schema
-                    && let Some(default) = property.get("default")
-                    && normalized == normalize_value(default, child_schema)
-                {
-                    continue;
-                }
-                out.insert(key.clone(), normalized);
-            }
-            GoValue::Object(out)
-        }
-        GoValue::Array(items) => {
-            let item_schema = schema.and_then(|s| s.get("items"));
-            GoValue::Array(items.iter().map(|item| normalize_value(item, item_schema)).collect())
-        }
-        other => other.clone(),
+    enum Work<'a> {
+        Value(&'a GoValue, Option<&'a GoValue>),
+        Array(usize),
+        Object(Vec<(String, bool)>),
     }
+    let mut work = vec![Work::Value(value, schema)];
+    let mut output = vec![];
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Value(value, schema) => {
+                let schema = match schema {
+                    Some(GoValue::Object(map)) => Some(map),
+                    _ => None,
+                };
+                match value {
+                    GoValue::Array(items) => {
+                        let item_schema = schema.and_then(|s| s.get("items"));
+                        work.push(Work::Array(items.len()));
+                        work.extend(items.iter().rev().map(|item| Work::Value(item, item_schema)));
+                    }
+                    GoValue::Object(map) => {
+                        let properties = match schema.and_then(|s| s.get("properties")) {
+                            Some(GoValue::Object(properties)) => Some(properties),
+                            _ => None,
+                        };
+                        let children: Vec<_> = map
+                            .iter()
+                            .map(|(key, child)| {
+                                let child_schema = properties.and_then(|p| p.get(key));
+                                let default = match child_schema {
+                                    Some(GoValue::Object(p)) => p.get("default"),
+                                    _ => None,
+                                };
+                                (key, child, child_schema, default)
+                            })
+                            .collect();
+                        work.push(Work::Object(
+                            children
+                                .iter()
+                                .map(|(key, _, _, default)| ((*key).clone(), default.is_some()))
+                                .collect(),
+                        ));
+                        for (_, child, schema, default) in children.into_iter().rev() {
+                            if let Some(default) = default {
+                                work.push(Work::Value(default, schema));
+                            }
+                            work.push(Work::Value(child, schema));
+                        }
+                    }
+                    other => output.push(other.clone()),
+                }
+            }
+            Work::Array(count) => {
+                let items = output.split_off(output.len() - count);
+                output.push(GoValue::Array(items));
+            }
+            Work::Object(keys) => {
+                let count = keys
+                    .iter()
+                    .map(|(_, default)| if *default { 2 } else { 1 })
+                    .sum::<usize>();
+                let mut values = output.split_off(output.len() - count).into_iter();
+                let mut map = BTreeMap::new();
+                for (key, default) in keys {
+                    let value = values.next().unwrap();
+                    if default && value == values.next().unwrap() {
+                        continue;
+                    }
+                    map.insert(key, value);
+                }
+                output.push(GoValue::Object(map));
+            }
+        }
+    }
+    output.pop().unwrap()
 }
 
 /// `antigravityFunctionCallMatchesReplayItem`: same name and arguments, or arguments

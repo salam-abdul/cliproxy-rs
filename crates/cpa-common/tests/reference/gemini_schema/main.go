@@ -106,13 +106,21 @@ func mine(path string) []string {
 
 func main() {
 	inputs := append(mine(filepath.Join(os.Args[1], "internal/util/gemini_schema_test.go")), extra...)
+	inputs = append(inputs, mine(filepath.Join(os.Args[1], "internal/util/gemini_schema_ref_test.go"))...)
+	for _, key := range []string{"", ":key", "key:part", "key\\part", "key.part", "*", "?", "@this", "#", "|", "a|b", "a.b", "0"} {
+		schema := map[string]any{"properties": map[string]any{key: map[string]any{"type": []string{"string", "null"}, "enum": []string{"a", "b"}, "x-test": true}}, "required": []string{key}}
+		raw, _ := json.Marshal(schema)
+		inputs = append(inputs, string(raw))
+	}
+	inputs = append(inputs, `{"properties":{"x":{"type":"string"},"x":{"enum":["a","b"]}},"type":"object"}`)
 	fns := map[string]func(string) string{
-		"gemini":               util.CleanJSONSchemaForGemini,
-		"gemini_json_schema":   util.CleanJSONSchemaForGeminiJSONSchema,
-		"antigravity":          util.CleanJSONSchemaForAntigravity,
-		"antigravity_tool":     func(s string) string { return util.CleanJSONSchemaForAntigravityTool(s, false) },
-		"antigravity_response": util.CleanJSONSchemaForAntigravityResponse,
-		"inline_local_refs":    util.InlineLocalRefs,
+		"gemini":                  util.CleanJSONSchemaForGemini,
+		"gemini_json_schema":      util.CleanJSONSchemaForGeminiJSONSchema,
+		"antigravity":             util.CleanJSONSchemaForAntigravity,
+		"antigravity_claude_tool": func(s string) string { return util.CleanJSONSchemaForAntigravityClaudeTool(s, false) },
+		"antigravity_tool":        func(s string) string { return util.CleanJSONSchemaForAntigravityTool(s, false) },
+		"antigravity_response":    util.CleanJSONSchemaForAntigravityResponse,
+		"inline_local_refs":       util.InlineLocalRefs,
 	}
 	names := make([]string, 0, len(fns))
 	for name := range fns {

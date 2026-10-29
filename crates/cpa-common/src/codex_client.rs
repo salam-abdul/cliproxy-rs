@@ -437,47 +437,48 @@ pub fn restore_response(payload: &[u8], optimized: bool) -> Vec<u8> {
 fn restore_value(value: &mut crate::json::GoValue) -> bool {
     use crate::json::GoValue;
     let mut changed = false;
-    match value {
-        GoValue::Array(items) => {
-            for item in items {
-                changed |= restore_value(item);
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            GoValue::Array(items) => {
+                pending.extend(items.iter_mut());
             }
-        }
-        GoValue::Object(map) => {
-            let item_type = match map.get("type") {
-                Some(GoValue::String(s)) => s.trim().to_owned(),
-                _ => String::new(),
-            };
-            let tool_call = item_type == "function_call" || item_type == "custom_tool_call";
-            if tool_call && matches!(map.get("namespace"), Some(GoValue::String(s)) if s == OPTIMIZED_NAMESPACE) {
-                map.insert("namespace".into(), GoValue::String(NAMESPACE.into()));
-                changed = true;
-            }
-            if let Some(GoValue::String(name)) = map.get("name") {
-                let name = name.clone();
-                if name == OPTIMIZED_NAMESPACE && item_type == "namespace" {
-                    map.insert("name".into(), GoValue::String(NAMESPACE.into()));
+            GoValue::Object(map) => {
+                let item_type = match map.get("type") {
+                    Some(GoValue::String(s)) => s.trim().to_owned(),
+                    _ => String::new(),
+                };
+                let tool_call = item_type == "function_call" || item_type == "custom_tool_call";
+                if tool_call && matches!(map.get("namespace"), Some(GoValue::String(s)) if s == OPTIMIZED_NAMESPACE) {
+                    map.insert("namespace".into(), GoValue::String(NAMESPACE.into()));
                     changed = true;
-                } else if tool_call && let Some(tool) = name.strip_prefix(OPTIMIZED_DOT_PREFIX) {
-                    if !tool.is_empty() {
-                        map.insert("namespace".into(), GoValue::String(NAMESPACE.into()));
-                        map.insert("name".into(), GoValue::String(tool.into()));
+                }
+                if let Some(GoValue::String(name)) = map.get("name") {
+                    let name = name.clone();
+                    if name == OPTIMIZED_NAMESPACE && item_type == "namespace" {
+                        map.insert("name".into(), GoValue::String(NAMESPACE.into()));
+                        changed = true;
+                    } else if tool_call && let Some(tool) = name.strip_prefix(OPTIMIZED_DOT_PREFIX) {
+                        if !tool.is_empty() {
+                            map.insert("namespace".into(), GoValue::String(NAMESPACE.into()));
+                            map.insert("name".into(), GoValue::String(tool.into()));
+                            changed = true;
+                        }
+                    } else if tool_call && let Some(rest) = name.strip_prefix(OPTIMIZED_NAME_PREFIX) {
+                        map.insert("name".into(), GoValue::String(format!("{NAMESPACE}__{rest}")));
                         changed = true;
                     }
-                } else if tool_call && let Some(rest) = name.strip_prefix(OPTIMIZED_NAME_PREFIX) {
-                    map.insert("name".into(), GoValue::String(format!("{NAMESPACE}__{rest}")));
-                    changed = true;
+                }
+                let output_item = item_type == "function_call_output" || item_type == "custom_tool_call_output";
+                for (key, child) in map.iter_mut() {
+                    if key == "arguments" || key == "input" || (key == "output" && output_item) {
+                        continue;
+                    }
+                    pending.push(child);
                 }
             }
-            let output_item = item_type == "function_call_output" || item_type == "custom_tool_call_output";
-            for (key, child) in map.iter_mut() {
-                if key == "arguments" || key == "input" || (key == "output" && output_item) {
-                    continue;
-                }
-                changed |= restore_value(child);
-            }
+            _ => {}
         }
-        _ => {}
     }
     changed
 }

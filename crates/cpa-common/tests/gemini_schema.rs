@@ -12,10 +12,11 @@ fn bytes(v: &Value) -> Vec<u8> {
 fn matches_go_cleaners() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!("fixtures/gemini_schema.json")).expect("fixture JSON");
     type Clean = fn(&[u8]) -> Vec<u8>;
-    let fns: [(&str, Clean); 6] = [
+    let fns: [(&str, Clean); 7] = [
         ("gemini", gs::for_gemini),
         ("gemini_json_schema", gs::for_gemini_json_schema),
         ("antigravity", gs::for_antigravity),
+        ("antigravity_claude_tool", |s| gs::for_antigravity_claude_tool(s, false)),
         ("antigravity_tool", |s| gs::for_antigravity_tool(s, false)),
         ("antigravity_response", gs::for_antigravity_response),
         ("inline_local_refs", gs::inline_local_refs),

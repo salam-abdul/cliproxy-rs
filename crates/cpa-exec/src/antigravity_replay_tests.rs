@@ -242,3 +242,15 @@ fn system_lane_handles_the_depth_limit() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn replay_normalization_handles_depth_and_schema_defaults() {
+    std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let raw = format!("{}1{}", r#"[{"d":"#.repeat(5_000), "}]".repeat(5_000));
+        let value = GoValue::parse(raw.as_bytes()).unwrap();
+        assert_eq!(normalize_value(&value, None).marshal(), raw.as_bytes());
+        let value = GoValue::parse(br#"{"keep":[{"a":1,"b":2}],"drop":{"a":1}}"#).unwrap();
+        let schema = GoValue::parse(br#"{"properties":{"keep":{"items":{"properties":{"a":{"default":1}}}},"drop":{"properties":{"a":{"default":1}},"default":{"a":1}}}}"#).unwrap();
+        assert_eq!(normalize_value(&value, Some(&schema)).marshal(), br#"{"keep":[{"b":2}]}"#);
+    }).unwrap().join().unwrap();
+}

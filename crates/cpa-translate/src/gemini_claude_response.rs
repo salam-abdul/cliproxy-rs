@@ -4,6 +4,8 @@
 //! The stream converter is a block state machine (none, text, thinking, tool use);
 //! events carry three trailing newlines, as Go writes them.
 
+use crate::claude_tool_args::{OpenTool, clean_claude_tool_arguments_with_translated};
+
 use crate::{
     Error, ResponseCtx,
     common::{self, map_tool_name, restore_sanitized_tool_name, sanitize_claude_tool_id},
@@ -47,6 +49,8 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
     Box::new(State {
         tool_names: common::tool_name_map_from_claude_request(ctx.original_request),
         sanitized: common::sanitized_tool_name_map(ctx.original_request),
+        original: ctx.original_request.to_vec(),
+        translated: ctx.translated_request.to_vec(),
         ..State::default()
     })
 }
@@ -59,6 +63,9 @@ struct State {
     has_content: bool,
     tool_names: NameMap,
     sanitized: NameMap,
+    original: Vec<u8>,
+    translated: Vec<u8>,
+    tool: OpenTool,
     saw_tool_call: bool,
     final_sent: bool,
 }
@@ -70,6 +77,15 @@ impl GoStream for State {
                 return Ok(vec![]);
             }
             let mut out = vec![];
+            if self.block == TOOL
+                && let Some(partial) = self.tool.finish()
+            {
+                push_event(
+                    &mut out,
+                    "content_block_delta",
+                    &self.delta("input_json_delta", "partial_json", partial),
+                );
+            }
             push_event(&mut out, "message_stop", br#"{"type":"message_stop"}"#);
             return Ok(vec![out]);
         }
@@ -92,6 +108,16 @@ impl GoStream for State {
             for part in parts.array() {
                 self.part(&part, &mut out);
             }
+        }
+        if !gj::get(raw, "candidates.0.finishReason").bytes().is_empty()
+            && self.block == TOOL
+            && let Some(partial) = self.tool.finish()
+        {
+            push_event(
+                &mut out,
+                "content_block_delta",
+                &self.delta("input_json_delta", "partial_json", partial),
+            );
         }
         let usage = gj::get(raw, "usageMetadata");
         let has_finish = raw.windows(14).any(|w| w == br#""finishReason""#);
@@ -143,7 +169,16 @@ impl State {
         data
     }
 
-    fn stop_block(&self, out: &mut Vec<u8>) {
+    fn stop_block(&mut self, out: &mut Vec<u8>) {
+        if self.block == TOOL
+            && let Some(partial) = self.tool.finish()
+        {
+            push_event(
+                out,
+                "content_block_delta",
+                &self.delta("input_json_delta", "partial_json", partial),
+            );
+        }
         push_event(
             out,
             "content_block_stop",
@@ -217,11 +252,13 @@ impl State {
             let client = map_tool_name(self.tool_names.as_ref(), &upstream);
             let args = call.get("args");
             if self.block == TOOL && upstream.is_empty() {
-                if args.exists() {
+                if args.exists()
+                    && let Some(partial) = self.tool.input(&args.raw, &self.original, &self.translated)
+                {
                     push_event(
                         out,
                         "content_block_delta",
-                        &self.delta("input_json_delta", "partial_json", &args.raw),
+                        &self.delta("input_json_delta", "partial_json", &partial),
                     );
                 }
                 return;
@@ -239,13 +276,16 @@ impl State {
             .into_bytes();
             let id = sanitize_claude_tool_id(&[&upstream[..], format!("-{n}").as_bytes()].concat());
             gj::set_str(&mut start, "content_block.id", id);
-            gj::set_str(&mut start, "content_block.name", client);
+            gj::set_str(&mut start, "content_block.name", &client);
+            self.tool.open(&client, &self.original);
             push_event(out, "content_block_start", &start);
-            if args.exists() {
+            if args.exists()
+                && let Some(partial) = self.tool.input(&args.raw, &self.original, &self.translated)
+            {
                 push_event(
                     out,
                     "content_block_delta",
-                    &self.delta("input_json_delta", "partial_json", &args.raw),
+                    &self.delta("input_json_delta", "partial_json", &partial),
                 );
             }
             self.block = TOOL;
@@ -339,14 +379,20 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
                 let mut block = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
                 let id = sanitize_claude_tool_id(&[&upstream[..], format!("-{tool_ids}").as_bytes()].concat());
                 gj::set_str(&mut block, "id", id);
-                gj::set_str(&mut block, "name", client);
+                gj::set_str(&mut block, "name", &client);
                 let args = call.get("args");
                 let input: &[u8] = if args.exists() && gj::valid(&args.raw) && args.is_object() {
                     &args.raw
                 } else {
                     b"{}"
                 };
-                gj::set_raw(&mut block, "input", input);
+                let cleaned = clean_claude_tool_arguments_with_translated(
+                    input,
+                    &client,
+                    ctx.original_request,
+                    ctx.translated_request,
+                );
+                gj::set_raw(&mut block, "input", &cleaned);
                 blocks.push(block);
             }
         }

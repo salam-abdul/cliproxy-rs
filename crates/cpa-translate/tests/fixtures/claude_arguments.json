@@ -1,0 +1,746 @@
+[
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"Entering plan mode\"}",
+  "tool": "EnterPlanMode",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"List jobs\"}",
+  "tool": "CronList",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"command\":\"ls -la\"}",
+  "tool": "Bash",
+  "translated": "",
+  "want": "{\"command\":\"ls -la\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"command\":\"ls -la\",\"reason\":\"why\"}",
+  "tool": "Bash",
+  "translated": "",
+  "want": "{\"command\":\"ls -la\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"command\":\"ls -la\",\"reason\":\"why\"}",
+  "tool": "Bash",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [{\"name\": \"Bash\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}}]}]}\n\t}",
+  "want": "{\"command\":\"ls -la\",\"reason\":\"why\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"command\":\"ls -la\",\"reason\":\"why\"}",
+  "tool": "Bash",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [{\"name\": \"Bash\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"reason\": {\"type\": \"string\"}}, \"required\": [\"command\", \"reason\"]}}]}]}\n\t}",
+  "want": "{\"command\":\"ls -la\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"command\":\"ls -la\",\"_\":true}",
+  "tool": "Bash",
+  "translated": "",
+  "want": "{\"command\":\"ls -la\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"valid\"}",
+  "tool": "CustomToolWithReason",
+  "translated": "",
+  "want": "{\"reason\":\"valid\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"name\":\"x\",\"reason\":\"dynamic\"}",
+  "tool": "DynamicTool",
+  "translated": "",
+  "want": "{\"name\":\"x\",\"reason\":\"dynamic\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "UnionTool",
+  "translated": "",
+  "want": "{\"reason\":\"x\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "EnterPlanMode",
+  "translated": "",
+  "want": "{\"reason\":\"x\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "",
+  "tool": "EnterPlanMode",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"EnterPlanMode\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"CronList\", \"input_schema\": {\"type\": \"object\"}},\n\t\t\t{\"name\": \"Bash\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n\t\t\t{\"name\": \"CustomToolWithReason\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"DynamicTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"UnionTool\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}]}}\n\t\t]\n\t}",
+  "raw": "{}",
+  "tool": "EnterPlanMode",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"MapTool\", \"input_schema\": {\"type\": \"object\", \"additionalProperties\": true}},\n\t\t\t{\"name\": \"TypedMapTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": {\"type\": \"string\"}}}\n\t\t]\n\t}",
+  "raw": "{\"key\":\"value\"}",
+  "tool": "MapTool",
+  "translated": "",
+  "want": "{\"key\":\"value\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"MapTool\", \"input_schema\": {\"type\": \"object\", \"additionalProperties\": true}},\n\t\t\t{\"name\": \"TypedMapTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": {\"type\": \"string\"}}}\n\t\t]\n\t}",
+  "raw": "{\"key\":\"value\"}",
+  "tool": "TypedMapTool",
+  "translated": "",
+  "want": "{\"key\":\"value\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Read\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"read\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"path\":\"/tmp/a\"}",
+  "tool": "read",
+  "translated": "",
+  "want": "{\"path\":\"/tmp/a\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Read\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"read\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "Read",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfEmpty\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"AllOfArgs\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}]}},\n\t\t\t{\"name\": \"RefEmpty\", \"input_schema\": {\"$ref\": \"#/$defs/empty\", \"$defs\": {\"empty\": {\"type\": \"object\", \"properties\": {}}}}},\n\t\t\t{\"name\": \"NestedTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}, \"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "AllOfEmpty",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfEmpty\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"AllOfArgs\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}]}},\n\t\t\t{\"name\": \"RefEmpty\", \"input_schema\": {\"$ref\": \"#/$defs/empty\", \"$defs\": {\"empty\": {\"type\": \"object\", \"properties\": {}}}}},\n\t\t\t{\"name\": \"NestedTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}, \"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"path\":\"/tmp/a\"}",
+  "tool": "AllOfArgs",
+  "translated": "",
+  "want": "{\"path\":\"/tmp/a\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfEmpty\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"AllOfArgs\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}]}},\n\t\t\t{\"name\": \"RefEmpty\", \"input_schema\": {\"$ref\": \"#/$defs/empty\", \"$defs\": {\"empty\": {\"type\": \"object\", \"properties\": {}}}}},\n\t\t\t{\"name\": \"NestedTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}, \"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "RefEmpty",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfEmpty\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"AllOfArgs\", \"input_schema\": {\"type\": \"object\", \"allOf\": [{\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}]}},\n\t\t\t{\"name\": \"RefEmpty\", \"input_schema\": {\"$ref\": \"#/$defs/empty\", \"$defs\": {\"empty\": {\"type\": \"object\", \"properties\": {}}}}},\n\t\t\t{\"name\": \"NestedTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}, \"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"opts\":{\"reason\":\"x\"},\"cfg\":{\"mode\":\"fast\",\"_\":true}}",
+  "tool": "NestedTool",
+  "translated": "",
+  "want": "{\"opts\":{},\"cfg\":{\"mode\":\"fast\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"payload\":{\"value\":1}}",
+  "tool": "FreeFormNested",
+  "translated": "",
+  "want": "{\"payload\":{\"value\":1}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"cfg\":{\"mode\":\"a\",\"reason\":\"b\"}}",
+  "tool": "AllOfMerge",
+  "translated": "",
+  "want": "{\"cfg\":{\"mode\":\"a\",\"reason\":\"b\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "SingleUnionEmpty",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"extra\":1,\"opts\":{\"reason\":\"x\"}}",
+  "tool": "DynamicParent",
+  "translated": "",
+  "want": "{\"extra\":1,\"opts\":{}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"items\":[{\"v\":\"a\",\"_\":true}]}",
+  "tool": "RefArray",
+  "translated": "",
+  "want": "{\"items\":[{\"v\":\"a\"}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"FreeFormNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"payload\": {}}, \"required\": [\"payload\"]}},\n\t\t\t{\"name\": \"AllOfMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}}}}]}},\n\t\t\t{\"name\": \"SingleUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}},\n\t\t\t{\"name\": \"DynamicParent\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}}}, \"additionalProperties\": true}},\n\t\t\t{\"name\": \"RefArray\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"items\": {\"$ref\": \"#/$defs/list\"}}, \"$defs\": {\"list\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"v\": {\"type\": \"string\"}}}}}}},\n\t\t\t{\"name\": \"PropRef\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"template\": {\"type\": \"object\", \"properties\": {}}, \"copy\": {\"$ref\": \"#/properties/template\"}}}}\n\t\t]\n\t}",
+  "raw": "{\"copy\":{\"reason\":\"x\"},\"template\":{}}",
+  "tool": "PropRef",
+  "translated": "",
+  "want": "{\"copy\":{},\"template\":{}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "AllOfDynamicConflict",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"parametersJsonSchema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"]}]}},\n\t\t\t{\"name\": \"MatrixTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}}}}\n\t\t]}]}\n\t}",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "MultiUnionEmpty",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"parametersJsonSchema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"]}]}},\n\t\t\t{\"name\": \"MatrixTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}}}}\n\t\t]}]}\n\t}",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "DupTool",
+  "translated": "",
+  "want": "{}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"path\":\"/tmp/a\"}",
+  "tool": "ConflictingDup",
+  "translated": "",
+  "want": "{\"path\":\"/tmp/a\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"x\"}",
+  "tool": "ConflictingDup",
+  "translated": "",
+  "want": "{\"reason\":\"x\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false, \"allOf\": [{\"additionalProperties\": true}]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"input_schema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"DupTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n\t\t\t{\"name\": \"ConflictingDup\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"MatrixTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}}}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[[{\"reason\":\"x\"}]]}",
+  "tool": "MatrixTool",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"AllOfDynamicConflict\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"MultiUnionEmpty\", \"parametersJsonSchema\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}, \"required\": [\"x\"]}]}},\n\t\t\t{\"name\": \"MatrixTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}}}}\n\t\t]}]}\n\t}",
+  "want": "{\"rows\":[[{}]]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"UnionChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}}]}},\n\t\t\t{\"name\": \"NestedRefTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"$ref\": \"#/$defs/Empty\"}}, \"$defs\": {\"Empty\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"reason\":\"maintenance\"}}",
+  "tool": "UnionChoice",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"UnionChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}},\n\t\t\t{\"name\": \"NestedRefTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"reason\":\"maintenance\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"UnionChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}}]}},\n\t\t\t{\"name\": \"NestedRefTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"$ref\": \"#/$defs/Empty\"}}, \"$defs\": {\"Empty\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"cfg\":{\"mode\":\"fast\"}}",
+  "tool": "AllOfChildMerge",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"UnionChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}},\n\t\t\t{\"name\": \"NestedRefTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}\n\t\t]}]}\n\t}",
+  "want": "{\"cfg\":{\"mode\":\"fast\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"UnionChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}, \"allOf\": [{\"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}}]}},\n\t\t\t{\"name\": \"NestedRefTool\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"$ref\": \"#/$defs/Empty\"}}, \"$defs\": {\"Empty\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"opts\":{\"reason\":\"initialize\"}}",
+  "tool": "NestedRefTool",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"UnionChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"AllOfChildMerge\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}}}}},\n\t\t\t{\"name\": \"NestedRefTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}},\n\t\t\t{\"name\": \"WrappedPlaceholder\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}}\n\t\t]}]}\n\t}",
+  "want": "{\"opts\":{}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Explain\", \"input_schema\": {\"type\": \"object\", \"required\": [\"reason\"], \"additionalProperties\": true}},\n\t\t\t{\"name\": \"Choose\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"opts\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"maintenance\"}",
+  "tool": "Explain",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Explain\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"Choose\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"opts\"]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]}]\n\t}",
+  "want": "{\"reason\":\"maintenance\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Explain\", \"input_schema\": {\"type\": \"object\", \"required\": [\"reason\"], \"additionalProperties\": true}},\n\t\t\t{\"name\": \"Choose\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"opts\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"opts\":{\"reason\":\"initialize\"}}}",
+  "tool": "Choose",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Explain\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"Choose\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"opts\"]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]}]\n\t}",
+  "want": "{\"choice\":{\"opts\":{}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Explain\", \"input_schema\": {\"type\": \"object\", \"required\": [\"reason\"], \"additionalProperties\": true}},\n\t\t\t{\"name\": \"Choose\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"opts\"]}, {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"]}]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]\n\t}",
+  "raw": "{\"flag\":\"x\",\"_\":true}",
+  "tool": "Options",
+  "translated": "{\n\t\t\"model\": \"gemini-3.8-flash-high\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Explain\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"Choose\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"opts\"]}}, \"required\": [\"choice\"]}},\n\t\t\t{\"name\": \"Options\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": true}}\n\t\t]}]\n\t}",
+  "want": "{\"flag\":\"x\",\"_\":true}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"PlainOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}},\n\t\t\t{\"name\": \"BranchChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"flag\":\"x\",\"_\":true}",
+  "tool": "PlainOptions",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"PlainOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"BranchChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"flag\":\"x\",\"_\":true}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"PlainOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}},\n\t\t\t{\"name\": \"BranchChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"flag\":\"x\",\"_\":true}",
+  "tool": "StrictOptions",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"PlainOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"BranchChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"flag\":\"x\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"PlainOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}, \"additionalProperties\": false}},\n\t\t\t{\"name\": \"BranchChoice\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"value\":1}}}",
+  "tool": "BranchChoice",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"PlainOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"StrictOptions\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"flag\": {\"type\": \"string\"}}}},\n\t\t\t{\"name\": \"BranchChoice\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"additionalProperties\": true}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"choice\":{\"cfg\":{\"value\":1}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Configure\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"additionalProperties\": true}]}}, \"required\": [\"cfg\"]}}\n\t\t]\n\t}",
+  "raw": "{\"cfg\":{\"reason\":\"business\"}}",
+  "tool": "Configure",
+  "translated": "{\n\t\t\"model\": \"gemini-3.1-pro\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Configure\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}]}}, \"required\": [\"cfg\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"cfg\":{\"reason\":\"business\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainPattern\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"patternProperties\": {\"^reason$\": {\"type\": \"string\"}}, \"additionalProperties\": false}},\n\t\t\t{\"name\": \"PatternData\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"patternProperties\": {\"^x-\": {\"type\": \"string\"}}, \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "ExplainPattern",
+  "translated": "{\n\t\t\"model\": \"gemini-3.1-pro\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ExplainPattern\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"PatternData\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainPattern\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"patternProperties\": {\"^reason$\": {\"type\": \"string\"}}, \"additionalProperties\": false}},\n\t\t\t{\"name\": \"PatternData\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"patternProperties\": {\"^x-\": {\"type\": \"string\"}}, \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"x-note\":\"keep\"}",
+  "tool": "PatternData",
+  "translated": "{\n\t\t\"model\": \"gemini-3.1-pro\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ExplainPattern\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"PatternData\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"x-note\":\"keep\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ConfigureNested\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"patternProperties\": {\"^cfg$\": {\"type\": \"object\", \"additionalProperties\": true}}, \"additionalProperties\": false}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"mode\":\"fast\",\"_\":true}}}",
+  "tool": "ConfigureNested",
+  "translated": "{\n\t\t\"model\": \"gemini-3.1-pro\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ConfigureNested\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}, \"_\": {\"type\": \"boolean\"}}, \"required\": [\"_\"]}}, \"required\": [\"cfg\"]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"cfg\":{\"mode\":\"fast\",\"_\":true}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ImplicitBranch\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}]}}, \"required\": [\"choice\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"tag\":\"keep\",\"cfg\":{\"mode\":\"fast\",\"_\":true}}}",
+  "tool": "ImplicitBranch",
+  "translated": "{\n\t\t\"model\": \"gemini-3.1-pro\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ImplicitBranch\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}, \"_\": {\"type\": \"boolean\"}}, \"required\": [\"_\"]}}, \"required\": [\"cfg\"]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"tag\":\"keep\",\"cfg\":{\"mode\":\"fast\",\"_\":true}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ChooseImplicit\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"tag\":\"keep\",\"reason\":\"business\"}}",
+  "tool": "ChooseImplicit",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ChooseImplicit\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"tag\":\"keep\",\"reason\":\"business\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ChooseImplicit\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"reason\":\"x\"}}",
+  "tool": "ChooseImplicit",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ChooseImplicit\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}, {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ConfigureAlt\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"required\": [\"mode\"]}}, \"required\": [\"cfg\"], \"additionalProperties\": false}]}}, \"required\": [\"choice\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"mode\":\"fast\",\"reason\":\"business\"}}}",
+  "tool": "ConfigureAlt",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ConfigureAlt\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"required\": [\"mode\"]}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"cfg\":{\"mode\":\"fast\",\"reason\":\"business\"}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ConfigureAlt\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"required\": [\"mode\"]}}, \"required\": [\"cfg\"], \"additionalProperties\": false}]}}, \"required\": [\"choice\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"reason\":\"x\"}}}",
+  "tool": "ConfigureAlt",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ConfigureAlt\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"required\": [\"mode\"]}}, \"required\": [\"cfg\"]}]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"cfg\":{}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"DeepAlt\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"additionalProperties\": false}}, \"required\": [\"opts\"], \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}}, \"required\": [\"cfg\"], \"additionalProperties\": false}]}}, \"required\": [\"choice\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"tag\":\"keep\",\"opts\":{\"mode\":\"fast\",\"_\":true}}}}",
+  "tool": "DeepAlt",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"DeepAlt\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}, \"_\": {\"type\": \"boolean\"}}, \"required\": [\"_\"]}}, \"required\": [\"opts\"]}}, \"required\": [\"cfg\"]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"cfg\":{\"tag\":\"keep\",\"opts\":{\"mode\":\"fast\",\"_\":true}}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"DeepAlt\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}}, \"additionalProperties\": false}}, \"required\": [\"opts\"], \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}, \"required\": [\"tag\"]}}, \"required\": [\"cfg\"], \"additionalProperties\": false}]}}, \"required\": [\"choice\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"choice\":{\"cfg\":{\"opts\":{\"mode\":\"fast\",\"_\":true}}}}",
+  "tool": "DeepAlt",
+  "translated": "{\n\t\t\"model\": \"gemini-3-pro-high\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"DeepAlt\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"choice\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"opts\": {\"type\": \"object\", \"properties\": {\"mode\": {\"type\": \"string\"}, \"_\": {\"type\": \"boolean\"}}, \"required\": [\"_\"]}}, \"required\": [\"opts\"]}}, \"required\": [\"cfg\"]}}, \"required\": [\"choice\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"choice\":{\"cfg\":{\"opts\":{\"mode\":\"fast\"}}}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ConfigureAltFree\", \"input_schema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"cfg\": {}}, \"required\": [\"cfg\"], \"additionalProperties\": false}]}}\n\t\t]\n\t}",
+  "raw": "{\"cfg\":{\"reason\":\"business\",\"value\":1}}",
+  "tool": "ConfigureAltFree",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ConfigureAltFree\", \"parametersJsonSchema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}, \"required\": [\"cfg\"]}, {\"type\": \"object\", \"properties\": {\"cfg\": {}}, \"required\": [\"cfg\"]}]}}\n\t\t]}]\n\t}",
+  "want": "{\"cfg\":{\"reason\":\"business\",\"value\":1}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Batch\", \"input_schema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}, \"required\": [\"rows\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"rows\": {}}, \"required\": [\"rows\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"BatchStrict\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}, \"required\": [\"rows\"]}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"value\":1}]}",
+  "tool": "Batch",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Batch\", \"parametersJsonSchema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}, \"required\": [\"rows\"]}, {\"type\": \"object\", \"properties\": {\"rows\": {}}, \"required\": [\"rows\"]}]}},\n\t\t\t{\"name\": \"BatchStrict\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"rows\":[{\"value\":1}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"Batch\", \"input_schema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}, \"required\": [\"rows\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"rows\": {}}, \"required\": [\"rows\"], \"additionalProperties\": false}]}},\n\t\t\t{\"name\": \"BatchStrict\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": false}}}, \"required\": [\"rows\"]}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"reason\":\"x\"}]}",
+  "tool": "BatchStrict",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"Batch\", \"parametersJsonSchema\": {\"type\": \"object\", \"anyOf\": [{\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}}}, \"required\": [\"rows\"]}, {\"type\": \"object\", \"properties\": {\"rows\": {}}, \"required\": [\"rows\"]}]}},\n\t\t\t{\"name\": \"BatchStrict\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"rows\":[{}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"1\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"_1\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "1",
+  "translated": "",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"input_schema\": {\"type\": \"object\", \"enum\": [{\"reason\": \"business\"}]}},\n\t\t\t{\"name\": \"ConstTool\", \"input_schema\": {\"type\": \"object\", \"const\": {\"reason\": \"fixed\"}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "ExplainFixed",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"ConstTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"input_schema\": {\"type\": \"object\", \"enum\": [{\"reason\": \"business\"}], \"anyOf\": [{\"type\": \"object\", \"properties\": {}}]}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "ExplainFixed",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"ConstTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchEnum\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}, \"enum\": [[{\"reason\": \"business\"}]]}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"reason\":\"business\"}]}",
+  "tool": "BatchEnum",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"BatchEnum\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"rows\":[{\"reason\":\"business\"}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchEnum\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}, \"enum\": [[{\"reason\": \"business\"}]]}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"reason\":\"business\"}]}",
+  "tool": "BatchEnum",
+  "translated": "",
+  "want": "{\"rows\":[{\"reason\":\"business\"}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchContains\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}, \"contains\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"reason\":\"business\"}]}",
+  "tool": "BatchContains",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"BatchContains\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"rows\":[{\"reason\":\"business\"}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchContains\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {}}, \"contains\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"reason\":\"business\"}]}",
+  "tool": "BatchContains",
+  "translated": "",
+  "want": "{\"rows\":[{\"reason\":\"business\"}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ConfigureSibling\", \"input_schema\": {\"type\": \"object\", \"required\": [\"cfg\"], \"anyOf\": [{\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {}}}, \"required\": [\"cfg\"], \"additionalProperties\": false}, {\"type\": \"object\", \"properties\": {\"other\": {\"type\": \"string\"}}, \"required\": [\"other\"], \"additionalProperties\": false}], \"allOf\": [{\"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}}]}}\n\t\t]\n\t}",
+  "raw": "{\"cfg\":{\"reason\":\"business\"}}",
+  "tool": "ConfigureSibling",
+  "translated": "{\n\t\t\"model\": \"gemini-2.5-pro\",\n\t\t\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ConfigureSibling\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"cfg\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}, \"required\": [\"cfg\"]}}\n\t\t]}]\n\t}",
+  "want": "{\"cfg\":{\"reason\":\"business\"}}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"StoreMetadata\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"minProperties\": 1}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"store\",\"label\":\"keep\"}",
+  "tool": "StoreMetadata",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"StoreMetadata\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"], \"minProperties\": 1}}\n\t\t]}]}\n\t}",
+  "want": "{\"reason\":\"store\",\"label\":\"keep\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"StoreMetadata\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"minProperties\": 1}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"store\",\"label\":\"keep\"}",
+  "tool": "StoreMetadata",
+  "translated": "",
+  "want": "{\"reason\":\"store\",\"label\":\"keep\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchUnique\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"uniqueItems\": true, \"items\": {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}}}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"tag\":\"same\",\"_\":true},{\"tag\":\"same\",\"_\":false}]}",
+  "tool": "BatchUnique",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"BatchUnique\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}, \"_\": {\"type\": \"boolean\"}}, \"required\": [\"_\"]}}}, \"required\": [\"rows\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"rows\":[{\"tag\":\"same\",\"_\":true},{\"tag\":\"same\",\"_\":false}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"BatchUnique\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"rows\": {\"type\": \"array\", \"uniqueItems\": true, \"items\": {\"type\": \"object\", \"properties\": {\"tag\": {\"type\": \"string\"}}}}}, \"required\": [\"rows\"], \"additionalProperties\": false}}\n\t\t]\n\t}",
+  "raw": "{\"rows\":[{\"tag\":\"same\",\"_\":true},{\"tag\":\"same\",\"_\":false}]}",
+  "tool": "BatchUnique",
+  "translated": "",
+  "want": "{\"rows\":[{\"tag\":\"same\",\"_\":true},{\"tag\":\"same\",\"_\":false}]}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"input_schema\": {\"type\": \"object\", \"enum\": [{\"reason\": \"business\"}]}},\n\t\t\t{\"name\": \"ConstTool\", \"input_schema\": {\"type\": \"object\", \"const\": {\"reason\": \"fixed\"}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "ExplainFixed",
+  "translated": "",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"input_schema\": {\"type\": \"object\", \"enum\": [{\"reason\": \"business\"}]}},\n\t\t\t{\"name\": \"ConstTool\", \"input_schema\": {\"type\": \"object\", \"const\": {\"reason\": \"fixed\"}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"fixed\"}",
+  "tool": "ConstTool",
+  "translated": "{\n\t\t\"model\": \"claude-sonnet-4-6\",\n\t\t\"request\": {\"tools\": [{\"functionDeclarations\": [\n\t\t\t{\"name\": \"ExplainFixed\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"ConstTool\", \"parametersJsonSchema\": {\"type\": \"object\", \"properties\": {\"reason\": {\"type\": \"string\"}}, \"required\": [\"reason\"]}}\n\t\t]}]}\n\t}",
+  "want": "{\"reason\":\"fixed\"}"
+ },
+ {
+  "name": "TestCleanClaudeToolArguments:641",
+  "original": "{\n\t\t\"tools\": [\n\t\t\t{\"name\": \"1\", \"input_schema\": {\"type\": \"object\", \"properties\": {}, \"required\": [\"reason\"]}},\n\t\t\t{\"name\": \"_1\", \"input_schema\": {\"type\": \"object\", \"properties\": {}}}\n\t\t]\n\t}",
+  "raw": "{\"reason\":\"business\"}",
+  "tool": "1",
+  "translated": "{\"model\":\"claude-sonnet-4-6\",\"request\":{\"tools\":[{\"functionDeclarations\":[{\"name\":\"_1_ee3d96c33ea9\",\"parametersJsonSchema\":{\"type\":\"object\",\"properties\":{\"reason\":{\"type\":\"string\"}},\"required\":[\"reason\"]}}]}]}}",
+  "want": "{\"reason\":\"business\"}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "duplicate-prefix",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"object\", \"properties\": {\"y\": {\"type\": \"object\", \"additionalProperties\": false}}}}}}]}",
+  "raw": "{\"x\":{},\"x\":{\"y\":{\"reason\":\"a\"}}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"x\":{\"y\":{}},\"x\":{\"y\":{\"reason\":\"a\"}}}"
+ },
+ {
+  "name": "duplicate-placeholder",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"string\"}}}}]}",
+  "raw": "{\"reason\":\"a\",\"reason\":\"b\"}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"reason\":\"b\"}"
+ },
+ {
+  "name": "delete-whitespace",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"number\"}}}}]}",
+  "raw": "{ \"reason\" : \"a\" , \"_\" : true , \"x\" : 1 }",
+  "tool": "t",
+  "translated": "",
+  "want": "{ \"x\" : 1 }"
+ },
+ {
+  "name": "delete-tail-whitespace",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"number\"}}}}]}",
+  "raw": "{ \"x\" : 1 , \"reason\" : \"a\" , \"_\" : true }",
+  "tool": "t",
+  "translated": "",
+  "want": "{ \"x\" : 1   }"
+ },
+ {
+  "fork": "passthrough",
+  "name": "operator-:x",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\":x\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\":x\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\":x\": {\"reason\": \"a\"},\"x\":{}}"
+ },
+ {
+  "name": "operator-@this",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"@this\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"@this\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"@this\": {\"reason\": \"a\"}}"
+ },
+ {
+  "name": "operator-#hash",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"#hash\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"#hash\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"#hash\": {}}"
+ },
+ {
+  "name": "operator-a|b",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a|b\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a|b\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a|b\": {\"reason\": \"a\"}}"
+ },
+ {
+  "name": "operator-a.b",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a.b\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a.b\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a.b\": {}}"
+ },
+ {
+  "name": "operator-a\\b",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\\\\b\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\\\\b\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\\\\b\": {\"reason\": \"a\"}}"
+ },
+ {
+  "name": "operator-",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"\": {\"reason\": \"a\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"\": {\"reason\": \"a\"}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "duplicate-prefix-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \"x\": {\"type\": \"object\", \"properties\": {\"y\": {\"type\": \"object\", \"additionalProperties\": false}}}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\"x\":{},\"x\":{\"y\":{\"reason\":\"keep\"}}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\"x\":{\"y\":{}},\"x\":{\"y\":{\"reason\":\"keep\"}}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "colon-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \":x\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\":x\":{\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\":x\":{\"reason\":\"keep\"},\"x\":{}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "modifier-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \"@this\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\"@this\":{\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\"@this\":{\"reason\":\"keep\"}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "pipe-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \"a|b\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\"a|b\":{\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\"a|b\":{\"reason\":\"keep\"}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "backslash-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \"a\\\\b\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\"a\\\\b\":{\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\"a\\\\b\":{\"reason\":\"keep\"}}"
+ },
+ {
+  "fork": "passthrough",
+  "name": "empty-after-edit",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"object\", \"additionalProperties\": false}, \"\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"a\":{\"reason\":\"erase\"},\"\":{\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"a\":{},\"\":{\"reason\":\"keep\"}}"
+ },
+ {
+  "name": "literal-at",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"@at\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"@at\":{\"reason\":\"erase\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"@at\":{}}"
+ },
+ {
+  "name": "hash-path-delete",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"#hash\": {\"type\": \"object\", \"properties\": {\"x\": {\"type\": \"number\"}}}}}}]}",
+  "raw": "{\"#hash\":{\"x\":1,\"reason\":\"keep\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"#hash\":{\"x\":1,\"reason\":\"keep\"}}"
+ },
+ {
+  "name": "literal-star",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"*\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"*\":{\"reason\":\"erase\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"*\":{}}"
+ },
+ {
+  "name": "literal-question",
+  "original": "{\"tools\": [{\"name\": \"t\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"?\": {\"type\": \"object\", \"additionalProperties\": false}}}}]}",
+  "raw": "{\"?\":{\"reason\":\"erase\"}}",
+  "tool": "t",
+  "translated": "",
+  "want": "{\"?\":{}}"
+ }
+]

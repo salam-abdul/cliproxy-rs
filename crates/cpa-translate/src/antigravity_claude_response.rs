@@ -2,6 +2,8 @@
 //! response half of web_search.go): ConvertAntigravityResponseToClaude, its NonStream and
 //! the web-search grounding blocks.
 
+use crate::claude_tool_args::{OpenTool, clean_claude_tool_arguments_with_translated};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -431,6 +433,8 @@ pub(crate) fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
     Box::new(Stream {
         model: model_name(ctx.translated_request),
         names: disambiguated_tool_name_map(ctx.original_request),
+        original: ctx.original_request.to_vec(),
+        translated: ctx.translated_request.to_vec(),
         web_search_mode: translates_grounding(ctx.original_request, ctx.translated_request),
         ..Stream::default()
     })
@@ -441,6 +445,9 @@ pub(crate) fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
 struct Stream {
     model: String,
     names: HashMap<Vec<u8>, Vec<u8>>,
+    original: Vec<u8>,
+    translated: Vec<u8>,
+    tool: OpenTool,
     web_search_mode: bool,
     out: Vec<u8>,
     has_first_response: bool,
@@ -471,7 +478,19 @@ impl Stream {
         push_event(&mut self.out, event, payload);
     }
 
+    fn flush_tool_input(&mut self) {
+        if self.response_type == FUNCTION_CALL
+            && let Some(partial) = self.tool.finish()
+        {
+            self.delta(
+                r#"{"type":"input_json_delta","partial_json":""}"#,
+                "delta.partial_json",
+                partial,
+            );
+        }
+    }
     fn stop_event(&mut self) {
+        self.flush_tool_input();
         let payload = format!(r#"{{"type":"content_block_stop","index":{}}}"#, self.index);
         self.event("content_block_stop", payload.as_bytes());
     }
@@ -632,6 +651,19 @@ impl Stream {
         }
         self.has_tool_use = true;
         let name = restore_sanitized_tool_name(Some(&self.names), &call.get("name").bytes());
+        if self.response_type == FUNCTION_CALL && name.is_empty() {
+            let args = call.get("args");
+            if args.exists()
+                && let Some(partial) = self.tool.input(&args.raw, &self.original, &self.translated)
+            {
+                self.delta(
+                    r#"{"type":"input_json_delta","partial_json":""}"#,
+                    "delta.partial_json",
+                    &partial,
+                );
+            }
+            return;
+        }
         if self.response_type == FUNCTION_CALL {
             self.stop_event();
             self.index += 1;
@@ -662,12 +694,15 @@ impl Stream {
             );
         }
         self.event("content_block_start", &data);
+        self.tool.open(&name, &self.original);
         let args = call.get("args");
-        if args.exists() {
+        if args.exists()
+            && let Some(partial) = self.tool.input(&args.raw, &self.original, &self.translated)
+        {
             self.delta(
                 r#"{"type":"input_json_delta","partial_json":""}"#,
                 "delta.partial_json",
-                &args.raw,
+                &partial,
             );
         }
         self.response_type = FUNCTION_CALL;
@@ -787,6 +822,9 @@ impl Stream {
         if finish.exists() {
             self.has_finish_reason = true;
             self.finish_reason = finish.bytes().into_owned();
+            if !self.finish_reason.is_empty() {
+                self.flush_tool_input();
+            }
         }
         let usage = gj::get(raw, "response.usageMetadata");
         if usage.exists() {
@@ -922,7 +960,13 @@ pub(crate) fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, 
                 }
                 let args = call.get("args");
                 if args.exists() && !args.raw.is_empty() && gj::valid(&args.raw) && args.is_object() {
-                    gj::set_raw(&mut block, "input", &args.raw);
+                    let cleaned = clean_claude_tool_arguments_with_translated(
+                        &args.raw,
+                        &name,
+                        ctx.original_request,
+                        ctx.translated_request,
+                    );
+                    gj::set_raw(&mut block, "input", &cleaned);
                 }
                 acc.blocks.push(block);
                 has_semantic = true;

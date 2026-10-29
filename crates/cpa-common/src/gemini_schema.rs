@@ -6,6 +6,10 @@
 //! local `$ref` inlining). Pass a single schema, never a whole request document.
 
 use crate::json::{self as gj, AnyValue, GoValue, Kind, Res};
+use crate::schema_path::{
+    delete as schema_delete, get as schema_get, set_bool as schema_set_bool, set_raw as schema_set_raw,
+    set_str as schema_set_str, set_strs as schema_set_strs,
+};
 use std::collections::{BTreeMap, HashMap};
 
 const PLACEHOLDER_REASON_DESCRIPTION: &[u8] = b"Brief explanation of why you are calling this tool";
@@ -18,6 +22,8 @@ struct Options {
     remove_tool_title: bool,
     remove_gemini_metadata: bool,
     flatten_unions: bool,
+    /// Flatten multi-branch anyOf/oneOf unions to one branch instead of preserving them.
+    flatten_multi_branch_unions: bool,
     force_enum_string_type: bool,
     drop_all_enums: bool,
     drop_boolean_enums: bool,
@@ -33,6 +39,16 @@ pub fn for_antigravity(schema: &[u8]) -> Vec<u8> {
 
 /// CleanJSONSchemaForAntigravityTool.
 pub fn for_antigravity_tool(schema: &[u8], require_placeholder: bool) -> Vec<u8> {
+    antigravity_tool(schema, require_placeholder, false)
+}
+
+/// CleanJSONSchemaForAntigravityClaudeTool: the Antigravity tool cleaner for Claude models,
+/// which flattens multi-branch unions because that backend rejects them.
+pub fn for_antigravity_claude_tool(schema: &[u8], require_placeholder: bool) -> Vec<u8> {
+    antigravity_tool(schema, require_placeholder, true)
+}
+
+fn antigravity_tool(schema: &[u8], require_placeholder: bool, flatten_multi_branch_unions: bool) -> Vec<u8> {
     clean(
         schema,
         Options {
@@ -41,6 +57,7 @@ pub fn for_antigravity_tool(schema: &[u8], require_placeholder: bool) -> Vec<u8>
             antigravity_semantics: true,
             remove_tool_title: !require_placeholder,
             flatten_unions: true,
+            flatten_multi_branch_unions,
             drop_all_enums: true,
             ..Options::default()
         },
@@ -97,11 +114,20 @@ pub fn inline_local_refs(schema: &[u8]) -> Vec<u8> {
     inline_refs(schema.to_vec())
 }
 
+/// cleanJSONSchema.
+///
+/// ponytail: the legacy path passes rescan and rewrite the schema. The upgrade path is
+/// a raw-span document with indexed nodes and batched edits, preserving the exact fixtures.
 fn clean(schema: &[u8], options: Options) -> Vec<u8> {
+    clean_inner(schema, options)
+}
+
+fn clean_inner(schema: &[u8], options: Options) -> Vec<u8> {
     let mut s = normalize_malformed_schema_objects(schema.to_vec(), options.add_missing_array_items);
-    if options.antigravity_semantics {
-        s = inline_refs(s);
-    }
+    // Every cleaner removes $defs/definitions later, so local references expand on every
+    // route. Per request this costs one decode and re-encode of each schema with a
+    // `"$ref"` (none without one), and up to the 256 KiB budget of copies.
+    s = inline_refs_for_clean(s);
     s = convert_refs_to_hints(s, options.antigravity_semantics);
     s = convert_const_to_enum(s);
     s = convert_enum_values_to_strings(s, options.force_enum_string_type);
@@ -115,11 +141,21 @@ fn clean(schema: &[u8], options: Options) -> Vec<u8> {
         s = move_not_to_description(s);
     }
     s = merge_conditionals(s);
-    s = merge_all_of(s);
-    if options.flatten_unions {
-        s = flatten_any_of_one_of(s);
+    let preserve_conjunctions =
+        options.preserve_standard_constraints && find_paths(&s, b"allOf").iter().any(|p| schema_get(&s, p).is_array());
+    if !options.preserve_standard_constraints {
+        s = merge_all_of(s);
     }
-    s = flatten_type_arrays(s, options.antigravity_semantics);
+    if options.flatten_unions && !preserve_conjunctions {
+        s = flatten_any_of_one_of(
+            s,
+            options.preserve_standard_constraints,
+            options.flatten_multi_branch_unions,
+        );
+    }
+    if !preserve_conjunctions {
+        s = flatten_type_arrays(s, options.antigravity_semantics);
+    }
     s = remove_unsupported_keywords(s, options);
     if options.remove_gemini_metadata {
         s = remove_keywords(s, &[b"nullable", b"title"]);
@@ -127,8 +163,11 @@ fn clean(schema: &[u8], options: Options) -> Vec<u8> {
     } else if options.remove_tool_title {
         s = remove_keywords(s, &[b"title"]);
     }
-    s = cleanup_required_fields(s);
-    s = sanitize_array_items(s);
+    if !preserve_conjunctions {
+        s = cleanup_required_fields(s);
+        s = sanitize_object_properties(s);
+        s = sanitize_array_items(s, options.add_missing_array_items);
+    }
     if options.add_placeholder {
         s = add_empty_schema_placeholder(s);
     }
@@ -204,10 +243,11 @@ fn depth_sorted(mut paths: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     paths
 }
 
-/// util.Walk: every path (keys escaped) whose last key equals `field`, in document order.
+/// util.WalkSchema: every path (keys escaped) whose last key equals `field`, in document
+/// order, without descending into literal values.
 fn find_paths(json: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
     let mut paths = vec![];
-    walk_fields(&gj::parse(json), b"", &mut |key, path| {
+    walk_fields(&gj::parse(json), b"", true, &mut |key, path| {
         if key == field {
             paths.push(path.to_vec());
         }
@@ -217,7 +257,7 @@ fn find_paths(json: &[u8], field: &[u8]) -> Vec<Vec<u8>> {
 
 fn find_paths_by_fields(json: &[u8], fields: &[&[u8]]) -> HashMap<Vec<u8>, Vec<Vec<u8>>> {
     let mut paths: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
-    walk_fields(&gj::parse(json), b"", &mut |key, path| {
+    walk_fields(&gj::parse(json), b"", true, &mut |key, path| {
         if fields.contains(&key) {
             paths.entry(key.to_vec()).or_default().push(path.to_vec());
         }
@@ -229,7 +269,7 @@ fn find_paths_by_fields(json: &[u8], fields: &[&[u8]]) -> HashMap<Vec<u8>, Vec<V
 /// in document order.
 pub fn walk(value: &Res<'_>, field: &[u8]) -> Vec<Vec<u8>> {
     let mut paths = vec![];
-    walk_fields(value, b"", &mut |key, path| {
+    walk_fields(value, b"", false, &mut |key, path| {
         if key == field {
             paths.push(path.to_vec());
         }
@@ -237,17 +277,44 @@ pub fn walk(value: &Res<'_>, field: &[u8]) -> Vec<Vec<u8>> {
     paths
 }
 
-fn walk_fields(value: &Res<'_>, path: &[u8], visit: &mut dyn FnMut(&[u8], &[u8])) {
-    if value.kind != Kind::Json {
-        return;
+/// `schema_aware` (WalkSchema) records a literal keyword but does not descend into its value,
+/// except under a name map, where the key is a property name.
+fn walk_fields(value: &Res<'_>, path: &[u8], schema_aware: bool, visit: &mut dyn FnMut(&[u8], &[u8])) {
+    enum Work<'a> {
+        Node(Res<'a>, Vec<u8>),
+        Entry(Vec<u8>, Res<'a>, Vec<u8>, bool),
     }
-    value.each(|key, child| {
-        let key = key.bytes();
-        let child_path = join_path(path, &escape_key(&key));
-        visit(&key, &child_path);
-        walk_fields(&child, &child_path, visit);
-        true
-    });
+    let mut work = vec![Work::Node(value.clone(), path.to_vec())];
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Node(value, path) => {
+                if value.kind != Kind::Json {
+                    continue;
+                }
+                let mut entries = Vec::new();
+                value.each(|key, child| {
+                    entries.push((key.bytes().into_owned(), child));
+                    true
+                });
+                for (key, child) in entries.into_iter().rev() {
+                    let child_path = join_path(&path, &escape_key(&key));
+                    let descend = !(schema_aware && is_literal_value_keyword(&key) && !is_property_definition(&path));
+                    work.push(Work::Entry(key, child, child_path, descend));
+                }
+            }
+            Work::Entry(key, child, path, descend) => {
+                visit(&key, &path);
+                if descend {
+                    work.push(Work::Node(child, path));
+                }
+            }
+        }
+    }
+}
+
+/// literalValueKeywords: their values are client data, never subschemas.
+fn is_literal_value_keyword(key: &[u8]) -> bool {
+    matches!(key, b"default" | b"example" | b"examples" | b"const" | b"enum")
 }
 
 /// isPropertyDefinition: an odd run of trailing name-map keywords means `path` is a map
@@ -259,7 +326,12 @@ fn is_property_definition(path: &[u8]) -> bool {
         .take_while(|seg| {
             matches!(
                 unescape_key(seg).as_slice(),
-                b"properties" | b"patternProperties" | b"dependentSchemas" | b"$defs" | b"definitions"
+                b"properties"
+                    | b"patternProperties"
+                    | b"dependentSchemas"
+                    | b"dependencies"
+                    | b"$defs"
+                    | b"definitions"
             )
         })
         .count();
@@ -293,13 +365,13 @@ fn merge_hint(existing: &[u8], hint: &[u8]) -> Vec<u8> {
 
 fn append_hint(mut json: Vec<u8>, parent: &[u8], hint: &[u8]) -> Vec<u8> {
     let path = description_path(parent);
-    let merged = merge_hint(&gj::get(&json, &path).bytes(), hint);
-    gj::set_str(&mut json, &path, merged);
+    let merged = merge_hint(&schema_get(&json, &path).bytes(), hint);
+    schema_set_str(&mut json, &path, String::from_utf8_lossy(&merged).as_bytes());
     json
 }
 
 fn get_strings(json: &[u8], path: &[u8]) -> Vec<Vec<u8>> {
-    let arr = gj::get(json, path);
+    let arr = schema_get(json, path);
     if !arr.is_array() {
         return vec![];
     }
@@ -309,9 +381,9 @@ fn get_strings(json: &[u8], path: &[u8]) -> Vec<Vec<u8>> {
 /// `sjson.SetBytes(json, path, []string)`: a nil (empty) slice marshals as `null`.
 fn set_strings(json: &mut Vec<u8>, path: &[u8], items: &[Vec<u8>]) {
     if items.is_empty() {
-        gj::set_raw(json, path, b"null");
+        schema_set_raw(json, path, b"null");
     } else {
-        gj::set_strs(json, path, items);
+        schema_set_raw(json, path, gj::quote_all(items));
     }
 }
 
@@ -320,12 +392,12 @@ fn set_raw_at(json: Vec<u8>, path: &[u8], value: &[u8]) -> Vec<u8> {
         return value.to_vec();
     }
     let mut json = json;
-    gj::set_raw(&mut json, path, value);
+    schema_set_raw(&mut json, path, value);
     json
 }
 
 fn delete(mut json: Vec<u8>, path: &[u8]) -> Vec<u8> {
-    gj::delete(&mut json, path);
+    schema_delete(&mut json, path);
     json
 }
 
@@ -424,21 +496,6 @@ fn is_non_object_type(t: Option<&GoValue>) -> bool {
     }
 }
 
-fn is_array_type(t: Option<&GoValue>) -> bool {
-    match t {
-        Some(GoValue::String(s)) => s.eq_ignore_ascii_case("array"),
-        Some(GoValue::Array(items)) => items
-            .iter()
-            .any(|i| matches!(i, GoValue::String(s) if s.eq_ignore_ascii_case("array"))),
-        _ => false,
-    }
-}
-
-/// `clone["type"] == nil || clone["type"] == ""`.
-fn type_unset(t: Option<&GoValue>) -> bool {
-    matches!(t, None | Some(GoValue::Null)) || matches!(t, Some(GoValue::String(s)) if s.is_empty())
-}
-
 fn is_api_request_document(m: &Map) -> bool {
     for key in [
         "tools",
@@ -527,316 +584,172 @@ fn empty_object() -> GoValue {
     GoValue::Object(Map::new())
 }
 
-fn repair_node(node: &Map, add_items: bool) -> (Map, bool) {
-    let mut modified = false;
-    let mut clone = node.clone();
-
-    if !is_non_object_type(clone.get("type")) {
-        let bare: Map = clone
-            .iter()
-            .filter(|(k, v)| matches!(v, GoValue::Object(_)) && !is_known_keyword_or_extension(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        if !bare.is_empty() {
-            let (repaired, promoted, _) = repair_property_map(&bare, add_items);
-            for k in bare.keys() {
-                clone.remove(k);
-            }
-            match clone.get_mut("properties") {
-                Some(GoValue::Object(existing)) => existing.extend(repaired),
-                _ => {
-                    clone.insert("properties".into(), GoValue::Object(repaired));
-                    clone
-                        .entry("type".into())
-                        .or_insert_with(|| GoValue::String("object".into()));
+fn repair_node(node: &Map, _add_items: bool) -> (Map, bool) {
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Schema,
+        Names,
+        List,
+        Literal,
+    }
+    enum Work {
+        Visit(GoValue, Mode),
+        Object(Vec<String>, bool),
+        Array(usize),
+    }
+    let mut work = vec![Work::Visit(GoValue::Object(node.clone()), Mode::Schema)];
+    let mut results: Vec<(GoValue, bool)> = Vec::new();
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Visit(value, Mode::Literal) => results.push((value, false)),
+            Work::Visit(value, mode) => {
+                if matches!(mode, Mode::Schema) && matches!(value, GoValue::Bool(true)) {
+                    results.push((empty_object(), true));
+                    continue;
                 }
-            }
-            if !promoted.is_empty() {
-                promote_required(&mut clone, &promoted);
-            }
-            modified = true;
-        }
-    }
-
-    if let Some(GoValue::Object(props)) = clone.get("properties") {
-        let (repaired, promoted, props_modified) = repair_property_map(props, add_items);
-        if props_modified {
-            clone.insert("properties".into(), GoValue::Object(repaired));
-            modified = true;
-        }
-        if !promoted.is_empty() {
-            promote_required(&mut clone, &promoted);
-            modified = true;
-        }
-    }
-
-    if add_items {
-        if is_array_type(clone.get("type")) {
-            if !clone.contains_key("items") {
-                let mut items = Map::new();
-                items.insert("type".into(), GoValue::String("string".into()));
-                clone.insert("items".into(), GoValue::Object(items));
-                modified = true;
-            }
-        } else if clone.contains_key("items") && type_unset(clone.get("type")) {
-            clone.insert("type".into(), GoValue::String("array".into()));
-            modified = true;
-        }
-    }
-
-    match clone.get("items") {
-        Some(GoValue::Object(items)) => {
-            let (repaired, m) = repair_node(items, add_items);
-            if m {
-                clone.insert("items".into(), GoValue::Object(repaired));
-                modified = true;
-            }
-        }
-        Some(GoValue::Array(list)) => {
-            if let Some(repaired) = repair_list(list, add_items) {
-                clone.insert("items".into(), GoValue::Array(repaired));
-                modified = true;
-            }
-        }
-        Some(GoValue::Bool(true)) => {
-            clone.insert("items".into(), empty_object());
-            modified = true;
-        }
-        _ => {}
-    }
-
-    if let Some(GoValue::Object(add)) = clone.get("additionalProperties") {
-        let (repaired, m) = repair_node(add, add_items);
-        if m {
-            clone.insert("additionalProperties".into(), GoValue::Object(repaired));
-            modified = true;
-        }
-    }
-    if let Some(GoValue::Object(pattern)) = clone.get("patternProperties") {
-        let (repaired, _, m) = repair_property_map(pattern, add_items);
-        if m {
-            clone.insert("patternProperties".into(), GoValue::Object(repaired));
-            modified = true;
-        }
-    }
-    for key in [
-        "if",
-        "then",
-        "else",
-        "not",
-        "contains",
-        "propertyNames",
-        "unevaluatedProperties",
-        "unevaluatedItems",
-        "contentSchema",
-        "additionalItems",
-    ] {
-        match clone.get(key) {
-            Some(GoValue::Object(sub)) => {
-                let (repaired, m) = repair_node(sub, add_items);
-                if m {
-                    clone.insert(key.into(), GoValue::Object(repaired));
-                    modified = true;
-                }
-            }
-            Some(GoValue::Bool(true)) => {
-                clone.insert(key.into(), empty_object());
-                modified = true;
-            }
-            _ => {}
-        }
-    }
-    for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-        if let Some(GoValue::Array(list)) = clone.get(key)
-            && let Some(repaired) = repair_list(list, add_items)
-        {
-            clone.insert(key.into(), GoValue::Array(repaired));
-            modified = true;
-        }
-    }
-    for key in ["$defs", "definitions", "dependentSchemas", "dependencies"] {
-        if let Some(GoValue::Object(defs)) = clone.get(key) {
-            let mut repaired = Map::new();
-            let mut defs_modified = false;
-            for (k, v) in defs {
-                let value = match v {
-                    GoValue::Object(def) => {
-                        let (r, m) = repair_node(def, add_items);
-                        defs_modified |= m;
-                        GoValue::Object(r)
+                let value = match value.into_array() {
+                    Ok(items) => {
+                        if matches!(mode, Mode::List) {
+                            work.push(Work::Array(items.len()));
+                            for item in items.into_iter().rev() {
+                                work.push(Work::Visit(item, Mode::Schema));
+                            }
+                        } else {
+                            results.push((GoValue::Array(items), false));
+                        }
+                        continue;
                     }
-                    GoValue::Bool(true) => {
-                        defs_modified = true;
-                        empty_object()
-                    }
-                    other => other.clone(),
+                    Err(value) => value,
                 };
-                repaired.insert(k.clone(), value);
-            }
-            if defs_modified {
-                clone.insert(key.into(), GoValue::Object(repaired));
-                modified = true;
-            }
-        }
-    }
-    (clone, modified)
-}
-
-/// repairSchemaList: `Some` only when an entry changed.
-fn repair_list(list: &[GoValue], add_items: bool) -> Option<Vec<GoValue>> {
-    let mut modified = false;
-    let repaired = list
-        .iter()
-        .map(|item| match item {
-            GoValue::Object(m) => {
-                let (r, changed) = repair_node(m, add_items);
-                modified |= changed;
-                GoValue::Object(r)
-            }
-            GoValue::Bool(true) => {
-                modified = true;
-                empty_object()
-            }
-            other => other.clone(),
-        })
-        .collect();
-    modified.then_some(repaired)
-}
-
-fn repair_property_map(props: &Map, add_items: bool) -> (Map, Vec<String>, bool) {
-    let mut out = Map::new();
-    let mut promoted = vec![];
-    let mut modified = false;
-    for (k, v) in props {
-        match v {
-            GoValue::Bool(true) => {
-                out.insert(k.clone(), empty_object());
-                modified = true;
-            }
-            GoValue::Object(child) => {
-                let mut child = child.clone();
-                if let Some(GoValue::Bool(required)) = child.get("required").cloned() {
-                    child.remove("required");
-                    modified = true;
-                    if required {
-                        promoted.push(k.clone());
+                let mut map = match value.into_object() {
+                    Ok(map) => map,
+                    Err(value) => {
+                        results.push((value, false));
+                        continue;
+                    }
+                };
+                let mut modified = false;
+                if matches!(mode, Mode::Schema) {
+                    if !is_non_object_type(map.get("type")) {
+                        let keys: Vec<_> = map
+                            .iter()
+                            .filter(|(k, v)| matches!(v, GoValue::Object(_)) && !is_known_keyword_or_extension(k))
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        if !keys.is_empty() {
+                            let existing_properties = matches!(map.get("properties"), Some(GoValue::Object(_)));
+                            let mut props = map
+                                .remove("properties")
+                                .and_then(|v| v.into_object().ok())
+                                .unwrap_or_default();
+                            for key in keys {
+                                props.insert(key.clone(), map.remove(&key).unwrap());
+                            }
+                            map.insert("properties".into(), GoValue::Object(props));
+                            if !existing_properties {
+                                map.entry("type".into())
+                                    .or_insert_with(|| GoValue::String("object".into()));
+                            }
+                            modified = true;
+                        }
+                    }
+                    let mut promoted = Vec::new();
+                    if let Some(GoValue::Object(props)) = map.get_mut("properties") {
+                        for (name, value) in props {
+                            if let GoValue::Object(child) = value
+                                && matches!(child.get("required"), Some(GoValue::Bool(_)))
+                            {
+                                if matches!(child.remove("required"), Some(GoValue::Bool(true))) {
+                                    promoted.push(name.clone());
+                                }
+                                modified = true;
+                            }
+                        }
+                    }
+                    if !promoted.is_empty() {
+                        promote_required(&mut map, &promoted);
                     }
                 }
-                let (repaired, m) = repair_node(&child, add_items);
-                modified |= m;
-                out.insert(k.clone(), GoValue::Object(repaired));
+                let entries: Vec<_> = map.into_iter().collect();
+                work.push(Work::Object(entries.iter().map(|(k, _)| k.clone()).collect(), modified));
+                for (key, value) in entries.into_iter().rev() {
+                    let child_mode = match mode {
+                        Mode::Names => Mode::Schema,
+                        Mode::Schema => match key.as_str() {
+                            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas"
+                            | "dependencies"
+                                if matches!(value, GoValue::Object(_)) =>
+                            {
+                                Mode::Names
+                            }
+                            "anyOf" | "oneOf" | "allOf" | "prefixItems" if matches!(value, GoValue::Array(_)) => {
+                                Mode::List
+                            }
+                            "items" if matches!(value, GoValue::Array(_)) => Mode::List,
+                            "items"
+                            | "if"
+                            | "then"
+                            | "else"
+                            | "not"
+                            | "contains"
+                            | "propertyNames"
+                            | "unevaluatedProperties"
+                            | "unevaluatedItems"
+                            | "contentSchema"
+                            | "additionalItems" => Mode::Schema,
+                            "additionalProperties" if matches!(value, GoValue::Object(_)) => Mode::Schema,
+                            _ => Mode::Literal,
+                        },
+                        _ => Mode::Literal,
+                    };
+                    work.push(Work::Visit(value, child_mode));
+                }
             }
-            other => {
-                out.insert(k.clone(), other.clone());
+            Work::Object(keys, mut modified) => {
+                let values = results.split_off(results.len() - keys.len());
+                let mut map = Map::new();
+                for (key, (value, changed)) in keys.into_iter().zip(values) {
+                    modified |= changed;
+                    map.insert(key, value);
+                }
+                results.push((GoValue::Object(map), modified));
+            }
+            Work::Array(n) => {
+                let values = results.split_off(results.len() - n);
+                let modified = values.iter().any(|(_, changed)| *changed);
+                results.push((GoValue::Array(values.into_iter().map(|(v, _)| v).collect()), modified));
             }
         }
     }
-    promoted.sort();
-    (out, promoted, modified)
+    let (value, modified) = results.pop().unwrap();
+    (value.into_object().unwrap(), modified)
 }
 
 // ---------------------------------------------------------------------------------------
 // Phase 1: references, enums and hints
 
 fn inline_refs(json: Vec<u8>) -> Vec<u8> {
-    if !contains_seq(&json, br#""$ref""#) {
-        return json;
-    }
-    let Some(root) = decode_first(&json) else {
-        return json;
-    };
-    let mut active = std::collections::HashSet::new();
-    resolve_refs(&root, &root, &mut active).marshal()
+    crate::schema_refs::inline_refs(json)
 }
-
-fn resolve_refs(root: &GoValue, value: &GoValue, active: &mut std::collections::HashSet<String>) -> GoValue {
-    match value {
-        GoValue::Array(items) => GoValue::Array(items.iter().map(|i| resolve_refs(root, i, active)).collect()),
-        GoValue::Object(node) => {
-            if let Some(GoValue::String(reference)) = node.get("$ref")
-                && reference.starts_with("#/")
-                && let Some(target) = resolve_pointer(root, reference)
-            {
-                if active.contains(reference) {
-                    return GoValue::Object(cyclic_ref_fallback(node, target, reference));
-                }
-                active.insert(reference.clone());
-                let resolved = resolve_refs(root, target, active);
-                active.remove(reference);
-                if let Ok(target_map) = resolved.into_object() {
-                    let mut out = target_map;
-                    for (key, item) in node {
-                        if key != "$ref" {
-                            out.insert(key.clone(), resolve_refs(root, item, active));
-                        }
-                    }
-                    return GoValue::Object(out);
-                }
-            }
-            GoValue::Object(
-                node.iter()
-                    .map(|(k, v)| (k.clone(), resolve_refs(root, v, active)))
-                    .collect(),
-            )
-        }
-        other => other.clone(),
-    }
-}
-
-fn resolve_pointer<'a>(root: &'a GoValue, reference: &str) -> Option<&'a GoValue> {
-    let mut current = root;
-    for raw in reference["#/".len()..].split('/') {
-        let part = String::from_utf8(pointer_unescape(raw.as_bytes())).unwrap_or_default();
-        current = match current {
-            GoValue::Object(map) => map.get(&part)?,
-            GoValue::Array(items) => {
-                let index: i64 = part.parse().ok()?;
-                items.get(usize::try_from(index).ok()?)?
-            }
-            _ => return None,
-        };
-    }
-    Some(current)
-}
-
-fn cyclic_ref_fallback(node: &Map, target: &GoValue, reference: &str) -> Map {
-    let mut out = Map::new();
-    if let GoValue::Object(target) = target {
-        for key in ["type", "nullable", "description"] {
-            if let Some(v) = target.get(key) {
-                out.insert(key.into(), v.clone());
-            }
-        }
-    }
-    for (key, value) in node {
-        if key != "$ref" {
-            out.insert(key.clone(), value.clone());
-        }
-    }
-    let hint = [&b"See: "[..], &ref_name(reference.as_bytes())].concat();
-    let description = match out.get("description") {
-        Some(GoValue::String(d)) if !d.is_empty() => merge_hint(d.as_bytes(), &hint),
-        _ => hint,
-    };
-    out.insert(
-        "description".into(),
-        GoValue::String(String::from_utf8_lossy(&description).into_owned()),
-    );
-    out
+fn inline_refs_for_clean(json: Vec<u8>) -> Vec<u8> {
+    crate::schema_refs::inline_refs_for_clean(json)
 }
 
 fn convert_refs_to_hints(mut json: Vec<u8>, preserve_siblings: bool) -> Vec<u8> {
     for p in depth_sorted(find_paths(&json, b"$ref")) {
-        let name = ref_name(&gj::get(&json, &p).bytes());
         let parent = trim_suffix(&p, b".$ref").to_vec();
+        if is_property_definition(&parent) {
+            continue; // a property literally named "$ref"
+        }
+        let name = ref_name(&schema_get(&json, &p).bytes());
         let mut hint = [&b"See: "[..], &name].concat();
         if !preserve_siblings {
-            let existing = gj::get(&json, &description_path(&parent)).bytes().into_owned();
+            let existing = schema_get(&json, &description_path(&parent)).bytes().into_owned();
             if !existing.is_empty() {
                 hint = [&existing[..], b" (", &hint, b")"].concat();
             }
             let mut replacement = br#"{"type":"object","description":""}"#.to_vec();
-            gj::set_str(&mut replacement, "description", &hint);
+            schema_set_str(&mut replacement, "description", &hint);
             json = set_raw_at(json, &parent, &replacement);
             continue;
         }
@@ -848,12 +761,12 @@ fn convert_refs_to_hints(mut json: Vec<u8>, preserve_siblings: bool) -> Vec<u8> 
 
 fn convert_const_to_enum(mut json: Vec<u8>) -> Vec<u8> {
     for p in find_paths(&json, b"const") {
-        let value = gj::get(&json, &p).into_owned();
+        let value = schema_get(&json, &p).into_owned();
         if !value.exists() {
             continue;
         }
         let enum_path = [trim_suffix(&p, b".const"), b".enum"].concat();
-        if !gj::get(&json, &enum_path).exists() {
+        if !schema_get(&json, &enum_path).exists() {
             AnyValue::Array(vec![AnyValue::from_res(&value)]).set(&mut json, &enum_path);
         }
     }
@@ -862,7 +775,7 @@ fn convert_const_to_enum(mut json: Vec<u8>) -> Vec<u8> {
 
 fn convert_enum_values_to_strings(mut json: Vec<u8>, force_string_type: bool) -> Vec<u8> {
     for p in find_paths(&json, b"enum") {
-        let arr = gj::get(&json, &p);
+        let arr = schema_get(&json, &p);
         if !arr.is_array() {
             continue;
         }
@@ -870,7 +783,7 @@ fn convert_enum_values_to_strings(mut json: Vec<u8>, force_string_type: bool) ->
         set_strings(&mut json, &p, &values);
         if force_string_type {
             let parent = trim_suffix(&p, b".enum").to_vec();
-            gj::set_str(&mut json, &join_path(&parent, b"type"), "string");
+            schema_set_str(&mut json, &join_path(&parent, b"type"), "string");
         }
     }
     json
@@ -878,7 +791,7 @@ fn convert_enum_values_to_strings(mut json: Vec<u8>, force_string_type: bool) ->
 
 fn add_enum_hints(mut json: Vec<u8>) -> Vec<u8> {
     for p in find_paths(&json, b"enum") {
-        let arr = gj::get(&json, &p);
+        let arr = schema_get(&json, &p);
         if !arr.is_array() {
             continue;
         }
@@ -898,11 +811,11 @@ fn drop_ignored_enums_to_hints(mut json: Vec<u8>, options: Options) -> Vec<u8> {
         let parent = trim_suffix(&p, b".enum").to_vec();
         let drop = options.drop_all_enums
             || (options.drop_boolean_enums
-                && gj::get(&json, &join_path(&parent, b"type")).bytes().as_ref() == b"boolean");
+                && schema_get(&json, &join_path(&parent, b"type")).bytes().as_ref() == b"boolean");
         if !drop {
             continue;
         }
-        let values = gj::get(&json, &p);
+        let values = schema_get(&json, &p);
         if values.is_array() {
             let items = values.array();
             if items.len() == 1 {
@@ -917,7 +830,7 @@ fn drop_ignored_enums_to_hints(mut json: Vec<u8>, options: Options) -> Vec<u8> {
 
 fn add_additional_properties_hints(mut json: Vec<u8>) -> Vec<u8> {
     for p in find_paths(&json, b"additionalProperties") {
-        if gj::get(&json, &p).kind == Kind::False {
+        if schema_get(&json, &p).kind == Kind::False {
             json = append_hint(
                 json,
                 trim_suffix(&p, b".additionalProperties"),
@@ -962,7 +875,7 @@ fn move_constraints_to_description(mut json: Vec<u8>, options: Options) -> Vec<u
     let by_field = find_paths_by_fields(&json, &constraints);
     for key in &constraints {
         for p in by_field.get(*key).into_iter().flatten() {
-            let value = gj::get(&json, p).into_owned();
+            let value = schema_get(&json, p).into_owned();
             if !value.exists() {
                 continue;
             }
@@ -983,7 +896,7 @@ fn move_constraints_to_description(mut json: Vec<u8>, options: Options) -> Vec<u
 
 fn move_not_to_description(mut json: Vec<u8>) -> Vec<u8> {
     for p in find_paths(&json, b"not") {
-        let value = gj::get(&json, &p).into_owned();
+        let value = schema_get(&json, &p).into_owned();
         let parent = trim_suffix(&p, b".not").to_vec();
         if !value.exists() || is_property_definition(&parent) {
             continue;
@@ -1007,7 +920,7 @@ fn merge_conditionals(mut json: Vec<u8>) -> Vec<u8> {
         }
     }
     for p in depth_sorted(paths) {
-        let props = gj::get(&json, &join_path(&p, b"properties")).into_owned();
+        let props = schema_get(&json, &join_path(&p, b"properties")).into_owned();
         if !props.is_object() {
             continue;
         }
@@ -1020,8 +933,8 @@ fn merge_conditionals(mut json: Vec<u8>) -> Vec<u8> {
         };
         props.each(|key, value| {
             let dest = join_path(&parent, &[&b"properties."[..], &escape_key(&key.bytes())].concat());
-            if !gj::get(&json, &dest).exists() {
-                gj::set_raw(&mut json, &dest, &value.raw);
+            if !schema_get(&json, &dest).exists() {
+                schema_set_raw(&mut json, &dest, &value.raw);
             }
             true
         });
@@ -1031,7 +944,7 @@ fn merge_conditionals(mut json: Vec<u8>) -> Vec<u8> {
 
 fn merge_all_of(mut json: Vec<u8>) -> Vec<u8> {
     for p in depth_sorted(find_paths(&json, b"allOf")) {
-        let all_of = gj::get(&json, &p).into_owned();
+        let all_of = schema_get(&json, &p).into_owned();
         if !all_of.is_array() {
             continue;
         }
@@ -1073,29 +986,30 @@ fn merge_all_of(mut json: Vec<u8>) -> Vec<u8> {
 
 /// mergeMissingSchemaAtPath: fills absent fields, never replacing an existing one.
 fn merge_missing_schema(mut json: Vec<u8>, dest: &[u8], incoming: &Res<'_>) -> Vec<u8> {
-    let existing = gj::get(&json, dest);
-    if !existing.exists() {
-        gj::set_raw(&mut json, dest, &incoming.raw);
-        return json;
+    let mut work = vec![(dest.to_vec(), incoming.clone())];
+    while let Some((dest, incoming)) = work.pop() {
+        let existing = schema_get(&json, &dest);
+        if !existing.exists() {
+            schema_set_raw(&mut json, &dest, &incoming.raw);
+        } else if existing.is_object() && incoming.is_object() {
+            let mut children = Vec::new();
+            incoming.each(|key, value| {
+                children.push((join_path(&dest, &escape_key(&key.bytes())), value));
+                true
+            });
+            work.extend(children.into_iter().rev());
+        }
     }
-    if !existing.is_object() || !incoming.is_object() {
-        return json;
-    }
-    incoming.each(|key, value| {
-        let child = join_path(dest, &escape_key(&key.bytes()));
-        json = merge_missing_schema(std::mem::take(&mut json), &child, &value);
-        true
-    });
     json
 }
 
 fn merge_description_raw(schema: &[u8], parent_desc: &[u8]) -> Vec<u8> {
-    let child = gj::get(schema, "description").bytes().into_owned();
+    let child = schema_get(schema, "description").bytes().into_owned();
     let mut out = schema.to_vec();
     if child.is_empty() {
-        gj::set_str(&mut out, "description", parent_desc);
+        schema_set_str(&mut out, "description", parent_desc);
     } else if child != parent_desc {
-        gj::set_str(&mut out, "description", [parent_desc, b" (", &child, b")"].concat());
+        schema_set_str(&mut out, "description", [parent_desc, b" (", &child, b")"].concat());
     }
     out
 }
@@ -1135,60 +1049,207 @@ fn select_best(items: &[Res<'_>]) -> (usize, Vec<Vec<u8>>) {
     (best.0, types)
 }
 
-fn flatten_any_of_one_of(mut json: Vec<u8>) -> Vec<u8> {
-    for key in [&b"anyOf"[..], b"oneOf"] {
-        for p in depth_sorted(find_paths(&json, key)) {
-            let arr = gj::get(&json, &p).into_owned();
-            if !arr.is_array() {
-                continue;
+fn is_required_only_union_branch(item: &Res<'_>) -> bool {
+    item.is_object()
+        && item.get("required").exists()
+        && ["type", "properties", "items", "enum", "anyOf", "oneOf", "allOf"]
+            .iter()
+            .all(|k| !item.get(k).exists())
+}
+
+/// materializeRequiredOnlyBranch: a `{"required": [...]}` branch becomes an object branch
+/// with the parent's definitions of those properties.
+fn materialize_required_only_branch(item: &Res<'_>, parent_props: &Res<'_>) -> Option<Vec<u8>> {
+    if !parent_props.is_object() {
+        return None;
+    }
+    let required = get_strings(&item.raw, b"required");
+    if required.is_empty() {
+        return None;
+    }
+    let mut raw = item.raw.to_vec();
+    for name in &required {
+        let escaped = escape_key(name);
+        let prop = parent_props.get(&escaped);
+        if !prop.exists() {
+            return None;
+        }
+        schema_set_raw(&mut raw, &[&b"properties."[..], &escaped].concat(), &prop.raw);
+    }
+    schema_set_str(&mut raw, "type", "object");
+    Some(gj::parse(&raw).raw.to_vec())
+}
+
+fn is_null_only_branch(item: &Res<'_>) -> bool {
+    if item.get("properties").exists() || item.get("items").exists() {
+        return false;
+    }
+    let t = item.get("type");
+    if t.kind == Kind::String {
+        return t.bytes().as_ref() == b"null";
+    }
+    t.is_array() && !t.array().is_empty() && t.array().iter().all(|e| e.bytes().as_ref() == b"null")
+}
+
+/// partitionUnionBranches: the non-null branches (raw), whether a null branch was seen,
+/// and whether any branch was dropped or rewritten.
+fn partition_union_branches(items: &[Res<'_>], parent_props: &Res<'_>) -> (Vec<Vec<u8>>, bool, bool) {
+    let (mut non_null, mut has_null, mut filtered) = (vec![], false, false);
+    for item in items {
+        if item.kind == Kind::True {
+            non_null.push(b"{}".to_vec());
+            filtered = true;
+        } else if !item.is_object() {
+            filtered = true;
+        } else if is_null_only_branch(item) {
+            has_null = true;
+        } else if is_required_only_union_branch(item) {
+            if let Some(materialized) = materialize_required_only_branch(item, parent_props) {
+                non_null.push(materialized);
             }
-            let items = arr.array();
-            if items.is_empty() {
-                continue;
-            }
-            let parent_path = trim_suffix(&p, &[b".", key].concat()).to_vec();
-            let parent = if parent_path.is_empty() {
-                gj::parse(&json).into_owned()
+            filtered = true;
+        } else {
+            non_null.push(item.raw.to_vec());
+        }
+    }
+    (non_null, has_null, filtered)
+}
+
+/// flattenAnyOfOneOf: multi-branch unions are kept (oneOf becomes anyOf on native Schema
+/// carriers) unless `flatten_multi_branch`; other unions project onto the strongest branch.
+fn flatten_any_of_one_of(mut json: Vec<u8>, preserve_one_of: bool, flatten_multi_branch: bool) -> Vec<u8> {
+    let mut by_field = find_paths_by_fields(&json, &[b"oneOf", b"anyOf"]);
+    let mut paths = by_field.remove(&b"oneOf"[..]).unwrap_or_default();
+    paths.extend(by_field.remove(&b"anyOf"[..]).unwrap_or_default());
+    for p in depth_sorted(paths) {
+        let key: &[u8] = if p == b"oneOf" || p.ends_with(b".oneOf") {
+            b"oneOf"
+        } else {
+            b"anyOf"
+        };
+        let arr = schema_get(&json, &p).into_owned();
+        if !arr.is_array() || arr.array().is_empty() {
+            continue;
+        }
+        let parent_path = trim_suffix(&p, &[b".", key].concat()).to_vec();
+        if is_property_definition(&parent_path) {
+            continue;
+        }
+        let parent = if parent_path.is_empty() {
+            gj::parse(&json).into_owned()
+        } else {
+            schema_get(&json, &parent_path).into_owned()
+        };
+        // A native Schema has a single anyOf: a sibling oneOf moves to a hint.
+        if key == b"oneOf" && !flatten_multi_branch && !preserve_one_of && parent.get("anyOf").is_array() {
+            json = append_hint(json, &parent_path, &[&b"oneOf: "[..], &arr.raw].concat());
+            json = delete(json, &p);
+            continue;
+        }
+        let items = arr.array();
+        let parent_props = parent.get("properties");
+        let (non_null, has_null, filtered) = partition_union_branches(&items, &parent_props);
+        // An earlier pass may already have recorded the null branch as nullable:true.
+        let nullable = has_null || parent.get("nullable").bool();
+
+        if non_null.len() >= 2 && !flatten_multi_branch {
+            let target_key: &[u8] = if key == b"oneOf" && !preserve_one_of {
+                b"anyOf"
             } else {
-                gj::get(&json, &parent_path).into_owned()
+                key
             };
-            let has_null = items.iter().any(|i| type_of(i) == b"null");
-            if parent.get("properties").is_object() {
-                for item in &items {
-                    let branch = item.get("properties");
-                    if branch.is_object() {
-                        branch.each(|prop_key, prop_value| {
-                            let dest = join_path(
-                                &parent_path,
-                                &[&b"properties."[..], &escape_key(&prop_key.bytes())].concat(),
-                            );
-                            json = merge_missing_schema(std::mem::take(&mut json), &dest, &prop_value);
-                            true
-                        });
+            if target_key != key || has_null || filtered {
+                // sjson.SetBytes with []json.RawMessage: Marshal compacts each branch.
+                let mut list = b"[".to_vec();
+                for (i, raw) in non_null.iter().enumerate() {
+                    if i > 0 {
+                        list.push(b',');
                     }
+                    list.extend(gj::compact(raw, true));
                 }
-                if has_null {
-                    gj::set_bool(&mut json, &join_path(&parent_path, b"nullable"), true);
+                list.push(b']');
+                schema_set_raw(&mut json, &join_path(&parent_path, target_key), &list);
+                if target_key != key {
+                    json = delete(json, &p);
                 }
+            }
+            if has_null {
+                schema_set_bool(&mut json, &join_path(&parent_path, b"nullable"), true);
+                json = append_hint(json, &parent_path, b"(nullable)");
+            }
+            continue;
+        }
+
+        if parent_props.is_object() {
+            for raw in &non_null {
+                let branch = gj::parse(raw);
+                let branch_props = branch.get("properties");
+                if branch_props.is_object() {
+                    branch_props.each(|prop_key, prop_value| {
+                        let dest = join_path(
+                            &parent_path,
+                            &[&b"properties."[..], &escape_key(&prop_key.bytes())].concat(),
+                        );
+                        json = merge_missing_schema(std::mem::take(&mut json), &dest, &prop_value);
+                        true
+                    });
+                }
+            }
+            if nullable {
+                schema_set_bool(&mut json, &join_path(&parent_path, b"nullable"), true);
+            }
+            if parent.get("type").bytes().is_empty() {
+                schema_set_str(&mut json, &join_path(&parent_path, b"type"), "object");
+            }
+            json = delete(json, &p);
+            continue;
+        }
+
+        if non_null.is_empty() {
+            if !has_null {
                 json = delete(json, &p);
                 continue;
             }
-            let parent_desc = gj::get(&json, &description_path(&parent_path)).bytes().into_owned();
-            let (best, types) = select_best(&items);
-            let mut selected = items[best].raw.to_vec();
-            if has_null && type_of(&items[best]) != b"null" {
-                gj::set_bool(&mut selected, "nullable", true);
-            }
+            let mut selected = br#"{"type":"null"}"#.to_vec();
+            let parent_desc = schema_get(&json, &description_path(&parent_path)).bytes().into_owned();
             if !parent_desc.is_empty() {
                 selected = merge_description_raw(&selected, &parent_desc);
             }
-            if types.len() > 1 {
-                let hint = [&b"Accepts: "[..], &types.join(&b" | "[..])].concat();
-                let merged = merge_hint(&gj::get(&selected, "description").bytes(), &hint);
-                gj::set_str(&mut selected, "description", merged);
-            }
             json = set_raw_at(json, &parent_path, &selected);
+            continue;
         }
+
+        let parsed: Vec<Res<'_>> = non_null.iter().map(|raw| gj::parse(raw)).collect();
+        let null_branch = gj::parse(br#"{"type":"null"}"#);
+        let all_types = if filtered || non_null.len() >= 2 {
+            let mut candidates = parsed.clone();
+            if has_null {
+                candidates.push(null_branch);
+            }
+            select_best(&candidates).1
+        } else {
+            select_best(&items).1
+        };
+        let parent_desc = schema_get(&json, &description_path(&parent_path)).bytes().into_owned();
+        let mut selected = non_null[select_best(&parsed).0].clone();
+        if nullable {
+            schema_set_bool(&mut selected, "nullable", true);
+        }
+        if !parent_desc.is_empty() {
+            selected = merge_description_raw(&selected, &parent_desc);
+        }
+        let hint = if all_types.len() > 1 {
+            Some([&b"Accepts: "[..], &all_types.join(&b" | "[..])].concat())
+        } else if nullable {
+            Some(b"(nullable)".to_vec())
+        } else {
+            None
+        };
+        if let Some(hint) = hint {
+            let merged = merge_hint(&schema_get(&selected, "description").bytes(), &hint);
+            schema_set_str(&mut selected, "description", merged);
+        }
+        json = set_raw_at(json, &parent_path, &selected);
     }
     json
 }
@@ -1196,7 +1257,7 @@ fn flatten_any_of_one_of(mut json: Vec<u8>) -> Vec<u8> {
 fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec<u8> {
     let mut nullable_fields: Vec<(Vec<u8>, Vec<Vec<u8>>)> = vec![];
     for p in depth_sorted(find_paths(&json, b"type")) {
-        let res = gj::get(&json, &p);
+        let res = schema_get(&json, &p);
         if !res.is_array() {
             continue;
         }
@@ -1218,14 +1279,18 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
         let items_path = join_path(&parent, b"items");
         let first = if non_null.is_empty() {
             b"string".to_vec()
-        } else if gj::get(&json, &items_path).exists() && non_null.iter().any(|t| t == b"array") {
+        } else if schema_get(&json, &items_path).exists() && non_null.iter().any(|t| t == b"array") {
             b"array".to_vec()
+        } else if schema_get(&json, &join_path(&parent, b"properties")).exists()
+            && non_null.iter().any(|t| t == b"object")
+        {
+            b"object".to_vec()
         } else {
             non_null[0].clone()
         };
-        gj::set_str(&mut json, &p, &first);
-        if first != b"array" && gj::get(&json, &items_path).exists() {
-            gj::delete(&mut json, &items_path);
+        schema_set_str(&mut json, &p, &first);
+        if first != b"array" && schema_get(&json, &items_path).exists() {
+            schema_delete(&mut json, &items_path);
         }
         if non_null.len() > 1 {
             json = append_hint(
@@ -1236,7 +1301,7 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
         }
         if has_null {
             if preserve_native_nullable {
-                gj::set_bool(&mut json, &join_path(&parent, b"nullable"), true);
+                schema_set_bool(&mut json, &join_path(&parent, b"nullable"), true);
                 json = append_hint(json, &parent, b"(nullable)");
                 continue;
             }
@@ -1256,7 +1321,7 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
     }
     for (object_path, fields) in nullable_fields {
         let path = join_path(&object_path, b"required");
-        let required = gj::get(&json, &path);
+        let required = schema_get(&json, &path);
         if !required.is_array() {
             continue;
         }
@@ -1267,9 +1332,9 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
             .filter(|r| !fields.contains(r))
             .collect();
         if kept.is_empty() {
-            gj::delete(&mut json, &path);
+            schema_delete(&mut json, &path);
         } else {
-            gj::set_strs(&mut json, &path, &kept);
+            schema_set_strs(&mut json, &path, &kept);
         }
     }
     json
@@ -1290,7 +1355,7 @@ fn delete_keyword_paths(mut json: Vec<u8>, keywords: &[&[u8]], keep: impl Fn(&[u
         }
     }
     for p in depth_sorted(paths) {
-        gj::delete(&mut json, &p);
+        schema_delete(&mut json, &p);
     }
     json
 }
@@ -1312,6 +1377,9 @@ fn remove_unsupported_keywords(json: Vec<u8>, options: Options) -> Vec<u8> {
         b"$dynamicAnchor",
         b"propertyNames",
         b"patternProperties",
+        b"dependentRequired",
+        b"dependentSchemas",
+        b"dependencies",
         b"if",
         b"then",
         b"else",
@@ -1321,10 +1389,15 @@ fn remove_unsupported_keywords(json: Vec<u8>, options: Options) -> Vec<u8> {
         b"prefill",
         b"deprecated",
         b"encrypted",
+        b"discriminator",
+        b"readOnly",
+        b"writeOnly",
         b"additionalItems",
         b"unevaluatedProperties",
         b"unevaluatedItems",
         b"contentSchema",
+        b"contentMediaType",
+        b"contentEncoding",
     ]);
     if options.antigravity_semantics {
         keywords.push(b"not");
@@ -1332,7 +1405,7 @@ fn remove_unsupported_keywords(json: Vec<u8>, options: Options) -> Vec<u8> {
     let json = delete_keyword_paths(json, &keywords, |key, p, json| {
         key == b"additionalProperties"
             && (options.preserve_all_additional_properties
-                || (options.preserve_additional_properties_false && gj::get(json, p).kind == Kind::False))
+                || (options.preserve_additional_properties_false && schema_get(json, p).kind == Kind::False))
     });
     remove_extension_fields(json)
 }
@@ -1341,30 +1414,32 @@ fn remove_extension_fields(mut json: Vec<u8>) -> Vec<u8> {
     let mut paths = vec![];
     walk_extensions(&gj::parse(&json), b"", &mut paths);
     for p in paths {
-        gj::delete(&mut json, &p);
+        schema_delete(&mut json, &p);
     }
     json
 }
 
 fn walk_extensions(value: &Res<'_>, path: &[u8], paths: &mut Vec<Vec<u8>>) {
-    if value.is_array() {
-        let items = value.array();
-        for (i, item) in items.iter().enumerate().rev() {
-            walk_extensions(item, &join_path(path, i.to_string().as_bytes()), paths);
-        }
-        return;
-    }
-    if value.is_object() {
-        value.each(|key, child| {
-            let key = key.bytes();
-            let child_path = join_path(path, &escape_key(&key));
-            if key.starts_with(b"x-") && !is_property_definition(path) {
-                paths.push(child_path);
-            } else {
-                walk_extensions(&child, &child_path, paths);
+    let mut work = vec![(value.clone(), path.to_vec())];
+    while let Some((value, path)) = work.pop() {
+        if value.is_array() {
+            for (i, item) in value.array().into_iter().enumerate() {
+                work.push((item, join_path(&path, i.to_string().as_bytes())));
             }
-            true
-        });
+        } else if value.is_object() {
+            let mut children = Vec::new();
+            value.each(|key, child| {
+                let key = key.bytes();
+                let child_path = join_path(&path, &escape_key(&key));
+                if key.starts_with(b"x-") && !is_property_definition(&path) {
+                    paths.push(child_path);
+                } else if !(is_literal_value_keyword(&key) && !is_property_definition(&path)) {
+                    children.push((child, child_path));
+                }
+                true
+            });
+            work.extend(children.into_iter().rev());
+        }
     }
 }
 
@@ -1374,7 +1449,7 @@ fn remove_keywords(json: Vec<u8>, keywords: &[&[u8]]) -> Vec<u8> {
 
 fn filter_required(json: &mut Vec<u8>, parent: &[u8], name: &[u8]) {
     let path = join_path(parent, b"required");
-    let required = gj::get(json, &path);
+    let required = schema_get(json, &path);
     if !required.is_array() {
         return;
     }
@@ -1385,9 +1460,9 @@ fn filter_required(json: &mut Vec<u8>, parent: &[u8], name: &[u8]) {
         .filter(|r| r != name)
         .collect();
     if kept.is_empty() {
-        gj::delete(json, &path);
+        schema_delete(json, &path);
     } else {
-        gj::set_strs(json, &path, &kept);
+        schema_set_strs(json, &path, &kept);
     }
 }
 
@@ -1396,22 +1471,22 @@ fn remove_placeholder_fields(mut json: Vec<u8>) -> Vec<u8> {
         let Some(parent) = p.strip_suffix(b".properties._") else {
             continue;
         };
-        gj::delete(&mut json, &p);
+        schema_delete(&mut json, &p);
         filter_required(&mut json, parent, b"_");
     }
     for p in depth_sorted(find_paths(&json, b"reason")) {
         let Some(parent) = p.strip_suffix(b".properties.reason") else {
             continue;
         };
-        let props = gj::get(&json, &join_path(parent, b"properties"));
+        let props = schema_get(&json, &join_path(parent, b"properties"));
         let distinct: std::collections::HashSet<Vec<u8>> = props.map().into_iter().map(|(k, _)| k).collect();
         if !props.is_object() || distinct.len() != 1 {
             continue;
         }
-        if gj::get(&json, &[&p[..], b".description"].concat()).bytes().as_ref() != PLACEHOLDER_REASON_DESCRIPTION {
+        if schema_get(&json, &[&p[..], b".description"].concat()).bytes().as_ref() != PLACEHOLDER_REASON_DESCRIPTION {
             continue;
         }
-        gj::delete(&mut json, &p);
+        schema_delete(&mut json, &p);
         filter_required(&mut json, parent, b"reason");
     }
     json
@@ -1420,13 +1495,13 @@ fn remove_placeholder_fields(mut json: Vec<u8>) -> Vec<u8> {
 fn cleanup_required_fields(mut json: Vec<u8>) -> Vec<u8> {
     for p in find_paths(&json, b"required") {
         let parent = trim_suffix(&p, b".required").to_vec();
-        let required = gj::get(&json, &p).into_owned();
-        let props = gj::get(&json, &join_path(&parent, b"properties")).into_owned();
+        let required = schema_get(&json, &p).into_owned();
+        let props = schema_get(&json, &join_path(&parent, b"properties")).into_owned();
         if !required.is_array() {
             continue;
         }
         if !props.is_object() {
-            gj::delete(&mut json, &p);
+            schema_delete(&mut json, &p);
             continue;
         }
         let names = required.array();
@@ -1437,52 +1512,101 @@ fn cleanup_required_fields(mut json: Vec<u8>) -> Vec<u8> {
             .collect();
         if valid.len() != names.len() {
             if valid.is_empty() {
-                gj::delete(&mut json, &p);
+                schema_delete(&mut json, &p);
             } else {
-                gj::set_strs(&mut json, &p, &valid);
+                schema_set_strs(&mut json, &p, &valid);
             }
         }
     }
     json
 }
 
-fn sanitize_array_items(mut json: Vec<u8>) -> Vec<u8> {
+/// sanitizeObjectProperties: a node declaring `properties` is typed `object`.
+fn sanitize_object_properties(mut json: Vec<u8>) -> Vec<u8> {
+    for p in depth_sorted(find_paths(&json, b"properties")) {
+        let parent = trim_suffix(&p, b".properties").to_vec();
+        if is_property_definition(&parent) || !schema_get(&json, &p).is_object() {
+            continue;
+        }
+        let type_path = join_path(&parent, b"type");
+        if !schema_get(&json, &type_path).bytes().eq_ignore_ascii_case(b"object") {
+            schema_set_str(&mut json, &type_path, "object");
+        }
+    }
+    json
+}
+
+/// sanitizeArrayItems; with `add_missing`, an array node still lacking `items` after
+/// reference inlining gets Phase 0's placeholder.
+fn sanitize_array_items(mut json: Vec<u8>, add_missing: bool) -> Vec<u8> {
     for p in depth_sorted(find_paths(&json, b"items")) {
         let parent = trim_suffix(&p, b".items").to_vec();
         if is_property_definition(&parent) {
             continue;
         }
         let type_path = join_path(&parent, b"type");
-        let t = gj::get(&json, &type_path).bytes().into_owned();
+        let t = schema_get(&json, &type_path).bytes().into_owned();
         if t.is_empty() {
-            gj::set_str(&mut json, &type_path, "array");
+            schema_set_str(&mut json, &type_path, "array");
         } else if !t.eq_ignore_ascii_case(b"array") {
-            gj::delete(&mut json, &p);
+            schema_delete(&mut json, &p);
         }
+    }
+    if !add_missing {
+        return json;
+    }
+    for p in depth_sorted(find_paths(&json, b"type")) {
+        let parent = trim_suffix(&p, b".type").to_vec();
+        if is_property_definition(&parent) || !is_array_declared(&schema_get(&json, &p)) {
+            continue;
+        }
+        if schema_get(&json, &join_path(&parent, b"items")).exists()
+            || schema_get(&json, &join_path(&parent, b"$ref")).exists()
+        {
+            continue;
+        }
+        schema_set_raw(&mut json, &join_path(&parent, b"items"), br#"{"type":"string"}"#);
     }
     json
 }
 
+/// isArrayDeclaredType on a gjson value.
+fn is_array_declared(t: &Res<'_>) -> bool {
+    match t.kind {
+        Kind::String => t.bytes().eq_ignore_ascii_case(b"array"),
+        _ if t.is_array() => t
+            .array()
+            .iter()
+            .any(|i| i.kind == Kind::String && i.bytes().eq_ignore_ascii_case(b"array")),
+        _ => false,
+    }
+}
+
 fn add_empty_schema_placeholder(mut json: Vec<u8>) -> Vec<u8> {
     for p in depth_sorted(find_paths(&json, b"type")) {
-        if gj::get(&json, &p).bytes().as_ref() != b"object" {
+        if schema_get(&json, &p).bytes().as_ref() != b"object" {
             continue;
         }
         let parent = trim_suffix(&p, b".type").to_vec();
         let props_path = join_path(&parent, b"properties");
-        let props = gj::get(&json, &props_path).into_owned();
+        let props = schema_get(&json, &props_path).into_owned();
         let required_path = join_path(&parent, b"required");
-        let required = gj::get(&json, &required_path);
+        let required = schema_get(&json, &required_path);
         let has_required = required.is_array() && !required.array().is_empty();
+        if schema_get(&json, &join_path(&parent, b"anyOf")).is_array()
+            || schema_get(&json, &join_path(&parent, b"oneOf")).is_array()
+        {
+            continue;
+        }
         if !props.exists() || (props.is_object() && props.map().is_empty()) {
             let reason = join_path(&props_path, b"reason");
-            gj::set_str(&mut json, &[&reason[..], b".type"].concat(), "string");
-            gj::set_str(
+            schema_set_str(&mut json, &[&reason[..], b".type"].concat(), "string");
+            schema_set_str(
                 &mut json,
                 &[&reason[..], b".description"].concat(),
                 PLACEHOLDER_REASON_DESCRIPTION,
             );
-            gj::set_strs(&mut json, &required_path, &["reason"]);
+            schema_set_strs(&mut json, &required_path, &["reason"]);
             continue;
         }
         if props.is_object() && !has_required {
@@ -1490,11 +1614,38 @@ fn add_empty_schema_placeholder(mut json: Vec<u8>) -> Vec<u8> {
                 continue;
             }
             let placeholder = join_path(&props_path, b"_");
-            if !gj::get(&json, &placeholder).exists() {
-                gj::set_str(&mut json, &[&placeholder[..], b".type"].concat(), "boolean");
+            if !schema_get(&json, &placeholder).exists() {
+                schema_set_str(&mut json, &[&placeholder[..], b".type"].concat(), "boolean");
             }
-            gj::set_strs(&mut json, &required_path, &["_"]);
+            schema_set_strs(&mut json, &required_path, &["_"]);
         }
     }
     json
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go's TestIssue6732_CleanInliningStripsDefinitionsFromIntermediate: the cleaning
+    /// inliner drops definition containers, so a large unused definition is never copied
+    /// into the intermediate document, and both references still expand.
+    #[test]
+    fn clean_inlining_strips_definitions_from_intermediate() {
+        let person = format!(
+            r#"{{"type":"object","properties":{{"name":{{"type":"string"}}}},"$defs":{{"Unused":{{"type":"string","description":"{}"}}}}}}"#,
+            "x".repeat(280 * 1024)
+        );
+        let input = format!(
+            r##"{{"type":"object","properties":{{"p0":{{"$ref":"#/$defs/Person"}},"p1":{{"$ref":"#/$defs/Person"}}}},"$defs":{{"Person":{person}}}}}"##
+        );
+        let got = inline_refs_for_clean(input.into_bytes());
+        assert!(got.len() < 64 * 1024, "intermediate is {} bytes", got.len());
+        assert!(!schema_get(&got, "$defs").exists());
+        assert!(!schema_get(&got, "properties.p0.$defs").exists());
+        assert_eq!(
+            schema_get(&got, "properties.p1.properties.name.type").bytes().as_ref(),
+            b"string"
+        );
+    }
 }

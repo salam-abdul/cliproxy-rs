@@ -122,3 +122,7 @@ pub(crate) mod alloc_count {
 
 pub mod quota;
 pub mod wirejson;
+
+mod schema_refs;
+
+pub mod schema_path;

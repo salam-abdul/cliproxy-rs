@@ -169,3 +169,17 @@ fn normalizes_missing_or_null_instructions() {
         assert_eq!(String::from_utf8(body).unwrap(), want);
     }
 }
+
+#[test]
+fn namespace_restoration_handles_depth_and_preserves_opaque_fields() {
+    std::thread::Builder::new().stack_size(2 << 20).spawn(|| {
+        let wrap = |leaf: &str| format!("{{\"output\":{}{leaf}{}}}", "[".repeat(9_998), "]".repeat(9_998));
+        let raw = wrap(r#"{"type":"function_call","name":"collaboration-optimize.run"}"#);
+        let restored = restore_response(raw.as_bytes(), true);
+        assert_eq!(restored, wrap(r#"{"name":"run","namespace":"collaboration","type":"function_call"}"#).as_bytes());
+        let untouched = br#"{ "arguments":{"type":"function_call","name":"collaboration-optimize.run"}, "input":[{"type":"namespace","name":"collaboration-optimize"}]}"#;
+        assert_eq!(restore_response(untouched, true), untouched);
+        let output = br#"{"type":"function_call_output","output":{"type":"namespace","name":"collaboration-optimize"}}"#;
+        assert_eq!(restore_response(output, true), output);
+    }).unwrap().join().unwrap();
+}
