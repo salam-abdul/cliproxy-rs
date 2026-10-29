@@ -612,6 +612,10 @@ mod routes {
                 if want.contains_key("X-CPA-SUPPORT-PLUGIN") {
                     want.insert("X-CPA-SUPPORT-PLUGIN".into(), "0".into());
                 }
+                // This fixture predates fa68946a's ETag CORS exposure.
+                if let Some(Value::String(exposed)) = want.get_mut("Access-Control-Expose-Headers") {
+                    exposed.push_str(", ETag");
+                }
                 assert_eq!(Value::Object(headers), Value::Object(want), "{name}[{i}] headers");
                 compared += 1;
             }

@@ -43,7 +43,7 @@ const SUPPORT_PLUGIN: &str = "0";
 
 const EXPOSED_HEADERS: &str = "X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, \
 X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, \
-X-SERVER-BUILD-DATE, Location, Retry-After, X-Request-Id, OpenAI-Request-Id";
+X-SERVER-BUILD-DATE, Location, Retry-After, X-Request-Id, OpenAI-Request-Id, ETag";
 
 struct Attempt {
     count: u32,

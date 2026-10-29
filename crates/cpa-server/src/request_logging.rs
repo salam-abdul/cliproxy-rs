@@ -1505,7 +1505,7 @@ fn filename(url: &str, id: &str, at: DateTime<Local>, error: bool) -> String {
     for ch in path.chars() {
         let ch = if matches!(
             ch,
-            '/' | ':' | '<' | '>' | '"' | '|' | '?' | '*' | ' ' | '\t' | '\n' | '\r' | '\x0c'
+            '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' | ' ' | '\t' | '\n' | '\r' | '\x0c'
         ) {
             '-'
         } else {
@@ -1515,8 +1515,14 @@ fn filename(url: &str, id: &str, at: DateTime<Local>, error: bool) -> String {
             sanitized.push(ch);
         }
     }
-    let path = sanitized.trim_matches('-');
-    let path = if path.is_empty() { "root" } else { path };
+    let sanitized = sanitized.replace("..", "-");
+    let path = sanitized.trim_matches(['-', '.']);
+    let path = path
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let path = if path.is_empty() { "root" } else { &path };
     let id = if id.is_empty() {
         NEXT_ID.fetch_add(1, Ordering::Relaxed).wrapping_add(1).to_string()
     } else {
@@ -1530,6 +1536,14 @@ fn filename(url: &str, id: &str, at: DateTime<Local>, error: bool) -> String {
 }
 
 fn unique_file(dir: &Path, filename: &str) -> io::Result<File> {
+    if filename.is_empty()
+        || filename == "."
+        || filename.contains("..")
+        || filename.contains(['/', '\\', ':'])
+        || Path::new(filename).file_name() != Some(std::ffi::OsStr::new(filename))
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid log filename"));
+    }
     let (prefix, id) = filename
         .trim_end_matches(".log")
         .rsplit_once('-')
@@ -2171,6 +2185,84 @@ mod tests {
         let content = std::fs::read_to_string(&files[0]).unwrap();
         assert_eq!(canonical(&content), fixture["websocket"]["content"]);
         assert!(!content.contains("REQUEST BODY") && !content.contains("=== RESPONSE ==="));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn traversal_filenames_stay_inside_shared_redacting_sink() {
+        for enabled in [true, false] {
+            let dir = scratch();
+            let state = management(&dir, enabled, false);
+            let app = axum::Router::new()
+                .fallback(|| async move { (StatusCode::BAD_GATEWAY, [("set-cookie", "private-cookie")], "failed") });
+            let mut app = router(&state, app);
+            let response = app
+                .call(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/v1/models/x%5c..%5c..%5cescape?key=short-secret")
+                        .header("cookie", "private-cookie")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let paths = logs(&dir);
+                if let Some(path) = paths.first() {
+                    let content = std::fs::read_to_string(path).unwrap();
+                    if content.contains("failed") {
+                        assert_eq!(path.parent(), Some(dir.as_path()));
+                        let name = path.file_name().unwrap().to_str().unwrap();
+                        assert!(!name.contains(['/', '\\']) && !name.contains(".."), "{name}");
+                        assert!(!content.contains("private-cookie") && !content.contains("short-secret"));
+                        break;
+                    }
+                }
+                assert!(tokio::time::Instant::now() < deadline, "log not finalized");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn filename_components_reject_cross_platform_traversal() {
+        let dir = scratch();
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape.log",
+            r"..\escape.log",
+            "sub/file.log",
+            r"sub\file.log",
+            "a..b.log",
+            "C:escape.log",
+            r"C:\escape.log",
+            r"\\host\share\file.log",
+        ] {
+            assert!(unique_file(&dir, bad).is_err(), "accepted {bad:?}");
+        }
+        let at = Local::now();
+        for path in [
+            r"/v1/models/x\..\..\escape",
+            "/../../escape",
+            "/...",
+            "/.",
+            r"C:\folder\file",
+            r"\\host\share\file",
+        ] {
+            for error in [false, true] {
+                let name = filename(path, "synthetic-id", at, error);
+                assert!(!name.contains(['/', '\\', ':']), "{name}");
+                assert!(!name.contains(".."), "{name}");
+                assert!(name.ends_with(".log"));
+                unique_file(&dir, &name).unwrap();
+            }
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

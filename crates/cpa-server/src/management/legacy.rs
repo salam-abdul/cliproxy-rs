@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, RawQuery, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cpa_core::credential::Source;
 use serde_json::{Value, json};
@@ -256,7 +256,7 @@ async fn save_error(res: Response) -> Response {
 async fn write(state: Arc<Management>, v8: String, value: Value) -> Response {
     let path = format!("/v8/management/config/{v8}");
     let body = value.to_string().into_bytes();
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::PUT, &body))
+    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::PUT, &[], &body))
         .await
         .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
     if res.status() == StatusCode::OK {
@@ -284,7 +284,7 @@ async fn touch(state: Arc<Management>, v8: String) -> Response {
 /// Deletes one v8 path through the shared config writer (absent counts as done).
 async fn remove(state: Arc<Management>, v8: String) -> Response {
     let path = format!("/v8/management/config/{v8}");
-    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::DELETE, b""))
+    let res = tokio::task::spawn_blocking(move || super::config_sync(&state, &path, Method::DELETE, &[], b""))
         .await
         .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"));
     match res.status() {
@@ -672,64 +672,79 @@ fn legacy_weight_error(root: &serde_yaml_ng::Value) -> Option<Response> {
 /// for `LoadConfig` validation. ponytail: a type mismatch (`port: abc`) is also a decode
 /// error in Go but only `Config::parse` finds it here, so it is 422; and syntax messages
 /// are this parser's, not yaml.v3's.
-pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, headers: HeaderMap, body: Bytes) -> Response {
+    let if_match = super::if_match_values(&headers);
     let fail = |status: StatusCode, error: &str, message: String| {
         go_json(status, &json!({ "error": error, "message": message }))
     };
-    let Ok(text) = std::str::from_utf8(&body) else {
-        return fail(
-            StatusCode::BAD_REQUEST,
-            "invalid_yaml",
-            "yaml: invalid leading UTF-8 octet".into(),
-        );
-    };
-    // Validate the bytes that will be written. Go validates the upload and unindents
-    // comment lines only while writing, which can break a block scalar holding a `#` line
-    // after the file is already overwritten.
-    let text = normalize_comment_indentation(text);
-    let root = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
-        Err(e) => return fail(StatusCode::BAD_REQUEST, "invalid_yaml", e.to_string()),
-        Ok(root @ serde_yaml_ng::Value::Mapping(_)) => root,
-        Ok(serde_yaml_ng::Value::Null) if text.trim().is_empty() => serde_yaml_ng::Value::Null,
-        Ok(_) => {
+    tokio::task::spawn_blocking(move || {
+        let _guard = state.disk.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::fs::read(&state.path) {
+            Ok(bytes) => {
+                let etag = super::config_etag(&bytes);
+                if !super::if_match_satisfied(&if_match, &etag) {
+                    return super::config_precondition_failed(etag);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !if_match.is_empty() {
+                    return super::error(412, "precondition_failed");
+                }
+            }
+            Err(_) => return super::error(500, "read_failed"),
+        }
+        let Ok(text) = std::str::from_utf8(&body) else {
             return fail(
                 StatusCode::BAD_REQUEST,
                 "invalid_yaml",
-                "config must be a mapping".into(),
+                "yaml: invalid leading UTF-8 octet".into(),
+            );
+        };
+        // Validate the bytes that will be written. Go validates the upload and unindents
+        // comment lines only while writing, which can break a block scalar holding a `#` line
+        // after the file is already overwritten.
+        let text = normalize_comment_indentation(text);
+        let root = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
+            Err(e) => return fail(StatusCode::BAD_REQUEST, "invalid_yaml", e.to_string()),
+            Ok(root @ serde_yaml_ng::Value::Mapping(_)) => root,
+            Ok(serde_yaml_ng::Value::Null) if text.trim().is_empty() => serde_yaml_ng::Value::Null,
+            Ok(_) => {
+                return fail(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_yaml",
+                    "config must be a mapping".into(),
+                );
+            }
+        };
+        if let Err(e) = cpa_core::config::ConfigDocument::parse(&text) {
+            return fail(StatusCode::BAD_REQUEST, "invalid_yaml", format!("{e:#}"));
+        }
+        // Go checks the alias- and merge-expanded tree (`expandConfigAliases`).
+        let mut root = root;
+        if let Err(e) = cpa_core::config::expand_merges(&mut root) {
+            return fail(StatusCode::BAD_REQUEST, "invalid_yaml", format!("{e:#}"));
+        }
+        if let Some(e) = v8_group_error(&root) {
+            return fail(StatusCode::BAD_REQUEST, "invalid_yaml", e);
+        }
+        if let Some(answer) = legacy_weight_error(&root) {
+            return answer;
+        }
+        let cfg = match cpa_core::config::Config::parse(&text) {
+            Ok(cfg) => cfg,
+            Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", format!("{e:#}")),
+        };
+        // Go's LoadConfig hashes a plaintext key during validation, and bcrypt refuses more
+        // than 72 bytes (the Rust crate would silently truncate).
+        let secret = &cfg.management.secret_key;
+        if !secret.is_empty() && !cpa_core::config::is_bcrypt(secret) && secret.len() > 72 {
+            return fail(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_config",
+                "failed to hash remote management key: bcrypt: password length exceeds 72 bytes".into(),
             );
         }
-    };
-    if let Err(e) = cpa_core::config::ConfigDocument::parse(&text) {
-        return fail(StatusCode::BAD_REQUEST, "invalid_yaml", format!("{e:#}"));
-    }
-    // Go checks the alias- and merge-expanded tree (`expandConfigAliases`).
-    let mut root = root;
-    if let Err(e) = cpa_core::config::expand_merges(&mut root) {
-        return fail(StatusCode::BAD_REQUEST, "invalid_yaml", format!("{e:#}"));
-    }
-    if let Some(e) = v8_group_error(&root) {
-        return fail(StatusCode::BAD_REQUEST, "invalid_yaml", e);
-    }
-    if let Some(answer) = legacy_weight_error(&root) {
-        return answer;
-    }
-    let cfg = match cpa_core::config::Config::parse(&text) {
-        Ok(cfg) => cfg,
-        Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", format!("{e:#}")),
-    };
-    // Go's LoadConfig hashes a plaintext key during validation, and bcrypt refuses more
-    // than 72 bytes (the Rust crate would silently truncate).
-    let secret = &cfg.management.secret_key;
-    if !secret.is_empty() && !cpa_core::config::is_bcrypt(secret) && secret.len() > 72 {
-        return fail(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_config",
-            "failed to hash remote management key: bcrypt: password length exceeds 72 bytes".into(),
-        );
-    }
-    tokio::task::spawn_blocking(move || {
-        let _guard = state.disk.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cpa_core::config::ConfigDocument::write(&state.path, &text).is_err() {
+        if super::write_config(&state, &text).is_err() {
             return fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "write_failed",
@@ -739,7 +754,11 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, body: 
         match cpa_core::config::Config::load(&state.path) {
             Ok(cfg) => {
                 state.publish(cfg, None);
-                go_json(StatusCode::OK, &json!({"changed": ["config"], "ok": true}))
+                let mut response = go_json(StatusCode::OK, &json!({"changed": ["config"], "ok": true}));
+                if let Ok(saved) = std::fs::read(&state.path) {
+                    response.headers_mut().insert(header::ETAG, super::config_etag(&saved));
+                }
+                response
             }
             Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, "reload_failed", format!("{e:#}")),
         }

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, State};
 use axum::handler::Handler;
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, any, get};
 use axum::{Router, middleware};
@@ -637,11 +637,13 @@ pub(crate) async fn config(
     State(state): State<Arc<Management>>,
     OriginalUri(uri): OriginalUri,
     method: Method,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // gin's *path parameter is the decoded path.
     let path = percent_decode(uri.path());
-    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &body))
+    let if_match = if_match_values(&headers);
+    tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
         .await
         .unwrap_or_else(|_| error(500, "internal_error"))
 }
@@ -689,12 +691,22 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
 /// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
-pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: &[u8]) -> Response {
+pub(crate) fn config_sync(
+    state: &Management,
+    path: &str,
+    method: Method,
+    if_match: &[String],
+    body: &[u8],
+) -> Response {
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
         Err(_) => return error(500, "read_failed"),
     };
+    let etag = config_etag(original.as_bytes());
+    if method != Method::GET && !if_match_satisfied(if_match, &etag) {
+        return config_precondition_failed(etag);
+    }
     let mut doc = match ConfigDocument::parse(&original) {
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -717,8 +729,12 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
             return match doc.render_preserving(&basis) {
                 Ok(text) => (
                     [
-                        (header::CONTENT_TYPE, "application/yaml; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-store"),
+                        (
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/yaml; charset=utf-8"),
+                        ),
+                        (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                        (header::ETAG, etag),
                     ],
                     text + &archive_comments(&archived),
                 )
@@ -753,6 +769,7 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(header::ETAG, etag);
         return response;
     }
     let before = doc.clone();
@@ -871,21 +888,95 @@ pub(crate) fn config_sync(state: &Management, path: &str, method: Method, body: 
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
-    if let Err(e) = ConfigDocument::write(&state.path, &text) {
+    if let Err(e) = write_config(state, &text) {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &json!({"error": "write_failed", "message": e.to_string()}),
         );
     }
     state.publish(cfg, None);
-    json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}))
+    let mut response = json(StatusCode::OK, &json!({"config-version": 8, "status": "ok"}));
+    if let Ok(saved) = std::fs::read(&state.path) {
+        response.headers_mut().insert(header::ETAG, config_etag(&saved));
+    }
+    response
+}
+
+fn if_match_values(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::IF_MATCH)
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .collect()
+}
+
+// Go `configV8ETag`: hash the persisted source, including comments and whitespace.
+fn config_etag(raw: &[u8]) -> HeaderValue {
+    use sha2::{Digest, Sha256};
+    HeaderValue::from_str(&format!("\"{:x}\"", Sha256::digest(raw))).expect("SHA-256 is a valid ETag")
+}
+
+// Go `ifMatchSatisfied`: strong tags across all header lines; quoted commas stay in a tag.
+fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    let field = values.join(",");
+    let field = cpa_common::gostr::trim_space(field.as_bytes());
+    if field == b"*" {
+        return true;
+    }
+    let mut quoted = false;
+    field
+        .split(|&byte| {
+            quoted ^= byte == b'"';
+            byte == b',' && !quoted
+        })
+        .any(|tag| cpa_common::gostr::trim_space(tag) == etag.as_bytes())
+}
+
+fn config_precondition_failed(etag: HeaderValue) -> Response {
+    let mut response = error(412, "precondition_failed");
+    response.headers_mut().insert(header::ETAG, etag);
+    response
+}
+
+fn write_config(state: &Management, text: &str) -> std::io::Result<()> {
+    // Atomic replacement follows the existing config symlink rather than replacing it.
+    let path = match std::fs::canonicalize(&state.path) {
+        Ok(path) => path,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(&state.path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            state.path.clone()
+        }
+        Err(error) => return Err(error),
+    };
+    crate::runtime::write_bytes_atomic(&path, text.as_bytes())
 }
 
 async fn legacy_yaml(State(state): State<Arc<Management>>) -> Response {
-    match tokio::fs::read(&state.path).await {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/yaml; charset=utf-8")], bytes).into_response(),
-        Err(_) => error(404, "not_found"),
-    }
+    tokio::task::spawn_blocking(move || {
+        let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::fs::read(&state.path) {
+            Ok(bytes) => (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/yaml; charset=utf-8"),
+                    ),
+                    (header::ETAG, config_etag(&bytes)),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(_) => error(404, "not_found"),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| error(500, "internal_error"))
 }
 
 include!(concat!(env!("OUT_DIR"), "/dashboard.rs"));
@@ -920,5 +1011,37 @@ async fn no_route(State(state): State<Arc<Management>>, req: axum::extract::Requ
     match route.oneshot(req).await {
         Ok(response) => response,
         Err(never) => match never {},
+    }
+}
+
+#[cfg(test)]
+mod etag_tests {
+    use super::*;
+
+    #[test]
+    fn if_match_uses_go_strong_entity_tag_list_rules() {
+        let etag = HeaderValue::from_static("\"abc123\"");
+        let cases: &[(&[&str], bool)] = &[
+            (&[], true),
+            (&[""], false),
+            (&[" \t"], false),
+            (&["*"], true),
+            (&["\u{a0}*\u{2003}"], true),
+            (&["\"abc123\""], true),
+            (&["W/\"abc123\""], false),
+            (&["abc123"], false),
+            (&["\"old\", \"abc123\""], true),
+            (&["\"old,tag\"", "\"abc123\""], true),
+            (&["*", "\"old\""], false),
+            (&["*", "\"abc123\""], true),
+            (&["\"abc123\"suffix"], false),
+            (&["\"prefix\"abc123\""], false),
+            (&["\"unterminated, \"abc123\""], false),
+            (&["\u{a0}\"abc123\"\u{2003}"], true),
+        ];
+        for &(values, expected) in cases {
+            let values = values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+            assert_eq!(if_match_satisfied(&values, &etag), expected, "{values:?}");
+        }
     }
 }

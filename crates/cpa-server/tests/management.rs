@@ -1993,3 +1993,240 @@ async fn claude_usage_rejects_missing_account_and_cannot_reach_live_provider_in_
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn config_etag_preconditions_cover_reads_writes_and_external_edits() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new("etag");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let request = |method, path: &str| {
+        client
+            .request(method, format!("{base}{path}"))
+            .bearer_auth("fake-management-only")
+    };
+    let etag = |text: &str| format!("\"{:x}\"", Sha256::digest(text.as_bytes()));
+    let original = f.file();
+    let initial = etag(&original);
+    for path in [
+        "/v8/management/config",
+        "/v8/management/config/server/port",
+        "/v8/management/config.yaml",
+        "/v0/management/config.yaml",
+    ] {
+        let response = request(wreq::Method::GET, path).send().await.unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(
+            response.headers().get("etag").and_then(|h| h.to_str().ok()),
+            Some(initial.as_str()),
+            "{path}"
+        );
+        assert!(
+            response.headers()["access-control-expose-headers"]
+                .to_str()
+                .unwrap()
+                .split(',')
+                .any(|h| h.trim().eq_ignore_ascii_case("etag"))
+        );
+    }
+    for condition in ["", "\"stale\"", "W/\"stale\"", "*, \"stale\"", "unterminated\""] {
+        for (method, path, body) in [
+            (
+                wreq::Method::PATCH,
+                "/v8/management/config",
+                "{\"server\":{\"port\":1234}}",
+            ),
+            (wreq::Method::PUT, "/v8/management/config.yaml", original.as_str()),
+            (wreq::Method::PUT, "/v0/management/config.yaml", original.as_str()),
+            (wreq::Method::DELETE, "/v8/management/config/access/api-keys", ""),
+        ] {
+            let response = request(method, path)
+                .header("if-match", condition)
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 412, "{path}: {condition:?}");
+            assert_eq!(response.headers()["etag"], initial);
+            assert_eq!(f.file(), original);
+        }
+    }
+    let weak = format!("W/{initial}");
+    let response = request(wreq::Method::PUT, "/v8/management/config/server/port")
+        .header("if-match", weak)
+        .body("1234")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 412);
+    let response = request(wreq::Method::PUT, "/v8/management/config/server/port")
+        .header("if-match", "\"wrong,tag\"")
+        .header("if-match", initial.clone())
+        .body("1234")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["etag"], etag(&f.file()));
+    assert!(f.file().contains("# operator note"));
+    assert!(f.file().contains("# listener"));
+    let before = f.file();
+    let response = request(wreq::Method::PUT, "/v8/management/config/server/port")
+        .header("if-match", initial)
+        .body("1235")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 412);
+    assert_eq!(f.file(), before);
+    let current = etag(&before);
+    std::fs::write(f.dir.join("config.yaml"), format!("{before}# external edit\n")).unwrap();
+    let response = request(wreq::Method::PUT, "/v8/management/config/server/port")
+        .header("if-match", current)
+        .body("1235")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 412);
+    let external = f.file();
+    let response = request(wreq::Method::PUT, "/v8/management/config.yaml")
+        .header("if-match", etag(&external))
+        .body(external)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["etag"], etag(&f.file()));
+    let response = request(wreq::Method::PUT, "/v0/management/config.yaml")
+        .header("if-match", "*")
+        .body(f.file())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["etag"], etag(&f.file()));
+    server.abort();
+}
+
+#[tokio::test]
+async fn config_etag_allows_only_one_concurrent_writer() {
+    let f = Fixture::new("etag-race");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let url = format!("{base}/v8/management/config/server/port");
+    let response = client
+        .get(&url)
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap();
+    let tag = response
+        .headers()
+        .get("etag")
+        .expect("read ETag")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let write = |port: &str| {
+        client
+            .put(&url)
+            .bearer_auth("fake-management-only")
+            .header("if-match", tag.clone())
+            .body(port.to_owned())
+            .send()
+    };
+    let (a, b) = tokio::join!(write("1234"), write("1235"));
+    let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 412]);
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn config_etag_failed_atomic_save_keeps_existing_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("etag-write-failure");
+    let (base, server) = f.server().await;
+    let original = f.file();
+    let permissions = std::fs::metadata(&f.dir).unwrap().permissions();
+    std::fs::set_permissions(&f.dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let client = wreq::Client::new();
+    let mut responses = Vec::new();
+    for (path, body) in [
+        ("/v8/management/config/server/port", "1234"),
+        ("/v0/management/config.yaml", original.as_str()),
+    ] {
+        responses.push(
+            client
+                .put(format!("{base}{path}"))
+                .bearer_auth("fake-management-only")
+                .header("if-match", "*")
+                .body(body.to_owned())
+                .send()
+                .await,
+        );
+    }
+    std::fs::set_permissions(&f.dir, permissions).unwrap();
+    for response in responses {
+        assert_eq!(response.unwrap().status(), 500);
+    }
+    assert_eq!(f.file(), original);
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn config_etag_atomic_save_preserves_symlink_target() {
+    let f = Fixture::new("etag-symlink");
+    let path = f.dir.join("config.yaml");
+    let target = f.dir.join("actual.yaml");
+    std::fs::rename(&path, &target).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let (base, server) = f.server().await;
+    let response = wreq::Client::new()
+        .put(format!("{base}/v8/management/config/server/port"))
+        .bearer_auth("fake-management-only")
+        .header("if-match", "*")
+        .body("1234")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(path.is_symlink());
+    assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(&target).unwrap());
+    assert!(f.file().contains("1234"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn config_etag_legacy_missing_file_requires_unconditional_creation() {
+    let f = Fixture::new("etag-missing");
+    let original = f.file();
+    let (base, server) = f.server().await;
+    let path = f.dir.join("config.yaml");
+    std::fs::remove_file(&path).unwrap();
+    let client = wreq::Client::new();
+    let url = format!("{base}/v0/management/config.yaml");
+    let response = client
+        .put(&url)
+        .bearer_auth("fake-management-only")
+        .header("if-match", "*")
+        .body(original.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 412);
+    assert!(!path.exists());
+    let response = client
+        .put(&url)
+        .bearer_auth("fake-management-only")
+        .body(original.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(f.file(), original);
+    assert!(response.headers().get("etag").is_some());
+    server.abort();
+}

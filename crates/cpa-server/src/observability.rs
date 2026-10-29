@@ -346,6 +346,7 @@ pub(crate) fn mask_query(raw: &str) -> String {
             let lower = cpa_common::gostr::lower_bytes(cpa_core::config::go_trim_space(&decoded));
             let lower = lower.strip_suffix("[]").unwrap_or(&lower);
             if !(lower == "key"
+                || lower == "value"
                 || ["api-key", "apikey", "api_key", "token", "secret"]
                     .iter()
                     .any(|word| lower.contains(word)))
@@ -593,6 +594,20 @@ mod tests {
             assert_eq!(record["request_id"], id);
             assert_eq!(record["trace_id"], id);
         }
+    }
+
+    #[test]
+    fn management_value_query_redaction() {
+        let secret = "sk-secret-client-key";
+        for key in ["value", "VALUE", "%76alue", "value[]"] {
+            assert_eq!(mask_query(&format!("{key}={secret}")), format!("{key}=sk-s...-key"));
+        }
+        assert_eq!(
+            mask_query("value=ab&index=3&values=literal"),
+            "value=...&index=3&values=literal"
+        );
+        let masked = mask_query(&format!("key={secret}&access_token={secret}"));
+        assert!(!masked.contains(secret));
     }
 
     #[test]
