@@ -4087,7 +4087,7 @@
    "input": "{\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"messages\":[]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[],\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":\"auto\",\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[],\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":\"auto\",\"store\":false}"
     ]
    ]
   },
@@ -4098,7 +4098,7 @@
    "input": "{\"tools\":[],\"parallel_tool_calls\":false,\"messages\":[]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":false,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[],\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":false,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[],\"store\":false}"
     ]
    ]
   },
@@ -4110,7 +4110,7 @@
    "input": "{\"tool_choice\":\"auto\",\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"auto\",\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"auto\",\"store\":false}"
     ]
    ]
   },
@@ -4134,7 +4134,7 @@
    "input": "{\"tool_choice\":\"none\",\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"none\",\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"none\",\"store\":false}"
     ]
    ]
   },
@@ -4158,7 +4158,7 @@
    "input": "{\"tool_choice\":\"required\",\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"required\",\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"required\",\"store\":false}"
     ]
    ]
   },
@@ -4182,7 +4182,7 @@
    "input": "{\"tool_choice\":\"any\",\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"any\",\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":\"any\",\"store\":false}"
     ]
    ]
   },
@@ -4206,7 +4206,7 @@
    "input": "{\"tool_choice\":{\"type\":\"any\"},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"any\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"any\"},\"store\":false}"
     ]
    ]
   },
@@ -4230,7 +4230,7 @@
    "input": "{\"tool_choice\":{\"type\":\"none\"},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"none\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"none\"},\"store\":false}"
     ]
    ]
   },
@@ -4254,7 +4254,7 @@
    "input": "{\"tool_choice\":{\"type\":\"function\",\"function\":{\"name\":\"a.b\"}},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\",\"name\":\"a_b\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\",\"name\":\"a_b\"},\"store\":false}"
     ]
    ]
   },
@@ -4278,7 +4278,7 @@
    "input": "{\"tool_choice\":{\"type\":\"function\",\"name\":\"direct\"},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\"},\"store\":false}"
     ]
    ]
   },
@@ -4302,7 +4302,7 @@
    "input": "{\"tool_choice\":{\"type\":\"function\"},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"function\"},\"store\":false}"
     ]
    ]
   },
@@ -4326,7 +4326,7 @@
    "input": "{\"tool_choice\":null,\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
     ]
    ]
   },
@@ -4350,7 +4350,7 @@
    "input": "{\"tool_choice\":5,\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
     ]
    ]
   },
@@ -4374,7 +4374,7 @@
    "input": "{\"tool_choice\":[{\"type\":\"auto\"}],\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"store\":false}"
     ]
    ]
   },
@@ -4398,7 +4398,7 @@
    "input": "{\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\"}}]}},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\"}}]}},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\"}}]}},\"store\":false}"
     ]
    ]
   },
@@ -4422,7 +4422,7 @@
    "input": "{\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[{\"name\":\"missing\"}],\"mode\":\"REQUIRED\"},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[{\"name\":\"missing\"}],\"mode\":\"REQUIRED\"},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[{\"name\":\"missing\"}],\"mode\":\"REQUIRED\"},\"store\":false}"
     ]
    ]
   },
@@ -4446,7 +4446,7 @@
    "input": "{\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"tools\":[{\"name\":\" a_b \"}]}},\"parallel_tool_calls\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a.b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]}}}],\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}",
    "outputs": [
     [
-     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":true,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"tools\":[{\"name\":\" a_b \"}]}},\"store\":false}"
+     "{\"instructions\":\"\",\"stream\":true,\"reasoning\":{\"effort\":\"medium\"},\"parallel_tool_calls\":false,\"include\":[\"reasoning.encrypted_content\"],\"model\":\"gpt-5.3-codex\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"test\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"a_b\",\"parameters\":{\"allOf\":[{\"properties\":{\"z\":{\"default\":1e+09,\"description\":\"\u003c\u0026\u003e\"}},\"required\":[\"z\"]},{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\",\"z\"]}]},\"strict\":false}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"tools\":[{\"name\":\" a_b \"}]}},\"store\":false}"
     ]
    ]
   },

@@ -34,6 +34,7 @@ struct Call {
 #[derive(Default)]
 struct State {
     original: Vec<u8>,
+    names: Option<HashMap<Vec<u8>, Vec<u8>>>,
     has_emitted_tool_use: bool,
     block_index: i64,
     has_text_delta: bool,
@@ -362,7 +363,7 @@ impl State {
                 "content_block.id",
                 shorten_call_id(&sanitize_claude_tool_id(&c.call_id)),
             );
-            let names = short_to_original(&self.original);
+            let names = self.names.get_or_insert_with(|| short_to_original(&self.original));
             let name = names.get(&c.name).cloned().unwrap_or_else(|| c.name.clone());
             gj::set_str(&mut start, "content_block.name", &name);
             event(out, "content_block_start", &start);

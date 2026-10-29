@@ -10,7 +10,7 @@ use crate::{
 };
 use cpa_common::json::{self as gj, Kind, Res};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// buildReverseMapFromOriginalOpenAI: short name -> declared name.
 fn reverse_names(original: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
@@ -18,10 +18,6 @@ fn reverse_names(original: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
         .into_iter()
         .map(|(name, short)| (short, name))
         .collect()
-}
-
-fn restore_name(original: &[u8], name: Vec<u8>) -> Vec<u8> {
-    reverse_names(original).remove(&name).unwrap_or(name)
 }
 
 /// mimeTypeFromCodexOutputFormat.
@@ -100,22 +96,45 @@ fn is_tool_call(kind: &[u8]) -> bool {
 
 /// isOriginalCustomPatch: a custom call whose winning declaration is the apply_patch
 /// custom tool, unless an ordinary function shares its name.
-fn is_custom_patch(original: &[u8], item: &Res<'_>) -> bool {
-    if item.get("type").bytes().as_ref() != b"custom_tool_call" {
-        return false;
+#[derive(Default)]
+struct ToolMetadata {
+    names: HashMap<Vec<u8>, Vec<u8>>,
+    custom_patches: HashSet<Vec<u8>>,
+}
+
+impl ToolMetadata {
+    fn new(original: &[u8]) -> Self {
+        let root = gj::parse(original);
+        let ordinary: HashSet<Vec<u8>> = root
+            .get("tools")
+            .array()
+            .iter()
+            .filter(|t| t.get("type").bytes().as_ref() == b"function")
+            .map(|t| t.get("function.name").bytes().into_owned())
+            .collect();
+        let descriptors = tool_descriptors(&root);
+        let custom_patches = tool_winners(&descriptors)
+            .into_iter()
+            .filter(|(name, w)| !ordinary.contains(name) && apply_patch::is_custom_tool(&descriptors[*w].tool))
+            .map(|(name, _)| name)
+            .collect();
+        Self {
+            names: reverse_names(original),
+            custom_patches,
+        }
     }
-    let name = qualify_namespace_name(&item.get("namespace").bytes(), &item.get("name").bytes());
-    let tools = gj::get(original, "tools");
-    if tools.array().iter().any(|t| {
-        t.get("type").bytes().as_ref() == b"function" && t.get("function.name").bytes().as_ref() == name.as_slice()
-    }) {
-        return false;
+
+    fn restore(&self, name: Vec<u8>) -> Vec<u8> {
+        self.names.get(&name).cloned().unwrap_or(name)
     }
-    let root = gj::parse(original);
-    let descriptors = tool_descriptors(&root);
-    tool_winners(&descriptors)
-        .get(&name)
-        .is_some_and(|&w| apply_patch::is_custom_tool(&descriptors[w].tool))
+
+    fn is_custom_patch(&self, item: &Res<'_>) -> bool {
+        item.get("type").bytes().as_ref() == b"custom_tool_call"
+            && self.custom_patches.contains(&qualify_namespace_name(
+                &item.get("namespace").bytes(),
+                &item.get("name").bytes(),
+            ))
+    }
 }
 
 fn image_payload(index: usize, url: &[u8]) -> Vec<u8> {
@@ -162,6 +181,7 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
 #[derive(Default)]
 struct State {
     original: Vec<u8>,
+    metadata: std::sync::OnceLock<ToolMetadata>,
     model_name: Vec<u8>,
     service_tier: Vec<u8>,
     response_id: Vec<u8>,
@@ -244,7 +264,10 @@ impl State {
         let mut call = br#"{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}"#.to_vec();
         gj::set_int(&mut call, "index", index);
         gj::set_str(&mut call, "id", item.get("call_id").bytes());
-        let name = restore_name(&self.original, item.get("name").bytes().into_owned());
+        let name = self
+            .metadata
+            .get_or_init(|| ToolMetadata::new(&self.original))
+            .restore(item.get("name").bytes().into_owned());
         gj::set_str(&mut call, "function.name", name);
         gj::set_str(&mut call, "function.arguments", arguments);
         call
@@ -333,7 +356,10 @@ impl State {
                 self.function_index += 1;
                 let state = ToolState {
                     index: self.function_index,
-                    patch: is_custom_patch(&self.original, &item),
+                    patch: self
+                        .metadata
+                        .get_or_init(|| ToolMetadata::new(&self.original))
+                        .is_custom_patch(&item),
                     ..ToolState::default()
                 };
                 self.register(&root, &item, state);
@@ -423,7 +449,10 @@ impl State {
                     index: self.function_index,
                     arguments_emitted: true,
                     done: true,
-                    patch: is_custom_patch(&self.original, &item),
+                    patch: self
+                        .metadata
+                        .get_or_init(|| ToolMetadata::new(&self.original))
+                        .is_custom_patch(&item),
                     ..ToolState::default()
                 };
                 let mut args = tool_arguments(&item);
@@ -453,6 +482,7 @@ impl GoStream for State {
 
 /// ConvertCodexResponseToOpenAINonStream: a terminal Codex event as one chat completion.
 pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
+    let metadata = ToolMetadata::new(ctx.original_request);
     let root = gj::parse(raw);
     let kind = root.get("type").bytes();
     if kind.as_ref() != b"response.completed" && kind.as_ref() != b"response.incomplete" {
@@ -528,14 +558,10 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
                     }
                     let name = item.get("name");
                     if name.exists() {
-                        gj::set_str(
-                            &mut call,
-                            "function.name",
-                            restore_name(ctx.original_request, name.bytes().into_owned()),
-                        );
+                        gj::set_str(&mut call, "function.name", metadata.restore(name.bytes().into_owned()));
                     }
                     let mut args = tool_arguments(&item);
-                    if is_custom_patch(ctx.original_request, &item) {
+                    if metadata.is_custom_patch(&item) {
                         args = apply_patch::wrap_input(&args);
                     }
                     gj::set_str(&mut call, "function.arguments", args);
@@ -592,4 +618,54 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
         }
     }
     Ok(t)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    fn legacy_is_custom_patch(original: &[u8], item: &Res<'_>) -> bool {
+        if item.get("type").bytes().as_ref() != b"custom_tool_call" {
+            return false;
+        }
+        let name = qualify_namespace_name(&item.get("namespace").bytes(), &item.get("name").bytes());
+        let tools = gj::get(original, "tools");
+        if tools.array().iter().any(|t| {
+            t.get("type").bytes().as_ref() == b"function" && t.get("function.name").bytes().as_ref() == name.as_slice()
+        }) {
+            return false;
+        }
+        let root = gj::parse(original);
+        let descriptors = tool_descriptors(&root);
+        tool_winners(&descriptors)
+            .get(&name)
+            .is_some_and(|&w| apply_patch::is_custom_tool(&descriptors[w].tool))
+    }
+
+    #[test]
+    fn cached_tool_metadata_matches_legacy() {
+        let requests = [
+            br#"{"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar"}}]}"#.as_slice(),
+            br#"{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch"}}]}"#,
+            br#"{"tools":[{"type":"namespace","name":"docs","tools":[{"type":"custom","name":"apply_patch"}]}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"lookup"}]}]}"#,
+            br#"{"tools":{"type":"custom","name":"apply_patch"}}"#,
+            b"{}",
+        ];
+        for request in requests {
+            let cached = ToolMetadata::new(request);
+            for item in [
+                br#"{"type":"custom_tool_call","name":"apply_patch"}"#.as_slice(),
+                br#"{"type":"custom_tool_call","name":"apply_patch","namespace":"docs"}"#,
+                br#"{"type":"function_call","name":"apply_patch"}"#,
+                br#"{"type":"custom_tool_call","name":"missing"}"#,
+            ] {
+                let item = gj::parse(item);
+                assert_eq!(cached.is_custom_patch(&item), legacy_is_custom_patch(request, &item));
+                let name = item.get("name").bytes().into_owned();
+                assert_eq!(
+                    cached.restore(name.clone()),
+                    reverse_names(request).remove(&name).unwrap_or(name)
+                );
+            }
+        }
+    }
 }

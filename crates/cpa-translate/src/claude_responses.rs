@@ -1449,6 +1449,7 @@ fn history_tool_identities(root: &Res<'_>) -> Vec<Vec<u8>> {
 
 /// splitResponsesQualifiedFunctionCallFromRequest: a Claude tool name back to the
 /// client's `(name, namespace)`.
+#[cfg(test)]
 pub(crate) fn split_qualified_call(request: &[u8], qualified: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let qualified = trim_space(qualified);
     if qualified.is_empty() {

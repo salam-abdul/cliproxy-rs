@@ -2335,6 +2335,13 @@ fn must_marshal(s: &[u8]) -> bool {
         .any(|&c| !(b' '..=0x7f).contains(&c) || c == b'"' || c == b'\\')
 }
 
+/// The bytes sjson writes for a string value (`SetBytes` with a string).
+pub fn stringify(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len() + 2);
+    append_stringify(&mut out, s);
+    out
+}
+
 fn append_stringify(buf: &mut Vec<u8>, s: &[u8]) {
     if must_marshal(s) {
         marshal_str(buf, s, true);
@@ -2767,6 +2774,8 @@ pub fn set_items<S: AsRef<[u8]>>(out: &mut Vec<u8>, path: &(impl JsonPath + ?Siz
 /// keep the first duplicate key, strings keep gjson's unescaped bytes (invalid UTF-8
 /// marshals as `\ufffd`), numbers are float64 and non-container JSON is nil.
 /// Conversion, marshal, clone, comparison and drop use heap stacks.
+// ponytail: derived Debug on both value models is diagnostic-only and recursive;
+// use an iterative formatter before exposing arbitrary-depth trees in diagnostics.
 #[derive(Debug)]
 pub enum AnyValue {
     Null,
@@ -3327,6 +3336,8 @@ impl GoValue {
     }
 
     /// serde JSON metadata in Go's model (numbers keep their literal text).
+    // ponytail: metadata enters through serde's default 128-level decoder. Deeper
+    // synthesized Values need iterative conversion and a nonrecursive serde drop.
     pub fn from_json(value: &serde_json::Value) -> Self {
         match value {
             serde_json::Value::Null => Self::Null,

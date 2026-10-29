@@ -9,9 +9,7 @@
 use crate::apply_patch::CallState;
 use crate::{
     Error, Registered, RequestCtx, ResponseCtx,
-    claude_responses::{
-        REDACTED_THINKING_PREFIX, ToolNames, split_qualified_call, tool_descriptors, tool_winners, web_search_call_id,
-    },
+    claude_responses::{REDACTED_THINKING_PREFIX, ToolNames, tool_descriptors, tool_winners, web_search_call_id},
     common::{self, now_unix, sse_event, trim_space},
     stream::GoStream,
 };
@@ -45,8 +43,11 @@ struct Tools {
 
 impl Tools {
     fn new(request: &[u8]) -> Self {
-        let root = gj::parse(request);
-        let descriptors = tool_descriptors(&root);
+        Self::from_root(&gj::parse(request))
+    }
+
+    fn from_root(root: &Res<'_>) -> Self {
+        let descriptors = tool_descriptors(root);
         let winners = tool_winners(&descriptors)
             .into_iter()
             .map(|(name, order)| {
@@ -65,7 +66,7 @@ impl Tools {
             .collect();
         Tools {
             winners,
-            names: ToolNames::build(&root),
+            names: ToolNames::build(root),
         }
     }
 
@@ -129,8 +130,12 @@ pub(crate) fn pick_request<'a>(original: &'a [u8], translated: &'a [u8]) -> &'a 
 }
 
 /// common.SetResponsesToolCallIdentity with the request's namespace split.
-fn with_identity(mut item: Vec<u8>, request: &[u8], qualified: &[u8], path: &str) -> Vec<u8> {
-    let (name, namespace) = split_qualified_call(request, qualified);
+fn with_identity(mut item: Vec<u8>, tools: &Tools, qualified: &[u8], path: &str) -> Vec<u8> {
+    let identity = tools.names.identity(trim_space(qualified));
+    let (name, namespace) = match tools.winners.get(&identity) {
+        Some(w) => (w.local_name.clone(), w.namespace.clone()),
+        None => (identity, vec![]),
+    };
     let at = |key: &str| {
         if path.is_empty() {
             key.to_owned()
@@ -194,7 +199,8 @@ impl Usage {
 }
 
 fn incomplete(stop: &[u8]) -> bool {
-    trim_space(stop).eq_ignore_ascii_case(b"max_tokens")
+    let stop = trim_space(stop);
+    stop.eq_ignore_ascii_case(b"max_tokens") || stop.eq_ignore_ascii_case(b"model_context_window_exceeded")
 }
 
 fn output_status(stop: &[u8]) -> &'static str {
@@ -369,9 +375,8 @@ struct ReasoningItem {
 /// claudeToResponsesState. Maps mirror Go's so presence checks keep their meaning.
 struct State {
     model: Vec<u8>,
-    original: Vec<u8>,
-    translated: Vec<u8>,
-    request: Vec<u8>,
+    request_model: Vec<u8>,
+    echo: RequestEcho,
     tools: Tools,
     completed: bool,
     /// ApplyPatchErrorState: an invalid apply_patch call failed the response.
@@ -420,13 +425,13 @@ struct State {
 }
 
 pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
-    let request = pick_request(ctx.original_request, ctx.translated_request).to_vec();
+    let request = pick_request(ctx.original_request, ctx.translated_request);
+    let root = gj::parse(request);
     Box::new(State {
         model: ctx.model.as_bytes().to_vec(),
-        original: ctx.original_request.to_vec(),
-        translated: ctx.translated_request.to_vec(),
-        tools: Tools::new(&request),
-        request,
+        request_model: common::request_model_name(ctx.original_request, ctx.translated_request),
+        tools: Tools::from_root(&root),
+        echo: RequestEcho::from_root(&root, !request.is_empty()),
         completed: false,
         tool_error: false,
         patch_calls: HashMap::new(),
@@ -593,7 +598,7 @@ impl State {
         }
         gj::set_str(&mut item, "item.id", &item_id);
         gj::set_str(&mut item, "item.call_id", &call_id);
-        item = with_identity(item, &self.request, &name, "item");
+        item = with_identity(item, &self.tools, &name, "item");
         let seq = self.next_seq();
         gj::set_int(&mut item, "sequence_number", seq);
         gj::set_int(&mut item, "output_index", output_index);
@@ -702,7 +707,7 @@ impl State {
             gj::set_str(&mut item, "item.status", status);
             gj::set_str(&mut item, "item.input", &input);
             gj::set_str(&mut item, "item.call_id", &call_id);
-            item = with_identity(item, &self.request, &name, "item");
+            item = with_identity(item, &self.tools, &name, "item");
             out.push(event("response.output_item.done", &item));
         } else {
             let id = [&b"fc_"[..], &call_id].concat();
@@ -723,7 +728,7 @@ impl State {
             gj::set_str(&mut item, "item.status", status);
             gj::set_str_no_html(&mut item, "item.arguments", &args);
             gj::set_str(&mut item, "item.call_id", &call_id);
-            item = with_identity(item, &self.request, &name, "item");
+            item = with_identity(item, &self.tools, &name, "item");
             out.push(event("response.output_item.done", &item));
         }
         self.in_func_block = false;
@@ -894,7 +899,7 @@ impl State {
                 self.created_at = now_unix();
                 self.reset();
                 self.usage.merge(&msg.get("usage"));
-                let mut model = common::request_model_name(&self.original, &self.translated);
+                let mut model = self.request_model.clone();
                 if model.is_empty() {
                     model = self.model.clone();
                 }
@@ -1210,7 +1215,7 @@ impl State {
                 r#"{"reason":"max_output_tokens"}"#,
             );
         }
-        copy_request_fields(&mut completed, &self.request, "response.", Echo::default());
+        self.echo.apply(&mut completed, "response.", Echo::default());
         let mut outputs = br#"{"arr":[]}"#.to_vec();
         for r in &self.reasoning_items {
             let mut item =
@@ -1275,7 +1280,7 @@ impl State {
                 };
                 gj::set_str(&mut item, "input", input);
                 gj::set_str(&mut item, "call_id", &call_id);
-                with_identity(item, &self.request, &name, "")
+                with_identity(item, &self.tools, &name, "")
             } else {
                 let mut item =
                     br#"{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}"#
@@ -1284,7 +1289,7 @@ impl State {
                 gj::set_str(&mut item, "status", status);
                 gj::set_str_no_html(&mut item, "arguments", &args);
                 gj::set_str(&mut item, "call_id", &call_id);
-                with_identity(item, &self.request, &name, "")
+                with_identity(item, &self.tools, &name, "")
             };
             gj::set_raw(&mut outputs, &format!("arr.{index}"), item);
         }
@@ -1332,55 +1337,109 @@ pub(crate) fn copy_request_fields(out: &mut Vec<u8>, request: &[u8], prefix: &st
     if request.is_empty() {
         return;
     }
-    let req = gj::parse(request);
-    let at = |key: &str| format!("{prefix}{key}");
-    for key in [
-        "instructions",
-        "max_output_tokens",
-        "max_tool_calls",
-        "model",
-        "parallel_tool_calls",
-        "previous_response_id",
-        "prompt_cache_key",
-        "reasoning",
-        "safety_identifier",
-        "service_tier",
-        "store",
-        "temperature",
-        "text",
-        "tool_choice",
-        "tools",
-        "top_logprobs",
-        "top_p",
-        "truncation",
-        "user",
-        "metadata",
-    ] {
-        let mut v = req.get(key);
-        if !v.exists() && key == "max_output_tokens" && echo.max_tokens {
-            v = req.get("max_tokens");
+    RequestEcho::new(request).apply(out, prefix, echo);
+}
+
+#[derive(Default)]
+pub(crate) struct RequestEcho {
+    present: bool,
+    fields: HashMap<Vec<u8>, Res<'static>>,
+}
+
+impl RequestEcho {
+    pub(crate) fn new(request: &[u8]) -> Self {
+        Self::from_root(&gj::parse(request), !request.is_empty())
+    }
+
+    pub(crate) fn from_root(root: &Res<'_>, present: bool) -> Self {
+        let fields = root
+            .map()
+            .into_iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_slice(),
+                    b"instructions"
+                        | b"max_tokens"
+                        | b"max_output_tokens"
+                        | b"max_tool_calls"
+                        | b"model"
+                        | b"parallel_tool_calls"
+                        | b"previous_response_id"
+                        | b"prompt_cache_key"
+                        | b"reasoning"
+                        | b"safety_identifier"
+                        | b"service_tier"
+                        | b"store"
+                        | b"temperature"
+                        | b"text"
+                        | b"tool_choice"
+                        | b"tools"
+                        | b"top_logprobs"
+                        | b"top_p"
+                        | b"truncation"
+                        | b"user"
+                        | b"metadata"
+                )
+            })
+            .map(|(key, value)| (key, value.into_owned()))
+            .collect();
+        Self { present, fields }
+    }
+
+    pub(crate) fn apply(&self, out: &mut Vec<u8>, prefix: &str, echo: Echo<'_>) {
+        if !self.present {
+            return;
         }
-        if !v.exists() {
-            if key == "model"
-                && let Some(fallback) = echo.model
-            {
-                gj::set_str(out, &at(key), fallback);
+        let at = |key: &str| format!("{prefix}{key}");
+        for key in [
+            "instructions",
+            "max_output_tokens",
+            "max_tool_calls",
+            "model",
+            "parallel_tool_calls",
+            "previous_response_id",
+            "prompt_cache_key",
+            "reasoning",
+            "safety_identifier",
+            "service_tier",
+            "store",
+            "temperature",
+            "text",
+            "tool_choice",
+            "tools",
+            "top_logprobs",
+            "top_p",
+            "truncation",
+            "user",
+            "metadata",
+        ] {
+            let absent = Res::default();
+            let mut v = self.fields.get(key.as_bytes()).unwrap_or(&absent);
+            if !v.exists() && key == "max_output_tokens" && echo.max_tokens {
+                v = self.fields.get(b"max_tokens".as_slice()).unwrap_or(&absent);
             }
-            continue;
-        }
-        match key {
-            "max_output_tokens" | "max_tool_calls" | "top_logprobs" => {
-                gj::set_int(out, &at(key), v.int());
+            if !v.exists() {
+                if key == "model"
+                    && let Some(fallback) = echo.model
+                {
+                    gj::set_str(out, &at(key), fallback);
+                }
+                continue;
             }
-            "parallel_tool_calls" | "store" => {
-                gj::set_bool(out, &at(key), v.bool());
-            }
-            "temperature" | "top_p" => {
-                gj::set_f64(out, &at(key), v.float());
-            }
-            "reasoning" | "text" | "tool_choice" | "tools" | "user" | "metadata" => set_value(out, &at(key), &v),
-            _ => {
-                gj::set_str(out, &at(key), v.bytes());
+            match key {
+                "max_output_tokens" | "max_tool_calls" | "top_logprobs" => {
+                    gj::set_int(out, &at(key), v.int());
+                }
+                "parallel_tool_calls" | "store" => {
+                    gj::set_bool(out, &at(key), v.bool());
+                }
+                "temperature" | "top_p" => {
+                    gj::set_f64(out, &at(key), v.float());
+                }
+                "reasoning" | "text" | "tool_choice" | "tools" | "user" | "metadata" => set_value(out, &at(key), v),
+                _ => {
+                    gj::set_str(out, &at(key), v.bytes());
+                }
             }
         }
     }
@@ -1721,7 +1780,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                 };
                 gj::set_str(&mut item, "input", input);
                 gj::set_str(&mut item, "call_id", &it.call_id);
-                with_identity(item, request, &it.name, "")
+                with_identity(item, &tools, &it.name, "")
             }
             _ => {
                 let mut args = it.args.clone();
@@ -1735,7 +1794,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                 gj::set_str(&mut item, "status", item_status);
                 gj::set_str_no_html(&mut item, "arguments", &args);
                 gj::set_str(&mut item, "call_id", &it.call_id);
-                with_identity(item, request, &it.name, "")
+                with_identity(item, &tools, &it.name, "")
             }
         };
         outputs.push(item);
@@ -1768,4 +1827,120 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    fn legacy_copy_request_fields(out: &mut Vec<u8>, request: &[u8], prefix: &str, echo: Echo<'_>) {
+        if request.is_empty() {
+            return;
+        }
+        let req = gj::parse(request);
+        let at = |key: &str| format!("{prefix}{key}");
+        for key in [
+            "instructions",
+            "max_output_tokens",
+            "max_tool_calls",
+            "model",
+            "parallel_tool_calls",
+            "previous_response_id",
+            "prompt_cache_key",
+            "reasoning",
+            "safety_identifier",
+            "service_tier",
+            "store",
+            "temperature",
+            "text",
+            "tool_choice",
+            "tools",
+            "top_logprobs",
+            "top_p",
+            "truncation",
+            "user",
+            "metadata",
+        ] {
+            let mut v = req.get(key);
+            if !v.exists() && key == "max_output_tokens" && echo.max_tokens {
+                v = req.get("max_tokens");
+            }
+            if !v.exists() {
+                if key == "model"
+                    && let Some(fallback) = echo.model
+                {
+                    gj::set_str(out, &at(key), fallback);
+                }
+                continue;
+            }
+            match key {
+                "max_output_tokens" | "max_tool_calls" | "top_logprobs" => {
+                    gj::set_int(out, &at(key), v.int());
+                }
+                "parallel_tool_calls" | "store" => {
+                    gj::set_bool(out, &at(key), v.bool());
+                }
+                "temperature" | "top_p" => {
+                    gj::set_f64(out, &at(key), v.float());
+                }
+                "reasoning" | "text" | "tool_choice" | "tools" | "user" | "metadata" => set_value(out, &at(key), &v),
+                _ => {
+                    gj::set_str(out, &at(key), v.bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_request_echo_matches_legacy_bytes_and_drops_history() {
+        let cases = [
+            br#"{"instructions":"hello <world>","max_tokens":17,"max_tool_calls":"2","model":null,"parallel_tool_calls":"false","previous_response_id":2,"prompt_cache_key":false,"reasoning":{"effort":"high"},"safety_identifier":null,"service_tier":"priority","store":0,"temperature":"0.2","text":[],"tool_choice":null,"tools":[{"name":"lookup"}],"top_logprobs":true,"top_p":0.5,"truncation":{},"user":"u","metadata":{"x":1}}"#.as_slice(),
+            br#"{"model":"first","model":"second","\u0074ools":[1],"tools":[2],"max_output_tokens":null,"max_tokens":4}"#,
+            b"{}", b"[]", b"null", b"",
+        ];
+        for request in cases {
+            let cached = RequestEcho::new(request);
+            for max_tokens in [false, true] {
+                for prefix in ["", "response."] {
+                    let echo = Echo {
+                        model: Some(b"fallback"),
+                        max_tokens,
+                    };
+                    let mut old = br#"{"response":{"model":"existing"}}"#.to_vec();
+                    let mut new = old.clone();
+                    legacy_copy_request_fields(&mut old, request, prefix, echo);
+                    cached.apply(&mut new, prefix, echo);
+                    assert_eq!(new, old, "{}", String::from_utf8_lossy(request));
+                }
+            }
+        }
+        let request = format!(r#"{{"input":"{}","model":"m"}}"#, "x".repeat(1_000_000));
+        let cached = RequestEcho::new(request.as_bytes());
+        assert_eq!(cached.fields.len(), 1);
+        assert_eq!(cached.fields[b"model".as_slice()].str(), "m");
+    }
+
+    #[test]
+    fn cached_namespace_identity_matches_legacy() {
+        let requests = [
+            br#"{"tools":[{"type":"namespace","name":"docs","tools":[{"type":"function","name":"lookup"},{"type":"custom","name":"apply_patch","format":{"type":"grammar"}}]}]}"#.as_slice(),
+            br#"{"tools":[{"type":"function","name":"docs__lookup"},{"type":"function","name":"lookup"}]}"#,
+            b"{}",
+        ];
+        for request in requests {
+            let tools = Tools::new(request);
+            for name in [
+                b"docs__lookup".as_slice(),
+                b"docs.lookup",
+                b"lookup",
+                b"missing",
+                b"",
+                b"  lookup  ",
+            ] {
+                let out = with_identity(b"{}".to_vec(), &tools, name, "");
+                let (expected_name, namespace) = crate::claude_responses::split_qualified_call(request, name);
+                assert_eq!(gj::get(&out, "name").bytes().as_ref(), expected_name);
+                assert_eq!(gj::get(&out, "namespace").bytes().as_ref(), namespace);
+            }
+        }
+    }
 }

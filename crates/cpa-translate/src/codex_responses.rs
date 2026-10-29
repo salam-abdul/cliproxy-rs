@@ -34,7 +34,9 @@ pub(crate) fn convert(body: &[u8]) -> Vec<u8> {
     }
     set_required_bool(&mut raw, "stream", true);
     set_required_bool(&mut raw, "store", false);
-    set_required_bool(&mut raw, "parallel_tool_calls", true);
+    if !matches!(gj::get(&raw, "parallel_tool_calls").kind, Kind::True | Kind::False) {
+        set_required_bool(&mut raw, "parallel_tool_calls", true);
+    }
     set_required_include(&mut raw);
     delete_fields(
         &mut raw,

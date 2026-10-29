@@ -151,7 +151,11 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     if !tier.is_empty() {
         gj::set_str(&mut out, "service_tier", tier);
     }
-    gj::set_bool(&mut out, "parallel_tool_calls", true);
+    gj::set_bool(
+        &mut out,
+        "parallel_tool_calls",
+        root.get("parallel_tool_calls").kind != Kind::False,
+    );
     gj::set_strs(&mut out, "include", &["reasoning.encrypted_content"]);
     gj::set_str(&mut out, "model", model);
 

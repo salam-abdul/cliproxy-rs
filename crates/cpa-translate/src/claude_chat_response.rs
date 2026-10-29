@@ -59,7 +59,7 @@ struct Tool {
 fn finish_reason(reason: &[u8]) -> &'static str {
     match reason {
         b"tool_use" => "tool_calls",
-        b"max_tokens" => "length",
+        b"max_tokens" | b"model_context_window_exceeded" => "length",
         b"refusal" | b"sensitive" => "content_filter",
         _ => "stop",
     }
@@ -330,7 +330,7 @@ pub fn non_stream(_: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
         gj::set_str(&mut out, &format!("{path}.function.arguments"), &tool.arguments);
         count += 1;
     }
-    if count > 0 {
+    if count > 0 && finish_reason(&reason) != "length" {
         gj::set_str(&mut out, "choices.0.finish_reason", "tool_calls");
     } else if finish_reason(&reason) != "stop" {
         gj::set_str(&mut out, "choices.0.finish_reason", finish_reason(&reason));

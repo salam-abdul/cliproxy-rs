@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cpa_common::json::{self as gj, AnyValue, Res};
 
 use crate::apply_patch::{self, CallState};
-use crate::claude_responses_response::{Echo, copy_request_fields, pick_request};
+use crate::claude_responses_response::{Echo, RequestEcho, copy_request_fields, pick_request};
 use crate::common::{now_nanos, now_unix, request_model_name, sse_event, trim_space};
 use crate::openai_responses::{ToolIndex, unwrap_custom_tool_input};
 use crate::stream::GoStream;
@@ -55,10 +55,9 @@ fn with_prefix(prefix: &[u8], id: &[u8]) -> Vec<u8> {
 
 #[derive(Default)]
 struct State {
-    original: Vec<u8>,
-    translated: Vec<u8>,
+    request_model: Vec<u8>,
     model: String,
-    request: Vec<u8>,
+    echo: RequestEcho,
     index: Option<ToolIndex>,
     tool_error: Option<String>,
     patch_calls: HashMap<String, CallState>,
@@ -97,13 +96,13 @@ struct State {
 }
 
 pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
-    let request = pick_request(ctx.original_request, ctx.translated_request).to_vec();
+    let request = pick_request(ctx.original_request, ctx.translated_request);
+    let root = gj::parse(request);
     Box::new(State {
-        original: ctx.original_request.to_vec(),
-        translated: ctx.translated_request.to_vec(),
+        request_model: request_model_name(ctx.original_request, ctx.translated_request),
         model: ctx.model.to_owned(),
-        index: Some(ToolIndex::from_raw(&request)),
-        request,
+        index: Some(ToolIndex::new(&root)),
+        echo: RequestEcho::from_root(&root, !request.is_empty()),
         ..Default::default()
     })
 }
@@ -462,7 +461,7 @@ impl State {
         if let Some(details) = incomplete {
             gj::set_raw(&mut completed, "response.incomplete_details", details);
         }
-        copy_request_fields(&mut completed, &self.request, "response.", Echo::default());
+        self.echo.apply(&mut completed, "response.", Echo::default());
 
         let item_status = status(&self.finish_reason);
         let mut items: Vec<(i64, Vec<u8>)> = vec![];
@@ -579,7 +578,7 @@ impl State {
     fn start(&mut self, root: &Res<'_>, out: &mut Vec<Vec<u8>>) {
         self.response_id = root.get("id").bytes().into_owned();
         self.created = root.get("created").int();
-        let mut model = request_model_name(&self.original, &self.translated);
+        let mut model = self.request_model.clone();
         if model.is_empty() {
             model = self.model.as_bytes().to_vec();
         }
