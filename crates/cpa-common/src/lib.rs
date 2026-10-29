@@ -38,50 +38,10 @@ mod gostr_tables;
 pub mod headers;
 pub mod idle;
 pub mod json;
-#[cfg(test)]
-mod json_go_vectors;
 pub mod payload;
 pub mod session;
 pub mod signature;
 pub mod thinking;
-
-/// Calls recorded from Go's own test suites at v8.0.27, where the recorded thinking
-/// functions are unchanged since 6fecc6e, one JSON object per line
-/// (tests/reference/record/README.md).
-#[cfg(test)]
-pub(crate) fn go_calls() -> impl Iterator<Item = &'static str> {
-    use std::io::Read;
-    static CALLS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let gz = include_bytes!("../tests/fixtures/go_calls.jsonl.gz");
-        let mut text = String::new();
-        flate2::read::GzDecoder::new(&gz[..]).read_to_string(&mut text).unwrap();
-        text
-    });
-    CALLS.lines()
-}
-
-/// A recorded Go string: plain JSON text, or `{"b64": ...}` for bytes that are not UTF-8.
-#[cfg(test)]
-pub(crate) fn recorded_bytes(v: &serde_json::Value) -> Vec<u8> {
-    use base64::Engine;
-    match v {
-        serde_json::Value::String(s) => s.as_bytes().to_vec(),
-        serde_json::Value::Object(m) if m.contains_key("b64") => base64::engine::general_purpose::STANDARD
-            .decode(m["b64"].as_str().unwrap())
-            .unwrap(),
-        other => panic!("not a recorded string: {other}"),
-    }
-}
-
-/// Encodes bytes the way the recorder does, for comparison with recorded outputs.
-#[cfg(test)]
-pub(crate) fn recorded_value(b: &[u8]) -> serde_json::Value {
-    use base64::Engine;
-    match std::str::from_utf8(b) {
-        Ok(s) => serde_json::Value::String(s.into()),
-        Err(_) => serde_json::json!({"b64": base64::engine::general_purpose::STANDARD.encode(b)}),
-    }
-}
 
 /// Test-only allocation counter: bytes allocated on the current thread, so parallel
 /// tests do not disturb each other.

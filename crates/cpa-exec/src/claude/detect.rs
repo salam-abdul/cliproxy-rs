@@ -292,7 +292,7 @@ fn helper_headers(headers: &HeaderMap, settings: &Settings) -> bool {
         && candidate.1 == baseline.package_version
         && candidate.2 == baseline.runtime_version;
     // A newer release's helper is confirmed with its own versions, as its main requests
-    // are (docs/DIFFERENCES-FROM-GO.md); the measured beta and body shapes still guard.
+    // are; the measured beta and body shapes still guard.
     let newer = profile::newer_than_baseline(user_agent, settings) && profile::stainless_versions_ok(headers);
     if !exact && !newer {
         return false;

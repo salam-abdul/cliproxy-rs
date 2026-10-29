@@ -422,7 +422,7 @@ mod tests {
             assert!(raw.ends_with("}\n"), "{name}: MarshalIndent plus newline");
             let mut actual: serde_json::Value = serde_json::from_str(&raw).unwrap();
             mask(&mut actual);
-            // The one deliberate difference (docs/DIFFERENCES-FROM-GO.md): every quota
+            // The one deliberate difference: every quota
             // record cliproxy-rs writes carries `trust_windows`, which Go's decoder skips.
             for record in actual["records"].as_array_mut().unwrap() {
                 if record["quota"]["exceeded"] == true {

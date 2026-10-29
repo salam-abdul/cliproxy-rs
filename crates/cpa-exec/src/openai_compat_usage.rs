@@ -378,7 +378,7 @@ pub(crate) fn http_capture_problems(events: &[Captured], a: &HttpAttempt<'_>) ->
                 problems.push(format!("capture url: {url} != {}", a.url));
             }
             // Each call site logs the method it sends (Go logs POST for every xAI request,
-            // including the GET video poll; see docs/DIFFERENCES-FROM-GO.md).
+            // including the GET video poll).
             if logged_method != method {
                 problems.push(format!("capture method: {logged_method} (sent {method})"));
             }

@@ -1,45 +1,64 @@
 # cliproxy-rs
 
-A private personal fork. Preserve native Claude CLI/Desktop/Zed workflows and existing built-in providers. Do not publish packages, releases or images, or replace the running installation without an explicit request.
+A private personal fork. Preserve native Claude CLI/Desktop/Zed workflows and existing
+built-in providers. Do not publish packages, releases or images, or replace the running
+installation without an explicit request.
 
-A Rust rewrite of CLIProxyAPI (https://github.com/router-for-me/CLIProxyAPI) preserving useful compatibility: same `config.yaml`, same auth JSON files in `auth-dir`, built-in HTTP routes and response shapes, and v8 Management API compatibility within the scope in `docs/PARITY.md`.
+## Scope and layout
 
-## Reference
+Production behavior and focused Rust regressions define this fork. Reuse upstream fixes
+selectively; record reviewed-through hashes and unfinished work in
+`docs/UPSTREAM-REVIEW.md`. Do not add Go code, differential harnesses, upstream parity
+corpora or historical benchmark reports.
 
-- The reference is CLIProxyAPI at commit `6fecc6e`: clone https://github.com/router-for-me/CLIProxyAPI, check out that commit and treat the clone as read-only. Cite Go file paths in comments only where behaviour is non-obvious. The Claude prompt-cache and prompt-shaping fixes named in `docs/PARITY.md` follow v8.0.27 instead.
-- When Go behaviour and documentation disagree, the Go code wins. Port behaviour, not structure: idiomatic Rust over transliterated Go.
-- A deliberate difference from Go is listed in `docs/DIFFERENCES-FROM-GO.md`, and tests that compare against Go goldens encode it explicitly.
+- `cpa-core`: configuration and credential formats; no networking.
+- `cpa-common`: shared provider-neutral helpers.
+- `cpa-translate`: Anthropic, OpenAI and Gemini translation.
+- `cpa-exec`: provider wire formats, authentication and HTTP transports.
+- `cpa-server`: routes, client authentication, credential selection and management.
+- `cpa-store`, `cpa-home`: remote stores and Home mode.
+- `cliproxy`: binary and CLI; `ui/`: dashboard; `native/`: native client integration.
 
-## Layout
+Keep operation docs in README, `docs/CONFIGURATION.md`, `docs/INSTALL.md` and
+`native/README.md`. Keep plans, progress logs and architecture reports outside the repo.
+Comments should explain completed behavior and non-obvious constraints concisely.
 
-- `crates/cpa-core`: config and credential file formats. No networking.
-- `crates/cpa-common`: provider-neutral, Go-exact helpers shared by translators and executors.
-- `crates/cpa-translate`: format translation between the Anthropic, OpenAI and Gemini APIs.
-- `crates/cpa-exec`: one module per upstream provider (wire format, auth headers, HTTP client profile).
-- `crates/cpa-server`: axum routes, client auth, credential selection, management API.
-- `crates/cpa-store`, `crates/cpa-home`: remote config/auth stores and Home mode.
-- `crates/cliproxy`: the binary. Go-style single-dash flags are accepted.
-- `ui/` is the dashboard, `harness/` sends the same requests to Go and Rust and compares them.
+## Delegation
 
-## Rules
+- Delegate only when the user explicitly requests it; use the fewest agents needed.
+- Default to one focused agent; never create more than three direct agents for a task
+  without a new explicit request. Agents must not delegate further.
+- Use medium reasoning for authorized agents unless the user requests higher.
+- Run review agents only when explicitly requested.
 
-- Do not delegate unless the user explicitly requests it.
-- Keep docs and comments concise and non-overlapping. Add feature comments only after implementation is complete. Keep progress logs and architecture reports outside the repository.
-- Review upstream changes against this fork's scope; do not copy upstream operator instructions.
+## Behavior and safety
 
-- Never commit private operational evidence: real account or organization details, quota/reset measurements, session identifiers or URLs, conversation/file contents, credential material, local user paths, or live test logs. Keep those outside the repository. Committed examples and fixtures must be synthetic and use generic account labels.
+- Forward request/response bytes unchanged unless a deliberate rule requires edits.
+  Never re-serialize JSON just to pass it through.
+- Preserve credential isolation, fail-closed authorization and fresh native quota
+  admission. Never replay inference after an ambiguous response or transport failure.
+- Request preparation must be linear in body size: walk once and edit by path.
+  `crates/cpa-exec/src/claude/signals.rs` is an example.
+- Upstream capture uses `crates/cpa-server/src/request_logging.rs`, which redacts
+  sensitive headers/URLs and spools large sections. Never log captured bytes elsewhere.
+- Never commit credentials, real account/organization details, private quota records,
+  sessions, conversations, local user paths or live test logs. Fixtures are synthetic.
+- Mark deliberate implementation ceilings with a `ponytail:` comment and an upgrade path.
 
-- The full test suite is slow and memory-heavy (the BoringSSL build and the release link). While iterating, run the affected crate or a filter, for example `cargo test -p cpa-exec kimi`; CI runs fmt, `clippy -D warnings` and the whole suite. On a shared or small machine, add `CARGO_BUILD_JOBS=2 nice -n 19`.
-- PostgreSQL tests require local server binaries; CI runs them in a network-denied namespace. For a local Go/Rust differential run on Linux, use `./harness/run` (see `harness/README.md`).
-- Request bodies are forwarded byte for byte unless a ported rule rewrites them. Never re-serialize JSON just to pass it through.
-- Upstream credentials and client keys must never be logged or forwarded to the wrong side.
-- Upstream request and response capture goes through the shared sink in `crates/cpa-server/src/request_logging.rs`. It redacts `Cookie` and `Set-Cookie` values, credentials in URLs and short keys, and spools large sections to disk. Don't format or log captured bytes anywhere else.
-- Keep request preparation linear in the body size. Coding agents send bodies from 100 KB to several MB, so walk a JSON body once and edit by path (see `crates/cpa-exec/src/claude/signals.rs`) instead of searching it again from the start for each element.
-- Performance and memory claims come from `docs/BENCHMARKS.md`. `bench/run.sh`, `bench/messages.sh` and `bench/latency.sh` reproduce its scripted workloads; field observations there are labelled as such and are not reproducible on demand.
-- Tests use local mock upstreams and never send traffic to real provider accounts. Give every test a private `auth-dir`: without one, credential loading falls back to `~/.cli-proxy-api`, where real logins live. Build test runtimes with `cpa_server::testing::runtime`.
-- Mark deliberate simplifications with a `ponytail:` comment naming the ceiling and the upgrade path.
-- Prompt-cache changes must keep request semantics and stable prefixes, and show cache-read and cache-write usage for warm, changed-context and idle continuations before merge. Never add inference keepalive pings. `bench/claude-cache-live.sh` runs that check against a live Claude login, by hand.
+## Validation
 
-## Review guidelines
+Use focused Rust tests and local mocks. Every server test gets a private `auth-dir` and
+uses `cpa_server::testing::runtime`; never fall back to real credentials or provider
+accounts. PostgreSQL tests need local server binaries; CI denies external networking.
 
-Flag, in order: behaviour that differs from Go at `6fecc6e` without an entry in `docs/DIFFERENCES-FROM-GO.md`; request or response bytes changed on passthrough; credentials or client keys reaching logs or the wrong side; tests that can touch the network or a real `auth-dir`; work on a request body that grows faster than linearly with its size. Skip style nits that `cargo fmt` and clippy already cover.
+The whole suite is slow and memory-heavy. Iterate on affected crates or filters, e.g.
+`CARGO_BUILD_JOBS=2 cargo test -p cpa-exec kimi`. CI runs formatting, clippy with warnings
+as errors and the workspace tests. Keep meaningful resource bounds and regressions;
+performance claims require a controlled measurement of this fork.
+
+Prompt-cache changes preserve semantics and stable prefixes. Before merge, manually
+qualify warm, changed-context and idle continuations with returned cache-read/write
+usage using `tools/claude-cache-live.sh`. Never send inference keepalive pings.
+
+Review byte fidelity, credential/log isolation, authorization and no-replay behavior,
+test isolation and superlinear body processing, in that order. Skip formatter/linter nits.

@@ -493,7 +493,7 @@ fn legacy_device_headers(h: &mut GoHeader, p: &Plan<'_>) {
             .unwrap_or_default()
             .trim();
         // A newer native release keeps its own SDK and runtime versions, so they match
-        // its User-Agent (docs/DIFFERENCES-FROM-GO.md); otherwise Go's baseline values.
+        // its User-Agent; otherwise Go's baseline values.
         let newer = profile::newer_than_baseline(ua, p.settings);
         ensure_valid("X-Stainless-Runtime-Version", &d.runtime_version, &|v| {
             v == d.runtime_version || (newer && profile::runtime_version_ok(v))

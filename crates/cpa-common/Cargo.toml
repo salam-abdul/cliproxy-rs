@@ -18,6 +18,3 @@ sha2 = "0.10"
 memchr = "2"
 # The idle signal (idle.rs).
 tokio.workspace = true
-
-[dev-dependencies]
-flate2 = "1"

@@ -44,7 +44,7 @@ use crate::codex_response::{self as response, OutputItems};
 pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// `codexResponsesWebsocketHandshakeTO`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bound on one upstream frame write (docs/DIFFERENCES-FROM-GO.md). Go sets no write
+/// Bound on one upstream frame write. Go sets no write
 /// deadline, so a write into a half-open socket held the turn until the 300 s read
 /// deadline. A large frame gets as long as it takes at `rate` bytes per second.
 #[derive(Debug, Clone, Copy)]

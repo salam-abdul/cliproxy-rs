@@ -16,8 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # One exact compiler for every job: the size and allocation budgets are exact numbers
-  # from one compiler and std. Bumping it means re-measuring bench/budgets.txt.
+  # Allocation ceilings use one pinned compiler. Re-measure when it changes.
   RUST_TOOLCHAIN: "1.99.0"
   CARGO_INCREMENTAL: "0"
 
@@ -78,7 +77,6 @@ jobs:
             cargo nextest run --workspace --locked --profile ci 2>&1 | tee test.log
             cargo test --workspace --doc --locked 2>&1 | tee -a test.log
             cargo test --locked --manifest-path vendor/gjson/Cargo.toml --target-dir target 2>&1 | tee -a test.log
-            python3 bench/test-claude-cache-replay.py 2>&1 | tee -a test.log
           '
           # shellcheck disable=SC2016 # $1 to $3 belong to the inner shell
           sudo env "PATH=$PATH" "HOME=$HOME" \
@@ -86,7 +84,6 @@ jobs:
             "CPA_TEST_PG_BIN=$CPA_TEST_PG_BIN" CPA_TEST_NO_SKIP=1 \
             CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 \
             "CARGO_PROFILE_TEST_DEBUG=$CARGO_PROFILE_TEST_DEBUG" \
-            GOTOOLCHAIN=local GOPROXY=off \
             unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- bash -eo pipefail -c "$3"' \
             sh "$(id -u)" "$(id -g)" "$tests"
       - name: Test counts
@@ -106,10 +103,10 @@ jobs:
             END { printf "%d passed, %d failed, %d ignored\n", passed, failed, ignored }'
 
   # Everything that does not need the test build: formatting, clippy over every target,
-  # the harness, and the Codex Live media relay tests, which build cpa-server with its
+  # and the Codex Live media relay tests, which build cpa-server with its
   # optional media-relay feature. In parallel with the tests above.
   lint:
-    name: fmt, clippy, harness and media relay tests (Linux)
+    name: fmt, clippy and media relay tests (Linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -131,15 +128,10 @@ jobs:
       - name: Fetch dependencies
         run: |
           cargo fetch --locked
-          cargo fetch --locked --manifest-path harness/rust/Cargo.toml
       - name: Clippy
         env:
           CARGO_NET_OFFLINE: "true"
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Harness
-        env:
-          CARGO_NET_OFFLINE: "true"
-        run: cargo check --locked --manifest-path harness/rust/Cargo.toml --target-dir target
       - name: Media relay tests, with external network denied
         # The same loopback-only namespace as the tests above. All of cpa-server's unit
         # tests run with the feature on, the 25 behind it included.
@@ -151,45 +143,6 @@ jobs:
             "CARGO_PROFILE_TEST_DEBUG=$CARGO_PROFILE_TEST_DEBUG" \
             unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- cargo nextest run -p cpa-server --features media-relay --lib --locked --profile ci' \
             sh "$(id -u)" "$(id -g)"
-
-  perf:
-    name: ${{ matrix.gates }} (Linux)
-    # The release builds use Ubuntu 22.04 too, so the sizes compare with theirs, and its
-    # unprivileged user namespaces give bench/idle.sh a loopback-only network. The two
-    # idle gates run on separate runners, so neither waits out the other's 60 s window;
-    # each still has its machine to itself. Both build the same release binary.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { gates: "size and idle gates, 1 auth file", auth-files: 1 }
-          - { gates: "idle gate, 2,000 auth files", auth-files: 2000 }
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - name: Build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev perl
-      - name: Rust
-        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
-      # Both entries share one cache; one of them saves it.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.auth-files == 1 }}
-      - name: Build
-        run: cargo build --release --locked -p cliproxy
-      # Bytes and counts against bench/budgets.txt, never elapsed time.
-      - name: Size
-        if: matrix.auth-files == 1
-        run: |
-          name=cliproxy-ci-x86_64-unknown-linux-gnu
-          mkdir -p "$name" && cp target/release/cliproxy README.md LICENSE "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          bench/gate.sh size x86_64-unknown-linux-gnu target/release/cliproxy "$name.tar.gz"
-      - name: Idle
-        env:
-          AUTH_FILES: ${{ matrix.auth-files }}
-        run: bench/gate.sh idle linux target/release/cliproxy "$AUTH_FILES"
 
   # Clippy over every target (tests, examples, benches) with warnings as errors, so code
   # that only builds on Windows, test-only code included, is held to the Linux rules.

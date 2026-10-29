@@ -595,7 +595,7 @@ pub(crate) struct Cooldown {
     pub trust: Trust,
 }
 
-/// Bounded trust of one cooldown (`max-trusted-cooldown`, docs/DIFFERENCES-FROM-GO.md).
+/// Bounded trust of one cooldown (`max-trusted-cooldown`).
 /// Costs nothing until a stated reset is cut: then one comparison per 429 and, per
 /// recorded result, a probe check on the two keys the result touches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -733,7 +733,7 @@ fn quota_backoff(level: u32) -> (Duration, u32) {
     }
 }
 
-/// Bounded trust for a stated quota reset (docs/DIFFERENCES-FROM-GO.md): a reset longer
+/// Bounded trust for a stated quota reset: a reset longer
 /// than the window's bound is cut to it, so the next ordinary request after the bound
 /// probes the account and an early provider reset is noticed within the bound. The
 /// first window is `cap`; each cut window after one that ended without a success is
@@ -774,7 +774,7 @@ impl Scheduler {
             self.cursors.clear();
             self.affinity.clear();
             // Go builds a new selector, and with it a new matcher on the new TTL. Unlike
-            // Go, access generations keep counting (docs/DIFFERENCES-FROM-GO.md).
+            // Go, access generations keep counting.
             self.lcp.reset(crate::lcp::Limits {
                 ttl: next.session_affinity_ttl,
                 ..Default::default()
@@ -3006,7 +3006,7 @@ mod tests {
         let fixture: Value = serde_json::from_str(include_str!("../tests/fixtures/server_go.json")).unwrap();
         let cases = fixture["cooldown"].as_array().unwrap();
         assert_eq!(cases.len(), 25);
-        // Go trusts every stated reset (docs/DIFFERENCES-FROM-GO.md).
+        // Go trusts every stated reset.
         let policy = Policy {
             max_trusted_cooldown: Duration::ZERO,
             ..Policy::default()

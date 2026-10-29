@@ -104,7 +104,7 @@ pub(crate) fn default_version(settings: &Settings) -> String {
 /// Native Claude Code at or above the baseline within the baseline's major version
 /// keeps native passthrough. Go accepts only patch releases of the baseline's
 /// major.minor line, so a newer minor release was rewritten to the older baseline
-/// identity and cloaked like a third-party client (docs/DIFFERENCES-FROM-GO.md).
+/// identity and cloaked like a third-party client.
 /// With `stabilize-device-profile` Go's rule stays: a stabilized profile forwards only
 /// the exact baseline tuple, so a newer release would send its body under baseline
 /// headers.

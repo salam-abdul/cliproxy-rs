@@ -212,8 +212,7 @@ pub(crate) fn before_reporter<T>(
 }
 
 /// `recordXAIRequest` with the request's own headers. Go logs every xAI request as a POST;
-/// this logs the method actually sent, so a video poll shows as a GET
-/// (docs/DIFFERENCES-FROM-GO.md).
+/// this logs the method actually sent, so a video poll shows as a GET.
 fn capture_request(
     req: &ExecRequest,
     credential: &Credential,

@@ -493,7 +493,7 @@ pub(crate) struct SystemPlan<'a> {
 /// leading user run, for API keys as for OAuth logins. Go v8.0.27 keeps it top-level
 /// for an API key while the leading user run ends the conversation or holds more than
 /// one turn (5d89040, eca1d11, 39632e5), so the second turn of a conversation moves it
-/// and misses the cache from the identity block on (docs/DIFFERENCES-FROM-GO.md).
+/// and invalidates the cached prefix starting at the identity block.
 pub(crate) fn install_system(body: String, plan: &SystemPlan<'_>) -> String {
     let forwarded = forwarded_system_blocks(&body);
     let message = fingerprint_message(&body);

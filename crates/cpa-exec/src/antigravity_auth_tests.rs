@@ -205,7 +205,7 @@ fn credential(case: &Value) -> Credential {
 }
 
 /// Go's error text for `case`, with the token endpoint's body withheld: only its OAuth
-/// error code (or Google API error status) is kept (docs/DIFFERENCES-FROM-GO.md).
+/// error code (or Google API error status) is kept.
 fn go_error(case: &Value) -> Option<String> {
     let go = case["error"].as_str()?;
     let token_reply = |status: u16| {

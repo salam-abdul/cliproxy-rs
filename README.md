@@ -23,25 +23,20 @@ Keep the listener on loopback, configure separate client and management keys, an
 
 ## Documentation
 
-- [Configuration](docs/CONFIGURATION.md): settings and environment variables.
-- [Client setup](docs/CLIENTS.md): translating endpoint examples.
-- [Account routing](docs/MULTI-ACCOUNT.md): affinity, selection and cooldowns.
-- [Compatibility](docs/PARITY.md) and [deliberate differences](docs/DIFFERENCES-FROM-GO.md).
-- [Upstream review checkpoints and port backlog](docs/UPSTREAM-REVIEW.md).
-- [Benchmarks](docs/BENCHMARKS.md) and [optional cache telemetry](docs/CLAUDE-CACHE-TELEMETRY.md).
+- [Configuration](docs/CONFIGURATION.md): settings, routing and environment variables.
+- [Local installation](docs/INSTALL.md): builds and manual updates.
+- [Native Claude](native/README.md): Claude Code, Desktop and Zed setup and qualification.
+- [Upstream checkpoints](docs/UPSTREAM-REVIEW.md): reviewed hashes and remaining ports.
 
 ## Development
 
-Use focused crate tests while iterating. Tests use private auth directories and local mock upstreams. CI also runs isolated Go/PostgreSQL comparisons and resource gates.
-
-Go files in test directories regenerate pinned upstream fixtures; Rust tests replay the recorded outputs. The three Go programs in `bench/` generate local test traffic. Go is needed for regeneration, those benchmarks and the differential harness; building or running the proxy does not require it.
+Use focused Rust regression tests with private auth directories and local mock
+upstreams. CI checks the workspace with external networking denied.
 
 ```sh
 cargo fmt --all --check
 CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --locked -- -D warnings
 CARGO_BUILD_JOBS=2 cargo test --workspace --locked
 ```
-
-The [differential harness](harness/README.md) records protocol behavior. Performance claims require a reproducible workload; historical upstream measurements do not establish this fork's performance.
 
 MIT. Preserve [LICENSE](LICENSE) and third-party notices.

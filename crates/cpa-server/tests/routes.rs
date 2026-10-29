@@ -1,6 +1,6 @@
 //! Route surface through the real runtime, Claude executor and a local mock upstream.
 //! Expected shapes come from the Go handlers they port (cited per assertion); the Go
-//! binary comparison for the same routes lives in harness/fixtures.py.
+//! focused route regressions use synthetic local requests.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -310,7 +310,7 @@ async fn nonstream_keepalive_commits_like_go() {
 /// gin without `HandleMethodNotAllowed` (Go `engine.handleHTTPRequest`): a known
 /// path's unregistered method and an unregistered HEAD run NoRoute, whose handler
 /// aborts with a bare 404; only `/healthz` registers HEAD. The Go binary comparison is
-/// harness/fixtures.py `wrong-method-chat`, `models-head`, `healthz-post`.
+/// Method and health-route regressions.
 #[tokio::test]
 async fn wrong_methods_are_gin_no_route() {
     let p = proxy("", vec![oauth("a.json", "fake-ok", serde_json::json!({}))]).await;

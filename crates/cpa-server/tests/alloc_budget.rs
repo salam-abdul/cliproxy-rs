@@ -19,7 +19,7 @@
 //! own thread and runtime, which the allocator does not count: hyper sizes its read buffers
 //! from how much the previous read returned, so the upstream's allocations depend on
 //! scheduling, not on the proxy. Each size is sent three times and gated on the smallest
-//! peak and call count. The ceilings are the `alloc.*` lines of `bench/budgets.txt` (a
+//! peak and call count. The ceilings are the `alloc.*` lines of `fixtures/allocation_limits.txt` (a
 //! value without a line is reported, not gated); the measured values are printed so a
 //! change can update them with a dated note. Every route runs in one test, one after the
 //! other, because the counters are process-wide.
@@ -166,7 +166,7 @@ async fn settle(captures: &Mutex<Vec<RequestLog>>) {
     }
 }
 
-/// A coding-agent conversation of about `target` bytes, shaped like `bench/messages`:
+/// A coding-agent conversation of about `target` bytes, shaped like `the synthetic conversation generator`:
 /// an 18 KB system prompt, 24 tools, then assistant `tool_use` and user `tool_result`
 /// turns.
 fn conversation(target: usize) -> Bytes {
@@ -257,11 +257,11 @@ fn responses_conversation(target: usize) -> Bytes {
     Bytes::from(serde_json::to_vec(&body).unwrap())
 }
 
-/// The ceiling for `key` in bench/budgets.txt: `<key> <value> <tolerance %>`, read the way
-/// bench/gate.sh reads it. None when the file has no line for it: the value is reported,
+/// The ceiling for `key` in fixtures/allocation_limits.txt: `<key> <value> <tolerance %>`, read the way
+/// the allocation gate reads it. None when the file has no line for it: the value is reported,
 /// not gated.
 fn budget(key: &str) -> Option<usize> {
-    include_str!("../../../bench/budgets.txt")
+    include_str!("fixtures/allocation_limits.txt")
         .lines()
         .filter_map(|l| l.split('#').next())
         .find_map(|l| {
@@ -276,7 +276,7 @@ fn budget(key: &str) -> Option<usize> {
 
 /// [`budget`] for a key that must have a line.
 fn gated(key: &str) -> usize {
-    budget(key).unwrap_or_else(|| panic!("bench/budgets.txt has no {key}"))
+    budget(key).unwrap_or_else(|| panic!("fixtures/allocation_limits.txt has no {key}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -486,7 +486,7 @@ async fn large_requests_stay_within_their_heap_budget() {
     HOLD.store(false, Ordering::Relaxed);
     settle(&captures).await;
     assert_eq!(waiting, CONCURRENT, "requests that reached the fake upstream");
-    // `held` must have a line; `peak` is reported until bench/budgets.txt gives it one.
+    // `held` must have a line; `peak` is reported until fixtures/allocation_limits.txt gives it one.
     let key = |name: &str| format!("alloc.cloak.1900k.c{CONCURRENT}.{name}_bytes");
     for (name, value, ceiling) in [
         ("held", held, Some(gated(&key("held")))),
@@ -503,5 +503,8 @@ async fn large_requests_stay_within_their_heap_budget() {
         }
     }
     let _ = std::fs::remove_dir_all(dir);
-    assert!(over.is_empty(), "over budget (bench/budgets.txt): {over:?}");
+    assert!(
+        over.is_empty(),
+        "over budget (fixtures/allocation_limits.txt): {over:?}"
+    );
 }

@@ -1,0 +1,19 @@
+# Rust request-allocation regression ceilings: key, value, tolerance percent.
+# Re-measure when changing the pinned compiler or request preparation.
+alloc.306k.peak_bytes       1_286_793  2
+alloc.306k.allocations          2_337  3
+alloc.1900k.peak_bytes      7_420_905  2
+alloc.1900k.allocations         6_710  3
+alloc.codex.306k.peak_bytes       2_769_147  2
+alloc.codex.306k.allocations          1_683  3
+alloc.codex.1900k.peak_bytes     16_783_275  2
+alloc.codex.1900k.allocations         4_004  3
+alloc.count.306k.peak_bytes       1_949_324  2
+alloc.count.306k.allocations        275_295  3
+alloc.count.1900k.peak_bytes     11_687_196  2
+alloc.count.1900k.allocations     1_629_779  3
+alloc.cloak.306k.peak_bytes       1_635_396  2
+alloc.cloak.306k.allocations          4_443  3
+alloc.cloak.1900k.peak_bytes      9_322_748  2
+alloc.cloak.1900k.allocations        10_388  3
+alloc.cloak.1900k.c8.held_bytes  15_662_380  2

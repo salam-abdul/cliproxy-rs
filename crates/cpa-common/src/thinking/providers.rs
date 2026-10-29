@@ -336,8 +336,7 @@ fn claude_rejects_disabled(model: &str) -> bool {
 }
 
 /// Thinking off for `model` (the registry ID, or the body's `model` for an alias):
-/// `disabled`, or the lowest effort on a model that refuses `disabled`
-/// (docs/DIFFERENCES-FROM-GO.md).
+/// `disabled`, or the lowest effort on a model that refuses `disabled`.
 // ponytail: a fixed model list; move it into the model registry as a capability if
 // Anthropic keeps adding always-on models.
 fn claude_off(body: &[u8], model: &str, drop_display: bool) -> Vec<u8> {

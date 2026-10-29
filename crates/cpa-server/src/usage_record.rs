@@ -8,8 +8,7 @@
 //! whenever the upstream speaks the client's format.
 //!
 //! The queued record adds what Go's lacks, after Go's fields: where its `session_id`
-//! came from, a [`prompt_prefix`] hash, per-stage [`Timings`] and byte counts
-//! (docs/DIFFERENCES-FROM-GO.md).
+//! came from, a [`prompt_prefix`] hash, per-stage [`Timings`] and byte counts.
 
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
@@ -1297,7 +1296,7 @@ pub struct Record {
 
 /// Where an attempt's time went, in milliseconds from when the server accepted the
 /// client request, and the bytes it moved. Not in Go's record: cliproxy-rs adds these
-/// fields (docs/DIFFERENCES-FROM-GO.md), and leaves out each one it did not see. The
+/// fields, and leaves out each one it did not see. The
 /// upstream stages come from the shared HTTP client ([`cpa_core::exec::UpstreamStage`]),
 /// which the Claude executor times; other executors leave them out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1556,7 +1555,7 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.str("service_tier", &service_tier);
     w.opt_str("response_service_tier", detail.response_service_tier.trim());
     w.opt_str("response_model", record.response_model.trim());
-    // Not in Go's record (docs/DIFFERENCES-FROM-GO.md).
+    // Not in Go's record.
     w.opt_str("session_source", client.session_source);
     w.opt_str("prompt_prefix_hash", &record.prompt_prefix_hash);
     if let Some(cache) = &record.claude_cache {
@@ -3011,7 +3010,7 @@ mod tests {
                     Some(36)
                 );
             }
-            // Not in Go's record (docs/DIFFERENCES-FROM-GO.md): Home's canonical session
+            // Not in Go's record: Home's canonical session
             // says where it came from.
             let source = got[0].as_object_mut().unwrap().remove("session_source");
             let home = name == "count_tokens_oauth_runtime";

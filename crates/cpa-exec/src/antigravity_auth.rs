@@ -504,7 +504,7 @@ impl OAuth {
 /// API error's `status`) when it is a short plain token, else nothing. Go shows the whole
 /// body; a token endpoint is sent the authorization code, the refresh token and the
 /// client secret, so its body stays out of errors, logs and client answers, as for the
-/// other providers' sign-ins (docs/DIFFERENCES-FROM-GO.md).
+/// other providers' sign-ins.
 fn token_error_code(body: &[u8]) -> Vec<u8> {
     let error = gj::get(body, "error");
     let code = if error.kind == gj::Kind::String {

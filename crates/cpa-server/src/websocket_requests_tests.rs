@@ -1,6 +1,4 @@
-//! Pure-function parity with Go: every vector in `tests/ws_fixtures/ws_vectors.json` is
-//! the output of CLIProxyAPI's own handler helpers (`zz_rsfix_ws_test.go`,
-//! `TestRSFixWSVectors`). Expected values never come from this crate.
+//! WebSocket request normalization and retained-state regressions.
 
 use super::*;
 use crate::websocket_tools::{Retained, prepare_fallback_turn};
@@ -8,7 +6,7 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 static VECTORS: LazyLock<Vec<Value>> = LazyLock::new(|| {
-    serde_json::from_str::<Value>(include_str!("../tests/ws_fixtures/ws_vectors.json"))
+    serde_json::from_str::<Value>(include_str!("../tests/fixtures/websocket_requests.json"))
         .unwrap()
         .as_array()
         .unwrap()
