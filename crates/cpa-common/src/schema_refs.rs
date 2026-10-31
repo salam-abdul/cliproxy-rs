@@ -1,5 +1,7 @@
 use crate::json::GoValue;
-use crate::schema_support::{contains_seq, decode_first, merge_hint, pointer_unescape, ref_name};
+use crate::schema_support::{
+    contains_seq, decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, pointer_unescape, ref_name,
+};
 use std::collections::{BTreeMap, HashMap};
 // ---------------------------------------------------------------------------------------
 // Phase 0: malformed object repair (Go's `any` model)
@@ -39,13 +41,6 @@ impl Budget {
         self.sizes.insert(reference.to_owned(), size);
         size
     }
-}
-
-fn is_name_map_keyword(key: &str) -> bool {
-    matches!(
-        key,
-        "properties" | "patternProperties" | "dependentSchemas" | "dependencies" | "$defs" | "definitions"
-    )
 }
 
 fn is_definitions(key: &str) -> bool {
@@ -188,7 +183,7 @@ fn value_size(value: &GoValue, for_clean: bool, names: bool) -> usize {
                     work.push((
                         item,
                         clean && (names || !is_literal_value_keyword(key.as_bytes())),
-                        !names && is_name_map_keyword(key),
+                        !names && is_name_map_keyword(key.as_bytes()),
                     ));
                 }
             }
@@ -246,7 +241,7 @@ fn resolve_local_refs(
                 if is_literal_value_keyword(key.as_bytes()) {
                     results.push(item.clone());
                 } else {
-                    work.push(Work::Visit(item, is_name_map_keyword(key)));
+                    work.push(Work::Visit(item, is_name_map_keyword(key.as_bytes())));
                 }
             }
             Work::Visit(value, names) => match value {
@@ -478,7 +473,7 @@ fn resolve_schema_entry(
     if is_literal_value_keyword(key.as_bytes()) {
         return item.clone();
     }
-    if is_name_map_keyword(key)
+    if is_name_map_keyword(key.as_bytes())
         && let GoValue::Object(names) = item
     {
         return GoValue::Object(
@@ -534,8 +529,4 @@ fn cyclic_ref_fallback(node: &Map, target: &GoValue, reference: &str) -> Map {
         GoValue::String(String::from_utf8_lossy(&description).into_owned()),
     );
     out
-}
-
-fn is_literal_value_keyword(k: &[u8]) -> bool {
-    matches!(k, b"default" | b"example" | b"examples" | b"const" | b"enum")
 }

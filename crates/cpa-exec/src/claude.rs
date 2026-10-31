@@ -361,11 +361,7 @@ impl ClaudeExecutor {
                 // EnsurePublished): a stream that never carried usage records nothing.
                 req.usage.usage_required();
                 let (usage, capture) = (req.usage.clone(), req.capture().clone());
-                let relayed = if req.response_format == Format::Claude {
-                    stream::relay(raw, reverse, done, usage, capture)
-                } else {
-                    stream::relay_translated(raw, reverse, done, usage, capture)
-                };
+                let relayed = stream::relay(raw, reverse, done, usage, capture);
                 ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
             }
             ResponseBody::Stream(raw) => {

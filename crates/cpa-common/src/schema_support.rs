@@ -2,6 +2,19 @@
 
 use crate::json::{self as gj, GoValue};
 
+/// Values of these keywords are client data, never subschemas.
+pub(super) fn is_literal_value_keyword(key: &[u8]) -> bool {
+    matches!(key, b"default" | b"example" | b"examples" | b"const" | b"enum")
+}
+
+/// These keywords map author-chosen names to schemas.
+pub(super) fn is_name_map_keyword(key: &[u8]) -> bool {
+    matches!(
+        key,
+        b"properties" | b"patternProperties" | b"dependentSchemas" | b"dependencies" | b"$defs" | b"definitions"
+    )
+}
+
 pub(super) fn ref_name(reference: &[u8]) -> Vec<u8> {
     match reference.iter().rposition(|&c| c == b'/') {
         Some(i) if i + 1 < reference.len() => pointer_unescape(&reference[i + 1..]),

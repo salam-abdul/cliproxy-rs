@@ -259,27 +259,6 @@ pub(crate) fn relay(
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
 ) -> ExecStream {
-    relay_with(body, reverse, done, usage, capture)
-}
-
-/// [`relay`] for a translated client; terminal events are observed before translation.
-pub(crate) fn relay_translated(
-    body: ExecStream,
-    reverse: Arc<Reverse>,
-    done: OnComplete,
-    usage: cpa_core::exec::UsageSink,
-    capture: cpa_core::exec::CaptureSink,
-) -> ExecStream {
-    relay_with(body, reverse, done, usage, capture)
-}
-
-fn relay_with(
-    body: ExecStream,
-    reverse: Arc<Reverse>,
-    done: OnComplete,
-    usage: cpa_core::exec::UsageSink,
-    capture: cpa_core::exec::CaptureSink,
-) -> ExecStream {
     let relay = Relay {
         usage,
         capture,
@@ -448,36 +427,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn translated_streams_wait_for_a_complete_terminal_event() {
+    async fn relay_waits_for_a_complete_terminal_event() {
         let input = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n";
-        for translated in [false, true] {
-            let open = futures_util::stream::iter([Ok(Bytes::from_static(input))])
-                .chain(futures_util::stream::pending())
-                .boxed();
-            let mut stream = if translated {
-                relay_translated(
-                    open,
-                    Arc::default(),
-                    Box::new(|_| {}),
-                    Default::default(),
-                    Default::default(),
-                )
-            } else {
-                relay(
-                    open,
-                    Arc::default(),
-                    Box::new(|_| {}),
-                    Default::default(),
-                    Default::default(),
-                )
-            };
-            assert!(stream.next().await.is_some());
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
-                    .await
-                    .is_err()
-            );
-        }
+        let open = futures_util::stream::iter([Ok(Bytes::from_static(input))])
+            .chain(futures_util::stream::pending())
+            .boxed();
+        let mut stream = relay(
+            open,
+            Arc::default(),
+            Box::new(|_| {}),
+            Default::default(),
+            Default::default(),
+        );
+        assert!(stream.next().await.is_some());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

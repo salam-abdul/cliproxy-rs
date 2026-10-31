@@ -343,16 +343,7 @@ impl Tree {
                         if is_literal_value_keyword(&key) {
                             continue;
                         }
-                        let mode = if matches!(
-                            key.as_slice(),
-                            b"properties"
-                                | b"patternProperties"
-                                | b"dependentSchemas"
-                                | b"dependencies"
-                                | b"$defs"
-                                | b"definitions"
-                        ) && self.object(child)
-                        {
+                        let mode = if is_name_map_keyword(&key) && self.object(child) {
                             Mode::Names
                         } else if self.array(child) {
                             Mode::List

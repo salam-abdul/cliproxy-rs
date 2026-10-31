@@ -9,7 +9,9 @@ use crate::schema_path::{
     delete as schema_delete, get as schema_get, set_bool as schema_set_bool, set_raw as schema_set_raw,
     set_str as schema_set_str, set_strs as schema_set_strs,
 };
-use crate::schema_support::{contains_seq, decode_first, merge_hint, ref_name};
+use crate::schema_support::{
+    contains_seq, decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, ref_name,
+};
 use std::collections::{BTreeMap, HashMap};
 
 #[path = "schema_indexed.rs"]
@@ -540,28 +542,13 @@ fn walk_fields(value: &Res<'_>, path: &[u8], schema_aware: bool, visit: &mut dyn
     }
 }
 
-/// literalValueKeywords: their values are client data, never subschemas.
-fn is_literal_value_keyword(key: &[u8]) -> bool {
-    matches!(key, b"default" | b"example" | b"examples" | b"const" | b"enum")
-}
-
 /// isPropertyDefinition: an odd run of trailing name-map keywords means `path` is a map
 /// of author-chosen names, not a schema.
 fn is_property_definition(path: &[u8]) -> bool {
     let trailing = split_path(path)
         .iter()
         .rev()
-        .take_while(|seg| {
-            matches!(
-                unescape_key(seg).as_slice(),
-                b"properties"
-                    | b"patternProperties"
-                    | b"dependentSchemas"
-                    | b"dependencies"
-                    | b"$defs"
-                    | b"definitions"
-            )
-        })
+        .take_while(|seg| is_name_map_keyword(&unescape_key(seg)))
         .count();
     trailing % 2 == 1
 }
