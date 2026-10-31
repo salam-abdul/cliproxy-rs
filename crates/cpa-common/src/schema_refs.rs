@@ -1,66 +1,10 @@
-use crate::json::{self as gj, GoValue};
+use crate::json::GoValue;
+use crate::schema_support::{contains_seq, decode_first, merge_hint, pointer_unescape, ref_name};
 use std::collections::{BTreeMap, HashMap};
-fn ref_name(reference: &[u8]) -> Vec<u8> {
-    match reference.iter().rposition(|&c| c == b'/') {
-        Some(i) if i + 1 < reference.len() => pointer_unescape(&reference[i + 1..]),
-        _ => reference.to_vec(),
-    }
-}
-
-/// `~1` -> `/`, then `~0` -> `~` (two strings.ReplaceAll passes).
-fn pointer_unescape(part: &[u8]) -> Vec<u8> {
-    let replace = |s: &[u8], from: &[u8], to: u8| {
-        let mut out = Vec::with_capacity(s.len());
-        let mut i = 0;
-        while i < s.len() {
-            if s[i..].starts_with(from) {
-                out.push(to);
-                i += from.len();
-            } else {
-                out.push(s[i]);
-                i += 1;
-            }
-        }
-        out
-    };
-    replace(&replace(part, b"~1", b'/'), b"~0", b'~')
-}
-
 // ---------------------------------------------------------------------------------------
 // Phase 0: malformed object repair (Go's `any` model)
 
 type Map = BTreeMap<String, GoValue>;
-
-/// json.Decoder.Decode: only the first value is decoded; the decoder reports bytes after
-/// it on the next call, so they never fail this one.
-fn merge_hint(existing: &[u8], hint: &[u8]) -> Vec<u8> {
-    if existing.is_empty() {
-        return hint.to_vec();
-    }
-    if existing == hint
-        || existing.starts_with(&[hint, b" ("].concat())
-        || contains_seq(existing, &[&b"("[..], hint, b")"].concat())
-    {
-        return existing.to_vec();
-    }
-    [existing, b" (", hint, b")"].concat()
-}
-
-fn contains_seq(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-/// mergeHint: an existing copy of the hint is kept as is.
-fn decode_first(text: &[u8]) -> Option<GoValue> {
-    let start = text.iter().position(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'))?;
-    let rest = &text[start..];
-    let end = match rest[0] {
-        b't' | b'n' => 4,
-        b'f' => 5,
-        _ => gj::parse(rest).raw.len(),
-    };
-    GoValue::parse(rest.get(..end)?)
-}
 
 /// maxInlinedSchemaBytes: shared definitions fan out once per reference, so expansions past
 /// this budget degrade to a typed hint like cycles do.

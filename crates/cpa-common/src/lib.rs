@@ -84,5 +84,6 @@ pub mod quota;
 pub mod wirejson;
 
 mod schema_refs;
+mod schema_support;
 
 pub mod schema_path;
