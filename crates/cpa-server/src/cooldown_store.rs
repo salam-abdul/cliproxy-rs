@@ -126,14 +126,14 @@ mod go_time {
 /// extension, else a sanitized file name.
 fn relative_path(dir: &Path, record: &Record) -> Option<PathBuf> {
     match &record.auth_file {
-        Some(file) if file.is_absolute() => match file.strip_prefix(dir) {
+        Some(file) => match file.strip_prefix(dir) {
             Ok(rel) if !rel.as_os_str().is_empty() => cds_path_for_rel(rel),
-            _ => file
+            _ if file.is_absolute() => file
                 .file_name()
                 .and_then(|n| sanitize(&n.to_string_lossy()))
                 .map(PathBuf::from),
+            _ => cds_path_for_rel(file),
         },
-        Some(file) => cds_path_for_rel(file),
         None => sanitize(record.auth_id.trim()).map(PathBuf::from),
     }
 }
@@ -311,6 +311,19 @@ mod tests {
         assert_eq!(path(&rec(Some("../escape.json"), "x")), None);
         assert_eq!(path(&rec(None, "cfg:key/0")).as_deref(), Some("cfg_key_0.cds"));
         assert_eq!(path(&rec(None, "...")), None);
+    }
+
+    #[test]
+    fn relative_auth_dir_does_not_double_prefix_cooldown_file() {
+        let record = Record {
+            auth_id: "team-a".into(),
+            auth_file: Some(PathBuf::from("auth/sub/team a.json")),
+            ..Default::default()
+        };
+        assert_eq!(
+            relative_path(Path::new("auth"), &record),
+            Some(PathBuf::from("sub/team_a.cds"))
+        );
     }
 
     /// Go `FileCooldownStateStore` output for the same `MarkResult` sequence
