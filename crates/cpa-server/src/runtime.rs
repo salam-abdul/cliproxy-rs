@@ -293,6 +293,7 @@ impl Runtime {
         let admit = admission(registry, &aliases, &scope, &self.executors);
         // `soonest-reset` ranks by the quota windows the executors last observed.
         let now = std::time::SystemTime::now();
+        let cap = policy.max_trusted_cooldown;
         let ranks = |c: &Credential| {
             let provider = c.provider.trim().to_ascii_lowercase();
             let snapshot = match provider.as_str() {
@@ -301,7 +302,13 @@ impl Runtime {
                 _ => None,
             };
             snapshot.map_or_else(crate::scheduler::Windows::default, |s| {
-                crate::scheduler::Windows::observed(&provider, &s.signals, s.observed_at, now)
+                let mut windows = crate::scheduler::Windows::observed(&provider, &s.signals, s.observed_at, now);
+                // `max-trusted-cooldown` bounds trust in an observed exhausted window as in
+                // a cooldown: past the bound, the next request may probe the account.
+                if !cap.is_zero() && s.observed_at.checked_add(cap).is_some_and(|end| end <= now) {
+                    windows.exhausted = false;
+                }
+                windows
             })
         };
         let mut lease = self.store.select_ranked(selection, policy, &admit, &ranks)?;
