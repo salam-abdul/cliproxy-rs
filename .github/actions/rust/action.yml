@@ -1,0 +1,46 @@
+name: Rust
+description: Install BoringSSL's build tools, the pinned Rust toolchain and the cargo cache.
+
+inputs:
+  toolchain:
+    description: Toolchain to install and make the default.
+    required: true
+  components:
+    description: Comma-separated rustup components.
+    default: ""
+  target:
+    description: Extra rustup target.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Build tools (Linux)
+      if: runner.os == 'Linux'
+      # BoringSSL (through btls-sys) needs cmake, clang and perl; bindgen needs libclang.
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang libclang-dev perl
+    - name: Build tools (Windows)
+      if: runner.os == 'Windows'
+      # btls-sys keeps BoringSSL's assembly on a native MSVC build, and BoringSSL assembles
+      # x86_64 Windows code with NASM, which the image lacks. bindgen needs libclang.
+      shell: bash
+      run: |
+        choco install nasm --no-progress -y
+        printf '%s\n' 'C:\Program Files\NASM' >> "$GITHUB_PATH"
+        printf 'LIBCLANG_PATH=%s\n' 'C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+    - name: Toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        args=(--profile minimal)
+        if [ -n "$COMPONENTS" ]; then args+=(--component "$COMPONENTS"); fi
+        if [ -n "$TARGET" ]; then args+=(--target "$TARGET"); fi
+        rustup toolchain install "$TOOLCHAIN" "${args[@]}"
+        rustup default "$TOOLCHAIN"
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}

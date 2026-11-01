@@ -1,14 +1,12 @@
 # cliproxy-rs
 
-A personal Rust fork of [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs), based on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Build and update it from source; this fork does not publish binaries or packages.
+A personal Rust fork of [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs), itself based on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Build it from source; this fork publishes no binaries, packages or images.
 
-## Workflows
+## What it does
 
-- **Native Claude:** one conversation stays on one eligible subscription account across Claude Code, Desktop and Zed ACP. The CONNECT transport preserves request bodies, model names, beta headers and Remote Control. Unknown quota fails closed; ambiguous transport failures are not replayed.
-- **Translating proxy:** the existing Anthropic, OpenAI and Gemini endpoints support built-in providers, API keys, streaming, account selection and failover.
-- **Local management:** the embedded dashboard manages accounts, configuration, usage and client setup.
-
-Native Claude setup is in [native/README.md](native/README.md). Custom base URLs use the translating proxy and have different semantics.
+- **Native Claude routing.** One Claude Code, Desktop or Zed conversation stays on one eligible subscription account. Request bodies, model names, beta headers and Remote Control pass through unchanged. Unknown quota fails closed, and an ambiguous transport failure is never replayed. Setup: [native/README.md](native/README.md).
+- **Translating proxy.** Anthropic, OpenAI and Gemini endpoints over built-in providers and API keys, with streaming, account selection and failover. Custom base URLs use this path, with different semantics from native routing.
+- **Local management.** The embedded dashboard manages accounts, configuration, usage and client setup.
 
 ## Build and run
 
@@ -17,26 +15,29 @@ cargo build --release --locked -p cliproxy
 ./target/release/cliproxy --config /path/to/config.yaml
 ```
 
-The dashboard assets are checked in. After changing the dashboard, run `npm ci` and `npm run build` in `ui/` before building Rust. See [installation](docs/INSTALL.md) for prerequisites and local updates.
-
-Keep the listener on loopback, configure separate client and management keys, and protect the credential directory. Use one refresh owner per auth directory. Live credentials, conversations and operational records stay outside this repository.
+Keep the listener on loopback, configure separate client and management keys, and protect the credential directory. Use one credential-refresh owner per auth directory. Live credentials, conversations and operational records stay outside this repository.
 
 ## Documentation
 
-- [Configuration](docs/CONFIGURATION.md): settings, routing and environment variables.
-- [Local installation](docs/INSTALL.md): builds and manual updates.
-- [Native Claude](native/README.md): Claude Code, Desktop and Zed setup and qualification.
-- [Upstream checkpoints](docs/UPSTREAM-REVIEW.md): reviewed hashes and remaining ports.
+| Page | Covers |
+| --- | --- |
+| [Configuration](docs/CONFIGURATION.md) | Settings, routing and environment variables |
+| [Installation](docs/INSTALL.md) | Prerequisites, builds, manual updates and the local container |
+| [Native Claude](native/README.md) | Claude Code, Desktop and Zed setup, routing behavior and qualification |
+| [Dashboard](ui/README.md) | Building the embedded dashboard |
+| [Upstream review](docs/UPSTREAM-REVIEW.md) | Reviewed upstream hashes and pending ports |
+| [Patched crates](vendor/README.md) | Vendored third-party crates and their changes |
 
 ## Development
 
-Use focused Rust regression tests with private auth directories and local mock
-upstreams. CI checks the workspace with external networking denied.
+Tests use private auth directories and local mock upstreams; CI runs them with external networking denied. These are the checks CI runs, scoped down for local use:
 
 ```sh
 cargo fmt --all --check
 CARGO_BUILD_JOBS=2 cargo clippy --workspace --all-targets --locked -- -D warnings
-CARGO_BUILD_JOBS=2 cargo test --workspace --locked
+CARGO_BUILD_JOBS=2 cargo test -p <crate> <filter>
 ```
+
+The dashboard's built assets in `ui/dist` are checked in and embedded. After changing `ui/src`, rebuild them as described in [ui/README.md](ui/README.md) and commit the result. Contributor and agent rules are in [AGENTS.md](AGENTS.md).
 
 MIT. Preserve [LICENSE](LICENSE) and third-party notices.

@@ -1,64 +1,68 @@
 # cliproxy-rs
 
-A private personal fork. Preserve native Claude CLI/Desktop/Zed workflows and existing
-built-in providers. Do not publish packages, releases or images, or replace the running
-installation without an explicit request.
+A private Rust fork of CLIProxyAPI. One binary serves a translating proxy (Anthropic, OpenAI and Gemini endpoints over built-in providers), native Claude routing for Claude Code, Desktop and Zed, and an embedded management dashboard.
 
-## Scope and layout
+| Path | Owns |
+| --- | --- |
+| `crates/cpa-core` | Configuration and credential formats. No networking. |
+| `crates/cpa-common` | Provider-neutral helpers, including Go string, URL and JSON semantics. |
+| `crates/cpa-translate` | Anthropic, OpenAI and Gemini translation. |
+| `crates/cpa-exec` | Provider wire formats, authentication and HTTP transports. |
+| `crates/cpa-server` | Routes, client authentication, credential selection, native Claude routing and management. |
+| `crates/cpa-store`, `crates/cpa-home` | Remote configuration and credential stores, and Home mode. |
+| `crates/cliproxy` | Binary and CLI. |
+| `ui/` | Dashboard. `ui/dist` is checked in and embedded in the binary. |
+| `native/` | Native client installer, launcher, management command and Zed ACP adapter. |
+| `vendor/` | Patched third-party crates. |
 
-Production behavior and focused Rust regressions define this fork. Reuse upstream fixes
-selectively; record reviewed-through hashes and unfinished work in
-`docs/UPSTREAM-REVIEW.md`. Do not add Go code, differential harnesses, upstream parity
-corpora or historical benchmark reports.
+## Rules
 
-- `cpa-core`: configuration and credential formats; no networking.
-- `cpa-common`: shared provider-neutral helpers.
-- `cpa-translate`: Anthropic, OpenAI and Gemini translation.
-- `cpa-exec`: provider wire formats, authentication and HTTP transports.
-- `cpa-server`: routes, client authentication, credential selection and management.
-- `cpa-store`, `cpa-home`: remote stores and Home mode.
-- `cliproxy`: binary and CLI; `ui/`: dashboard; `native/`: native client integration.
+These hold for every task. A direct instruction from the user for the task wins over them: say once that you are following it.
 
-Keep operation docs in README, `docs/CONFIGURATION.md`, `docs/INSTALL.md` and
-`native/README.md`. Keep plans, progress logs and architecture reports outside the repo.
-Comments should explain completed behavior and non-obvious constraints concisely.
+- **Fork scope.** Preserve native Claude CLI, Desktop and Zed workflows and the existing built-in providers. Port upstream fixes selectively and record reviewed-through hashes and pending decisions in `docs/UPSTREAM-REVIEW.md`. Never add Go code, differential harnesses, upstream parity corpora or benchmark reports.
+- **Running installation.** The installed service, its auth directory and `~/.config/cliproxy-native` and `~/.local/state/cliproxy-native` belong to the user. Do not stop, replace or reconfigure them, or sign accounts in or out, without an explicit request. Never run a second credential-refresh owner against an auth directory. Never publish packages, releases or images.
+- **Byte fidelity.** Forward request and response bytes unchanged unless a deliberate rule requires an edit, and then edit by path. Never re-serialize JSON to pass it through.
+- **No replay.** Never resend inference once the upstream may have received it: after an ambiguous response, a partial stream, a transport failure or a cancellation after the send. Failover happens only before the request reached the upstream.
+- **Isolation and admission.** Keep each credential's tokens, cooldowns and proxy settings separate. Authorization fails closed, and native quota admission uses fresh state: unknown quota refuses rather than guessing.
+- **Logs.** Upstream capture goes only through `crates/cpa-server/src/request_logging.rs`, which redacts sensitive headers and URLs and spools large sections. Never log captured bytes, tokens or keys anywhere else.
+- **Private data.** Never commit credentials, account or organization details, quota records, sessions, conversations, local user paths or live test logs. Fixtures are synthetic.
+- **Failing tests.** Never change an expected value, or loosen, skip or delete a test, to make a failure go away. Find the cause; if the test itself is wrong, show the evidence.
+- **Scope.** Add no doc, comment, refactor or file the task does not need. A config key, CLI flag, route, dashboard element, dependency or workflow that the request does not name needs approval first: say what it is for and which existing path you checked.
+- **Code text.** No plan IDs, ticket numbers or "see the plan" in code, comments, test names or docs. Write the reason itself. Plans, progress logs and reports stay outside the repo.
+- **Evidence.** Say "works", "fixed", "safe", "covered" or "pre-existing" only with the command output or file:line that shows it, from a check that could have failed. Name what you could not check. A subagent's report is a claim: check it on disk before you act on it.
+- **Delegation.** Delegate only when the user asks. Default to one agent and never run more than three for a task without a new request. Agents do not delegate further, use medium reasoning unless the user asks for more, and review only when asked.
+- **Writing.** Lead with the point. No acknowledgment, praise, filler or em dashes.
 
-## Delegation
+Read these when the task calls for them:
 
-- Delegate only when the user explicitly requests it; use the fewest agents needed.
-- Default to one focused agent; never create more than three direct agents for a task
-  without a new explicit request. Agents must not delegate further.
-- Use medium reasoning for authorized agents unless the user requests higher.
-- Run review agents only when explicitly requested.
+| Read | When |
+| --- | --- |
+| [`rust.md`](.agents/rules/rust.md) | Changing or reviewing Rust code |
+| [`testing.md`](.agents/rules/testing.md) | Writing, running or debugging tests, and before any commit |
+| [`writing.md`](.agents/rules/writing.md) | Writing docs, comments, commit messages or reports |
 
-## Behavior and safety
+## Commands
 
-- Forward request/response bytes unchanged unless a deliberate rule requires edits.
-  Never re-serialize JSON just to pass it through.
-- Preserve credential isolation, fail-closed authorization and fresh native quota
-  admission. Never replay inference after an ambiguous response or transport failure.
-- Request preparation must be linear in body size: walk once and edit by path.
-  `crates/cpa-exec/src/claude/signals.rs` is an example.
-- Upstream capture uses `crates/cpa-server/src/request_logging.rs`, which redacts
-  sensitive headers/URLs and spools large sections. Never log captured bytes elsewhere.
-- Never commit credentials, real account/organization details, private quota records,
-  sessions, conversations, local user paths or live test logs. Fixtures are synthetic.
-- Mark deliberate implementation ceilings with a `ponytail:` comment and an upgrade path.
+| Command | Use |
+| --- | --- |
+| `CARGO_BUILD_JOBS=2 cargo test -p <crate> <filter>` | Iterate on the crates you touch. The whole suite is slow and memory-heavy. |
+| `cargo fmt --all --check` | Format gate. |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint gate. CI also runs it for `x86_64-pc-windows-msvc`. |
+| `cargo nextest run --workspace --locked --profile ci` | The CI test run. `.config/nextest.toml` runs the heap gate and wall-clock tests alone. |
+| `cargo test --locked --manifest-path vendor/gjson/Cargo.toml` | Tests of the patched gjson, which is outside the workspace. |
+| `npm ci && npm run check && npm test && npm run build` (in `ui/`) | Dashboard type check, unit tests, bundle and size budgets. |
+| `node scripts/dashboard-check.mjs` (in `ui/`) | Dashboard browser checks with every request mocked. |
+| `python3 native/test.py` | Native routing wire tests. Build the binaries first (`native/README.md`). |
+| `tools/claude-cache-live.sh` | Live prompt-cache qualification. Spends real tokens; run it only by hand. |
 
-## Validation
+## Docs
 
-Use focused Rust tests and local mocks. Every server test gets a private `auth-dir` and
-uses `cpa_server::testing::runtime`; never fall back to real credentials or provider
-accounts. PostgreSQL tests need local server binaries; CI denies external networking.
+Operation docs live only in these files. When a behavior changes, update the page that owns it.
 
-The whole suite is slow and memory-heavy. Iterate on affected crates or filters, e.g.
-`CARGO_BUILD_JOBS=2 cargo test -p cpa-exec kimi`. CI runs formatting, clippy with warnings
-as errors and the workspace tests. Keep meaningful resource bounds and regressions;
-performance claims require a controlled measurement of this fork.
-
-Prompt-cache changes preserve semantics and stable prefixes. Before merge, manually
-qualify warm, changed-context and idle continuations with returned cache-read/write
-usage using `tools/claude-cache-live.sh`. Never send inference keepalive pings.
-
-Review byte fidelity, credential/log isolation, authorization and no-replay behavior,
-test isolation and superlinear body processing, in that order. Skip formatter/linter nits.
+- [README](README.md): what the fork is, build and run, development checks.
+- [Configuration](docs/CONFIGURATION.md): settings, routing and environment variables.
+- [Installation](docs/INSTALL.md): prerequisites, builds, manual updates and the local container.
+- [Native Claude](native/README.md): routing behavior, install, state and qualification.
+- [Upstream review](docs/UPSTREAM-REVIEW.md): reviewed upstream hashes and pending ports.
+- [Dashboard](ui/README.md): build, budgets and page layout.
+- [Patched crates](vendor/README.md): what each vendored crate changes.

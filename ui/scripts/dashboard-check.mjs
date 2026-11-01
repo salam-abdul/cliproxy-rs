@@ -2,7 +2,8 @@
 // CHROME_PATH=... node scripts/dashboard-check.mjs
 import { chromium } from "playwright-core";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 
 const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH });
@@ -233,7 +234,7 @@ try {
   await page.getByRole("button",{name:"Disable account",exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
-  await page.screenshot({path:"/private/tmp/cliproxy-accounts-mobile.png",fullPage:true});
+  await page.screenshot({path:join(tmpdir(),"cliproxy-accounts-mobile.png"),fullPage:true});
   await page.setViewportSize({width:1280,height:900});
   if (process.env.DASHBOARD_CAPTURE) await page.screenshot({ path: process.env.DASHBOARD_CAPTURE, fullPage: true });
   await page.goto("http://dashboard.test/management.html#overview");
@@ -285,4 +286,4 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
   console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, quota polling, policy errors, mobile and three destinations");
-} catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:"/private/tmp/cliproxy-dashboard-failure.png",fullPage:true}); throw error; } finally { await browser.close(); }
+} catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
