@@ -9,38 +9,6 @@ These are inclusive boundaries for screened default-branch history, not merge or
 | R — [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs) | `master` | `b7ab292f47c61263da16d0e07358f492ad4dabf4` |
 | S — [sub-api-proxy](https://github.com/DarkEden-coding/sub-api-proxy) | `main` | `d4c10513147821bafe99315ad520e265d46dfe69` |
 
-## Completed ports
-
-Implementation details live in the resolving commits.
-
-| IDs / completed portion | Fork commit | Result |
-| --- | --- | --- |
-| U07, U01, U03 | `cc3ffc1` | Isolated test catalogs, safe OAuth retry, RESP limits. |
-| U02 + U14 credentials | `28f94dc` | Preserve rotated credentials across edits and reloads. |
-| U08 core | `67fbb4d` | Stack-safe GoValue operations and built-in walkers. |
-| U08b | `ca733eb` | Stack-safe AnyValue operations and Claude tool-schema normalization. |
-| U14 config + U15 | `1962b30` | Conditional atomic config saves, log-path safety and query redaction. |
-| U11, U12 + U09 requests/responses | `8fbb788` | Payload batching, tool-name caching/restoration, concurrency and context stops. |
-| U13 + U08c walkers | `8856586` | Bounded references, schema/argument cleanup and iterative consuming walkers. |
-| U04, U05, U06 + U09 server, U10 rate limits, S01 translating | `42af939` | WebSocket reauthorization, stream/error delivery safety and scoped admission fixes. |
-| U08c — schema batching | `4e33741` | Indexed ordinary/complex schema passes, structural merges and batched edits; 18 focused regressions passed. |
-| U10 — setup | `77b50f7` | Setup-only timeouts, reload-isolated transports and pre-send-only retry; 480 executor tests and 2 integration tests passed. |
-| S01 — native | `a8b825d` | Bounded rejection inspection and account/model-scoped entitlement cooldowns; 35 native tests passed. |
-
-Latest verification: **2026-10-29**. All 480 executor tests, 18 schema regressions,
-35 native tests and 58 selected server integration tests passed, along with the
-core/translation suites, workspace clippy and formatting. This was not a
-whole-workspace test run or installation qualification.
-
-Schema rewrites treat property names literally and use the last duplicate value.
-Complex rewrites may compact JSON or reorder `required` entries. Passthrough bytes
-remain unchanged. Connection setup timeouts are opt-in; native CONNECT retains its
-existing no-replay behavior.
-
-Cleanup `562303d` removed Go sources/generators, differential and historical
-benchmark tooling, bulk parity corpora and obsolete docs. Focused Rust regressions
-remain. `docs/` contains configuration, installation and this checkpoint.
-
 ## Review of 2026-10-31
 
 The saved hashes were ancestors of all three source heads. Compared with fork
@@ -50,17 +18,17 @@ The saved hashes were ancestors of all three source heads. Compared with fork
 with focused source comparisons, not a full source audit or a port. No live
 provider calls or installation qualification were run.
 
-| Candidate | Source commits | Fork disposition |
+After independent impact review, only the decisions below remain open. Resolved
+work and its tests are in Git commits.
+
+| Pending decision | Source commits | Gate before porting |
 | --- | --- | --- |
-| Disable the AI Studio WebSocket in Home mode | G `a6b4477` | Priority authorization fix: the fork registers `/v1/ws` in Home mode while `home::overlay` disables `ws-auth` and clears local API keys. An available Home node accepts an unauthenticated relay connection. |
-| Bound pre-auth request capture and zstd log decoding | G `477605d`, `ad8bdd3` | Priority safety fix: `request_logging::capture` can eagerly read a body before client authentication, and its decode has no output limit. Preserve raw wire bytes while bounding capture. |
-| Preserve Claude tool-result errors | G `81de4b9`, `068fe15` | Port to Gemini and Antigravity translators: the fork currently writes `response.result` even when `tool_result.is_error` is true. |
-| Classify SIWC credentials as OAuth | R `77267c1` | Port the `use_siwc: true` precedence before API-key classification; cover mixed metadata. |
-| Reconcile stream terminal and retry rules | G `aa4130e`, `f013eb6`, `86a1aab`; R `80977ac`, `186ee6e` | Compare with the fork's existing truncation checks. Retain partial usage; never cool a credential for a locally detected truncation or replay after output. |
-| Preserve Claude and Codex conversation features | G `12d97cf`, `dbb7062`, `1d45a5f` | Evaluate mid-conversation `tool_addition`, recognized compaction capsules and forced-tool restrictions with synthetic native-client fixtures. |
-| Codex credential recovery | G `514d09f`, `43068c8` | Consider targeted re-sign-in and sanitized terminal-renewal status. Check relative auth-dir cooldown paths first; do not add automatic inference verification. |
-| Usage and dashboard history | G `89e472f` through `82deffb`, S `385b972`; R `7c3a83e` | Reconcile structured usage and speed metrics with the fork's durable history. Quota-window retention is present in the dashboard; review its 403 guidance. |
-| WebSocket late interrupt | S `d4c1051` | Applies only if local HTTP-turn interrupt support is added; no matching fork control path exists now. |
+| Stream terminal and retry rules | G `aa4130e`, `f013eb6`, `86a1aab`; R `80977ac`, `186ee6e` | Existing truncation errors are request-scoped. Establish protocol-specific EOF and partial-usage contracts with local mocks; keep explicit early 429 failover separate from truncation. Never replay after ambiguous delivery or emitted output. |
+| Mid-conversation Claude tool additions | G `12d97cf` | Confirm the native Claude-to-Codex path receives `tool_addition`, then test its placement and tool-name identity with synthetic fixtures. |
+| Codex compaction capsules | G `dbb7062` | Confirm recognized CPA capsules reach Codex, then preserve native OpenAI capsules unchanged. |
+| Forced-tool restrictions | G `1d45a5f` | Upstream relaxes required or named tool choice to `auto`; decide explicitly whether that semantic downgrade is acceptable for a supported model. |
+| Codex credential recovery | G `514d09f` | Define sanitized terminal-renewal state, account binding and race handling before adding targeted re-sign-in. Never perform automatic inference verification. |
+| Structured usage and speed metrics | G `89e472f` through `82deffb`; S `385b972` | Compare with durable history; define TTFT, token-rate denominators, failures and missing coverage before adding fields. |
 
 Plugin host, packaged releases, CI, Go parity fixtures, benchmarks, discovery,
 and unrelated dashboard branding stay outside this fork's scope. The reviewed
@@ -69,17 +37,15 @@ is resolved or explicitly dropped.
 
 ## Pick up next
 
-Start with the Home WebSocket gate and bounded request capture, then Claude
-tool-result semantics and SIWC classification. Reconcile the other candidates
-against current code before porting. The next upstream review starts from the
-saved hashes above.
+Choose one pending decision only after its local contract is established. The
+next upstream review starts from the saved hashes above.
 
 ## Handoff
 
 - Before porting, reconcile this queue with current code. Use focused Rust regressions,
   private auth directories and local mock upstreams; no Go parity infrastructure.
-  Record completed IDs with their fork commit and validation; preserve unfinished
-  parts of split items.
+  Record completed work and its tests in its resolving commit; preserve unfinished
+  parts of split items here.
 - Keep native Claude CLI/Desktop/Zed fidelity and built-in providers. Omit plugin
   and distributed-product portions of mixed commits. Scope and operational setup
   are in [README](../README.md) and the [native guide](../native/README.md).
