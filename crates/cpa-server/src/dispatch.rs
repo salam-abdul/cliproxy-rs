@@ -2907,6 +2907,49 @@ mod tests {
         assert_eq!(upstream_summary("status 500: {\"message\":\"m\"}"), "m");
     }
 
+    /// A stream buffered for a non-stream client: an upstream error before any event may
+    /// fail over like any status error, one after an event ends the request, since the
+    /// upstream already worked on it.
+    #[tokio::test]
+    async fn a_buffered_stream_error_after_an_event_is_terminal() {
+        let call = Call {
+            entry: Format::Claude,
+            response: Format::Claude,
+            operation: Operation::Generate,
+            model: "m".into(),
+            body: Bytes::new(),
+            stream: false,
+            alt: None,
+            headers: HeaderMap::new(),
+            caller: Caller {
+                principal: String::new(),
+                source: "authorization",
+            },
+            forced_provider: None,
+            selection_model: None,
+            execution_session: None,
+            request_path: "/v1/messages".into(),
+            peer: None,
+            turn: None,
+            media: None,
+        };
+        let overloaded = || ExecError::local(529, cpa_core::exec::FailureScope::Credential, "overloaded");
+        for (events, terminal) in [
+            (vec![Err(overloaded())], false),
+            (vec![Ok(Bytes::from_static(b"data: {}\n\n")), Err(overloaded())], true),
+        ] {
+            let response = cpa_core::exec::ExecResponse {
+                status: 200,
+                headers: HeaderMap::new(),
+                body: ResponseBody::Stream(futures_util::stream::iter(events).boxed()),
+            };
+            let Err(fault) = finish(&call, response).await else {
+                panic!("the stream failed")
+            };
+            assert_eq!(fault.terminal(), terminal);
+        }
+    }
+
     /// Hands out one grant per pick, in order, and counts the picks.
     struct Grants {
         grants: std::sync::Mutex<
