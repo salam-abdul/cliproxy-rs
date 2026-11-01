@@ -955,6 +955,7 @@ async fn run_routed(
             compact,
             trace,
             user_key: Default::default(),
+            broke: Default::default(),
         };
         return run_remote(context, remote, selection).await;
     }
@@ -1157,6 +1158,8 @@ struct RemoteContext<'a> {
     /// The client key Home authenticated on the latest pick that sent one (Go
     /// `setHomeUserAPIKeyOnGinContext`, which keeps it for the rest of the request).
     user_key: std::sync::Mutex<String>,
+    /// Credentials whose response broke off before any output: never picked again.
+    broke: std::sync::Mutex<Vec<String>>,
 }
 
 /// Go `homeRetryRoundExhaustedError`: the round ended; its timing decides the next.
@@ -1472,8 +1475,14 @@ async fn remote_round(
         // may come back once. Buffered calls exclude everything tried.
         let stream = cx.call.stream;
         let websocket = cx.call.turn.is_some();
-        let mut tried: Vec<String> = Vec::new();
-        let mut excluded: Vec<String> = Vec::new();
+        // A credential whose response broke off before any output is tried once per
+        // request: it is excluded, and refused if Home hands it out again.
+        let mut tried = cx
+            .broke
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut excluded = tried.clone();
         let mut same_retries: std::collections::HashMap<String, u32> = Default::default();
         let mut last_id = String::new();
         let mut same_pending = false;
@@ -1736,10 +1745,19 @@ async fn remote_round(
                     return Err(RemoteFault::from_attempt(fault, true));
                 }
                 Attempt::Next(fault) => {
+                    let broke = fault.broke_silently();
+                    if broke {
+                        cx.broke
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(id.clone());
+                    }
                     if stream {
-                        // Go `shouldExcludeHomeAuthAfterStreamError`.
+                        // Go `shouldExcludeHomeAuthAfterStreamError`, except that a response
+                        // that broke off is never resent to the same credential.
                         let error = &fault.error;
-                        let exclude = !(lifecycle(error) || (websocket && error.status == 426))
+                        let exclude = broke
+                            || !(lifecycle(error) || (websocket && error.status == 426))
                             || same_retries.get(&id).copied().unwrap_or(0) > 0;
                         if exclude && !excluded.contains(&id) {
                             excluded.push(id.clone());

@@ -1806,13 +1806,11 @@ mod tests {
         base
     }
 
-    /// Go's streaming Home loop: a connection-lifecycle failure (the body ended early)
-    /// lets Home hand the same credential out once more, unexcluded; a second failure
-    /// excludes it. `count` advances after each failed execution; on the wire Go's
-    /// `newAuthDispatchRequest` pins it to 1 once an exclusion list is sent. Go
-    /// `TestHomeStreamLifecycleRecoveryFailureRotatesWithoutExtraDispatch`.
+    /// A stream whose body ended before its first payload reached an upstream that had
+    /// the request, so the credential is tried once: unlike Go's lifecycle retry, the
+    /// next pick excludes it and another credential answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_lifecycle_failure_retries_the_same_credential_once() {
+    async fn a_broken_off_stream_excludes_its_credential_from_the_next_pick() {
         use std::sync::atomic::AtomicUsize;
         let truncated = Arc::new(AtomicUsize::new(0));
         let flaky = truncating_upstream(truncated.clone()).await;
@@ -1821,7 +1819,6 @@ mod tests {
         let home = scripted(
             "port: 0\nrouting: {retry: {request-retry: 0}}\n",
             vec![
-                accounted("cred-1", "sk-flaky", &flaky),
                 accounted("cred-1", "sk-flaky", &flaky),
                 accounted("cred-2", "sk-good", &good),
             ],
@@ -1835,16 +1832,16 @@ mod tests {
         let body = serde_json::json!({"model": "claude-x", "max_tokens": 8, "stream": true, "messages": [{"role": "user", "content": "hi"}]});
         let (status, _, text) = ask_with_headers(&base, "/v1/messages", body).await;
         assert_eq!(status, 200, "{text}");
-        assert_eq!(truncated.load(Ordering::SeqCst), 2, "cred-1 ran twice");
+        assert_eq!(truncated.load(Ordering::SeqCst), 1, "cred-1 ran once");
         assert_eq!(seen.lock().unwrap().len(), 1, "then cred-2");
         let requests = rpops(&home);
         let counts: Vec<i64> = requests.iter().map(|r| r["count"].as_i64().unwrap()).collect();
-        assert_eq!(counts, vec![1, 2, 1]);
+        assert_eq!(counts, vec![1, 1], "an exclusion list pins the count to 1");
         let excluded: Vec<Value> = requests
             .iter()
             .map(|r| r.get("excluded_auth_ids").cloned().unwrap_or(Value::Null))
             .collect();
-        assert_eq!(excluded, vec![Value::Null, Value::Null, serde_json::json!(["cred-1"])]);
+        assert_eq!(excluded, vec![Value::Null, serde_json::json!(["cred-1"])]);
         shutdown.cancel();
         task.await.unwrap();
     }
