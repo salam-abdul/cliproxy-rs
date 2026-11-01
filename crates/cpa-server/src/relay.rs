@@ -17,8 +17,9 @@ use axum::Router;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Request, State};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
@@ -82,8 +83,12 @@ fn observe(rt: &Weak<Runtime>, provider: &str, cause: Option<&str>) {
     }
 }
 
-/// Go's conditional auth: the client-key middleware only while `ws-auth` is on.
+/// Home cannot authorize local relay sessions: its client keys are cleared and
+/// browser registration bypasses dispatch. Normal mode honors `ws-auth`.
 async fn conditional_auth(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
+    if rt.remote_dispatch().is_some() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !ws_auth(&rt.config()) {
         return next.run(req).await;
     }

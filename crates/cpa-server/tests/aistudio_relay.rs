@@ -183,6 +183,69 @@ async fn ws_auth_off_admits_browsers_without_a_key() {
     assert!(relay_credentials(&rt, 0).await.is_empty());
 }
 
+struct Home(std::sync::atomic::AtomicBool);
+
+impl cpa_server::remote::RemoteDispatch for Home {
+    fn available(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn dispatch(
+        &self,
+        _: cpa_server::remote::RemoteRequest,
+    ) -> futures_util::future::BoxFuture<'_, Result<cpa_server::remote::RemoteGrant, cpa_server::remote::RemoteError>>
+    {
+        unreachable!("the relay must never dispatch through Home")
+    }
+
+    fn models(
+        &self,
+        _: Vec<(String, String)>,
+        _: Vec<(String, String)>,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<u8>, cpa_server::remote::ModelsError>> {
+        unreachable!("the relay must never request Home models")
+    }
+}
+
+#[tokio::test]
+async fn home_rejects_relay_handshakes_even_with_empty_client_keys() {
+    for ws_auth in [false, true] {
+        // Home clears the client keys; ws-auth alone cannot protect an open access policy.
+        let rt = runtime(&format!(
+            "oauth:\n  providers:\n    aistudio:\n      ws-auth: {ws_auth}\n"
+        ));
+        let app = router(rt.clone()).layer(axum::middleware::from_fn_with_state(
+            rt.clone(),
+            cpa_server::remote::gate,
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // The dispatcher can be installed after the router is built.
+        let home = Arc::new(Home(std::sync::atomic::AtomicBool::new(true)));
+        rt.set_remote_dispatch(Some(home.clone()));
+        let client = wreq::Client::new();
+        for available in [true, false, true] {
+            home.0.store(available, std::sync::atomic::Ordering::SeqCst);
+            for key in [None, Some("Bearer client-key")] {
+                let mut request = client.websocket(format!("ws://{addr}/v1/ws"));
+                if let Some(key) = key {
+                    request = request.header("authorization", key);
+                }
+                let response = request.send().await.unwrap();
+                assert_eq!(response.status(), if available { 404 } else { 503 });
+                assert!(relay_credentials(&rt, 0).await.is_empty());
+            }
+            let plain = client.get(format!("http://{addr}/v1/ws")).send().await.unwrap();
+            assert_eq!(plain.status(), if available { 404 } else { 503 });
+            assert!(plain.bytes().await.unwrap().is_empty());
+            let health = client.get(format!("http://{addr}/healthz")).send().await.unwrap();
+            assert_eq!(health.status(), if available { 200 } else { 503 });
+        }
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn relay_disconnect_after_stream_start_never_replays() {
     use std::sync::atomic::{AtomicUsize, Ordering};
