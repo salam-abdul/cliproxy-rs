@@ -194,11 +194,31 @@ pub fn thinking_value(t: &ThinkingSupport) -> Value {
     Value::Object(m)
 }
 
-/// Go `Auth.AuthKind()` (sdk/cliproxy/auth/classification.go): a recognised
-/// `auth_kind` attribute, then a recognised `auth_kind` metadata string, then a
-/// non-empty `api_key` attribute (`apikey`), then OAuth token metadata (`oauth`).
-/// Unrecognised kinds fall through to the next source.
+/// Go `IsCodexUseSIWC`: a true attribute wins; otherwise metadata accepts a
+/// boolean, Go-parsed boolean string, or nonzero number.
+fn uses_siwc(c: &Credential) -> bool {
+    let parse_bool = |s: &str| match s.trim() {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Some(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Some(false),
+        _ => None,
+    };
+    if c.attributes.get("use_siwc").and_then(|s| parse_bool(s)) == Some(true) {
+        return true;
+    }
+    match c.metadata.get("use_siwc") {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => parse_bool(value).unwrap_or(false),
+        Some(Value::Number(value)) => value.as_f64().is_some_and(|value| value != 0.0),
+        _ => false,
+    }
+}
+
+/// Go `Auth.AuthKind()` (sdk/cliproxy/auth/classification.go): SIWC first,
+/// then declared kind, API key, and OAuth token metadata.
 pub fn auth_kind(c: &Credential) -> Option<&'static str> {
+    if uses_siwc(c) {
+        return Some("oauth");
+    }
     let normalize = |s: &str| match s.trim().to_lowercase().as_str() {
         "apikey" | "api_key" | "api-key" => Some("apikey"),
         "oauth" | "oauth2" => Some("oauth"),
@@ -1515,6 +1535,47 @@ mod tests {
         assert_eq!(account_info(&declared), ("api_key", String::new()));
         let bare = file("b.json", serde_json::json!({"type":"claude"}), &[]);
         assert_eq!(account_info(&bare), ("", String::new()));
+    }
+
+    #[test]
+    fn siwc_credentials_are_oauth_even_with_an_explicit_api_key_kind() {
+        let cases = [
+            (
+                serde_json::json!({"type":"codex"}),
+                vec![("auth_kind", "apikey"), ("use_siwc", "true")],
+                "oauth",
+            ),
+            (
+                serde_json::json!({"type":"codex","use_siwc":true}),
+                vec![("auth_kind", "apikey")],
+                "oauth",
+            ),
+            (
+                serde_json::json!({"type":"codex","use_siwc":1}),
+                vec![("api_key", "synthetic")],
+                "oauth",
+            ),
+            (
+                serde_json::json!({"type":"codex","use_siwc":"True"}),
+                vec![("auth_kind", "apikey")],
+                "oauth",
+            ),
+            (
+                serde_json::json!({"type":"codex","use_siwc":false}),
+                vec![("auth_kind", "apikey")],
+                "apikey",
+            ),
+            (
+                serde_json::json!({"type":"codex","use_siwc":"true"}),
+                vec![("auth_kind", "apikey"), ("use_siwc", "false")],
+                "oauth",
+            ),
+        ];
+        for (meta, attrs, want) in cases {
+            let credential = file("codex.json", meta, &attrs);
+            assert_eq!(auth_kind(&credential), Some(want), "attrs: {attrs:?}");
+            assert_eq!(is_api_key(&credential), want == "apikey", "attrs: {attrs:?}");
+        }
     }
 
     fn config(provider: &str, id: &str, meta: Value, attrs: &[(&str, &str)]) -> Arc<Credential> {
