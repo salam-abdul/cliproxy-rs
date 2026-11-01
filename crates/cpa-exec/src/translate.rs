@@ -138,7 +138,7 @@ async fn transform(
             .filter(|out| !out.is_empty())
             .ok_or_else(|| {
                 publish_apply_patch_failure(&req.usage);
-                apply_patch_error()
+                crate::upstream::apply_patch_error()
             })?;
         Ok(ResponseBody::Buffered(Bytes::from(if responses {
             ensure_responses_usage_details(&out)
@@ -152,12 +152,6 @@ async fn transform(
 /// rejection publishes no tokens, even after stream usage was seen.
 fn publish_apply_patch_failure(usage: &cpa_core::exec::UsageSink) {
     usage.publish_failure(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR);
-}
-
-/// helps.ApplyPatchUpstreamErrorMessage with Go's 502 `statusErr`: a plain status error,
-/// so the conductor classifies it by status (it is not request-scoped) and fails over.
-fn apply_patch_error() -> ExecError {
-    crate::upstream::status_error(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
 /// Go's translated stream loop (claude_executor_stream.go): each upstream event goes
@@ -263,8 +257,8 @@ fn streaming(
     .boxed()
 }
 
-/// A response translator rejecting upstream data: a bad gateway, never the client's fault,
-/// classified by status like Go's plain `statusErr`.
+/// A response translator rejecting upstream data: a bad gateway, never the client's fault.
+/// The upstream already answered, so the error is request-scoped and never fails over.
 fn stream_error(error: cpa_translate::Error) -> ExecError {
     ExecError::local(502, FailureScope::Request, error.to_string())
 }
@@ -509,7 +503,6 @@ mod tests {
             .collect()
             .await;
         assert_eq!(result[0].as_ref().unwrap_err().scope, FailureScope::Request);
-        assert_eq!(apply_patch_error().scope, FailureScope::Credential);
         assert_eq!(failures.count(), 0);
         let (failures, usage) = Failures::sink();
         let reset = futures_util::stream::iter(vec![
@@ -583,7 +576,7 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.status, 502);
-        assert_eq!(error.scope, FailureScope::Credential);
+        assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(failures.count(), 1);
     }
 

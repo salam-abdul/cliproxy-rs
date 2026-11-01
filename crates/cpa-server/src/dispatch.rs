@@ -959,6 +959,9 @@ async fn run_routed(
     // Go `preferredExecutionAttemptError`: the latest failure that reached upstream wins
     // over later selection failures.
     let mut upstream: Option<Fault> = None;
+    // A response that broke off before any output fails over once per account: its
+    // account is never picked again, and it reruns neither the request nor a round.
+    let mut broke = false;
     loop {
         let mut last: Option<Fault> = None;
         let mut attempted: Vec<String> = Vec::new();
@@ -1028,6 +1031,7 @@ async fn run_routed(
                 continue;
             }
             attempted.push(lease.credential.id.clone());
+            let id = lease.credential.id.clone();
             let target = Target {
                 models: &models,
                 selection_model: &selection_model,
@@ -1041,6 +1045,10 @@ async fn run_routed(
                 Attempt::Done(done) => return Ok(done),
                 Attempt::Stop(fault) => return Err(fault.into_run_error()),
                 Attempt::Next(fault) => {
+                    if fault.broke_silently() {
+                        broke = true;
+                        pinned_exclusion.push(id);
+                    }
                     if classify::upstream_attempted(&fault.error) {
                         upstream = Some(fault.clone());
                     }
@@ -1051,6 +1059,7 @@ async fn run_routed(
         // The round's error decides retries: an attempt error when there was one, else
         // the selection failure. The response reports the latest upstream attempt when
         // there was one (Go executeMixedOnce, preferredExecutionAttemptError).
+        let last_broke = last.as_ref().is_some_and(Fault::broke_silently);
         let round_error: RunError = match (last, pick_failure) {
             (Some(fault), _) => fault.into_run_error(),
             (None, Some(failure)) => failure.into(),
@@ -1067,7 +1076,7 @@ async fn run_routed(
         let (status, retry_round) = match &round_error.failure {
             Failure::Exec(e) => (
                 classify::go_status(e),
-                classify::is_retry_round(e) && !classify::is_request_invalid(e),
+                classify::is_retry_round(e) && !classify::is_request_invalid(e) && !last_broke,
             ),
             Failure::Cooldown { .. } => (429, true),
             Failure::Unavailable {
@@ -1075,7 +1084,11 @@ async fn run_routed(
             } => (503, true),
             _ => (0, false),
         };
-        let terminal = |round_error: RunError| upstream.clone().map(Fault::into_run_error).unwrap_or(round_error);
+        let terminal = |round_error: RunError| {
+            let mut error = upstream.clone().map(Fault::into_run_error).unwrap_or(round_error);
+            error.bootstrap &= !broke;
+            error
+        };
         let credits = Credits {
             providers: &providers,
             model: &model,
@@ -2119,7 +2132,7 @@ async fn attempt(
         // Go returns stopping bootstrap failures directly, outside handler bootstrap retries.
         let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
         let mut fault = fault;
-        if stop {
+        if stop || silent {
             fault.bootstrap = None;
         } else if let Some(headers) = &fault.bootstrap {
             fault.error.addon = Some(headers.clone());
