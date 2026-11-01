@@ -326,13 +326,18 @@ fn message_contents(
                     name = id.clone();
                 }
                 let result = gemini::claude_tool_result(&block.get("content"));
-                let mut part = br#"{"functionResponse":{"name":"","response":{"result":""}}}"#.to_vec();
+                let mut part = br#"{"functionResponse":{"name":"","response":{}}}"#.to_vec();
                 gj::set_str(&mut part, "functionResponse.id", &id);
                 gj::set_str(&mut part, "functionResponse.name", sanitize_function_name(&name));
-                if result.raw {
-                    gemini::set_function_response_raw(&mut part, "functionResponse.response.result", &result.result);
+                let field = if block.get("is_error").kind == Kind::True {
+                    "functionResponse.response.error"
                 } else {
-                    gj::set_str(&mut part, "functionResponse.response.result", &result.result);
+                    "functionResponse.response.result"
+                };
+                if result.raw {
+                    gemini::set_function_response_raw(&mut part, field, &result.result);
+                } else {
+                    gj::set_str(&mut part, field, &result.result);
                 }
                 parts.push(part);
                 for (mime, data) in &result.images {
@@ -356,4 +361,29 @@ fn message_contents(
         parts = gemini::reorder_user_parts(parts);
     }
     contents.push(content_node(&role, &parts));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_error_uses_gemini_error_field() {
+        for (flag, want_error) in [("true", true), ("\"true\"", false)] {
+            let raw = format!(
+                r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"call-1","name":"lookup","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"call-1","is_error":{flag},"content":"failed"}}]}}]}}"#
+            );
+            let out: serde_json::Value =
+                serde_json::from_slice(&convert("gemini-3-flash", raw.as_bytes(), false)).unwrap();
+            let response = out["contents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|turn| turn["parts"].as_array().into_iter().flatten())
+                .find_map(|part| part.get("functionResponse"))
+                .unwrap();
+            assert_eq!(response["response"]["error"] == "failed", want_error);
+            assert_eq!(response["response"]["result"] == "failed", !want_error);
+        }
+    }
 }

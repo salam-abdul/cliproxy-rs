@@ -802,17 +802,22 @@ fn tool_result_part(
     let mut response = b"{}".to_vec();
     gj::set_str(&mut response, "id", &call_id);
     gj::set_str(&mut response, "name", map_sanitized_function_name(names, &name));
+    let field = if block.get("is_error").kind == Kind::True {
+        "response.error"
+    } else {
+        "response.result"
+    };
     if result.kind == Kind::String {
-        gj::set_str(&mut response, "response.result", &result.s);
+        gj::set_str(&mut response, field, &result.s);
     } else if result.is_array() {
         let (images, others): (Vec<Res<'_>>, Vec<Res<'_>>) = result.array().into_iter().partition(is_base64_image);
         let others: Vec<Vec<u8>> = others.iter().map(|r| r.raw.to_vec()).collect();
         match others.len() {
             0 => {
-                gj::set_str(&mut response, "response.result", "");
+                gj::set_str(&mut response, field, "");
             }
-            1 => set_function_response_raw(&mut response, "response.result", &others[0]),
-            _ => set_function_response_raw(&mut response, "response.result", &gj::join(&others)),
+            1 => set_function_response_raw(&mut response, field, &others[0]),
+            _ => set_function_response_raw(&mut response, field, &gj::join(&others)),
         }
         if !images.is_empty() {
             let images: Vec<Vec<u8>> = images.iter().map(|i| inline_data(&i.get("source"))).collect();
@@ -821,14 +826,14 @@ fn tool_result_part(
     } else if result.is_object() {
         if is_base64_image(&result) {
             gj::set_raw(&mut response, "parts", gj::join(&[inline_data(&result.get("source"))]));
-            gj::set_str(&mut response, "response.result", "");
+            gj::set_str(&mut response, field, "");
         } else {
-            set_function_response_result(&mut response, "response.result", &result);
+            set_function_response_result(&mut response, field, &result);
         }
     } else if !result.raw.is_empty() {
-        set_function_response_result(&mut response, "response.result", &result);
+        set_function_response_result(&mut response, field, &result);
     } else {
-        gj::set_str(&mut response, "response.result", "");
+        gj::set_str(&mut response, field, "");
     }
     let mut part = b"{}".to_vec();
     gj::set_raw(&mut part, "functionResponse", response);
@@ -1317,6 +1322,27 @@ pub(crate) fn split_function_response_turns(contents: Vec<Vec<u8>>) -> Vec<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_result_error_uses_antigravity_error_field() {
+        for (flag, want_error) in [("true", true), ("\"true\"", false)] {
+            let raw = format!(
+                r#"{{"type":"tool_result","tool_use_id":"lookup-1","is_error":{flag},"content":[{{"type":"text","text":"failed"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"YQ=="}}}}]}}"#
+            );
+            let block = gj::parse(raw.as_bytes());
+            let part = tool_result_part(&block, &HashMap::new(), &HashMap::new()).unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&part).unwrap();
+            assert_eq!(
+                response["functionResponse"]["response"]["error"]["text"] == "failed",
+                want_error
+            );
+            assert_eq!(
+                response["functionResponse"]["response"]["result"]["text"] == "failed",
+                !want_error
+            );
+            assert_eq!(response["functionResponse"]["parts"][0]["inlineData"]["data"], "YQ==");
+        }
+    }
 
     /// buildAntigravityWebSearchRequest as Go 6fecc6e writes it through TranslateRequest
     /// with an Antigravity `gemini-3-flash` registered with web search (the goldens run
