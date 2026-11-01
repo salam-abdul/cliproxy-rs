@@ -150,9 +150,6 @@ impl State {
             "affinity": counts.into_iter().map(|(a,n)| json!({"account":a,"sessions":n})).collect::<Vec<_>>(),
             "recent": recent
         });
-        if let Some(history) = &self.history {
-            history.record_status(&status);
-        }
         Ok(status)
     }
 }

@@ -152,7 +152,8 @@
         )}.
       {:else}Retained requests reach this period; offline gaps are unknown.{/if}
       {#if data.lostEvents}
-        {data.lostEvents} records could not be saved.{/if}
+        {data.lostEvents} records could not be saved since history began.{/if}
+      {#if data.coverageUncertain}A previous unclean shutdown may have left gaps.{/if}
     </p>
   {/if}
 </section>

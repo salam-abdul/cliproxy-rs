@@ -11,6 +11,7 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
+let historyHold, historyRelease, historyFailure = false;
 const rust = process.env.DASHBOARD_KIND === "rust";
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
@@ -35,6 +36,8 @@ await page.route("**/*", async route => {
   if (path === "/v8/management/observability/native/events") return send({events:[{type:"inference",requestId:"r",at:new Date().toISOString(),account:"a",model:"claude-opus-4-6",outcome:"success",recovered:true,usage:{input_tokens:1000,output_tokens:100,cache_read_input_tokens:10000,cache_creation_input_tokens:200,cache_creation:{ephemeral_5m_input_tokens:200,ephemeral_1h_input_tokens:0}}},{type:"failover",requestId:"r",at:new Date().toISOString(),account:"b",status:429},{type:"inference",requestId:"cancel",at:new Date().toISOString(),account:"a",outcome:"client_cancelled"}]});
   if (path === "/v8/management/observability/native/history") {
     historyChecks++;
+    if (historyHold) await historyHold;
+    if (historyFailure) return route.fulfill({status:500,json:{error:"History unavailable"}});
     const range = new URL(request.url()).searchParams.get("range") || "24h";
     const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
     const width = {"24h":3600000,"7d":21600000,"30d":86400000}[range];
@@ -144,8 +147,12 @@ try {
   const meter = page.getByRole("meter", {name:"5-hour limit remaining"});
   await meter.waitFor();
   assert.equal(await meter.getAttribute("aria-valuenow"), "64");
-  assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 1, "partial response headers retain REST-only spending");
+  assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 0, "compact Overview shows two quota windows");
   assert.equal(await page.getByRole("meter", {name:"7-day limit (Opus only) remaining"}).getAttribute("aria-valuenow"), "58");
+  await page.getByRole("button", {name:"account-a.json"}).first().click();
+  await page.getByRole("dialog", {name:/account-a.json details/}).waitFor();
+  assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 1, "account details retain additional quota windows");
+  await page.getByRole("button", {name:"Close",exact:true}).click();
 
   native = null;
   await page.reload();
@@ -232,9 +239,32 @@ try {
   await page.getByRole("heading", {name:"Top models",exact:true}).waitFor();
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
   assert.ok(historyChecks > 0,"history loads with Overview");
+  historyHold = new Promise(r => historyRelease = r);
   await page.getByRole("button",{name:"7 days"}).click();
+  await page.getByText("Loading history…").first().waitFor();
+  await page.getByRole("button",{name:"account-a.json"}).first().click();
+  const detail = page.getByRole("dialog",{name:/account-a.json details/});
+  await detail.waitFor();
+  assert.ok(await detail.getByText("Loading history…").count() > 0,"old range is hidden while the new range loads");
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('dialog') !== null),true,"modal moves focus inside");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('dialog') !== null),true,"modal traps reverse Tab");
+  await page.keyboard.press("Escape");
+  await detail.waitFor({state:"hidden"});
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('account-title')),true,"closing restores account focus");
+  historyRelease(); historyHold = null;
   await page.getByText("By requests · selected period",{exact:true}).waitFor();
   assert.ok(historyChecks > 1,"range selection loads durable history");
+  historyFailure = true;
+  await page.getByRole("button",{name:"30 days"}).click();
+  await page.getByText("History could not be loaded. Current account readings remain available.").waitFor();
+  await page.getByRole("button",{name:"account-a.json"}).first().click();
+  await detail.getByText("History could not be loaded for this period.").first().waitFor();
+  assert.equal(await detail.getByText("2",{exact:true}).count(),0,"failed range does not show prior totals");
+  await page.keyboard.press("Escape");
+  historyFailure = false;
+  await page.getByRole("button",{name:"24 hours"}).click();
+  await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
   await page.getByRole("button",{name:"account-a.json"}).first().click();
   await page.getByRole("dialog",{name:/account-a.json details/}).waitFor();
   await page.getByText("Availability history",{exact:true}).waitFor();

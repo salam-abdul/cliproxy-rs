@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import QuotaBrief from "../QuotaBrief.svelte";
   import HistoryPanels from "../HistoryPanels.svelte";
   import { store, every } from "../store.svelte";
@@ -32,10 +33,29 @@
   $effect(() => {
     if (!store.native.data?.enabled) return;
     store.historyRange;
+    store.history.data = undefined;
+    store.history.error = null;
     return every(30000, () => store.history.load(true), true);
   });
   let refreshing = $state(false);
   let selectedId = $state("");
+  let drawer = $state<HTMLDialogElement>();
+  function openAccount(id: string) {
+    selectedId = id;
+    void tick().then(() => drawer?.showModal());
+  }
+  function trapDrawerFocus(event: KeyboardEvent) {
+    if (event.key !== "Tab" || !drawer) return;
+    const controls = Array.from(drawer.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]"));
+    const first = controls[0], last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
+  }
   let mounted = false;
   $effect(() => {
     mounted = true;
@@ -53,6 +73,11 @@
     }
   }
   const native = $derived(store.native.data);
+  const historyData = $derived(
+    store.history.data?.range === store.historyRange
+      ? store.history.data
+      : undefined,
+  );
   const fresh = $derived(
     !store.native.error &&
       native?.model === "claude" &&
@@ -78,7 +103,7 @@
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
         const recent = n?.id
-          ? requestBuckets(store.history.data || {}, n.id)
+          ? requestBuckets(historyData || {}, n.id)
           : [];
         return { a, n, rank, state, recent };
       })
@@ -95,21 +120,21 @@
   );
   const selectedBuckets = $derived(
     selected?.n?.id
-      ? requestBuckets(store.history.data || {}, selected.n.id)
+      ? requestBuckets(historyData || {}, selected.n.id)
       : [],
   );
   const selectedStatuses = $derived(
-    (store.history.data?.statuses || []).filter(
+    (historyData?.statuses || []).filter(
       (row: Data) => row.account === selected?.n?.id && row.model === "claude",
     ) as Data[],
   );
   const selectedHealth = $derived(
-    store.history.data && selected?.n?.id
+    historyData && selected?.n?.id
       ? accountHealth(
           selectedStatuses,
           selected.n.id,
-          store.history.data.from,
-          store.history.data.to,
+          historyData.from,
+          historyData.to,
         )
       : [],
   );
@@ -129,12 +154,6 @@
     );
   }
 </script>
-
-<svelte:window
-  onkeydown={(event) => {
-    if (event.key === "Escape") selectedId = "";
-  }}
-/>
 
 <div class="overview-heading">
   <div>
@@ -183,7 +202,7 @@
             <span class="account-avatar" aria-hidden="true">{(n?.name || a.label || credName(a)).slice(0, 1).toUpperCase()}</span>
             <button
               class="account-title"
-              onclick={() => (selectedId = n?.id || a.id || a.name)}
+              onclick={() => openAccount(n?.id || a.id || a.name)}
               >{n?.name || a.label || credName(a)}</button
             >
           </div>
@@ -208,7 +227,7 @@
                     ? `${bucket.requests} requests · ${bucket.failures} failed`
                     : "No observation"}
                 ></span>{/each}
-            </div>{:else}<span class="muted small">No history</span>{/if}
+            </div>{:else}<span class="muted small">{historyData ? "No history" : store.history.error ? "History unavailable" : "Loading history…"}</span>{/if}
         </div>
       </article>
     {:else}<div class="state">
@@ -219,20 +238,16 @@
       </div>{/each}
   </div>
 </section>
-{#if native?.enabled}<HistoryPanels data={store.history.data} />{/if}
+{#if native?.enabled}<HistoryPanels data={historyData} />{/if}
 
 {#if selected}
-  <div class="account-drawer-layer">
-    <button
-      class="account-drawer-scrim"
-      aria-label="Close account details"
-      onclick={() => (selectedId = "")}
-    ></button>
-    <div
+    <dialog
+      bind:this={drawer}
       class="account-drawer"
-      role="dialog"
-      aria-modal="true"
       aria-label={`${selected.n?.name || selected.a.label || credName(selected.a)} details`}
+      onclose={() => (selectedId = "")}
+      onclick={(event) => { if (event.target === drawer) drawer.close(); }}
+      onkeydown={trapDrawerFocus}
     >
       <div class="drawer-head">
         <div>
@@ -248,7 +263,7 @@
         <button
           class="key small"
           aria-label="Close"
-          onclick={() => (selectedId = "")}>×</button
+          onclick={() => drawer?.close()}>×</button
         >
       </div>
       <div class="drawer-body">
@@ -266,7 +281,8 @@
             <h3>Availability history</h3>
             <span class="muted small">{store.historyRange}</span>
           </div>
-          {#if selectedStatuses.length}<div
+          {#if !historyData}<p class="muted small">{store.history.error ? "History could not be loaded for this period." : "Loading history…"}</p>
+          {:else if selectedStatuses.length}<div
               class="availability-strip"
               role="img"
               aria-label="Account availability over the selected period"
@@ -288,6 +304,8 @@
             <h3>Usage history</h3>
             <span class="muted small">{store.historyRange}</span>
           </div>
+          {#if !historyData}<p class="muted small">{store.history.error ? "History could not be loaded for this period." : "Loading history…"}</p>
+          {:else}
           <div class="drawer-numbers">
             <div>
               <strong
@@ -313,6 +331,7 @@
                   style:height={`${Math.max(2, 100 - point.fiveHourUsed)}%`}
                 ></span>{/each}
             </div>{/if}
+          {/if}
         </section>
       </div>
       <div class="drawer-actions">
@@ -325,11 +344,10 @@
         <a
           class="key small"
           href={`#credentials/${encodeURIComponent(selected.a.id || selected.a.name)}`}
-          onclick={() => (selectedId = "")}>Account settings</a
+          onclick={() => drawer?.close()}>Account settings</a
         >
       </div>
-    </div>
-  </div>
+    </dialog>
 {/if}
 
 <style>
@@ -362,25 +380,19 @@
     text-align: left;
     cursor: pointer;
   }
-  .account-drawer-layer {
-    position: fixed;
-    inset: 0;
-    z-index: 30;
-  }
-  .account-drawer-scrim {
-    position: absolute;
-    inset: 0;
+  .account-drawer::backdrop {
     background: #0e1c2b80;
-    border: 0;
-    width: 100%;
-    height: 100%;
   }
   .account-drawer {
-    position: absolute;
-    right: 0;
-    top: 0;
-    bottom: 0;
+    position: fixed;
+    inset: 0 0 0 auto;
+    margin: 0;
     width: min(480px, 100%);
+    max-width: 100%;
+    max-height: 100%;
+    padding: 0;
+    border: 0;
+    color: var(--ink);
     background: var(--body);
     box-shadow: -10px 0 30px #0e1c2b40;
     display: flex;

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -87,8 +87,21 @@ struct StatusRow {
 enum Command {
     Request(Box<RequestRow>),
     Status(Vec<StatusRow>),
+    Finish(std::sync::mpsc::Sender<()>),
     #[cfg(test)]
     Flush(std::sync::mpsc::Sender<()>),
+}
+
+impl Command {
+    fn records(&self) -> u64 {
+        match self {
+            Self::Request(_) => 1,
+            Self::Status(rows) => rows.len() as u64,
+            Self::Finish(_) => 0,
+            #[cfg(test)]
+            Self::Flush(_) => 0,
+        }
+    }
 }
 
 pub(super) struct History {
@@ -118,9 +131,21 @@ impl History {
                 five_hour REAL, weekly REAL, five_hour_reset INTEGER, weekly_reset INTEGER,
                 PRIMARY KEY(account, model, bucket_ms, availability)
             );
-            CREATE INDEX IF NOT EXISTS account_status_by_time ON account_status(at_ms);",
+            CREATE INDEX IF NOT EXISTS account_status_by_time ON account_status(at_ms);
+            CREATE TABLE IF NOT EXISTS history_meta (
+                key TEXT PRIMARY KEY, value INTEGER NOT NULL
+            );",
         )?;
         prune(&conn, epoch_ms())?;
+        let previous_lost = meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64;
+        lost.store(previous_lost, Ordering::Relaxed);
+        let unclean = meta(&conn, "dirty")? == Some(1);
+        let startup = conn.transaction()?;
+        if unclean {
+            set_meta(&startup, "uncertain_at", epoch_ms())?;
+        }
+        set_meta(&startup, "dirty", 1)?;
+        startup.commit()?;
         let (tx, rx) = sync_channel(QUEUE);
         let writer_lost = lost.clone();
         std::thread::Builder::new()
@@ -135,7 +160,8 @@ impl History {
                             Err(_) => break,
                         }
                     }
-                    let count = commands.len() as u64;
+                    let count = commands.iter().map(Command::records).sum::<u64>();
+                    let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
                     let result = (|| -> rusqlite::Result<()> {
                         let transaction = conn.transaction()?;
                         for command in &commands {
@@ -146,26 +172,44 @@ impl History {
                                         write_status(&transaction, row)?;
                                     }
                                 }
+                                Command::Finish(_) => {}
                                 #[cfg(test)]
                                 Command::Flush(_) => {}
                             }
+                        }
+                        set_meta(
+                            &transaction,
+                            "lost_events",
+                            writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
+                        )?;
+                        if finish {
+                            set_meta(&transaction, "dirty", 0)?;
                         }
                         transaction.commit()
                     })();
                     if result.is_err() {
                         writer_lost.fetch_add(count, Ordering::Relaxed);
                     }
-                    if last_prune.elapsed() >= Duration::from_secs(3600) {
+                    // ponytail: Hourly trimming keeps writes cheap; track live row counts for hard caps.
+                    if !finish && last_prune.elapsed() >= Duration::from_secs(3600) {
                         if prune(&conn, epoch_ms()).is_err() {
                             writer_lost.fetch_add(1, Ordering::Relaxed);
                         }
                         last_prune = std::time::Instant::now();
                     }
                     #[cfg(test)]
-                    for command in commands {
+                    for command in &commands {
                         if let Command::Flush(done) = command {
                             let _ = done.send(());
                         }
+                    }
+                    for command in commands {
+                        if let Command::Finish(done) = command {
+                            let _ = done.send(());
+                        }
+                    }
+                    if finish {
+                        break;
                     }
                 }
             })?;
@@ -208,8 +252,9 @@ impl History {
     }
 
     fn send(&self, command: Command) {
+        let count = command.records();
         if self.tx.try_send(command).is_err() {
-            self.lost.fetch_add(1, Ordering::Relaxed);
+            self.lost.fetch_add(count, Ordering::Relaxed);
         }
     }
 
@@ -225,6 +270,29 @@ impl History {
         self.tx.send(Command::Flush(tx)).unwrap();
         rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
+}
+
+impl Drop for History {
+    fn drop(&mut self) {
+        let (done, ack) = std::sync::mpsc::channel();
+        if self.tx.try_send(Command::Finish(done)).is_ok() {
+            let _ = ack.recv_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+fn meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row("SELECT value FROM history_meta WHERE key = ?1", [key], |row| row.get(0))
+        .optional()
+}
+
+fn set_meta(conn: &Connection, key: &str, value: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO history_meta (key, value) VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 impl RequestRow {
@@ -375,8 +443,9 @@ fn trim(conn: &Connection, request_limit: i64, status_limit: i64) -> rusqlite::R
 }
 
 fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) -> anyhow::Result<Value> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    conn.busy_timeout(Duration::from_secs(2))?;
+    let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    db.busy_timeout(Duration::from_secs(2))?;
+    let conn = db.transaction()?;
     let from = now - range.duration();
     let bucket_ms = range.bucket();
     let mut statement = conn.prepare(
@@ -465,17 +534,52 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let oldest: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM requests", [], |row| row.get(0))?;
     let oldest_status: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM account_status", [], |row| row.get(0))?;
-    Ok(
-        json!({"range": range.name(), "from": from, "to": now, "bucketMs": bucket_ms,
+    let lost = lost.max(meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64);
+    let coverage_uncertain = meta(&conn, "uncertain_at")?.is_some_and(|at| at >= from && at <= now);
+    let result = json!({"range": range.name(), "from": from, "to": now, "bucketMs": bucket_ms,
         "buckets": buckets, "accountBuckets": account_buckets, "errors": errors, "models": models,
         "modelsTruncated": models_truncated, "statuses": statuses,
-        "oldestRequest": oldest, "oldestStatus": oldest_status, "lostEvents": lost}),
-    )
+        "oldestRequest": oldest, "oldestStatus": oldest_status, "lostEvents": lost,
+        "coverageUncertain": coverage_uncertain});
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lost_records_and_unclean_restarts_remain_visible() {
+        let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("history.sqlite");
+        let lost = Arc::new(AtomicU64::new(0));
+        {
+            let history = History::start(path.clone(), lost.clone()).unwrap();
+            history.record_event(&json!({"type":"inference","requestId":"one",
+                "at":chrono::Utc::now().to_rfc3339(),"outcome":"success"}));
+            history.flush();
+            lost.fetch_add(2, Ordering::Relaxed);
+        }
+        let restarted = Arc::new(AtomicU64::new(0));
+        {
+            let history = History::start(path.clone(), restarted.clone()).unwrap();
+            assert_eq!(restarted.load(Ordering::Relaxed), 2);
+            let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+            assert_eq!(data["lostEvents"], 2);
+            assert_eq!(data["coverageUncertain"], false);
+            drop(history);
+        }
+        let conn = Connection::open(&path).unwrap();
+        set_meta(&conn, "dirty", 1).unwrap();
+        drop(conn);
+        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        assert_eq!(data["lostEvents"], 2);
+        assert_eq!(data["coverageUncertain"], true);
+        drop(history);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn history_survives_restart_and_never_stores_session_or_body_fingerprint() {

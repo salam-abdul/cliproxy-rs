@@ -1024,8 +1024,13 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if health_state.status().await.is_err() {
-                tracing::warn!("Native Claude health observation failed");
+            match health_state.status().await {
+                Ok(status) => {
+                    if let Some(history) = &health_state.history {
+                        history.record_status(&status);
+                    }
+                }
+                Err(_) => tracing::warn!("Native Claude health observation failed"),
             }
         }
     });
