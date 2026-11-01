@@ -295,6 +295,7 @@
             <li class="group">{label(g.p)}<span>{g.rows.length}</span></li>
             {#each g.rows as r (key(r.a))}
               {@const isOpen = open === id(r.a)}
+              {@const title = r.a.label || credName(r.a)}
               <li class:open={isOpen}>
                 <button
                   class="item"
@@ -303,9 +304,9 @@
                 >
                   <span class="lamp {r.s.lamp}"></span>
                   <span class="name"
-                    ><strong>{r.a.label || credName(r.a)}</strong
-                    >{#if r.a.note || credName(r.a) !== r.a.name}<small
-                        >{r.a.note ? r.a.note : r.a.email || r.a.name}</small
+                    ><strong>{title}</strong
+                    >{#if r.a.note || r.a.name !== title}<small
+                        >{r.a.note || r.a.name}</small
                       >{/if}</span
                   >
                   <span class="state-label"
@@ -367,7 +368,7 @@
                                 "_",
                                 " ",
                               )}{c.http_status ? ` ${c.http_status}` : ""} · {span(
-                                Date.parse(c.retry_at) - Date.now(),
+                                Date.parse(c.retry_at) - store.now,
                               )}</span
                             >{/each}
                           {#each Object.entries(a.quota?.signals || {}) as [k, v]}<span
@@ -454,7 +455,6 @@
                 {/if}
               </li>
             {/each}
-            {#if g.p === "claude"}<li class="policy"><ClaudePolicy /></li>{/if}
           {:else}
             <li class="state"><p>No credentials match.</p></li>
           {/each}
@@ -463,6 +463,7 @@
     {/if}
   {/snippet}
 </Load>
+<ClaudePolicy />
 <p class="legend">
   <a href="#overview">View quotas and account order →</a>
 </p>

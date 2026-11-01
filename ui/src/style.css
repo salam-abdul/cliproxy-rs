@@ -233,6 +233,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
 
 .toast .key { color: inherit; }
+.toast:empty { display: none; }
 .skip { position: fixed; left: 16px; top: -64px; z-index: 20; }
 .skip:focus { top: 12px; }
 .search { display: flex; align-items: center; position: relative; min-width: 220px; color: var(--ink-3); }
@@ -313,8 +314,6 @@ select { appearance: none; padding-right: 34px; background: var(--raised) url("d
 .accounts .name { flex: 1; min-width: 0; }
 .accounts .name strong, .accounts .name small { white-space: normal; overflow-wrap: anywhere; }
 .accounts .state-label { max-width: 21rem; text-align: right; }
-.accounts .policy { padding: 0 1rem; }
-.accounts .policy .section { margin: 0; border: 0; }
 .accounts .detail { display: grid; gap: 1.5rem; }
 .accounts details > summary { cursor: pointer; padding: .75rem 0; }
 .switch-track { display: inline-flex; width: 2.25rem; height: 1.25rem; border-radius: 1rem; background: var(--ink-3); padding: 2px; }

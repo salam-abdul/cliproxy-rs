@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import QuotaBrief from "../QuotaBrief.svelte";
   import HistoryPanels from "../HistoryPanels.svelte";
+  import Load from "../Load.svelte";
   import { store, every } from "../store.svelte";
   import { api, missing } from "../api";
   import { accountStatus } from "../accounts";
@@ -30,8 +31,9 @@
       stop();
     };
   });
+  const enabled = $derived(!!store.native.data?.enabled);
   $effect(() => {
-    if (!store.native.data?.enabled) return;
+    if (!enabled) return;
     store.historyRange;
     store.history.data = undefined;
     store.history.error = null;
@@ -193,7 +195,7 @@
   <div class="account-columns" aria-hidden="true">
     <span>Account</span><span>{claudeOnly ? "5-hour quota" : "Short window"}</span><span>{claudeOnly ? "Weekly quota" : "Long window"}</span><span>Recent requests</span>
   </div>
-  <div class="account-list">
+  <Load res={store.creds} what="Accounts">{#snippet children()}<div class="account-list">
     {#each accounts as { a, n, rank, state, recent } (`${a.name}:${a.auth_index}`)}
       <article class="account-row" class:account-disabled={a.disabled}>
         <div class="account-identity">
@@ -232,12 +234,10 @@
         </div>
       </article>
     {:else}<div class="state">
-        <p>
-          {store.creds.loading ? "Loading accounts…" : "No accounts connected."}
-        </p>
+        <p>No accounts connected.</p>
         <a class="key primary" href="#connect">Connect account</a>
       </div>{/each}
-  </div>
+  </div>{/snippet}</Load>
 </section>
 {#if native?.enabled}<HistoryPanels data={historyData} />{/if}
 

@@ -1,27 +1,21 @@
 <script lang="ts">
-  import { api, text } from "./api";
   import { store } from "./store.svelte";
 
-  let saving = $state(false);
   const known = $derived(
     typeof store.native.data?.allowExtraUsage === "boolean" &&
       !store.native.error &&
       !(store.native.data?.validUntil <= store.now),
   );
-
-  async function toggle() {
-    if (!store.native.data || saving) return;
-    const allowExtraUsage = !store.native.data.allowExtraUsage;
-    saving = true;
-    try {
-      await api("/routing/native-policy", "PATCH", { allowExtraUsage });
-      await store.native.load(true);
-    } catch (e) {
-      store.notify(text(e), true);
-    } finally {
-      saving = false;
-    }
-  }
+  const on = $derived(!!store.native.data?.allowExtraUsage);
+  const toggle = () =>
+    store.call(
+      "PATCH",
+      "/routing/native-policy",
+      { allowExtraUsage: !on },
+      on ? "Paid overage off." : "Paid overage on.",
+      on ? "" : "Allow paid overage? Requests may be billed after included quota runs out.",
+      () => store.native.load(true),
+    );
 </script>
 
 {#if store.native.data?.enabled}
@@ -31,17 +25,11 @@
       {#if known}<button
           class="key"
           role="switch"
-          aria-checked={!!store.native.data.allowExtraUsage}
-          disabled={saving ||
-            !!store.native.error ||
-            store.native.data.validUntil <= store.now}
+          aria-checked={on}
+          disabled={store.busy}
           onclick={toggle}
           ><span class="switch-track" aria-hidden="true"><span></span></span
-          >Allow paid overage: {saving
-            ? "Saving…"
-            : store.native.data.allowExtraUsage
-              ? "On"
-              : "Off"}</button
+          >Allow paid overage: {on ? "On" : "Off"}</button
         >{:else}<span class="muted"
           >Paid overage policy unavailable · waiting for status</span
         >{/if}

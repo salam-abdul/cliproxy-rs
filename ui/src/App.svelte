@@ -217,13 +217,11 @@
     </div>
   </div>
 {/if}
-{#if store.toast}<div class="toast" role={store.toast.bad ? "alert" : "status"}>
-    <span class="lamp {store.toast.bad ? 'bad' : 'ok'}"></span>{store.toast
-      .text}
-    {#if store.toast.bad}<button
+<div class="toast" role="status">{#if store.toast}<span
+      class="lamp {store.toast.bad ? 'bad' : 'ok'}"
+    ></span>{store.toast.text}{#if store.toast.bad}<button
         class="key quiet round small"
         aria-label="Dismiss"
         onclick={() => (store.toast = null)}
         ><svg class="i" aria-hidden="true"><use href="#i-close" /></svg></button
-      >{/if}
-  </div>{/if}
+      >{/if}{/if}</div>

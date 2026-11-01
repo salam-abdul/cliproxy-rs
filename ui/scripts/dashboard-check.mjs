@@ -12,7 +12,7 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
-let historyHold, historyRelease, historyFailure = false;
+let historyHold, historyRelease, historyFailure = false, credsFailure = false;
 const rust = process.env.DASHBOARD_KIND === "rust";
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
@@ -53,7 +53,7 @@ await page.route("**/*", async route => {
       errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
-  if (path === "/v8/management/credentials") return send({ files: creds });
+  if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds });
   if (path === (rust ? "/v8/management/observability/claude/usage" : "/v8/management/requests/api-call")) {
     if (rust) {
       assert.equal(request.method(), "GET");
@@ -74,8 +74,8 @@ await page.route("**/*", async route => {
   if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method()) && request.postData() === "{}") return route.fulfill({status:400,json:{error:"invalid request"}});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
-  assert.match(asset, /^(index\.html|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
-  return route.fulfill({ body: readFileSync(resolve("dist", asset)), contentType: asset.endsWith(".js") ? "text/javascript" : asset.endsWith(".css") ? "text/css" : "text/html" });
+  assert.match(asset, /^(index\.html|favicon\.svg|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
+  return route.fulfill({ body: readFileSync(resolve("dist", asset)), contentType: {js:"text/javascript",css:"text/css",svg:"image/svg+xml"}[asset.split(".").pop()] || "text/html" });
 });
 const settle = async () => { await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); };
 try {
@@ -83,6 +83,7 @@ try {
   await page.goto("http://dashboard.test/management.html#overview");
   await page.getByRole("meter", {name:"5-hour limit remaining"}).waitFor({timeout:5000});
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0);
+  assert.equal(await page.locator(".toast").isVisible(), false, "an empty toast region is hidden");
   assert.equal(checks, 1, "automatically checks only the enabled account");
   assert.equal(await page.locator(".top .nav a").count(), 3);
   await page.goto("http://dashboard.test/management.html#quotas/account-a.json");
@@ -110,7 +111,7 @@ try {
   await page.getByText("Last reading · refresh failed", {exact:true}).waitFor({ state: "hidden" });
   await page.locator('.top a[href="#config"]').click();
   await settle();
-  assert.equal(await page.locator(".section-tabs a").count(), 7);
+  assert.equal(await page.locator(".section-tabs a").count(), 8, "Settings holds Accounts and seven configuration pages");
   await page.clock.fastForward(120_000);
   await settle();
   assert.equal(checks, 4, "leaving the quota view stops provider polling");
@@ -124,6 +125,16 @@ try {
   await page.getByRole("region", {name:"Claude routing"}).waitFor();
   const toggle = page.getByRole("switch", {name:/Allow paid overage/});
   assert.equal(await toggle.getAttribute("aria-checked"), "false");
+  await page.getByPlaceholder("Filter by name, provider or note").fill("no-such-account");
+  await page.getByText("No credentials match.",{exact:true}).waitFor();
+  assert.equal(await toggle.isVisible(), true, "account filters cannot hide the overage policy");
+  let asked = "";
+  page.once("dialog", dialog => { asked = dialog.message(); dialog.dismiss(); });
+  await toggle.click();
+  await settle();
+  assert.equal(asked, "Allow paid overage? Requests may be billed after included quota runs out.");
+  assert.equal(overage, false, "dismissing the confirmation leaves paid overage off");
+  page.once("dialog", dialog => dialog.accept());
   await toggle.click();
   await page.getByRole("switch", {name:"Allow paid overage: On"}).waitFor();
   await page.reload();
@@ -214,6 +225,8 @@ try {
   assert.equal(dialogs, 1, "unsaved account fields guard navigation");
   assert.equal(await page.getByLabel("Note",{exact:true}).inputValue(), "Synthetic draft");
   await page.getByLabel("Note",{exact:true}).fill("Submitted note");
+  assert.equal(await page.locator(".toast[role=status]").count(), 1, "the toast live region is mounted before any message");
+  const toast = await page.locator(".toast[role=status]").elementHandle();
   saveHold = new Promise(r => saveRelease = r);
   const savePending = new Promise(r => saveStarted = r);
   await page.getByRole("button",{name:"Save",exact:true}).click();
@@ -221,6 +234,7 @@ try {
   await page.getByLabel("Note",{exact:true}).fill("New unsaved note");
   saveRelease(); saveHold = null;
   await page.getByText("Saved.",{exact:true}).waitFor();
+  assert.equal(await toast.evaluate(e => e.isConnected && e.textContent), "Saved.", "the toast live region stays mounted");
   await page.locator('.top .nav a[href="#overview"]').click();
   await settle();
   assert.equal(dialogs,2,"typing during save remains dirty after the submitted version is saved");
@@ -230,8 +244,19 @@ try {
   assert.equal(await page.locator(".native-event").count(),2,"two outcomes, with recovered attempts grouped");
   await page.getByRole("button",{name:"Failed",exact:true}).click();
   assert.equal(await page.locator(".native-event").count(),0,"successful failover and client cancellation are not failures");
+  creds[1].email = "b@example.test";
+  creds[0].cooldowns = [{model_key:"claude",reason:"rate_limit",retry_at:new Date(await page.evaluate(() => Date.now()) + 30000).toISOString()}];
   await page.goto("http://dashboard.test/management.html#credentials/account-a.json");
   await page.getByRole("button",{name:"Disable account",exact:true}).waitFor();
+  assert.equal(await page.locator(".accounts li").filter({hasText:"b@example.test"}).locator(".name small").innerText(), "disabled.json", "the subtitle names the file, not the email again");
+  await page.getByText("Advanced account settings", {exact:true}).click();
+  const cooldown = page.locator(".chip").filter({hasText:"rate limit"});
+  const seconds = async () => Number((await cooldown.innerText()).match(/(\d+)s$/)[1]);
+  const remaining = await seconds();
+  await page.clock.fastForward(5000);
+  await settle();
+  assert.ok(remaining - await seconds() >= 4, "cooldown countdown ticks");
+  delete creds[1].email; delete creds[0].cooldowns;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   await page.screenshot({path:join(tmpdir(),"cliproxy-accounts-mobile.png"),fullPage:true});
@@ -241,7 +266,11 @@ try {
   await page.getByRole("heading", {name:"Top models",exact:true}).waitFor();
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
   assert.ok(historyChecks > 0,"history loads with Overview");
+  const historyBefore = historyChecks;
+  for (let i = 0; i < 6; i++) { await page.clock.fastForward(10_000); await settle(); }
+  assert.equal(historyChecks - historyBefore, 2, "history reloads every 30 seconds despite 10-second status polls");
   historyHold = new Promise(r => historyRelease = r);
+  const rangeBefore = historyChecks;
   await page.getByRole("button",{name:"7 days"}).click();
   await page.getByText("Loading history…").first().waitFor();
   await page.getByRole("button",{name:"account-a.json"}).first().click();
@@ -256,7 +285,7 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('account-title')),true,"closing restores account focus");
   historyRelease(); historyHold = null;
   await page.getByText("By requests · selected period",{exact:true}).waitFor();
-  assert.ok(historyChecks > 1,"range selection loads durable history");
+  assert.equal(historyChecks - rangeBefore, 1, "range selection loads durable history once");
   historyFailure = true;
   await page.getByRole("button",{name:"30 days"}).click();
   await page.getByText("History could not be loaded. Current account readings remain available.").waitFor();
@@ -272,7 +301,7 @@ try {
   await page.getByText("Availability history",{exact:true}).waitFor();
   await page.getByRole("button",{name:"Close",exact:true}).click();
   assert.equal(await page.getByText(/Claude routing:/).count(),0);
-  await page.locator(".rank-badge").waitFor();
+  await page.locator(".rank-badge").first().waitFor();
   assert.equal(await page.locator(".rank-badge").first().innerText(),"1");
   assert.equal(await page.getByLabel("Capacity model").count(),0);
   assert.equal(await page.getByText("Check Claude capacity",{exact:true}).count(),0);
@@ -282,6 +311,12 @@ try {
   assert.ok(await page.getByRole("button",{name:"Refresh",exact:true}).evaluate(el => el.getBoundingClientRect().height) <= 32,"desktop controls stay compact");
   assert.equal(await page.locator(".account-columns span").count(),4,"quota and recent request columns stay together");
   assert.equal(await page.getByText(/cost/i).count(),0,"Overview does not imply token pricing");
+  credsFailure = true;
+  await page.reload();
+  await page.getByText("Refresh failed. Showing the last readings.",{exact:true}).waitFor();
+  assert.equal(await page.getByText("No accounts connected.").count(),0,"a failed first read is not an empty account list");
+  assert.equal(await page.getByText("Could not load accounts",{exact:true}).count(),1);
+  credsFailure = false;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);

@@ -7,7 +7,9 @@
   import Missing from "../Missing.svelte";
 
   const MAX = 1500;
+  // Clearing bumps epoch so a tail read already in flight cannot restore the old cursor.
   let cursor = "",
+    epoch = 0,
     pane = $state<HTMLDivElement>(),
     query = $state(""),
     tail = $state(true),
@@ -16,11 +18,12 @@
     reqText = $state(""),
     reqError = $state("");
   const logs: Res<string[]> = new Res(async (): Promise<string[]> => {
-    const follow = !pane || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+    const follow = !pane || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40,
+      at = epoch;
     const r = await api(`/observability/logs?limit=300${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
     const lines: string[] = r.lines || [];
     const next: string[] = cursor && !r["cursor-reset"] ? [...(logs.data || []), ...lines] : lines;
-    cursor = r["next-cursor"] || "";
+    if (at === epoch) cursor = r["next-cursor"] || "";
     tick().then(() => follow && pane && (pane.scrollTop = pane.scrollHeight));
     return next.slice(-MAX);
   });
@@ -57,7 +60,7 @@
   <button
     class="key quiet danger"
     disabled={store.busy || !store.can("GET", "/observability/logs") || !store.can("DELETE", "/observability/logs")}
-    onclick={() => store.call("DELETE", "/observability/logs", undefined, "Logs cleared.", "Delete the server’s application logs?", () => ((cursor = ""), logs.load()))}
+    onclick={() => store.call("DELETE", "/observability/logs", undefined, "Logs cleared.", "Delete the server’s application logs?", () => ((cursor = ""), epoch++, logs.load()))}
     >Clear</button
   >
 </div>
