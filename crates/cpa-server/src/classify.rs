@@ -5,7 +5,7 @@
 //! the error text (`err.Error()`, which is the upstream body or `status N`). Both feed
 //! retry, failover and cooldown decisions here so they cannot drift apart.
 
-use cpa_core::exec::{ExecError, FailureScope};
+use cpa_core::exec::{AfterAccept, ExecError, FailureScope};
 use serde_json::Value;
 
 /// Go `err.Error()` of an executor status error: the body, or `status N` when empty.
@@ -40,7 +40,11 @@ fn explicit_request_scoped(e: &ExecError) -> bool {
 
 /// The Go status of an error: transport faults have none.
 pub fn go_status(e: &ExecError) -> u16 {
-    if e.scope == FailureScope::Transport {
+    let statusless = matches!(
+        e.after_accept,
+        Some(AfterAccept::Interrupted | AfterAccept::Unprocessed)
+    );
+    if e.scope == FailureScope::Transport || statusless {
         0
     } else {
         e.status
@@ -55,6 +59,7 @@ pub fn empty_stream() -> ExecError {
         FailureScope::Request,
         "empty_stream: upstream stream closed before first payload",
     )
+    .accepted(AfterAccept::Interrupted)
 }
 
 /// Whether the failure came from an upstream attempt (Go `UpstreamAttempted`): an
@@ -506,6 +511,37 @@ fn missing_phrase(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Go error without a status after the response started (a read failure, an
+    /// unprocessable response) has no status for Go's rules, while a truncation the
+    /// executor gives a status keeps it. A status-matching error rule therefore never
+    /// stops on the statusless one; the client still gets 500.
+    #[test]
+    fn statusless_failures_after_the_response_have_no_go_status() {
+        let local = |status, after| ExecError::local(status, FailureScope::Request, "restore failed").accepted(after);
+        let credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/mock"),
+            std::path::Path::new("/mock/credential.json"),
+            serde_json::json!({"type": "claude", "request_scoped_errors": [
+                {"status": 500, "match": ["restore failed"], "action": "stop-and-cooldown"},
+                {"status": 502, "match": ["restore failed"], "action": "stop-and-cooldown"},
+            ]})
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        let policy = crate::scheduler::Policy::default();
+        for after in [AfterAccept::Interrupted, AfterAccept::Unprocessed] {
+            let error = local(500, after);
+            assert_eq!(go_status(&error), 0, "{after:?}");
+            assert_eq!(response_status(&error), 500, "{after:?}");
+            assert!(!policy.error_action(&credential, &error).matched, "{after:?}");
+        }
+        let truncated = local(502, AfterAccept::Truncated);
+        assert_eq!(go_status(&truncated), 502);
+        assert!(policy.error_action(&credential, &truncated).matched);
+    }
 
     #[test]
     fn successful_empty_stream_is_terminal_without_account_cooldown() {

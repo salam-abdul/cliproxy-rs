@@ -936,6 +936,36 @@ async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() 
     assert_eq!(script.calls.lock().unwrap().len(), 1);
 }
 
+/// The failover rule for a buffered response: an upstream error event that is the
+/// first event says the upstream did no work, so another account answers; one that
+/// follows output ends the request, since the upstream already worked on it.
+#[tokio::test]
+async fn a_buffered_upstream_error_fails_over_only_before_any_output() {
+    let error = || {
+        event(
+            "error",
+            serde_json::json!({"type":"error","error":{"type":"overloaded_error","message":"synthetic overload"}}),
+        )
+    };
+    let body = format!(r#"{{"model":"{MODEL}","messages":[{{"role":"user","content":"hello"}}]}}"#);
+
+    let first: Reply = Box::new(move || ([("content-type", "text/event-stream")], error()).into_response());
+    let (url, script, _) = scripted_proxy("", &["fake-a", "fake-b"], vec![first, sse_reply()]).await;
+    let (status, _, text) = post(&url, "/v1/chat/completions", &body).await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(script.calls.lock().unwrap().len(), 2);
+
+    let after_output: Reply = Box::new(move || {
+        let start = sse().split("\n\n").take(3).collect::<Vec<_>>().join("\n\n") + "\n\n";
+        ([("content-type", "text/event-stream")], start + &error()).into_response()
+    });
+    let (url, script, _) = scripted_proxy("", &["fake-a", "fake-b"], vec![after_output, sse_reply()]).await;
+    let (status, _, text) = post(&url, "/v1/chat/completions", &body).await;
+    assert_ne!(status, 200, "{text}");
+    assert!(text.contains("synthetic overload"), "{text}");
+    assert_eq!(script.calls.lock().unwrap().len(), 1, "never resent");
+}
+
 /// Go net/http: no Content-Length set by the handler means chunked above 2048 bytes and
 /// Content-Length at or below it; a bodiless HEAD carries neither.
 #[tokio::test]
