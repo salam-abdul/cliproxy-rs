@@ -126,7 +126,7 @@ impl Relay {
         let restored = match restore_line(line, &self.reverse) {
             Ok(restored) => restored,
             Err(message) => {
-                self.fail(super::plain_error(format!(
+                self.fail(crate::upstream::plain_error_after_response(format!(
                     "restore Claude OAuth tool name from streaming response: {message}"
                 )));
                 return false;
@@ -201,7 +201,9 @@ impl Relay {
         while let Some(pos) = self.line.iter().position(|b| *b == b'\n') {
             // bufio.Scanner holds at most MAX_LINE bytes: the line and its newline must fit.
             if pos + 1 > MAX_LINE {
-                self.fail(super::plain_error("bufio.Scanner: token too long"));
+                self.fail(crate::upstream::plain_error_after_response(
+                    "bufio.Scanner: token too long",
+                ));
                 return;
             }
             let mut line = self.line.split_to(pos + 1);
@@ -214,7 +216,9 @@ impl Relay {
             }
         }
         if self.line.len() > MAX_LINE {
-            self.fail(super::plain_error("bufio.Scanner: token too long"));
+            self.fail(crate::upstream::plain_error_after_response(
+                "bufio.Scanner: token too long",
+            ));
         }
     }
 
@@ -675,5 +679,47 @@ mod tests {
         assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(error.body.as_ref(), b"unexpected EOF");
         assert_eq!(out[1].as_ref().unwrap().as_ref(), b"partial\n");
+    }
+
+    /// An over-long line or an unrestorable tool alias ends a stream the upstream already
+    /// accepted, so the error is request-scoped and dispatch never resends the request.
+    #[tokio::test]
+    async fn relay_failures_after_the_response_started_are_not_replayed() {
+        let last_error = |body: ExecStream, reverse: Arc<Reverse>| async move {
+            let out = relay(
+                body,
+                reverse,
+                Box::new(|_| panic!("not complete")),
+                Default::default(),
+                Default::default(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+            out.last().unwrap().as_ref().unwrap_err().clone()
+        };
+        let long = Bytes::from(vec![b'a'; MAX_LINE + 1]);
+        let terminated =
+            futures_util::stream::iter([Ok(long.slice(..MAX_LINE)), Ok(Bytes::from_static(b"\n"))]).boxed();
+        let unterminated = futures_util::stream::iter([Ok(long)]).boxed();
+        for (name, body) in [("terminated", terminated), ("unterminated", unterminated)] {
+            let error = last_error(body, Arc::default()).await;
+            assert_eq!(error.body.as_ref(), b"bufio.Scanner: token too long", "{name}");
+            assert_eq!(error.scope, FailureScope::Request, "{name}");
+        }
+        let mut reverse = Reverse::new();
+        reverse.insert("mcp__srv1__query".into(), "mcp__srv1__query".into());
+        reverse.insert("mcp__srv2__query".into(), "mcp__srv2__query".into());
+        reverse.insert("mcp__virt__word_other".into(), "other".into());
+        let ambiguous = chunks(vec![Ok(
+            b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"mcp__virt__query\",\"input\":{}}}\n\n",
+        )]);
+        let error = last_error(ambiguous, Arc::new(reverse)).await;
+        assert!(
+            error
+                .body
+                .starts_with(b"restore Claude OAuth tool name from streaming response: "),
+            "{error}"
+        );
+        assert_eq!(error.scope, FailureScope::Request);
     }
 }

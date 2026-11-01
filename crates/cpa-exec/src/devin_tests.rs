@@ -850,3 +850,47 @@ fn sensitive_words_drop_matching_lines_then_obfuscate() {
     // A line containing a word is dropped; nothing is left to obfuscate.
     assert_eq!(sanitize_system_prompt(b"keep\nhas secret\nend", Some(&m)), b"keep\nend");
 }
+
+/// A body that ends before the EOS trailer, or whose read fails, may follow inference the
+/// upstream already ran: both the buffered and the streamed error are request-scoped, so
+/// dispatch never resends the request to another account.
+#[tokio::test]
+async fn a_truncated_or_failed_devin_body_is_not_replayed() {
+    let truncated = || futures_util::stream::iter(Vec::<Result<Bytes, ExecError>>::new()).boxed();
+    let failed = || {
+        futures_util::stream::iter([Err(ExecError::local(
+            502,
+            FailureScope::Transport,
+            "synthetic connection reset",
+        ))])
+        .boxed()
+    };
+    for (name, body) in [("truncated", truncated()), ("failed read", failed())] {
+        let (consumed, _) = consume_frames(FrameReader::new(body), "swe-2", b"{}").await;
+        let (error, statusless) = consumed
+            .err()
+            .unwrap_or_else(|| panic!("{name}: buffered body succeeded"));
+        assert_eq!(error.scope, FailureScope::Request, "{name}: buffered {error}");
+        assert!(statusless, "{name}: buffered error is a plain Go error");
+    }
+    for (name, body) in [("truncated", truncated()), ("failed read", failed())] {
+        let claude = ClaudeInputTokens::new(Format::OpenAI, Format::Interactions, Format::Interactions, Bytes::new());
+        let items: Vec<_> = DevinStream::new(
+            "swe-2".into(),
+            Format::Interactions,
+            None,
+            claude,
+            FrameReader::new(body),
+            Default::default(),
+            Default::default(),
+        )
+        .run()
+        .collect()
+        .await;
+        let error = items
+            .iter()
+            .find_map(|item| item.as_ref().err())
+            .unwrap_or_else(|| panic!("{name}: stream ended without an error"));
+        assert_eq!(error.scope, FailureScope::Request, "{name}: streamed {error}");
+    }
+}

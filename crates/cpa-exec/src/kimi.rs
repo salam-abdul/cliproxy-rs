@@ -483,7 +483,7 @@ async fn execute_chat(
         let out = (response_pair.non_stream)(&ctx, &data)
             .ok()
             .filter(|out| !out.is_empty())
-            .ok_or_else(apply_patch_error)?;
+            .ok_or_else(crate::upstream::apply_patch_error)?;
         req.usage.response_body(Format::OpenAI, &data);
         ResponseBody::Buffered(Bytes::from(if req.response_format == Format::OpenAIResponse {
             ensure_responses_usage_details(&out)
@@ -505,11 +505,6 @@ enum StreamEnd {
     Chat,
     /// Native Responses translated for another client (executeResponsesStream): neither.
     Responses,
-}
-
-/// The 502 Go returns when a translator rejects upstream apply_patch input.
-fn apply_patch_error() -> ExecError {
-    ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
 /// Go's per-line stream loop: each non-empty scanned line goes through the translator.
@@ -562,7 +557,7 @@ fn translate_lines(
                 let finalized = self.translator.finalize_tool_input();
                 self.ready.extend(finalized.into_iter().map(Ok));
                 if self.translator.tool_input_failed() {
-                    return self.fail(apply_patch_error());
+                    return self.fail(crate::upstream::apply_patch_error());
                 }
             }
             if let Some(Err(mut error)) = end {
@@ -605,7 +600,7 @@ fn translate_lines(
                     Some(Ok(line)) if line.is_empty() => {}
                     Some(Ok(line)) => {
                         if st.translate(&line) && st.translator.tool_input_failed() {
-                            st.fail(apply_patch_error());
+                            st.fail(crate::upstream::apply_patch_error());
                         }
                     }
                     end => st.finish(end),
@@ -690,7 +685,7 @@ fn bridge_lines(lines: ExecStream, bridge: apply_patch_responses::State) -> Exec
                         ready.extend(out.into_iter().map(|l| Ok(Bytes::from(l))));
                         if error.is_some() {
                             done = true;
-                            ready.push_back(Err(apply_patch_error()));
+                            ready.push_back(Err(crate::upstream::apply_patch_error()));
                         }
                     }
                     end => {
@@ -698,7 +693,7 @@ fn bridge_lines(lines: ExecStream, bridge: apply_patch_responses::State) -> Exec
                         let (out, error) = bridge.finish_stream();
                         ready.extend(out.into_iter().map(|l| Ok(Bytes::from(l))));
                         if error.is_some() {
-                            ready.push_back(Err(apply_patch_error()));
+                            ready.push_back(Err(crate::upstream::apply_patch_error()));
                         } else if let Some(Err(error)) = end {
                             ready.push_back(Err(error));
                         }
@@ -821,13 +816,13 @@ async fn execute_responses(
         report_model(&req.usage, Format::Codex, &data);
         let out = match bridge.bridge.transform_non_stream(&data) {
             Ok(out) if !(out.is_empty() && apply_patch_requested(original_request)) => out,
-            _ => return Err(apply_patch_error()),
+            _ => return Err(crate::upstream::apply_patch_error()),
         };
         let out = match response_pair {
             Some(pair) => (pair.non_stream)(&ctx, &out)
                 .ok()
                 .filter(|out| !out.is_empty())
-                .ok_or_else(apply_patch_error)?,
+                .ok_or_else(crate::upstream::apply_patch_error)?,
             None => out,
         };
         if let Some(usage) = native_usage_body(&data) {

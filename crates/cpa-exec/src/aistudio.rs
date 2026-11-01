@@ -34,14 +34,9 @@ pub struct AiStudioExecutor {
     pub relay: Arc<Relay>,
 }
 
-/// A Go error without a status code: the handler answers it with 500.
-fn plain_error(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Credential, message)
-}
-
 /// Go's `statusErr{code: status}`; a status outside HTTP's range is answered as 500.
 fn status_error(status: i64, body: Vec<u8>) -> ExecError {
-    g::status_err(u16::try_from(status).ok().filter(|s| *s >= 100).unwrap_or(500), body)
+    crate::upstream::status_error(u16::try_from(status).ok().filter(|s| *s >= 100).unwrap_or(500), body)
 }
 
 fn header_map(headers: &std::collections::BTreeMap<String, Vec<String>>) -> http::HeaderMap {
@@ -232,7 +227,7 @@ async fn non_stream_captured(
             if error.origin == wsrelay::StreamErrorOrigin::Disconnected {
                 ExecError::local(500, FailureScope::Request, error.message)
             } else {
-                plain_error(error.message)
+                crate::upstream::credential_error(error.message)
             }
         })?;
     capture_metadata(capture, resp.status, &resp.headers);
@@ -258,7 +253,7 @@ impl AiStudioExecutor {
             return self.count_tokens(credential, &req, cfg).await;
         }
         if req.alt.as_deref() == Some(g::COMPACT_ALT) {
-            return Err(g::status_err(501, "/responses/compact not supported"));
+            return Err(crate::upstream::status_error(501, "/responses/compact not supported"));
         }
         let base_model = parse_suffix(&req.model).model_name;
         let (body, action) = translate(&req, cfg, false)?;
@@ -294,7 +289,7 @@ impl AiStudioExecutor {
         let capture = req.capture().clone();
         let fail = |message: String| {
             capture.record(CaptureEvent::ResponseError(&message));
-            plain_error(message)
+            crate::upstream::credential_error(message)
         };
         capture_request(&capture, credential, &relayed);
         let mut events = self.relay.stream(&credential.id, &relayed).await.map_err(fail)?;
@@ -389,7 +384,9 @@ impl AiStudioExecutor {
         }
         let total = gj::get(&resp.body, "totalTokens").int();
         if total <= 0 {
-            return Err(plain_error("wsrelay: totalTokens missing in response"));
+            return Err(crate::upstream::plain_error_after_response(
+                "wsrelay: totalTokens missing in response",
+            ));
         }
         let out = cpa_translate::translate_token_count(req.response_format, Format::Gemini, total, &resp.body);
         Ok(ExecResponse {
@@ -449,7 +446,7 @@ impl Events {
             let error = if event.error_origin == wsrelay::StreamErrorOrigin::Disconnected {
                 ExecError::local(500, FailureScope::Request, message)
             } else {
-                plain_error(message)
+                crate::upstream::credential_error(message)
             };
             self.fail(error);
             return;

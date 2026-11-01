@@ -489,7 +489,7 @@ impl OAuth {
                     String::from_utf8_lossy(&code)
                 )
             };
-            let mut error = crate::gemini::status_err(status, message);
+            let mut error = crate::upstream::status_error(status, message);
             if status == 429 {
                 error.retry_after = parse_retry_delay(&data);
             }

@@ -25,8 +25,9 @@ use crate::codex_capture::Wire;
 use crate::codex_json::{delete, set_bool_if_different, set_raw, set_str, set_str_if_different};
 use crate::codex_request::{self as request, Settings, View};
 use crate::codex_response::{self as response, OutputItems};
-use crate::openai_compat::{plain_err, prepare_images_payload, status_err};
+use crate::openai_compat::prepare_images_payload;
 use crate::openai_compat_multipart::{self as multipart, Form, MediaType, Part};
+use crate::upstream::{model_status_error, plain_error};
 
 const GENERATIONS: &str = "/v1/images/generations";
 const EDITS: &str = "/v1/images/edits";
@@ -264,7 +265,7 @@ impl CodexExecutor {
                     "response.completed" => {
                         let (calls, created, usage) = extract(data, &items);
                         if calls.is_empty() {
-                            return Err(status_err(502, "upstream did not return image output"));
+                            return Err(model_status_error(502, "upstream did not return image output"));
                         }
                         return Ok(ExecResponse {
                             status: res.status,
@@ -281,7 +282,10 @@ impl CodexExecutor {
                 }
             }
         }
-        Err(status_err(504, "stream error: stream disconnected before completion"))
+        Err(model_status_error(
+            504,
+            "stream error: stream disconnected before completion",
+        ))
     }
 }
 
@@ -351,7 +355,7 @@ fn frames(upstream: ExecStream, prepared: Prepared, usage: cpa_core::exec::Usage
                         let (calls, _, usage) = extract(data, &st.items);
                         if calls.is_empty() {
                             st.out
-                                .push_back(Err(status_err(502, "upstream did not return image output")));
+                                .push_back(Err(model_status_error(502, "upstream did not return image output")));
                         }
                         for call in &calls {
                             let frame = completed_frame(call, usage.as_deref(), &st.prepared);
@@ -446,7 +450,7 @@ fn direct_edit_payload(
     if cpa_common::json::std_valid(payload) {
         return prepare_images_payload(payload, model, content_type, stream);
     }
-    let unsupported = || plain_err(format!("unsupported OpenAI image edit Content-Type {content_type:?}"));
+    let unsupported = || plain_error(format!("unsupported OpenAI image edit Content-Type {content_type:?}"));
     let MediaType::Ok(media, params) = multipart::parse_media_type(content_type.trim()) else {
         return Err(unsupported());
     };
@@ -455,10 +459,10 @@ fn direct_edit_payload(
     }
     let boundary = params.get("boundary").map(|b| b.trim()).unwrap_or_default();
     if boundary.is_empty() {
-        return Err(plain_err("multipart boundary is missing"));
+        return Err(plain_error("multipart boundary is missing"));
     }
     let form =
-        multipart::read_form(payload, boundary).map_err(|e| plain_err(format!("read multipart form failed: {e}")))?;
+        multipart::read_form(payload, boundary).map_err(|e| plain_error(format!("read multipart form failed: {e}")))?;
     Ok((
         Bytes::from(edit_form_to_json(&form, model, stream)),
         "application/json".into(),
@@ -592,7 +596,7 @@ fn prepare(req: &ExecRequest, path: &str) -> Result<Prepared, ExecError> {
         return generation_json(&req.body, &req.model);
     }
     if !path.ends_with(EDITS) {
-        return Err(plain_err(format!("unsupported OpenAI image endpoint path {path:?}")));
+        return Err(plain_error(format!("unsupported OpenAI image endpoint path {path:?}")));
     }
     let content_type = request::header(&req.headers, "content-type").trim();
     let media = match multipart::parse_media_type(content_type) {
@@ -611,7 +615,7 @@ fn json_text(raw: &[u8]) -> Option<String> {
 
 /// `codexPrepareOpenAIImageGenerationJSON`.
 fn generation_json(raw: &[u8], route_model: &str) -> Result<Prepared, ExecError> {
-    let raw = json_text(raw).ok_or_else(|| plain_err("invalid OpenAI image generation request JSON"))?;
+    let raw = json_text(raw).ok_or_else(|| plain_error("invalid OpenAI image generation request JSON"))?;
     let prompt = gjson::get(&raw, "prompt").str().trim().to_owned();
     let tool = tool_json(
         &raw,
@@ -628,7 +632,7 @@ fn generation_json(raw: &[u8], route_model: &str) -> Result<Prepared, ExecError>
 
 /// `codexPrepareOpenAIImageEditJSON`.
 fn edit_json(raw: &[u8], route_model: &str) -> Result<Prepared, ExecError> {
-    let raw = json_text(raw).ok_or_else(|| plain_err("invalid OpenAI image edit request JSON"))?;
+    let raw = json_text(raw).ok_or_else(|| plain_error("invalid OpenAI image edit request JSON"))?;
     let prompt = gjson::get(&raw, "prompt").str().trim().to_owned();
     let images_value = gjson::get(&raw, "images");
     let images: Vec<String> = if images_value.kind() == Kind::Array {
@@ -670,17 +674,17 @@ fn edit_multipart(body: &[u8], route_model: &str, content_type: &str) -> Result<
     let params = match multipart::parse_media_type(content_type) {
         MediaType::Ok(_, params) => params,
         _ => {
-            return Err(plain_err(
+            return Err(plain_error(
                 "parse multipart content type failed: mime: invalid media parameter",
             ));
         }
     };
     let boundary = params.get("boundary").map(|b| b.trim()).unwrap_or_default();
     if boundary.is_empty() {
-        return Err(plain_err("multipart boundary is required"));
+        return Err(plain_error("multipart boundary is required"));
     }
     let form =
-        multipart::read_form(body, boundary).map_err(|e| plain_err(format!("parse multipart form failed: {e}")))?;
+        multipart::read_form(body, boundary).map_err(|e| plain_error(format!("parse multipart form failed: {e}")))?;
     let value = |key: &str| form.value(key).trim().to_owned();
     let mut tool = r#"{"type":"image_generation","action":"edit"}"#.to_owned();
     tool = set_str(&tool, "model", &tool_model(&value("model"), route_model));

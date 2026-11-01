@@ -392,8 +392,9 @@ impl ClaudeExecutor {
                         // ObserveResponseModel and ObserveClaudeStream, before restore.
                         req.usage.response_line(Format::Claude, line);
                         out.extend(stream::restore_line(line, &reverse).map_err(|m| {
-                            let error =
-                                plain_error(format!("restore Claude OAuth tool name from streaming response: {m}"));
+                            let error = crate::upstream::plain_error_after_response(format!(
+                                "restore Claude OAuth tool name from streaming response: {m}"
+                            ));
                             capture_error(capture, &error);
                             wrap(error)
                         })?);
@@ -415,7 +416,7 @@ impl ClaudeExecutor {
                         let message = format!("restore Claude OAuth tool name from response: {m}");
                         req.usage.publish_failure(0, &message);
                         capture.record(CaptureEvent::ResponseError(&message));
-                        wrap(plain_error(message))
+                        wrap(crate::upstream::plain_error_after_response(message))
                     })?;
                     if let Some(scope) = replay {
                         scope.store_response(restored.as_bytes());
@@ -631,10 +632,7 @@ async fn finish(
     if (200..300).contains(&status) {
         let body = body.map_err(|m| {
             capture.record(CaptureEvent::ResponseError(&m));
-            fast_request_error(
-                fast,
-                crate::upstream::body_read_error_after_response(status, plain_error(m)),
-            )
+            fast_request_error(fast, crate::upstream::plain_error_after_response(m))
         })?;
         return Ok(RawResponse {
             status,
@@ -754,12 +752,6 @@ fn upstream_error(
         addon: None,
     };
     quota::classify(error, model_level_cooling)
-}
-
-/// A Go error with no status or scope (`fmt.Errorf`): the handler answers 500, and the
-/// conductor neither cools the credential nor treats the request as unservable.
-pub(crate) fn plain_error(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Transport, message)
 }
 
 /// `wrapClaudeFastRequestError`: any other failure of a fast request stops at the
@@ -1077,7 +1069,7 @@ impl<'a> Ctx<'a> {
             if e.code.is_some() {
                 ExecError::local(e.status(), FailureScope::Request, e.message)
             } else {
-                plain_error(e.message)
+                crate::upstream::plain_error(e.message)
             }
         })
     }
@@ -1254,7 +1246,7 @@ impl<'a> Ctx<'a> {
                         .await
                         .map(|session| cloak::fake_user_id(&session))
                 };
-                let user_id = user_id.map_err(|e| ExecError::local(500, FailureScope::Transport, e))?;
+                let user_id = user_id.map_err(crate::upstream::plain_error)?;
                 body = rawjson::set_str(&body, "metadata.user_id", &user_id);
             }
             cloaked = true;
@@ -1564,7 +1556,7 @@ impl<'a> Ctx<'a> {
         let device_profile = if self.settings.header_defaults.stabilize_device_profile && confirmed {
             let profile = profile::resolve_required(&self.credential.id, &self.api_key, &req.headers, &self.settings)
                 .await
-                .map_err(|e| ExecError::local(500, FailureScope::Transport, e))?;
+                .map_err(crate::upstream::plain_error)?;
             Some(profile)
         } else {
             None
@@ -1574,7 +1566,7 @@ impl<'a> Ctx<'a> {
         let cached_session_id = if headers::needs_cached_session(self.cli_profile || cloak, confirmed, session_id) {
             session::cached_session_id_required(&self.api_key)
                 .await
-                .map_err(|e| ExecError::local(500, FailureScope::Transport, e))?
+                .map_err(crate::upstream::plain_error)?
         } else {
             String::new()
         };
@@ -1745,7 +1737,9 @@ impl<'a> Ctx<'a> {
         let (device, account) = identity::wire_identity(self.credential, &seed, synthesize);
         // applyClaudeCLIIdentity wraps every ApplyClaudeCredentialMetadata error once more.
         identity::apply(body, &device, &account, session_id).map_err(|e| match e {
-            identity::ApplyError::Plain(e) => plain_error(format!("apply Claude credential metadata: {e}")),
+            identity::ApplyError::Plain(e) => {
+                crate::upstream::plain_error(format!("apply Claude credential metadata: {e}"))
+            }
             identity::ApplyError::Request(e) => ExecError::local(
                 400,
                 FailureScope::Request,

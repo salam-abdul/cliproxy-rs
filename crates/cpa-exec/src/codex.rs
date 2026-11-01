@@ -875,11 +875,7 @@ fn non_stream_output(
         None => completed.as_bytes().to_vec(),
     };
     if out.is_empty() {
-        return Err(ExecError::local(
-            502,
-            FailureScope::Request,
-            cpa_translate::APPLY_PATCH_UPSTREAM_ERROR,
-        ));
+        return Err(crate::upstream::apply_patch_error());
     }
     let out = String::from_utf8_lossy(&out).into_owned();
     let out = if req.response_format == Format::OpenAIResponse {

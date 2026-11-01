@@ -28,8 +28,6 @@ const IMAGES_GENERATIONS: &str = "/images/generations";
 const IMAGES_EDITS: &str = "/images/edits";
 /// `scanner.Buffer(nil, 52_428_800)`.
 const MAX_LINE: usize = 52_428_800;
-/// helps.ApplyPatchUpstreamErrorMessage: Go's error for an empty or rejected translation.
-const EMPTY_TRANSLATION: &str = cpa_translate::APPLY_PATCH_UPSTREAM_ERROR;
 
 /// Providers this executor serves: `openai-compatibility` and `openai-compatible-<name>`
 /// (util.OpenAICompatibleProviderKey).
@@ -40,33 +38,6 @@ pub fn handles(provider: &str) -> bool {
 #[derive(Default)]
 pub struct OpenAICompatExecutor {
     clients: Clients,
-}
-
-/// Go's plain `statusErr`: never credential-scoped, so a 429 cools only the model
-/// (`IsCredentialScoped` is false); other failures by status.
-pub(crate) fn scope_for(status: u16) -> FailureScope {
-    match status {
-        429 => FailureScope::Model,
-        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
-        _ => FailureScope::Request,
-    }
-}
-
-/// A plain Go error (no status code): no status, scope or retry semantics, which the
-/// server models as a transport fault; Go's handler answers 500 with its text.
-pub(crate) fn plain_err(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Transport, message)
-}
-
-/// `statusErr{code, msg}`: an empty message reads `status N`.
-pub(crate) fn status_err(status: u16, message: impl Into<String>) -> ExecError {
-    let message = message.into();
-    let message = if message.is_empty() {
-        format!("status {status}")
-    } else {
-        message
-    };
-    ExecError::local(status, scope_for(status), message)
 }
 
 /// A chat non-2xx response: `newOpenAICompatStatusError` over the error body, which is
@@ -92,7 +63,7 @@ async fn images_error(upstream: wire::Upstream, with_retry: bool, capture: &wire
 }
 
 fn status_error(status: u16, headers: http::HeaderMap, body: &[u8], with_retry: bool) -> ExecError {
-    let mut error = status_err(status, String::from_utf8_lossy(body));
+    let mut error = crate::upstream::model_status_error(status, String::from_utf8_lossy(body).into_owned());
     if with_retry {
         error.retry_after = payload::retry_after(status, &headers, body, SystemTime::now());
     }
@@ -373,11 +344,11 @@ impl OpenAICompatExecutor {
                 },
                 &raw,
             )
-            .map_err(|_| ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION))?,
+            .map_err(|_| crate::upstream::apply_patch_error())?,
             None => raw.to_vec(),
         };
         if out.is_empty() {
-            return Err(ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION));
+            return Err(crate::upstream::apply_patch_error());
         }
         if req.response_format == Format::OpenAIResponse {
             out = payload::ensure_responses_usage_details(&out);
@@ -505,9 +476,9 @@ pub(crate) fn prepare_images_payload(
         return Ok((Bytes::copy_from_slice(body), content_type.to_owned()));
     };
     // Go returns a plain error here; the handler answers 500.
-    let boundary = boundary.map_err(plain_err)?;
-    let form =
-        multipart::read_form(body, &boundary).map_err(|e| plain_err(format!("read multipart form failed: {e}")))?;
+    let boundary = boundary.map_err(crate::upstream::plain_error)?;
+    let form = multipart::read_form(body, &boundary)
+        .map_err(|e| crate::upstream::plain_error(format!("read multipart form failed: {e}")))?;
     let (out, content_type) = multipart::rewrite_images_form(&form, model, stream, false);
     Ok((Bytes::from(out), content_type))
 }
@@ -641,7 +612,11 @@ impl Frames {
     /// `publishStreamError(err, false)`: the error is logged and published as a failure
     /// before the client gets it.
     fn fail(&mut self, status: u16, message: impl Into<String>) -> bool {
-        let error = status_err(status, message);
+        self.fail_with(crate::upstream::model_status_error(status, message.into()))
+    }
+
+    /// [`Self::fail`] with an error built by the caller.
+    fn fail_with(&mut self, error: ExecError) -> bool {
         self.capture.error(&error);
         wire::publish_failure(&self.usage, &error);
         self.terminal(error);
@@ -651,10 +626,10 @@ impl Frames {
     /// `publishStreamError(err, true)`: the upstream's error payload is neither logged nor
     /// published; a fixed text stands in for it.
     fn fail_payload(&mut self, status: u16, message: impl Into<String>) -> bool {
-        let logged = status_err(status, "upstream stream returned an error payload");
+        let logged = crate::upstream::model_status_error(status, "upstream stream returned an error payload");
         self.capture.error(&logged);
         wire::publish_failure(&self.usage, &logged);
-        self.terminal(status_err(status, message));
+        self.terminal(crate::upstream::model_status_error(status, message.into()));
         true
     }
 
@@ -714,7 +689,7 @@ impl Frames {
         }
         // helps.ApplyPatchTranslationError: the frame's chunks go out, then the 502.
         if self.translator.tool_input_failed() {
-            return self.fail(502, EMPTY_TRANSLATION);
+            return self.fail_with(crate::upstream::apply_patch_error());
         }
         if done {
             self.seen_done = true;
@@ -746,7 +721,7 @@ impl Frames {
         self.ready.extend(out.into_iter().map(Ok));
         if self.translator.tool_input_failed() {
             // RecordApplyPatchStreamFailure publishes; nothing is logged.
-            let error = status_err(502, EMPTY_TRANSLATION);
+            let error = crate::upstream::apply_patch_error();
             wire::publish_failure(&self.usage, &error);
             self.terminal(error);
             return true;

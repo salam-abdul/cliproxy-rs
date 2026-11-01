@@ -23,9 +23,9 @@ use futures_util::StreamExt;
 use http::HeaderMap;
 
 use crate::gemini_stream::ClaudeInputTokens;
-use crate::openai_compat::status_err;
 use crate::openai_compat_http::{self as wire, Clients, GoHeaders};
 use crate::openai_compat_payload::{self as compat, ensure_responses_usage_details};
+use crate::upstream::{apply_patch_error, model_status_error};
 use crate::xai_auth::{self, CLI_CHAT_PROXY_BASE_URL, DEFAULT_API_BASE_URL, metadata_string};
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request::{self as request, Prepared};
@@ -63,10 +63,6 @@ pub struct XaiExecutor {
     rewrite: Option<UrlRewrite>,
     /// The upstream Responses WebSocket sessions (xai_ws.rs).
     pub(crate) ws: Arc<crate::xai_ws::Ws>,
-}
-
-pub(crate) fn apply_patch_error() -> ExecError {
-    status_err(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
 // --- credentials and endpoints (xai_executor_request.go) ---------------------------------
@@ -438,7 +434,10 @@ impl XaiExecutor {
             if req.stream {
                 // Go answers before creating its usage reporter.
                 req.usage.discard();
-                return Err(status_err(400, "streaming not supported for /responses/compact"));
+                return Err(model_status_error(
+                    400,
+                    "streaming not supported for /responses/compact",
+                ));
             }
             return self.compact(credential, &req, cfg, downstream_websocket).await;
         }
@@ -799,7 +798,7 @@ fn buffered(req: &ExecRequest, mut p: Prepared, store: &replay::Store, data: &[u
         }
     }
     p.apply_patch.finish().map_err(|_| apply_patch_error())?;
-    Err(status_err(408, DISCONNECTED))
+    Err(model_status_error(408, DISCONNECTED))
 }
 
 /// Same-format passthrough when no pair is registered (Go's TranslateStream returns
@@ -885,7 +884,7 @@ impl Pipeline {
         let mut out = match self.translator.event(line) {
             Ok(out) => out,
             Err(e) => {
-                self.terminal(status_err(502, e.to_string()));
+                self.terminal(model_status_error(502, e.to_string()));
                 return None;
             }
         };
@@ -1025,7 +1024,7 @@ impl Pipeline {
         match self.translator.finish() {
             Ok(out) => self.ready.extend(out.into_iter().filter(|f| !f.is_empty()).map(Ok)),
             Err(e) => {
-                let error = status_err(502, e.to_string());
+                let error = model_status_error(502, e.to_string());
                 wire::publish_failure(&self.usage, &error);
                 return self.ready.push_back(Err(error));
             }

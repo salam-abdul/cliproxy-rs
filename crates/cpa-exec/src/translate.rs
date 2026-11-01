@@ -157,11 +157,7 @@ fn publish_apply_patch_failure(usage: &cpa_core::exec::UsageSink) {
 /// helps.ApplyPatchUpstreamErrorMessage with Go's 502 `statusErr`: a plain status error,
 /// so the conductor classifies it by status (it is not request-scoped) and fails over.
 fn apply_patch_error() -> ExecError {
-    ExecError::local(
-        502,
-        crate::upstream::scope_for(502),
-        cpa_translate::APPLY_PATCH_UPSTREAM_ERROR,
-    )
+    crate::upstream::status_error(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
 /// Go's translated stream loop (claude_executor_stream.go): each upstream event goes

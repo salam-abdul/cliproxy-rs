@@ -35,6 +35,57 @@ pub(crate) fn body_read_error_after_response(_status: u16, mut error: ExecError)
     error
 }
 
+/// A statusless failure before the request was sent (a plain Go error, answered 500):
+/// nothing reached the upstream, so dispatch may try another credential.
+pub(crate) fn plain_error(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Transport, message)
+}
+
+/// A statusless failure before the send that the provider charges to the credential,
+/// such as missing or unusable credential fields.
+pub(crate) fn credential_error(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Credential, message)
+}
+
+/// A statusless failure after the upstream response started: inference may have run,
+/// so the error is request-scoped and dispatch never resends it.
+pub(crate) fn plain_error_after_response(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Request, message)
+}
+
+/// Go's `statusErr{code, msg}` classified by [`scope_for`]; an empty message reads
+/// `status N`.
+pub(crate) fn status_error(status: u16, message: impl Into<Bytes>) -> ExecError {
+    status_error_scoped(status, scope_for(status), message.into())
+}
+
+/// Go's `statusErr{code, msg}` classified by [`model_scope_for`]; an empty message reads
+/// `status N`.
+pub(crate) fn model_status_error(status: u16, message: impl Into<Bytes>) -> ExecError {
+    status_error_scoped(status, model_scope_for(status), message.into())
+}
+
+fn status_error_scoped(status: u16, scope: FailureScope, mut body: Bytes) -> ExecError {
+    if body.is_empty() {
+        body = Bytes::from(format!("status {status}"));
+    }
+    ExecError {
+        status,
+        scope,
+        body,
+        headers: Box::default(),
+        retry_after: None,
+        direct: false,
+        addon: None,
+    }
+}
+
+/// The 502 for apply_patch tool input or a response translation the proxy cannot
+/// deliver. The upstream already answered, so the error is request-scoped.
+pub(crate) fn apply_patch_error() -> ExecError {
+    ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
+}
+
 pub(crate) fn body_after_response(status: u16, body: ExecStream) -> ExecStream {
     body.map(move |item| item.map_err(|error| body_read_error_after_response(status, error)))
         .boxed()
@@ -324,6 +375,16 @@ where
 pub(crate) fn scope_for(status: u16) -> FailureScope {
     match status {
         401 | 402 | 403 | 408 | 429 | 500.. => FailureScope::Credential,
+        _ => FailureScope::Request,
+    }
+}
+
+/// Go's plain `statusErr` in the API-key executors: never credential-scoped, so a 429
+/// cools only the model; other failures by status.
+pub(crate) fn model_scope_for(status: u16) -> FailureScope {
+    match status {
+        429 => FailureScope::Model,
+        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
         _ => FailureScope::Request,
     }
 }

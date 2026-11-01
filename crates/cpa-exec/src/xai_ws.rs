@@ -30,9 +30,9 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{OwnedMutexGuard, mpsc};
 
 use crate::codex_ws::{self, Pool, Read, Session, Target, Upstream};
-use crate::openai_compat::status_err;
 use crate::openai_compat_payload::ensure_responses_usage_details;
-use crate::xai::{XaiExecutor, apply_patch_error, compaction_frames, compaction_item, compaction_response_id, creds};
+use crate::upstream::{apply_patch_error, model_status_error};
+use crate::xai::{XaiExecutor, compaction_frames, compaction_item, compaction_response_id, creds};
 use crate::xai_auth::DEFAULT_API_BASE_URL;
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request as request;
@@ -452,7 +452,7 @@ pub(crate) fn websockets_enabled(credential: &Credential) -> bool {
 
 /// A plain Go error (`fmt.Errorf`), as the manager sees it.
 fn plain(message: impl Into<String>) -> ExecError {
-    crate::openai_compat::plain_err(message.into())
+    crate::upstream::plain_error(message.into())
 }
 
 /// `buildXAIResponsesWebsocketURL`.
@@ -659,9 +659,12 @@ fn compaction_payload(payload: &[u8], transcript: &[u8]) -> Vec<u8> {
 /// `validateXAIWebsocketCompactionResponse`: the normalized response ID and the
 /// compaction item to keep as the transcript.
 fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
-    let missing = || status_err(502, "xai websocket compaction response is missing compacted state");
+    let missing = || model_status_error(502, "xai websocket compaction response is missing compacted state");
     if data.is_empty() || !gj::std_valid(data) {
-        return Err(status_err(502, "xai websocket compaction returned invalid JSON"));
+        return Err(model_status_error(
+            502,
+            "xai websocket compaction returned invalid JSON",
+        ));
     }
     let id = gj::get(data, "id");
     let output = gj::get(data, "output");
@@ -1057,7 +1060,10 @@ impl XaiExecutor {
     ) -> Result<ExecResponse, ExecError> {
         if req.alt.as_deref() == Some(crate::xai::COMPACT_ALT) {
             req.usage.discard();
-            return Err(status_err(400, "streaming not supported for /responses/compact"));
+            return Err(model_status_error(
+                400,
+                "streaming not supported for /responses/compact",
+            ));
         }
         let exec_id = exec_session.id.trim().to_owned();
         let mut state_id = request::execution_session_id(&req);
@@ -1404,7 +1410,10 @@ impl XaiExecutor {
         // Go's context errors come before executeCompactRequest creates its reporter.
         let Some(mapper) = mapper else {
             req.usage.discard();
-            return Err(status_err(400, "xai websocket compaction context is unavailable"));
+            return Err(model_status_error(
+                400,
+                "xai websocket compaction context is unavailable",
+            ));
         };
         let payload = match mapper.state.snapshot() {
             Some(transcript) => compaction_payload(&req.body, &transcript),
@@ -1421,7 +1430,7 @@ impl XaiExecutor {
                     }
                     if previous.is_empty() {
                         req.usage.discard();
-                        return Err(status_err(400, "xai websocket compaction context is empty"));
+                        return Err(model_status_error(400, "xai websocket compaction context is empty"));
                     }
                     let mut out = crate::xai::remove_input_items(req.body.to_vec(), "compaction_trigger");
                     gj::set_str(&mut out, "previous_response_id", &previous);

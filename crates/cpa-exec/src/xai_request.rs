@@ -188,7 +188,7 @@ pub(crate) async fn prepare(
     let mut apply_patch = apply_patch::State::new(req.source_format, &original_payload, &original_translated);
     // A plain Go error (translator/common NormalizeApplyPatchResponsesRequest).
     body = apply_patch::normalize_executor_request(&body, Some(&original_payload))
-        .map_err(crate::openai_compat::plain_err)?;
+        .map_err(crate::upstream::plain_error)?;
     let will_inject = inject_x_search(cfg);
     let fold = should_fold_namespace_tools(&body, will_inject);
     let namespace_tools = collect_namespace_refs(&body, fold);

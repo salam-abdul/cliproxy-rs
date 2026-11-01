@@ -1114,6 +1114,41 @@ async fn declassified_probes_keep_their_own_date() {
 /// even though the upstream body (and its model) was observed.
 #[tokio::test]
 async fn unrestorable_tool_alias_publishes_no_tokens() {
+    let (error, usage) = unrestorable_tool_alias_error().await;
+    let message = String::from_utf8_lossy(&error.body).into_owned();
+    assert!(
+        message.starts_with("restore Claude OAuth tool name from response: "),
+        "{message}"
+    );
+    assert_eq!(
+        usage.kinds(),
+        ["request", "round_trip_started", "first_byte", "body", "publish_failure"]
+    );
+    let reports = usage.0.lock().unwrap();
+    assert_eq!(
+        reports.last().unwrap().2,
+        format!("0 {message}"),
+        "Go's plain error has no status"
+    );
+}
+
+/// The restore fails after a complete 2xx reply the upstream billed, and fails the same
+/// way on every cloaked account, so the error is request-scoped and never resent.
+#[tokio::test]
+async fn unrestorable_tool_alias_after_a_billed_reply_is_not_replayed() {
+    let (error, _) = unrestorable_tool_alias_error().await;
+    assert!(
+        error
+            .body
+            .starts_with(b"restore Claude OAuth tool name from response: "),
+        "{error}"
+    );
+    assert_eq!(error.scope, FailureScope::Request);
+}
+
+/// A non-stream request whose 2xx reply names a tool alias that matches two passthrough
+/// MCP tools, and the usage reports it produced.
+async fn unrestorable_tool_alias_error() -> (ExecError, Arc<Usage>) {
     use axum::response::IntoResponse;
     let router = axum::Router::new().fallback(|body: String| async move {
         // The client tool `other` went upstream as mcp__<virtual server>__<word>_other;
@@ -1169,21 +1204,7 @@ async fn unrestorable_tool_alias_publishes_no_tokens() {
     });
     let cfg = Config::parse("").unwrap();
     let error = executor.execute(&credential, req, &cfg).await.err().unwrap();
-    let message = String::from_utf8_lossy(&error.body).into_owned();
-    assert!(
-        message.starts_with("restore Claude OAuth tool name from response: "),
-        "{message}"
-    );
-    assert_eq!(
-        usage.kinds(),
-        ["request", "round_trip_started", "first_byte", "body", "publish_failure"]
-    );
-    let reports = usage.0.lock().unwrap();
-    assert_eq!(
-        reports.last().unwrap().2,
-        format!("0 {message}"),
-        "Go's plain error has no status"
-    );
+    (error, usage)
 }
 
 /// Go's reporter calls on each Claude path (claude_executor_execute.go and

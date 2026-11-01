@@ -280,9 +280,7 @@ impl MetaExecutor {
                 (prepared.response.non_stream)(&ctx, event)
                     .ok()
                     .filter(|out| !out.is_empty())
-                    .ok_or_else(|| {
-                        ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
-                    })
+                    .ok_or_else(crate::upstream::apply_patch_error)
             })?;
             // The terminal event Go reads model and Codex usage from, once translated.
             req.usage.response_line(Format::Codex, &source.into_inner());
@@ -595,7 +593,7 @@ fn collect_completed(
     apply_patch: &mut apply_patch_responses::State,
     translate: impl Fn(&[u8]) -> Result<Vec<u8>, ExecError>,
 ) -> Result<Vec<u8>, ExecError> {
-    let bridge_error = || ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR);
+    let bridge_error = crate::upstream::apply_patch_error;
     let mut items = OutputItems::default();
     for line in data.split(|b| *b == b'\n') {
         let Some(event) = data_payload(line) else {
@@ -662,9 +660,7 @@ fn stream_events(
         done: bool,
         responses_client: bool,
     }
-    fn bridge_error() -> ExecError {
-        ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
-    }
+    use crate::upstream::apply_patch_error as bridge_error;
     impl State {
         /// Translates bridge output lines; false when a translator error ended the stream.
         fn translate_all(&mut self, lines: Vec<Vec<u8>>) -> bool {
