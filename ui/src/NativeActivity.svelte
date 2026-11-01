@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { store, Res, every } from "./store.svelte";
-  import { api, text } from "./api";
-  import { requestOutcomes } from "./accounts";
+  import { store, every } from "./store.svelte";
+  import { text } from "./api";
+  import { isFailure, outcomeLabel } from "./traffic";
+  import { requestOutcomes, switchedAccounts } from "./accounts";
   import { type Data } from "./core";
   const native = $derived(!!store.native.data?.enabled);
-  const activity = new Res<Data>(() => api("/observability/native/events"));
+  const activity = store.activity;
   $effect(() => {
     if (native) {
       activity.load();
@@ -14,15 +15,15 @@
   const events = $derived(
     requestOutcomes((activity.data?.events || []) as Data[]),
   );
-  let failuresOnly = $state(false);
+  let filter = $state("all");
   let account = $state("");
-  const failures = (e: Data) =>
-    !["success", "pending", "client_cancelled"].includes(e.outcome);
+  const failures = isFailure;
   const visible = $derived(
     events
       .filter(
         (e) =>
-          (!failuresOnly || failures(e)) &&
+          (filter === "all" ||
+            (filter === "failed" ? failures(e) : switchedAccounts(e))) &&
           (!account ||
             e.events.some((attempt: Data) => attempt.account === account)),
       )
@@ -35,27 +36,27 @@
 
 {#if native}
   <section class="section">
-    <div class="section-head">
-      <h2>Claude requests</h2>
-      <button
-        class="key"
-        aria-pressed={failuresOnly}
-        onclick={() => (failuresOnly = !failuresOnly)}
-        >{failuresOnly ? "Show all requests" : "Show failures"}</button
+    <div class="request-toolbar">
+      <div class="seg" role="group" aria-label="Request outcome">
+        {#each [["all", "All"], ["failed", "Failed"], ["switched", "Account switches"]] as [value, name]}
+          <button
+            aria-pressed={filter === value}
+            onclick={() => (filter = value)}>{name}</button
+          >
+        {/each}
+      </div>
+      <label
+        ><span class="sr">Account</span><select bind:value={account}
+          ><option value="">All accounts</option
+          >{#each store.native.data?.accounts || [] as a}<option value={a.id}
+              >{a.name}</option
+            >{/each}</select
+        ></label
+      >
+      <span class="muted small"
+        >{visible.length} of {events.length} recent requests</span
       >
     </div>
-    <label class="field model-choice"
-      >Account<select bind:value={account}
-        ><option value="">All accounts</option
-        >{#each store.native.data?.accounts || [] as a}<option value={a.id}
-            >{a.name}</option
-          >{/each}</select
-      ></label
-    >
-    <p class="note">
-      Recent requests since startup. Each request groups its failover attempts.
-      Pending means no final outcome is recorded in this history.
-    </p>
     {#if activity.error}<p class="note error">{text(activity.error)}</p>{/if}
     {#if activity.data?.lostEvents}<p class="note error">
         {activity.data.lostEvents} events could not be written to disk. Recent memory
@@ -67,21 +68,32 @@
     {#each visible as e}
       <details class="native-event">
         <summary>
-          <span
-            class="lamp {failures(e)
-              ? 'bad'
-              : e.outcome !== 'success'
-                ? 'warn'
-                : 'ok'}"
-          ></span>
-          <span class="legend">{new Date(e.at).toLocaleTimeString()}</span>
-          <code>{e.model || "Claude"}</code>
-          <span
-            >{e.recovered
-              ? "Recovered after failover"
-              : label(e.outcome || e.reason || e.type)}</span
+          <time class="legend" title={new Date(e.at).toLocaleString()}
+            >{new Date(e.at).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}</time
           >
-          {#if e.status}<span class="legend">{e.status}</span>{/if}
+          <code>{e.model || "Model not reported"}</code>
+          <span class="request-account"
+            >{store.native.data?.accounts?.find((a: Data) => a.id === e.account)
+              ?.name || "—"}</span
+          >
+          <span
+            class="request-result"
+            title={e.outcome === "pending"
+              ? "No final outcome recorded in this history"
+              : undefined}
+            ><span
+              class="lamp {failures(e)
+                ? 'bad'
+                : e.outcome !== 'success'
+                  ? 'warn'
+                  : 'ok'}"
+            ></span><span>{outcomeLabel(e)}</span>{#if e.status}<span
+                class="legend">{e.status}</span
+              >{/if}</span
+          >
         </summary>
         <p>{e.events.length} recorded events</p>
         {#each e.events.filter((event: Data) => event.type === "failover") as attempt}<p
@@ -94,12 +106,6 @@
               "unknown"}
           </p>{/each}
         <dl>
-          {#if e.account}<dt>Account</dt>
-            <dd>
-              {store.native.data?.accounts?.find(
-                (a: Data) => a.id === e.account,
-              )?.name || e.account}
-            </dd>{/if}
           {#if e.requestId}<dt>Request</dt>
             <dd><code>{e.requestId}</code></dd>{/if}
           {#if e.upstreamStatus}<dt>Provider HTTP status</dt>
@@ -140,25 +146,89 @@
   </p>{/if}
 
 <style>
+  .request-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .request-toolbar > span {
+    margin-left: auto;
+  }
+  .section {
+    gap: 0;
+  }
+  .request-toolbar {
+    margin-bottom: 12px;
+  }
   .native-event {
-    border-bottom: 1px solid var(--line, #7774);
-    padding: 0.65rem 0;
+    border-bottom: 1px solid var(--line);
   }
   summary {
     cursor: pointer;
-    display: flex;
-    gap: 0.75rem;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns:
+      70px minmax(0, 1.2fr) minmax(70px, 0.6fr) minmax(0, 1.4fr)
+      10px;
+    gap: 12px;
     align-items: center;
+    padding: 10px 0;
+    font-size: 12px;
+  }
+  summary::after {
+    content: "›";
+    color: var(--ink-2);
+    font-size: 18px;
+  }
+  details[open] > summary::after {
+    transform: rotate(90deg);
+  }
+  summary code {
+    font: inherit;
+    overflow-wrap: anywhere;
+  }
+  .request-account {
+    overflow-wrap: anywhere;
+    color: var(--ink-2);
+  }
+  .request-result {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .request-result .lamp {
+    width: 7px;
+    height: 7px;
   }
   dl {
     display: grid;
-    grid-template-columns: minmax(10rem, 1fr) 2fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
     gap: 0.35rem 1rem;
-    margin: 1rem;
+    padding: 12px;
+    margin: 12px 0;
+    background: var(--panel);
+    border-radius: 8px;
+    font-size: 12px;
   }
   dd {
     margin: 0;
     overflow-wrap: anywhere;
+  }
+  @media (max-width: 600px) {
+    summary {
+      grid-template-columns: 60px minmax(0, 1fr) 10px;
+      gap: 6px 10px;
+    }
+    summary::after {
+      grid-column: 3;
+      grid-row: 1 / 3;
+    }
+    .request-account {
+      grid-column: 1;
+    }
+    .request-result {
+      grid-column: 2;
+    }
   }
 </style>

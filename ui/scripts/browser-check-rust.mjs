@@ -17,8 +17,9 @@ const settled = () => {
   browser("eval", "document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))))");
 };
 const go = (page) => {
-  const parent = ["providers", "quotas"].includes(page) ? "credentials" : ["keys", "models", "payload", "system"].includes(page) ? "config" : page;
-  browser("click", `.side nav a[href="#${parent}"], .side a[href="#${parent}"]`);
+  const parent = page === "logs" ? "activity" : ["use", "credentials", "providers", "keys", "models", "payload", "system"].includes(page) ? "config" : page === "quotas" ? "overview" : page;
+  browser("click", `.top .nav a[href="#${parent}"]`);
+  if (page === "quotas") return browser("eval", "location.hash='quotas'");
   if (parent !== page) browser("click", `.section-tabs a[href="#${page}"]`);
 };
 const results = [];

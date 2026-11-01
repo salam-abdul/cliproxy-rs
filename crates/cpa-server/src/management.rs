@@ -496,6 +496,10 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().get(guarded!(s, observability::native_events)),
         ),
         (
+            "observability/native/history",
+            methods().get(guarded!(s, observability::native_history)),
+        ),
+        (
             "observability/usage/api-keys",
             methods().get(guarded!(s, observability::api_key_usage)),
         ),

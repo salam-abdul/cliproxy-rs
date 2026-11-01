@@ -1,13 +1,13 @@
 # Upstream port queue
 
-Reviewed **2026-10-25**, against fork `fa0cd8b5a4ef61474500d04885334fc07d15ec30`.
+Initial review **2026-10-25**, against fork `fa0cd8b5a4ef61474500d04885334fc07d15ec30`.
 These are inclusive boundaries for screened default-branch history, not merge or full-audit claims.
 
 | Source | Branch | Reviewed through |
 | --- | --- | --- |
-| G — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | `main` | `307803510bce87f986fcf7b1a84190f105c7b4aa` |
-| R — [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs) | `master` | `0ccf7e4da7676994a8f342d7de5deb6f1362123c` |
-| S — [sub-api-proxy](https://github.com/DarkEden-coding/sub-api-proxy) | `main` | `b9c875c3d9060a55f9caf377d6b87d1ffc4b0008` |
+| G — [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | `main` | `dbb706215a3afd2f0ea3c96482d4233856466caa` |
+| R — [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs) | `master` | `b7ab292f47c61263da16d0e07358f492ad4dabf4` |
+| S — [sub-api-proxy](https://github.com/DarkEden-coding/sub-api-proxy) | `main` | `d4c10513147821bafe99315ad520e265d46dfe69` |
 
 ## Completed ports
 
@@ -41,10 +41,38 @@ Cleanup `562303d` removed Go sources/generators, differential and historical
 benchmark tooling, bulk parity corpora and obsolete docs. Focused Rust regressions
 remain. `docs/` contains configuration, installation and this checkpoint.
 
+## Review of 2026-10-31
+
+The saved hashes were ancestors of all three source heads. Compared with fork
+`a4e81c0` and this dashboard update. Screened
+`3078035..dbb7062` (89 Go commits), `0ccf7e4..b7ab292` (48 Rust commits) and
+`b9c875c..d4c1051` (3 sub-api-proxy commits). This was a commit-range screen
+with focused source comparisons, not a full source audit or a port. No live
+provider calls or installation qualification were run.
+
+| Candidate | Source commits | Fork disposition |
+| --- | --- | --- |
+| Disable the AI Studio WebSocket in Home mode | G `a6b4477` | Priority authorization fix: the fork registers `/v1/ws` in Home mode while `home::overlay` disables `ws-auth` and clears local API keys. An available Home node accepts an unauthenticated relay connection. |
+| Bound pre-auth request capture and zstd log decoding | G `477605d`, `ad8bdd3` | Priority safety fix: `request_logging::capture` can eagerly read a body before client authentication, and its decode has no output limit. Preserve raw wire bytes while bounding capture. |
+| Preserve Claude tool-result errors | G `81de4b9`, `068fe15` | Port to Gemini and Antigravity translators: the fork currently writes `response.result` even when `tool_result.is_error` is true. |
+| Classify SIWC credentials as OAuth | R `77267c1` | Port the `use_siwc: true` precedence before API-key classification; cover mixed metadata. |
+| Reconcile stream terminal and retry rules | G `aa4130e`, `f013eb6`, `86a1aab`; R `80977ac`, `186ee6e` | Compare with the fork's existing truncation checks. Retain partial usage; never cool a credential for a locally detected truncation or replay after output. |
+| Preserve Claude and Codex conversation features | G `12d97cf`, `dbb7062`, `1d45a5f` | Evaluate mid-conversation `tool_addition`, recognized compaction capsules and forced-tool restrictions with synthetic native-client fixtures. |
+| Codex credential recovery | G `514d09f`, `43068c8` | Consider targeted re-sign-in and sanitized terminal-renewal status. Check relative auth-dir cooldown paths first; do not add automatic inference verification. |
+| Usage and dashboard history | G `89e472f` through `82deffb`, S `385b972`; R `7c3a83e` | Reconcile structured usage and speed metrics with the fork's durable history. Quota-window retention is present in the dashboard; review its 403 guidance. |
+| WebSocket late interrupt | S `d4c1051` | Applies only if local HTTP-turn interrupt support is added; no matching fork control path exists now. |
+
+Plugin host, packaged releases, CI, Go parity fixtures, benchmarks, discovery,
+and unrelated dashboard branding stay outside this fork's scope. The reviewed
+boundaries advance despite unfinished candidates; preserve this queue until each
+is resolved or explicitly dropped.
+
 ## Pick up next
 
-The reviewed port queue is complete. Start the next upstream review from the saved
-hashes above; no additional upstream history was screened during implementation.
+Start with the Home WebSocket gate and bounded request capture, then Claude
+tool-result semantics and SIWC classification. Reconcile the other candidates
+against current code before porting. The next upstream review starts from the
+saved hashes above.
 
 ## Handoff
 

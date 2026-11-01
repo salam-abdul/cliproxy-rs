@@ -11,12 +11,11 @@ import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
 
 export const sections = [
   ["overview", "Overview", ["overview"]],
-  ["credentials", "Accounts", ["credentials", "connect"]],
   ["activity", "Activity", ["activity", "logs"]],
   [
     "config",
     "Settings",
-    ["config", "providers", "keys", "models", "payload", "system", "use"],
+    ["config", "credentials", "connect", "providers", "keys", "models", "payload", "system", "use"],
   ],
 ] as const;
 
@@ -43,7 +42,7 @@ const routes = new Set<string>([
 const aliases: Record<string, string> = {
   oauth: "connect",
   configuration: "config",
-  quotas: "credentials",
+  quotas: "overview",
   usage: "activity",
 };
 
@@ -81,7 +80,7 @@ function parse(hash: string) {
 class Store {
   logged = $state(false);
   localDashboard = $state(false);
-  theme = $state(document.documentElement.dataset.theme || "dark");
+  theme = $state(document.documentElement.dataset.theme || "light");
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
   /**
@@ -103,11 +102,13 @@ class Store {
   toast = $state<{ text: string; bad: boolean } | null>(null);
   /** "METHOD /path" → false when the server does not implement it. */
   caps = $state<Record<string, false>>({});
-  model = $state("claude-sonnet-4-6");
   now = $state(Date.now());
   quotaPending = $state<Record<string, boolean>>({});
-  native = new Res<Data>(() =>
-    api(`/observability/native/status?model=${encodeURIComponent(this.model)}`),
+  native = new Res<Data>(() => api("/observability/native/status"));
+  activity = new Res<Data>(() => api("/observability/native/events"));
+  historyRange = $state("24h");
+  history = new Res<Data>(() =>
+    api(`/observability/native/history?range=${this.historyRange}`),
   );
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> =>
@@ -173,7 +174,13 @@ class Store {
     this.localDashboard = false;
     this.caps = {};
     this.#probed.clear();
-    for (const resource of [this.config, this.creds, this.native]) {
+    for (const resource of [
+      this.config,
+      this.creds,
+      this.native,
+      this.activity,
+      this.history,
+    ]) {
       resource.data = undefined;
       resource.error = null;
       resource.loading = false;

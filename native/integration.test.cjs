@@ -185,6 +185,8 @@ test("native transport honors manager toggles, committed rotation and durable af
     assert.equal(status.accounts.find(a => a.id === "a").availability, "disabled");
     assert.equal(status.accounts.find(a => a.id === "b").availability, "included");
     assert.equal(status.enabled, true);
+    assert.deepEqual(status.selectionOrder, ["b"], "disabled accounts never appear in new-session order");
+    assert.equal(typeof status.newSessionMinRemaining, "number");
     assert.equal(status.accounts.find(a => a.id === "a").disabled, true);
     assert.equal(status.accounts.find(a => a.id === "a").includedQuota, null);
     assert.ok(!JSON.stringify(status).includes("fixture-"), "status never exposes tokens");

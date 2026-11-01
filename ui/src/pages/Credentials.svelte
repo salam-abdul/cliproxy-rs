@@ -2,31 +2,13 @@
   import { store, every, Res } from "../store.svelte";
   import { api, download } from "../api";
   import { credName, provider, label, span, type Data } from "../core";
-  import QuotaBrief from "../QuotaBrief.svelte";
-  import AccountQuota from "../AccountQuota.svelte";
   import { accountStatus } from "../accounts";
-  import { checkAll } from "../quota";
   import Load from "../Load.svelte";
   import Missing from "../Missing.svelte";
   import ClaudePolicy from "../ClaudePolicy.svelte";
 
-  $effect(() => {
-    let active = true;
-    const stop = every(
-      15000,
-      async () => {
-        await store.creds.load(true);
-        if (active && !store.creds.error)
-          await checkAll(store.creds.data || [], true, () => active);
-      },
-      true,
-    );
-    return () => {
-      active = false;
-      stop();
-    };
-  });
-  let customModel = $state(false);
+  $effect(() => every(15000, () => store.creds.load(true), true));
+
   let query = $state(""),
     filter = $state("all"),
     open = $state(store.route.arg);
@@ -44,22 +26,22 @@
         a,
         store.native.data,
         store.native.error,
-        store.model,
+        "claude",
         store.now,
       ),
     })),
   );
   const matches = (r: (typeof rows)[number], f: string) =>
     f === "all" ||
-    (f === "available"
-      ? r.s.available
+    (f === "enabled"
+      ? !r.a.disabled
       : f === "disabled"
         ? r.a.disabled
-        : !r.a.disabled && !r.s.available);
+        : !r.a.disabled && ["warn", "bad"].includes(r.s.lamp));
   const filters = $derived(
     [
       ["all", "All"],
-      ["available", "Available"],
+      ["enabled", "Enabled"],
       ["attention", "Needs attention"],
       ["disabled", "Disabled"],
     ].map(([id, name]) => ({
@@ -72,7 +54,7 @@
     rows.filter(
       (r) =>
         matches(r, filter) &&
-        `${r.a.name} ${credName(r.a)} ${provider(r.a)} ${r.a.note || ""}`
+        `${r.a.name} ${r.a.label || ""} ${credName(r.a)} ${provider(r.a)} ${r.a.note || ""}`
           .toLowerCase()
           .includes(query.trim().toLowerCase()),
     ),
@@ -280,27 +262,6 @@
   ]}
 />
 
-<label class="field model-choice"
-  >Claude availability for
-  <select
-    aria-label="Routing model"
-    value={customModel ? "custom" : store.model}
-    onchange={(e) => {
-      customModel = e.currentTarget.value === "custom";
-      if (!customModel) store.model = e.currentTarget.value;
-    }}
-  >
-    <option value="claude-sonnet-4-6">Sonnet 4.6</option><option
-      value="claude-opus-4-6">Opus 4.6</option
-    ><option value="claude-haiku-4-5-20251001">Haiku 4.5</option><option
-      value="custom">Custom model…</option
-    >
-  </select>
-</label>
-{#if customModel}<label class="field model-choice"
-    >Model identifier<input maxlength="200" bind:value={store.model} /></label
-  >{/if}
-
 <Load res={store.creds} what="Credentials">
   {#snippet children(list)}
     {#if !list.length}
@@ -342,12 +303,10 @@
                 >
                   <span class="lamp {r.s.lamp}"></span>
                   <span class="name"
-                    ><strong>{credName(r.a)}</strong
+                    ><strong>{r.a.label || credName(r.a)}</strong
                     >{#if r.a.note || credName(r.a) !== r.a.name}<small
-                        >{r.a.note
-                          ? `${r.a.note} · ${r.a.name}`
-                          : r.a.name}</small
-                      >{/if}<QuotaBrief a={r.a} /></span
+                        >{r.a.note ? r.a.note : r.a.email || r.a.name}</small
+                      >{/if}</span
                   >
                   <span class="state-label"
                     >{r.s.label}{#if r.s.detail}<small title={r.s.detail}
@@ -387,7 +346,6 @@
                           href="#connect">Reconnect account</a
                         >{/if}
                     </div>
-                    <AccountQuota {a} />
                     {#if routeAccount}<p class="muted">
                         {store.native.data?.affinity?.find(
                           (n: Data) => n.account === routeAccount.id,
@@ -506,8 +464,7 @@
   {/snippet}
 </Load>
 <p class="legend">
-  Status refreshes every 10 seconds; quotas every minute while this page is
-  visible. Disabled accounts are skipped.
+  <a href="#overview">View quotas and account order →</a>
 </p>
 
 <details class="section">

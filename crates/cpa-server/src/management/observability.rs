@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{RawQuery, State};
+use axum::extract::{Query as AxumQuery, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{Map, Value, json};
@@ -171,6 +171,42 @@ pub(crate) async fn native_policy(
 
 pub(crate) async fn native_events(State(state): State<Arc<Management>>) -> Response {
     super::json_ordered(StatusCode::OK, &state.rt.native_events.snapshot())
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct NativeHistoryParams {
+    #[serde(default = "default_history_range")]
+    range: String,
+    account: Option<String>,
+}
+
+fn default_history_range() -> String {
+    "24h".to_owned()
+}
+
+pub(crate) async fn native_history(
+    State(state): State<Arc<Management>>,
+    AxumQuery(params): AxumQuery<NativeHistoryParams>,
+) -> Response {
+    let Some(range) = crate::native_claude::history::Range::parse(&params.range) else {
+        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
+    };
+    if params.account.as_ref().is_some_and(|a| a.is_empty() || a.len() > 256) {
+        return fail(StatusCode::BAD_REQUEST, "Invalid account filter");
+    }
+    let native = state
+        .rt
+        .native_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade();
+    let Some(native) = native else {
+        return fail(StatusCode::CONFLICT, "Native routing is not enabled on this server");
+    };
+    match native.history(range, params.account).await {
+        Ok(result) => super::json_ordered(StatusCode::OK, &result),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Native history could not be read"),
+    }
 }
 
 #[cfg(test)]

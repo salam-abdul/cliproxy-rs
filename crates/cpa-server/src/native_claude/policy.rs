@@ -44,14 +44,15 @@ pub(super) fn proposed<'a>(
         return Some(first);
     }
     pool.iter()
-        .filter(|a| {
-            a.enabled
-                && !tried.contains(&a.id)
-                && routing.cooldowns.account_until(&a.id) <= at
-                && headroom(&a.quota, model, minimum)
-        })
-        .min_by_key(|a| weekly_reset(&a.quota, at).unwrap_or(u64::MAX))
+        .filter(|a| a.enabled && !tried.contains(&a.id) && routing.cooldowns.account_until(&a.id) <= at)
+        .min_by_key(|a| new_session_key(a, at, Some((model, minimum))))
         .or(Some(first))
+}
+pub(super) fn new_session_key(a: &Account, at: u64, headroom_check: Option<(&str, f64)>) -> (bool, u64) {
+    (
+        headroom_check.is_some_and(|(model, minimum)| !headroom(&a.quota, model, minimum)),
+        weekly_reset(&a.quota, at).unwrap_or(u64::MAX),
+    )
 }
 // Rank only fresh, future weekly resets. Missing dates cannot win selection.
 pub(super) fn weekly_reset(q: &Value, at: u64) -> Option<u64> {
@@ -76,11 +77,7 @@ pub(super) fn choose_account<'a>(
         .iter()
         .find(|a| routing.affinity.get(sid) == Some(&a.id))
         .copied()
-        .or_else(|| {
-            usable
-                .into_iter()
-                .min_by_key(|a| weekly_reset(&a.quota, at).unwrap_or(u64::MAX))
-        })
+        .or_else(|| usable.into_iter().min_by_key(|a| new_session_key(a, at, None)))
 }
 
 #[cfg(test)]

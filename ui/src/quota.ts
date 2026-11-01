@@ -5,6 +5,7 @@ import {
   provider,
   quotaWindows,
   signalWindows,
+  claudeWindows,
   type Data,
   type Window,
 } from "./core";
@@ -44,6 +45,27 @@ export function limits(
     };
   }
   return live || null;
+}
+
+export function quotaSummary(a: Data) {
+  const q = limits(a);
+  const native =
+    provider(a) === "claude" && store.native.data?.enabled
+      ? store.native.data.accounts?.find(
+          (n: Data) => n.fileId === (a.id || a.name),
+        )?.includedQuota
+      : null;
+  return {
+    windows: native?.limits
+      ? claudeWindows(native.limits)
+      : q && "windows" in q
+        ? q.windows
+        : [],
+    failed: !!(q?.error || (native && store.native.error)),
+    stale: native
+      ? !(store.native.data?.validUntil > store.now)
+      : !!(q && "at" in q && store.now - q.at > 90000),
+  };
 }
 
 export function check(a: Data, automatic = false): Promise<void> {

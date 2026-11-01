@@ -26,9 +26,12 @@ export function accountStatus(
       signin: ["bad", "Sign in again"],
       qualification: ["warn", "Qualification mode"],
       cooling: ["warn", "Cooling down"],
-      included: ["ok", "Included quota available"],
-      extra: ["warn", "Paid extra usage available"],
-      limited: ["warn", "Included quota exhausted"],
+      included: [
+        "ok",
+        model === "claude" ? "Enabled" : "Included quota available",
+      ],
+      extra: ["warn", "Paid overage eligible"],
+      limited: ["warn", "Quota exhausted"],
       unknown: ["warn", "Availability unknown"],
     };
     const [lamp, label] = states[account?.availability] || states.unknown;
@@ -45,7 +48,7 @@ export function accountStatus(
   return fallback.lamp === "ok"
     ? {
         lamp: "off",
-        label: "Enabled · availability not reported",
+        label: "Enabled",
         detail: fallback.detail,
       }
     : fallback;
@@ -72,4 +75,13 @@ export function requestOutcomes(events: Data[]): Data[] {
       };
     })
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+}
+
+export function switchedAccounts(request: Data): boolean {
+  const accounts = new Set(
+    (request.events || [])
+      .map((event: Data) => event.account)
+      .filter((account: unknown): account is string => typeof account === "string" && account.length > 0),
+  );
+  return accounts.size > 1;
 }

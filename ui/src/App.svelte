@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, type Component } from "svelte";
+  import { onMount, type Component } from "svelte";
   import { store, pages, sections, every } from "./store.svelte";
   import Overview from "./pages/Overview.svelte";
   import Use from "./pages/Use.svelte";
@@ -22,12 +22,6 @@
       clearInterval(timer);
       stop();
     };
-  });
-  $effect(() => {
-    if (!store.logged || !store.model) return;
-    store.model;
-    const timer = setTimeout(() => store.native.load(), 250);
-    return () => clearTimeout(timer);
   });
   const views: Record<string, Component> = {
     overview: Overview,
@@ -66,7 +60,6 @@
       ? `v${store.meta.version}`
       : store.meta.version,
   );
-  let menu = $state(false);
   // After a page change, move focus to the new content (not on credential or log arguments).
   let page = store.route.page;
   $effect(() => {
@@ -103,7 +96,6 @@
   $effect(() => {
     const sync = () => {
       store.sync();
-      menu = false;
     };
     addEventListener("hashchange", sync);
     return () => removeEventListener("hashchange", sync);
@@ -115,15 +107,7 @@
     >{store.logged ? `${title} · cliproxy-rs` : "Sign in · cliproxy-rs"}</title
   ></svelte:head
 >
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === "Escape" && menu) {
-      menu = false;
-      document.querySelector<HTMLElement>(".menu")?.focus();
-    }
-  }}
-  onbeforeunload={(e) => store.dirty && e.preventDefault()}
-/>
+<svelte:window onbeforeunload={(e) => store.dirty && e.preventDefault()} />
 
 {#snippet mark()}<svg
     width="22"
@@ -189,15 +173,21 @@
     )}>Skip to content</a
   >
   <div class="shell">
-    <nav class="side" class:open={menu} id="pages" aria-label="Pages">
+    <header class="top">
       <a class="brand" href="#overview">{@render mark()}</a>
-      <div class="nav">
+      <nav class="nav" aria-label="Pages">
         {#each sections as [id, name]}<a
             href={`#${id}`}
             aria-current={section[0] === id ? "page" : undefined}>{name}</a
           >{/each}
-      </div>
-      <div class="side-foot">
+      </nav>
+      <span class="top-spacer"></span>
+      <span class="row connection" role="status">
+        <span class="lamp {store.online ? 'ok' : 'bad'}"></span>
+        {store.online ? "Local proxy online" : "Connection lost"}
+        <span class="sr">{host}{version ? ` · ${version}` : ""}</span>
+      </span>
+      <div class="top-actions">
         {@render theme()}
         {#if !store.localDashboard}<button
             class="key quiet"
@@ -208,32 +198,9 @@
             out</button
           >{/if}
       </div>
-    </nav>
+    </header>
     <div class="main">
-      <header class="top">
-        <a class="brand" href="#overview">{@render mark()}</a>
-        <span class="row" role="status">
-          <span class="lamp {store.online ? 'ok' : 'bad'}"></span>
-          {#if store.online}<span>Management connected</span><span class="host"
-              >{host}{version ? ` · ${version}` : ""}</span
-            >{:else}Connection lost{/if}
-        </span>
-        <button
-          class="key round menu"
-          aria-label="Pages"
-          aria-expanded={menu}
-          aria-controls="pages"
-          onclick={() =>
-            (menu = !menu) &&
-            tick().then(() =>
-              document.querySelector<HTMLElement>(".nav a")?.focus(),
-            )}
-          ><svg class="i" aria-hidden="true"
-            ><use href={`#i-${menu ? "close" : "menu"}`} /></svg
-          ></button
-        >
-      </header>
-      <main class="page" id="main" tabindex="-1" inert={menu}>
+      <main class="page" id="main" tabindex="-1">
         {#if children.length > 1}<nav
             class="row section-tabs"
             aria-label={section[1]}

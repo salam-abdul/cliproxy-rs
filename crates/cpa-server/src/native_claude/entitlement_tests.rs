@@ -143,6 +143,13 @@ impl Fixture {
         ));
         let state = Arc::new(State {
             events: diagnostics::Writer::start(native.events.clone(), rt.native_events.lost.clone()).unwrap(),
+            history: Some(
+                history::History::start(
+                    native.events.with_extension("sqlite"),
+                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                )
+                .unwrap(),
+            ),
             config: native,
             rt,
             client: wreq::Client::builder()

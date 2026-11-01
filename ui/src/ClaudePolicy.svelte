@@ -46,9 +46,8 @@
           >Paid overage policy unavailable · waiting for status</span
         >{/if}
       <span class="note"
-        >Applies to all enabled Claude accounts. Included quota is used first.
-        When off, wait for a reset rather than use paid extra usage. This does
-        not change provider billing settings or set a spending cap.</span
+        >Use paid extra usage after included quota runs out. Account billing
+        settings stay unchanged.</span
       >
     </div>
     {#if store.native.error}<p class="note error">

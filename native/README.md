@@ -16,7 +16,9 @@ Exhausted response headers override cached quota and affinity on the next reques
 
 ## Diagnostics and retention
 
-The dashboard’s Usage page shows recent native selections, failover attempts and final outcomes through the authenticated, nondestructive `GET /v8/management/observability/native/events` route. It retains 512 events in memory since startup. Stream errors, missing `message_stop`, transport failures and client cancellations are distinct; an HTTP 200 alone does not establish streaming success. Observer failures are reported as incomplete observation. Provider errors retain only allowlisted types; usage retains only known numeric token counters.
+Activity shows recent native selections, failover attempts and final outcomes through the authenticated, nondestructive `GET /v8/management/observability/native/events` route. It retains 512 events in memory since startup. Stream errors, missing `message_stop`, transport failures and client cancellations are distinct; an HTTP 200 alone does not establish streaming success. Observer failures are reported as incomplete observation. Provider errors retain only allowlisted types; usage retains only known numeric token counters.
+
+Overview reads `GET /v8/management/observability/native/history?range=24h|7d|30d`. A private SQLite file beside the event log retains up to 31 days of final request outcomes, token counters and sampled account availability, capped at 250,000 requests and 50,000 status records; it excludes sessions, request bodies and body fingerprints. The writer batches records off the inference path, and an unavailable history file does not stop routing. Account status is sampled every five minutes without inference calls. History begins when this version first runs; older event logs are not backfilled. The dashboard marks incomplete token totals and gaps without account observations.
 
 Timing fields separate body preparation, session waiting, quota admission, upstream headers across attempts and response streaming. First-byte time is measured from request arrival and may precede generated text; it is not time to first token. These fields describe elapsed time, not isolated CPU cost.
 
@@ -44,7 +46,9 @@ cliproxy-native status
 cliproxy-native dashboard --copy-key
 ```
 
-`refresh` runs through the same Rust owner as automatic refresh. The management command never exchanges refresh tokens. The dashboard manages this owner’s accounts and displays native request activity. A separate proxy with another auth directory has independent switches; use `cliproxy-native dashboard` for native Claude accounts. The dashboard identifies its scope through `GET /v8/management/observability/native/status`. Enable `observability.usage.usage-statistics-enabled` for the Usage page's provider counters; the installer enables it on new setups. `status` also shows recent cache counters and persistent affinity, without making model requests.
+`refresh` uses the Rust credential owner; the management command never exchanges refresh tokens. `status` shows recent cache counters and persistent affinity without model requests.
+
+Use `cliproxy-native dashboard` to open that owner's accounts and quotas. Overview shows remaining quota, default new-session order, native Claude history and reported token counts. Session affinity and model limits can override the displayed order. Settings contains account controls; Activity shows recent request errors and switches. Other provider request counters require `observability.usage.usage-statistics-enabled`, enabled by the installer.
 
 The native transport runs inside the same Rust process as the API server. To attach it to an existing server, set `native-claude.config-file` in that server's YAML and point the native JSON's `managerConfig`, `managementUrl`, `managementKeyFile` and `authDir` at that same owner. Preserve native account IDs when consolidating credentials so existing affinity remains valid; stop both refresh owners before moving files. Disable the retired service to prevent duplicate refreshes.
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accountStatus, requestOutcomes } from "./accounts.ts";
+import { accountStatus, requestOutcomes, switchedAccounts } from "./accounts.ts";
 const now = 2_000_000_000_000;
 const a = {
   id: "file-a",
@@ -26,7 +26,7 @@ test("native status is model scoped, freshness bounded, and never inferred from 
   );
   assert.equal(
     accountStatus(a, native("extra"), null, "sonnet", now).label,
-    "Paid extra usage available",
+    "Paid overage eligible",
   );
   assert.equal(
     accountStatus(a, native("extra"), null, "sonnet", now).available,
@@ -57,7 +57,7 @@ test("native status is model scoped, freshness bounded, and never inferred from 
   );
   assert.equal(
     accountStatus(a, { enabled: false }, null, "sonnet", now).label,
-    "Enabled · availability not reported",
+    "Enabled",
   );
 });
 test("request outcomes keep recovered attempts together and pending distinct from success", () => {
@@ -90,4 +90,18 @@ test("request outcomes keep recovered attempts together and pending distinct fro
     ])[0].outcome,
     "client_cancelled",
   );
+});
+
+test("account switches include failed requests that reached another account", () => {
+  const switched = requestOutcomes([
+    { type: "rejected", requestId: "r", at: "2033-05-18T03:33:22Z", outcome: "attempt_limit" },
+    { type: "failover", requestId: "r", at: "2033-05-18T03:33:21Z", account: "b" },
+    { type: "failover", requestId: "r", at: "2033-05-18T03:33:20Z", account: "a" },
+  ])[0];
+  assert.equal(switchedAccounts(switched), true);
+  const oneAttempt = requestOutcomes([
+    { type: "rejected", requestId: "s", at: "2033-05-18T03:33:22Z", outcome: "attempt_limit" },
+    { type: "failover", requestId: "s", at: "2033-05-18T03:33:20Z", account: "a" },
+  ])[0];
+  assert.equal(switchedAccounts(oneAttempt), false);
 });

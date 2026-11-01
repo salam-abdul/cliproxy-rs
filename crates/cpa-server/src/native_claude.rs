@@ -3,6 +3,7 @@
 pub(crate) mod diagnostics;
 #[cfg(test)]
 mod entitlement_tests;
+pub(crate) mod history;
 mod observation;
 mod policy;
 mod quota;
@@ -126,6 +127,7 @@ fn yes() -> bool {
 pub(crate) struct State {
     config: Config,
     events: diagnostics::Writer,
+    history: Option<history::History>,
     rt: Arc<Runtime>,
     client: wreq::Client,
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
@@ -276,7 +278,18 @@ impl State {
     fn event(&self, mut v: Value) {
         v["at"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         self.events.send(&v, &self.rt.native_events.lost);
+        if let Some(history) = &self.history {
+            history.record_event(&v);
+        }
         self.rt.native_events.record(v);
+    }
+
+    pub(crate) async fn history(&self, range: history::Range, account: Option<String>) -> anyhow::Result<Value> {
+        self.history
+            .as_ref()
+            .context("Native history is unavailable")?
+            .query(range, account)
+            .await
     }
 
     fn accounts(&self) -> anyhow::Result<Vec<Account>> {
@@ -963,6 +976,16 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     }
     let s = Arc::new(State {
         events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
+        history: match history::History::start(
+            c.events.with_extension("sqlite"),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ) {
+            Ok(history) => Some(history),
+            Err(error) => {
+                tracing::warn!(%error, "Native history is unavailable");
+                None
+            }
+        },
         config: c.clone(),
         rt,
         client: client.build()?,
@@ -995,6 +1018,17 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             }
         }
     });
+    let health_state = s.clone();
+    let health = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if health_state.status().await.is_err() {
+                tracing::warn!("Native Claude health observation failed");
+            }
+        }
+    });
     let s1 = s.clone();
     let a = tokio::spawn(async move {
         while let Ok((io, _)) = plain.accept().await {
@@ -1022,7 +1056,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         "Native Claude transparent router ready on loopback:{}",
         c.http_proxy_port
     );
-    Ok(Running(vec![a, b, certificate], owner))
+    Ok(Running(vec![a, b, certificate, health], owner))
 }
 
 fn load_tls(c: &Config) -> anyhow::Result<Arc<SslAcceptor>> {
