@@ -894,3 +894,37 @@ async fn a_truncated_or_failed_devin_body_is_not_replayed() {
         assert_eq!(error.scope, FailureScope::Request, "{name}: streamed {error}");
     }
 }
+
+/// A trailer error alone says the upstream did no work, so dispatch may try another
+/// account; after other frames the upstream worked on the request, so the buffered
+/// error marks a response that broke off and dispatch never resends it.
+#[tokio::test]
+async fn a_trailer_error_after_frames_marks_the_response_broken() {
+    let frame = |flag: u8, payload: &[u8]| {
+        let mut bytes = vec![flag];
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        Bytes::from(bytes)
+    };
+    let trailer = frame(
+        0x02,
+        br#"{"error":{"code":"invalid_argument","message":"An Internal Error"}}"#,
+    );
+    for (name, frames, after) in [
+        ("alone", vec![trailer.clone()], None),
+        (
+            "after a frame",
+            vec![frame(0, b""), trailer.clone()],
+            Some(cpa_core::exec::AfterAccept::Truncated),
+        ),
+    ] {
+        let body = futures_util::stream::iter(frames.into_iter().map(Ok)).boxed();
+        let (consumed, _) = consume_frames(FrameReader::new(body), "swe-2", b"{}").await;
+        let (error, statusless) = consumed
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the trailer error was lost"));
+        assert_eq!(error.status, 502, "{name}: {error}");
+        assert!(!statusless, "{name}");
+        assert_eq!(error.after_accept, after, "{name}");
+    }
+}

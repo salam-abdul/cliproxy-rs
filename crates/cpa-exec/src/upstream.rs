@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use bytes::{Bytes, BytesMut};
-use cpa_core::exec::{ExecError, ExecResponse, ExecStream, FailureScope, ResponseBody};
+use cpa_core::exec::{AfterAccept, ExecError, ExecResponse, ExecStream, FailureScope, ResponseBody};
 use cpa_translate::sse::Framer;
 use futures_util::{Stream, StreamExt};
 use http::HeaderMap;
@@ -31,6 +31,7 @@ pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
 pub(crate) fn body_read_error_after_response(_status: u16, mut error: ExecError) -> ExecError {
     if error.scope == FailureScope::Transport && error.headers.is_empty() {
         error.scope = FailureScope::Request;
+        error.after_accept = Some(AfterAccept::Interrupted);
     }
     error
 }
@@ -50,7 +51,13 @@ pub(crate) fn credential_error(message: impl Into<String>) -> ExecError {
 /// A statusless failure after the upstream response started: inference may have run,
 /// so the error is request-scoped and dispatch never resends it.
 pub(crate) fn plain_error_after_response(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Request, message)
+    ExecError::local(500, FailureScope::Request, message).accepted(AfterAccept::Unprocessed)
+}
+
+/// A statusless read failure or early end of an accepted response. Dispatch may fail it
+/// over only while the client has received nothing.
+pub(crate) fn interrupted_after_response(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Request, message).accepted(AfterAccept::Interrupted)
 }
 
 /// Go's `statusErr{code, msg}` classified by [`scope_for`]; an empty message reads
@@ -77,6 +84,7 @@ fn status_error_scoped(status: u16, scope: FailureScope, mut body: Bytes) -> Exe
         retry_after: None,
         direct: false,
         addon: None,
+        after_accept: None,
     }
 }
 
@@ -148,6 +156,7 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
             body,
             direct: false,
             addon: None,
+            after_accept: None,
         });
     }
     let is_sse = headers

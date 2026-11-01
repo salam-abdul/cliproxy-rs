@@ -15,7 +15,7 @@ use base64::Engine;
 use bytes::Bytes;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
-use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, ResponseBody};
+use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, ResponseBody};
 use cpa_core::format::Format;
 use futures_util::StreamExt;
 use gjson::Kind;
@@ -265,7 +265,12 @@ impl CodexExecutor {
                     "response.completed" => {
                         let (calls, created, usage) = extract(data, &items);
                         if calls.is_empty() {
-                            return Err(model_status_error(502, "upstream did not return image output"));
+                            // A completed response: the upstream did the work.
+                            return Err(ExecError::local(
+                                502,
+                                FailureScope::Request,
+                                "upstream did not return image output",
+                            ));
                         }
                         return Ok(ExecResponse {
                             status: res.status,
@@ -282,10 +287,10 @@ impl CodexExecutor {
                 }
             }
         }
-        Err(model_status_error(
-            504,
-            "stream error: stream disconnected before completion",
-        ))
+        Err(
+            model_status_error(504, "stream error: stream disconnected before completion")
+                .accepted(cpa_core::exec::AfterAccept::Truncated),
+        )
     }
 }
 
@@ -354,8 +359,12 @@ fn frames(upstream: ExecStream, prepared: Prepared, usage: cpa_core::exec::Usage
                         st.done = true;
                         let (calls, _, usage) = extract(data, &st.items);
                         if calls.is_empty() {
-                            st.out
-                                .push_back(Err(model_status_error(502, "upstream did not return image output")));
+                            // A completed response: the upstream did the work.
+                            st.out.push_back(Err(ExecError::local(
+                                502,
+                                FailureScope::Request,
+                                "upstream did not return image output",
+                            )));
                         }
                         for call in &calls {
                             let frame = completed_frame(call, usage.as_deref(), &st.prepared);

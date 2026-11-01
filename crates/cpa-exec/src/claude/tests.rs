@@ -1858,3 +1858,28 @@ async fn translating_request_reads_connection_setup_bound_from_config_snapshot()
     assert!(error.headers.is_empty());
     server.await.unwrap();
 }
+
+/// A fast request stops at the caller instead of failing over, also when its response
+/// broke off before the client saw any of it; a read failure stays statusless.
+#[test]
+fn a_fast_request_never_fails_over_a_broken_response() {
+    use cpa_core::exec::AfterAccept;
+    let interrupted = crate::upstream::interrupted_after_response("unexpected EOF");
+    let truncated = ExecError::local(502, FailureScope::Request, "closed early").accepted(AfterAccept::Truncated);
+    for (error, kept) in [
+        (interrupted.clone(), Some(AfterAccept::Unprocessed)),
+        (truncated.clone(), None),
+    ] {
+        let wrapped = fast_request_error(true, error);
+        assert_eq!(wrapped.scope, FailureScope::Request);
+        assert_eq!(wrapped.after_accept, kept, "{wrapped}");
+    }
+    assert_eq!(
+        fast_request_error(false, truncated).after_accept,
+        Some(AfterAccept::Truncated)
+    );
+    assert_eq!(
+        fast_request_error(false, interrupted).after_accept,
+        Some(AfterAccept::Interrupted)
+    );
+}

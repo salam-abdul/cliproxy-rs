@@ -650,7 +650,7 @@ impl Frames {
                 self.ready.extend(out.into_iter().map(Ok));
                 false
             }
-            Err(e) => self.fail(502, e.to_string()),
+            Err(e) => self.fail_with(ExecError::local(502, FailureScope::Request, e.to_string())),
         }
     }
 
@@ -739,7 +739,8 @@ impl Frames {
         }
         if !self.seen_done {
             if self.client == Format::OpenAIResponse || (self.client == Format::Claude && !self.saw_finish_reason) {
-                let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before [DONE]");
+                let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before [DONE]")
+                    .accepted(cpa_core::exec::AfterAccept::Truncated);
                 self.capture.error(&error);
                 wire::publish_failure(&self.usage, &error);
                 self.terminal(error);
@@ -756,7 +757,7 @@ impl Frames {
         match self.translator.finish() {
             Ok(out) => self.ready.extend(out.into_iter().map(Ok)),
             Err(e) => {
-                self.fail(502, e.to_string());
+                self.fail_with(ExecError::local(502, FailureScope::Request, e.to_string()));
             }
         }
     }

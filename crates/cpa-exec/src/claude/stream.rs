@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use cpa_core::exec::{ExecError, ExecStream, FailureScope};
+use cpa_core::exec::{AfterAccept, ExecError, ExecStream, FailureScope};
 use futures_util::StreamExt;
 
 use super::alias::{self, Reverse};
@@ -105,6 +105,8 @@ struct Relay {
     message_id: String,
     completed: bool,
     finished: bool,
+    /// Whether any event went out: a body that ends without one is an empty stream.
+    relayed: bool,
     upstream_error: Option<ExecError>,
     done: Option<OnComplete>,
     /// Go's usage reporter: every upstream line, before alias restore.
@@ -169,6 +171,7 @@ impl Relay {
         if !self.event.is_empty() {
             let event = std::mem::take(&mut self.event).freeze();
             self.ready.push_back(Ok(event));
+            self.relayed = true;
         }
     }
 
@@ -236,15 +239,20 @@ impl Relay {
             &mut self.upstream_error,
         );
         self.flush();
-        if !self.completed {
+        // An empty body ends quietly: dispatch reports it as an empty stream.
+        if !self.completed && (self.relayed || error.is_some() || self.upstream_error.is_some()) {
             // A submitted inference may have completed remotely; local truncation cannot replay.
             let read_error = error.is_some();
             let mut error = error.or_else(|| self.upstream_error.take()).unwrap_or_else(|| {
                 ExecError::local(502, FailureScope::Request, "upstream stream closed before message_stop")
+                    .accepted(AfterAccept::Truncated)
             });
             if read_error {
                 error.body = Bytes::from_static(b"unexpected EOF");
                 error = crate::upstream::body_read_error_after_response(200, error);
+                if error.scope == FailureScope::Request && error.headers.is_empty() {
+                    error.after_accept.get_or_insert(AfterAccept::Interrupted);
+                }
             }
             self.capture_error(&error);
             self.ready.push_back(Err(error));
@@ -274,6 +282,7 @@ pub(crate) fn relay(
         message_id: String::new(),
         completed: false,
         finished: false,
+        relayed: false,
         upstream_error: None,
         done: Some(done),
     };
@@ -297,9 +306,17 @@ pub(crate) fn relay(
 
 /// `validateClaudeStreamingResponse` for buffered SSE behind a non-stream client.
 pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
-    // statusErr{502}: classified by status like any upstream 502.
-    let bad = |m: &str| ExecError::local(502, crate::upstream::scope_for(502), m.to_owned());
+    // statusErr{502}: classified by status like any upstream 502. Once an event came
+    // before it, the upstream did work for the request, so it is never resent.
     let (mut has_data, mut start, mut delta) = (false, false, false);
+    let bad = |m: &str, after_data: bool| {
+        let error = ExecError::local(502, crate::upstream::scope_for(502), m.to_owned());
+        if after_data {
+            error.accepted(AfterAccept::Truncated)
+        } else {
+            error
+        }
+    };
     for line in data.split(|b| *b == b'\n') {
         let line = line.trim_ascii();
         let Some(payload) = line.strip_prefix(b"data:") else {
@@ -309,10 +326,10 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
         if payload.is_empty() || payload == b"[DONE]" {
             continue;
         }
-        has_data = true;
+        let earlier = std::mem::replace(&mut has_data, true);
         let payload = std::str::from_utf8(payload).unwrap_or("");
         if !gjson::valid(payload) {
-            return Err(bad("claude executor: upstream returned malformed stream data"));
+            return Err(bad("claude executor: upstream returned malformed stream data", earlier));
         }
         match rawjson::get(payload, "type").str() {
             "error" => {
@@ -323,9 +340,10 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
                 if message.is_empty() {
                     message = "unknown upstream error".into();
                 }
-                return Err(bad(&format!(
-                    "claude executor: upstream returned error event: {message}"
-                )));
+                return Err(bad(
+                    &format!("claude executor: upstream returned error event: {message}"),
+                    earlier,
+                ));
             }
             "message_start" => {
                 if rawjson::string(payload, "message.id").trim().is_empty()
@@ -333,6 +351,7 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
                 {
                     return Err(bad(
                         "claude executor: upstream stream message_start is missing id or model",
+                        earlier,
                     ));
                 }
                 start = true;
@@ -342,16 +361,18 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
         }
     }
     if !has_data {
-        return Err(bad("claude executor: upstream returned empty stream response"));
+        return Err(bad("claude executor: upstream returned empty stream response", false));
     }
     if !start {
         return Err(bad(
             "claude executor: upstream stream response is missing message_start",
+            true,
         ));
     }
     if !delta {
         return Err(bad(
             "claude executor: upstream stream response ended before message completion",
+            true,
         ));
     }
     Ok(())

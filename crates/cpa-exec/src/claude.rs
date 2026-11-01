@@ -736,6 +736,7 @@ fn upstream_error(
             body,
             direct: true,
             addon: None,
+            after_accept: None,
         };
     }
     let error = ExecError {
@@ -750,6 +751,7 @@ fn upstream_error(
         },
         direct: false,
         addon: None,
+        after_accept: None,
     };
     quota::classify(error, model_level_cooling)
 }
@@ -763,6 +765,12 @@ fn fast_request_error(fast: bool, mut error: ExecError) -> ExecError {
             error.scope == FailureScope::Credential && error.status == 429 && quota::shared_rejection(&error.headers);
         if !shared_window {
             error.scope = FailureScope::Request;
+            // Nor does a response that broke off before the client saw any of it.
+            error.after_accept = match error.after_accept {
+                Some(cpa_core::exec::AfterAccept::Interrupted) => Some(cpa_core::exec::AfterAccept::Unprocessed),
+                Some(cpa_core::exec::AfterAccept::Truncated) => None,
+                kept => kept,
+            };
         }
     }
     error

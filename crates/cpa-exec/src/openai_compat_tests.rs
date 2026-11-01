@@ -683,3 +683,53 @@ async fn claude_target_eof_requires_openai_finish_reason_or_done() {
         }
     }
 }
+
+/// A translator that rejects every event.
+struct Rejects;
+
+impl StreamTranslator for Rejects {
+    fn event(&mut self, _: &[u8]) -> Result<Vec<Bytes>, cpa_translate::Error> {
+        Err(cpa_translate::Error("synthetic translation failure".into()))
+    }
+
+    fn finish(&mut self) -> Result<Vec<Bytes>, cpa_translate::Error> {
+        Ok(vec![])
+    }
+}
+
+/// A response translation failure is terminal even before any output: another account
+/// would answer the same way. A stream that closes before `[DONE]` broke off, which
+/// dispatch may fail over while the client has received nothing.
+#[tokio::test]
+async fn translation_failures_are_terminal_and_an_early_close_broke_off() {
+    let lines =
+        futures_util::stream::iter([Ok(Bytes::from_static(b"data: {\"choices\":[]}")), Ok(Bytes::new())]).boxed();
+    let out: Vec<_> = frames(
+        lines,
+        Box::new(Rejects),
+        Format::OpenAI,
+        Default::default(),
+        Default::default(),
+    )
+    .collect()
+    .await;
+    let error = out.last().unwrap().as_ref().expect_err("translation failed");
+    assert_eq!(error.status, 502);
+    assert_eq!(error.scope, FailureScope::Request);
+    assert_eq!(error.after_accept, None);
+
+    let lines =
+        futures_util::stream::iter([Ok(Bytes::from_static(b"data: {\"choices\":[]}")), Ok(Bytes::new())]).boxed();
+    let out: Vec<_> = frames(
+        lines,
+        Box::new(Pending),
+        Format::OpenAIResponse,
+        Default::default(),
+        Default::default(),
+    )
+    .collect()
+    .await;
+    let error = out.last().unwrap().as_ref().expect_err("closed before [DONE]");
+    assert_eq!(error.body.as_ref(), b"upstream stream closed before [DONE]");
+    assert_eq!(error.after_accept, Some(cpa_core::exec::AfterAccept::Truncated));
+}

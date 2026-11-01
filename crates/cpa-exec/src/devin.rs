@@ -167,6 +167,7 @@ fn upstream_error(status: u16, headers: http::HeaderMap, body: Bytes) -> ExecErr
         retry_after,
         direct: false,
         addon: None,
+        after_accept: None,
     }
 }
 
@@ -782,7 +783,7 @@ async fn consume_frames(
             Err(FrameError::Eof) => break,
             Err(FrameError::Failed(message)) => {
                 return (
-                    Err((crate::upstream::plain_error_after_response(message.clone()), true)),
+                    Err((crate::upstream::interrupted_after_response(message.clone()), true)),
                     log_now!(format!("read_error: {message}")),
                 );
             }
@@ -791,10 +792,12 @@ async fn consume_frames(
         if flag & FLAG_END_STREAM != 0 {
             if let Some((code, message)) = parse_trailer_error(&payload) {
                 let status = format!("trailer_error({code}): {message}");
-                return (
-                    Err((crate::upstream::model_status_error(code, message), false)),
-                    log_now!(status),
-                );
+                let mut error = crate::upstream::model_status_error(code, message);
+                // Frames before the trailer: the upstream worked on the request.
+                if frames > 1 {
+                    error = error.accepted(cpa_core::exec::AfterAccept::Truncated);
+                }
+                return (Err((error, false)), log_now!(status));
             }
             saw_eos = true;
             break;
@@ -887,7 +890,7 @@ async fn consume_frames(
     if !saw_eos {
         return (
             Err((
-                crate::upstream::plain_error_after_response(
+                crate::upstream::interrupted_after_response(
                     "devin upstream stream terminated prematurely before EOS trailer",
                 ),
                 true,
@@ -1549,7 +1552,7 @@ impl DevinStream {
             gj::set_str(&mut failed, "error.message", &message);
             let _ = self.emit(failed);
             if !self.ended {
-                self.fail(crate::upstream::plain_error_after_response(message));
+                self.fail(crate::upstream::interrupted_after_response(message));
             }
             return;
         }
@@ -1558,7 +1561,7 @@ impl DevinStream {
             let failed = br#"{"event_type":"response.failed","error":{"message":"devin stream terminated prematurely before EOS trailer","code":"stream_truncated"}}"#.to_vec();
             let _ = self.emit(failed);
             if !self.ended {
-                self.fail(crate::upstream::plain_error_after_response(TRUNCATED));
+                self.fail(crate::upstream::interrupted_after_response(TRUNCATED));
             }
             return;
         }

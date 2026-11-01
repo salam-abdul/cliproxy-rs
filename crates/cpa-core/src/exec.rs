@@ -548,6 +548,27 @@ pub enum FailureScope {
     Transport,
 }
 
+/// How a failure after the upstream accepted the request came about. Dispatch fails an
+/// attempt whose response broke off over to another credential only while the client
+/// has received nothing of it; it never resends any other accepted request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterAccept {
+    /// The response failed to read or ended early: a Go error without a status.
+    Interrupted,
+    /// The response ended before its terminal event; the error keeps its status.
+    Truncated,
+    /// The proxy could not process a response it received: a Go error without a
+    /// status. Never failed over.
+    Unprocessed,
+}
+
+impl AfterAccept {
+    /// The upstream response broke off before it completed.
+    pub fn broke_off(self) -> bool {
+        matches!(self, Self::Interrupted | Self::Truncated)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecError {
     pub status: u16,
@@ -567,6 +588,8 @@ pub struct ExecError {
     /// WebSocket error frames and stream bootstrap failures). `headers` stays the
     /// classification copy, sent only for a direct response.
     pub addon: Option<Box<HeaderMap>>,
+    /// Set when the failure came after the upstream accepted the request.
+    pub after_accept: Option<AfterAccept>,
 }
 
 impl ExecError {
@@ -579,7 +602,13 @@ impl ExecError {
             retry_after: None,
             direct: false,
             addon: None,
+            after_accept: None,
         }
+    }
+
+    pub fn accepted(mut self, after: AfterAccept) -> Self {
+        self.after_accept = Some(after);
+        self
     }
 }
 
