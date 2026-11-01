@@ -883,10 +883,11 @@ async fn empty_stream_fails_over_and_reports_empty_stream() {
     );
 }
 
-/// Go handlers_stream.go: `requests.streaming.bootstrap-retries` re-runs a stream that
-/// failed before its first payload, independently of request-retry.
+/// A stream that broke off before its first payload reached an upstream that had the
+/// request, so its account is tried once: `requests.streaming.bootstrap-retries` never
+/// reruns it, with or without the setting.
 #[tokio::test]
-async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() {
+async fn bootstrap_retries_never_rerun_an_account_whose_stream_broke_off() {
     let broken: Reply = Box::new(|| {
         // A reset before any body byte: the executor's first item is the error (Go: a
         // channel error before the first payload). Go's Claude stream flushes any bytes
@@ -909,8 +910,12 @@ async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() 
     let config = "requests:\n  streaming:\n    bootstrap-retries: 1\n";
     let (url, script, _) = scripted_proxy(config, &["fake-a"], vec![broken, sse_reply()]).await;
     let (status, _, text) = post(&url, "/v1/messages", &body).await;
-    assert_eq!(status, 200, "{text}");
-    assert_eq!(script.calls.lock().unwrap().len(), 2);
+    assert_eq!(status, 500, "{text}");
+    assert_eq!(
+        text,
+        r#"{"type":"error","error":{"type":"api_error","message":"unexpected EOF"}}"#
+    );
+    assert_eq!(script.calls.lock().unwrap().len(), 1);
 
     let broken: Reply = Box::new(|| {
         // A reset before any body byte: the executor's first item is the error (Go: a
@@ -932,7 +937,7 @@ async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() 
     });
     let (url, script, _) = scripted_proxy("", &["fake-a"], vec![broken, sse_reply()]).await;
     let (status, _, _) = post(&url, "/v1/messages", &body).await;
-    assert_eq!(status, 500, "without bootstrap retries the transport fault is final");
+    assert_eq!(status, 500, "without bootstrap retries the break is final too");
     assert_eq!(script.calls.lock().unwrap().len(), 1);
 }
 

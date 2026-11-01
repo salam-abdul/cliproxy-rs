@@ -818,7 +818,7 @@ impl Fault {
     /// fail over.
     fn terminal(&self) -> bool {
         let error = &self.error;
-        let broke = error.after_accept.is_some_and(AfterAccept::broke_off);
+        let broke = self.broke_off();
         match self.reached {
             Reached::Output => true,
             Reached::NoOutput if broke => false,
@@ -826,9 +826,16 @@ impl Fault {
         }
     }
 
+    /// The response broke off: as the executor reports it, or a connection fault once a
+    /// response was accepted.
+    fn broke_off(&self) -> bool {
+        self.error.after_accept.is_some_and(AfterAccept::broke_off)
+            || (self.reached != Reached::Executing && self.error.scope == cpa_core::exec::FailureScope::Transport)
+    }
+
     /// A response that broke off before any of it was consumed.
     fn broke_silently(&self) -> bool {
-        self.reached == Reached::NoOutput && self.error.after_accept.is_some_and(AfterAccept::broke_off)
+        self.reached == Reached::NoOutput && self.broke_off()
     }
 
     fn into_run_error(self) -> RunError {
@@ -2963,6 +2970,21 @@ mod tests {
             };
             assert_eq!(fault.terminal(), terminal);
         }
+    }
+
+    /// A connection fault after a response was accepted is a break, so it fails over
+    /// once per account; before any response it is an ordinary transport fault.
+    #[test]
+    fn a_transport_fault_after_acceptance_broke_off() {
+        let error = ExecError::local(502, cpa_core::exec::FailureScope::Transport, "connection reset");
+        let mut fault = Fault::executing(error);
+        assert!(!fault.broke_silently());
+        assert!(!fault.terminal());
+        fault.reached = Reached::NoOutput;
+        assert!(fault.broke_silently());
+        assert!(!fault.terminal());
+        fault.reached = Reached::Output;
+        assert!(fault.terminal());
     }
 
     /// Hands out one grant per pick, in order, and counts the picks.
