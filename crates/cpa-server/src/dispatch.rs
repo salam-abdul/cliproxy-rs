@@ -1682,8 +1682,9 @@ async fn remote_round(
             let cancelled = lease
                 .remote_cancelled()
                 .unwrap_or_else(|| Box::pin(std::future::pending()));
-            // Go: draining the registry cancels the attempt context; the execution stops
-            // and the round moves on (the registry then refuses new picks). A failed
+            // Go: draining the registry cancels the attempt context. A cancel before the
+            // attempt runs moves the round on (the registry then refuses new picks); one
+            // after it ends the request, which is never sent twice. A failed
             // preparation ends the attempt (Go reports it and redispatches), but it is
             // not an upstream error and does not advance the streaming count.
             // ponytail: an attempt counts as sent once it starts executing, before the
@@ -2119,8 +2120,9 @@ async fn attempt(
         } else {
             Outcome::Failure(error.clone())
         };
-        // A local request failure is terminal even when a custom rule says continue:
-        // stream truncation can represent inference already accepted upstream.
+        // A local request failure, or a response that broke off after the executor had it
+        // or after output, is terminal even when a custom rule says continue: inference
+        // may already have run. One that broke off before any output may fail over.
         let silent = fault.broke_silently();
         let stop = fault.terminal()
             || if action.matched {

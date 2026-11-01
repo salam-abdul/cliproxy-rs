@@ -38,7 +38,8 @@ fn explicit_request_scoped(e: &ExecError) -> bool {
     e.scope == FailureScope::Request && e.headers.is_empty()
 }
 
-/// The Go status of an error: transport faults have none.
+/// The Go status of an error: transport faults and statusless failures after the
+/// response started (`Interrupted`, `Unprocessed`) have none.
 pub fn go_status(e: &ExecError) -> u16 {
     let statusless = matches!(
         e.after_accept,
@@ -51,8 +52,9 @@ pub fn go_status(e: &ExecError) -> u16 {
     }
 }
 
-/// An accepted stream without a first payload is ambiguous inference. Keep Go's
-/// statusless 500 response, but make the failure terminal without account cooldown.
+/// Go's `empty_stream`: an accepted stream that ended before its first payload. It is
+/// statusless (answered 500) and cools no account; dispatch fails it over once per
+/// account, as a response that broke off before any output.
 pub fn empty_stream() -> ExecError {
     ExecError::local(
         0,
@@ -544,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_empty_stream_is_terminal_without_account_cooldown() {
+    fn an_empty_stream_is_statusless_and_cools_no_account() {
         let error = empty_stream();
         assert_eq!(error.scope, FailureScope::Request);
         assert!(error.headers.is_empty());
