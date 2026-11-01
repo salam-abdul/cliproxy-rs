@@ -143,6 +143,7 @@ try {
   }};
   await page.goto("http://dashboard.test/management.html#overview");
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0, "policy is absent from Overview");
+  assert.equal(await page.getByText("Loading history…").count(), 0, "servers without native routing do not promise history");
   assert.equal(await page.getByText(/Native Claude routing · Account switches/).count(), 0);
   const meter = page.getByRole("meter", {name:"5-hour limit remaining"});
   await meter.waitFor();

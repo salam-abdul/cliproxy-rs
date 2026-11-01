@@ -214,7 +214,8 @@
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">
-          {#if recent.length}<div
+          {#if !native?.enabled || !n?.id}<span class="muted small">Not tracked</span>
+          {:else if recent.length}<div
               class="account-history"
               role="img"
               aria-label={`${recent.reduce((sum, b) => sum + b.requests, 0)} recorded requests in ${store.historyRange}`}
@@ -276,7 +277,7 @@
               : "Quota is reported when the provider supplies it."}
           </p>
         </section>
-        <section class="drawer-card">
+        {#if native?.enabled && selected.n?.id}<section class="drawer-card">
           <div class="section-head">
             <h3>Availability history</h3>
             <span class="muted small">{store.historyRange}</span>
@@ -333,6 +334,7 @@
             </div>{/if}
           {/if}
         </section>
+        {/if}
       </div>
       <div class="drawer-actions">
         <button
