@@ -23,8 +23,11 @@ use crate::Runtime;
 use crate::management::Management;
 use crate::observability::{RequestId, hide_key, mask_query};
 
-const SMALL_BODY: u64 = 1 << 20;
+// ponytail: request capture and decoded output stop at 32 MiB; raise together only
+// with bounded storage and decompression tests for larger diagnostic bodies.
 const DEFERRED_BODY: u64 = 32 << 20;
+// ponytail: permit zstd windows up to 8 MiB; qualify larger windows before raising.
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 tokio::task_local! { static CURRENT: RequestLog; }
@@ -127,36 +130,19 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
         .get("content-length")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
-    let eager = enabled || (!multipart && length.is_some_and(|n| n > 0 && n <= SMALL_BODY));
-    let mut request_body = Vec::new();
-    if eager {
-        let body = std::mem::replace(request.body_mut(), Body::empty());
-        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                // Preserve the transport error downstream; never turn it into
-                // a successful empty body when capture cannot read the input.
-                *request.body_mut() = Body::from_stream(futures_util::stream::once(async move {
-                    Err::<Bytes, _>(io::Error::other(error.to_string()))
-                }));
-                return next.run(request).await;
-            }
-        };
-        *request.body_mut() = Body::from(bytes.clone());
-        request_body = decode(bytes.to_vec(), request.headers(), true, None).await.0;
-    }
-    let deferred = if !eager && !multipart && length != Some(0) && !request.body().is_end_stream() {
-        Spool::new(&state.dir, "request-body").ok().map(|spool| {
-            Arc::new(Mutex::new(Deferred {
-                spool,
-                length,
-                read: 0,
-                captured: 0,
-                eof: false,
-                truncated: false,
-                failed: false,
-            }))
-        })
+    // Capture only bytes the handler consumes: authentication and body limits
+    // must run before logging can poll an untrusted request stream.
+    let deferred = if (enabled || !multipart) && !request.body().is_end_stream() {
+        Some(Arc::new(Mutex::new(Deferred {
+            dir: state.dir.clone(),
+            spool: None,
+            length,
+            read: 0,
+            captured: 0,
+            eof: false,
+            truncated: false,
+            failed: false,
+        })))
     } else {
         None
     };
@@ -187,7 +173,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
             id,
             timestamp: Local::now(),
             headers: request.headers().clone(),
-            request_body,
+            request_body: Vec::new(),
             deferred,
             status: 200,
             response_headers: HeaderMap::new(),
@@ -910,8 +896,8 @@ impl HttpBody for RequestBody {
                 .len()
                 .min(DEFERRED_BODY.saturating_sub(deferred.captured) as usize);
             deferred.truncated |= length < bytes.len();
-            if !deferred.failed {
-                match deferred.spool.file.write(&bytes[..length]) {
+            if !deferred.failed && length > 0 {
+                match deferred.write(&bytes[..length]) {
                     Ok(n) => {
                         deferred.captured += n as u64;
                         deferred.failed = n < length;
@@ -920,7 +906,7 @@ impl HttpBody for RequestBody {
                 }
             }
         }
-        if matches!(result, Poll::Ready(None)) {
+        if matches!(result, Poll::Ready(None)) || self.body.is_end_stream() {
             deferred.eof = true;
         }
         result
@@ -934,7 +920,8 @@ impl HttpBody for RequestBody {
 }
 
 struct Deferred {
-    spool: Spool,
+    dir: PathBuf,
+    spool: Option<Spool>,
     length: Option<u64>,
     read: u64,
     captured: u64,
@@ -943,6 +930,15 @@ struct Deferred {
     failed: bool,
 }
 impl Deferred {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // An idle or rejected request must not hold a spool file descriptor.
+        let spool = match &mut self.spool {
+            Some(spool) => spool,
+            None => self.spool.insert(Spool::new(&self.dir, "request-body")?),
+        };
+        spool.file.write(bytes)
+    }
+
     fn bytes(&self) -> io::Result<(Vec<u8>, String)> {
         if self.failed {
             return Err(io::Error::other("request body capture failed"));
@@ -954,7 +950,7 @@ impl Deferred {
                 self.captured
             ));
         }
-        if !(self.eof || self.length.is_some_and(|n| self.read >= n)) {
+        if !self.eof {
             markers.push(match self.length {
                 Some(n) => format!("[REQUEST BODY CAPTURE INCOMPLETE: consumed {} of {n} bytes]", self.read),
                 None => format!(
@@ -963,7 +959,11 @@ impl Deferred {
                 ),
             });
         }
-        Ok((std::fs::read(&self.spool.path)?, markers.join("\n")))
+        let bytes = match &self.spool {
+            Some(spool) => std::fs::read(&spool.path)?,
+            None => Vec::new(),
+        };
+        Ok((bytes, markers.join("\n")))
     }
 }
 
@@ -1614,12 +1614,16 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
     {
         return (raw, None);
     }
+    let limit = limit.unwrap_or(DEFERRED_BODY).min(DEFERRED_BODY);
     let mut body = raw.clone();
     for encoding in encoding.split(',').rev().map(|s| s.trim().to_ascii_lowercase()) {
         let mut reader: Pin<Box<dyn AsyncRead + Send + '_>> = match encoding.as_str() {
             "" | "identity" => continue,
             "zstd" => {
-                let mut decoder = ZstdDecoder::new(body.as_slice());
+                let mut decoder = ZstdDecoder::with_params(
+                    body.as_slice(),
+                    &[async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)],
+                );
                 decoder.multiple_members(true);
                 Box::pin(decoder)
             }
@@ -1633,11 +1637,7 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
             _ => return (raw, None),
         };
         let mut output = Vec::new();
-        let result = if let Some(limit) = limit {
-            reader.as_mut().take(limit + 1).read_to_end(&mut output).await
-        } else {
-            reader.read_to_end(&mut output).await
-        };
+        let result = reader.as_mut().take(limit + 1).read_to_end(&mut output).await;
         drop(reader);
         if let Err(error) = result {
             // ponytail: M4-0254 accepted partial: malformed Brotli can withhold
@@ -1649,12 +1649,16 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
                 (!request).then(|| format!("failed to decompress {encoding} data: {error}")),
             );
         }
-        if limit.is_some_and(|limit| output.len() as u64 > limit) {
-            output.truncate(limit.unwrap() as usize);
+        if output.len() as u64 > limit {
+            output.truncate(limit as usize);
             if !output.ends_with(b"\n") {
                 output.push(b'\n');
             }
-            output.extend_from_slice(b"[DECOMPRESSED REQUEST BODY TRUNCATED]");
+            output.extend_from_slice(if request {
+                b"[DECOMPRESSED REQUEST BODY TRUNCATED]"
+            } else {
+                b"[DECOMPRESSED RESPONSE BODY TRUNCATED]"
+            });
             return (output, None);
         }
         body = output;
@@ -1687,7 +1691,8 @@ mod tests {
 
     fn management(dir: &Path, enabled: bool, commercial: bool) -> Arc<Management> {
         let config = cpa_core::config::Config::parse(&format!(
-            "observability: {{logs: {{request-log: {enabled}}}}}\nserver: {{commercial-mode: {commercial}}}\n"
+            "auth-dir: {}\nobservability: {{logs: {{request-log: {enabled}}}}}\nserver: {{commercial-mode: {commercial}}}\n",
+            dir.join("auth").display()
         ))
         .unwrap();
         let rt = Arc::new(crate::testing::runtime(
@@ -1751,6 +1756,124 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "log"))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn capture_never_polls_request_before_the_handler() {
+        for enabled in [false, true] {
+            for length in [None, Some("1"), Some("0")] {
+                let dir = scratch();
+                let state = management(&dir, enabled, false);
+                let polled = Arc::new(AtomicBool::new(false));
+                let observed = polled.clone();
+                let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+                    observed.store(true, Ordering::Relaxed);
+                    Poll::<Option<io::Result<Bytes>>>::Pending
+                }));
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let capture_dir = dir.clone();
+                let app = axum::Router::new().fallback(move |axum::Extension(log): axum::Extension<RequestLog>| {
+                    assert!(
+                        std::fs::read_dir(&capture_dir)
+                            .unwrap()
+                            .flatten()
+                            .all(|entry| { !entry.file_name().to_string_lossy().starts_with("request-body-") }),
+                        "an unconsumed request must not open a spool file"
+                    );
+                    sender.send(log).unwrap();
+                    async { StatusCode::UNAUTHORIZED }
+                });
+                let mut app = router(&state, app);
+                let mut request = HttpRequest::builder().method("POST").uri("/v1/responses");
+                if let Some(length) = length {
+                    request = request.header("content-length", length);
+                }
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    app.call(request.body(body).unwrap()),
+                )
+                .await;
+                assert!(response.is_ok(), "capture must not wait for unauthenticated input");
+                assert!(!polled.load(Ordering::Relaxed));
+                let response = response.unwrap().unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let log = receiver.try_recv().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !log.1.done.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_preserves_bytes_despite_false_content_length() {
+        for enabled in [false, true] {
+            for length in ["0", "1"] {
+                let dir = scratch();
+                let state = management(&dir, enabled, false);
+                let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+                let app = axum::Router::new().fallback(move |request: Request| {
+                    sender
+                        .send(request.extensions().get::<RequestLog>().unwrap().clone())
+                        .unwrap();
+                    async move {
+                        let bytes = axum::body::to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                        assert_eq!(bytes, b"  {\"model\": \"fixture\", \"value\": 1}\n".as_slice());
+                        StatusCode::BAD_REQUEST
+                    }
+                });
+                let mut app = router(&state, app);
+                let request = HttpRequest::builder()
+                    .method("POST")
+                    .uri("/fixture")
+                    .header("content-length", length)
+                    .body(Body::from("  {\"model\": \"fixture\", \"value\": 1}\n"))
+                    .unwrap();
+                let response = app.call(request).await.unwrap();
+                axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let log = receiver.try_recv().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !log.1.done.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn log_decode_bounds_default_output_and_zstd_window() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+        let source = vec![b'x'; DEFERRED_BODY as usize + 1];
+        let compressed = zstd::stream::encode_all(source.as_slice(), 1).unwrap();
+        for request in [false, true] {
+            let (body, _) = decode(compressed.clone(), &headers, request, None).await;
+            assert!(body.len() < source.len() + 128);
+            assert!(body.windows(9).any(|bytes| bytes == b"TRUNCATED"));
+        }
+        // One raw-byte block with a 16 MiB window advertised in its frame header.
+        let oversized_window = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x70, 9, 0, 0, b'x'];
+        assert_eq!(zstd::stream::decode_all(oversized_window.as_slice()).unwrap(), b"x");
+        let mut allowed_window = oversized_window.clone();
+        allowed_window[5] = 0x68; // 8 MiB, exactly the configured decoder ceiling.
+        for request in [false, true] {
+            let (body, error) = decode(allowed_window.clone(), &headers, request, None).await;
+            assert_eq!(body, b"x");
+            assert!(error.is_none());
+            let (body, error) = decode(oversized_window.clone(), &headers, request, None).await;
+            assert_eq!(body, oversized_window, "oversized windows retain raw log bytes");
+            assert_eq!(error.is_some(), !request);
+        }
     }
 
     #[tokio::test]
@@ -2351,9 +2474,19 @@ mod tests {
     async fn capture_preserves_transport_errors_and_classifies_cancellation() {
         let dir = scratch();
         let state = management(&dir, true, false);
-        let app = axum::Router::new().fallback(|request: Request| async move {
-            assert!(axum::body::to_bytes(request.into_body(), usize::MAX).await.is_err());
-            StatusCode::BAD_REQUEST
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().fallback(move |request: Request| {
+            sender
+                .send(request.extensions().get::<RequestLog>().unwrap().clone())
+                .unwrap();
+            async move {
+                use futures_util::StreamExt;
+                let mut body = request.into_body().into_data_stream();
+                assert_eq!(body.next().await.unwrap().unwrap(), "partial");
+                assert_eq!(body.next().await.unwrap().unwrap_err().to_string(), "broken transport");
+                assert!(body.next().await.is_none());
+                StatusCode::BAD_REQUEST
+            }
         });
         let mut app = router(&state, app);
         let body = Body::from_stream(futures_util::stream::iter([
@@ -2372,7 +2505,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         drop(response);
-        assert!(logs(&dir).is_empty(), "capture failure bypasses logging as in Go");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            receiver.try_recv().unwrap().finished(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(logs(&dir).len(), 1, "lazy capture still records the handler error");
         std::fs::remove_dir_all(dir).unwrap();
 
         for (status, error, expected) in [
@@ -2468,7 +2607,8 @@ mod tests {
         for size in [32 << 20, (32 << 20) + 1] {
             let dir = scratch();
             let capture = Arc::new(Mutex::new(Deferred {
-                spool: Spool::new(&dir, "request-body").unwrap(),
+                dir: dir.clone(),
+                spool: None,
                 length: None,
                 read: 0,
                 captured: 0,
@@ -2476,6 +2616,8 @@ mod tests {
                 truncated: false,
                 failed: false,
             }));
+            assert!(capture.lock().unwrap().spool.is_none());
+            assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
             let body = Body::new(RequestBody {
                 body: Body::from(vec![b'x'; size]),
                 deferred: capture.clone(),
@@ -2499,7 +2641,8 @@ mod tests {
         let mut spool = Spool::new(&dir, "request-body").unwrap();
         spool.file = unwritable(&dir);
         let capture = Arc::new(Mutex::new(Deferred {
-            spool,
+            dir: dir.clone(),
+            spool: Some(spool),
             length: None,
             read: 0,
             captured: 0,
@@ -2514,6 +2657,28 @@ mod tests {
         assert_eq!(axum::body::to_bytes(body, usize::MAX).await.unwrap(), "still forwarded");
         assert!(capture.lock().unwrap().bytes().is_err());
         assert_eq!(capture.lock().unwrap().captured, 0);
+        drop(capture);
+        let capture = Arc::new(Mutex::new(Deferred {
+            dir: dir.join("unwritable"), // An existing file, so opening a spool fails.
+            spool: None,
+            length: None,
+            read: 0,
+            captured: 0,
+            eof: false,
+            truncated: false,
+            failed: false,
+        }));
+        let body = Body::new(RequestBody {
+            body: Body::from("forwarded when spool creation fails"),
+            deferred: capture.clone(),
+        });
+        assert_eq!(
+            axum::body::to_bytes(body, usize::MAX).await.unwrap(),
+            "forwarded when spool creation fails"
+        );
+        assert!(capture.lock().unwrap().failed);
+        assert!(capture.lock().unwrap().spool.is_none());
+        assert!(capture.lock().unwrap().bytes().is_err());
         drop(capture);
         std::fs::remove_dir_all(dir).unwrap();
     }
