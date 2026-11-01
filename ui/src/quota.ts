@@ -110,9 +110,13 @@ async function read(a: Data, lifetime: Lifetime) {
       });
       if (r.status_code < 200 || r.status_code >= 300)
         throw new Error(
-          r.status_code === 401 || r.status_code === 403
-            ? `The provider rejected the account's token (HTTP ${r.status_code}). Refresh the token, or connect the account again.`
-            : `The provider answered HTTP ${r.status_code}. Try again later.`,
+          r.status_code === 403
+            ? p === "claude"
+              ? "Claude denied access to usage (HTTP 403). Setup tokens cannot read usage; connect Claude through the dashboard sign-in."
+              : "The provider denied access to usage (HTTP 403). Check this account's usage permissions."
+            : r.status_code === 401
+              ? "The provider rejected the account's token (HTTP 401). Refresh the token, or connect the account again."
+              : `The provider answered HTTP ${r.status_code}. Try again later.`,
         );
       raw = typeof r.body === "string" ? JSON.parse(r.body) : r.body;
     }
