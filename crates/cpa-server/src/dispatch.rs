@@ -1673,13 +1673,20 @@ async fn remote_round(
             // and the round moves on (the registry then refuses new picks). A failed
             // preparation ends the attempt (Go reports it and redispatches), but it is
             // not an upstream error and does not advance the streaming count.
+            // ponytail: an attempt counts as sent once it starts executing, before the
+            // executor has written the request; an executor signal at the write would let
+            // a cancel during connection setup re-pick too.
+            let sent = std::sync::atomic::AtomicBool::new(false);
             let run = async {
                 let mut lease = lease;
                 match cx.rt.prepare_remote(&mut lease, cx.cfg).await {
-                    Ok(()) => (
-                        attempt(cx.rt, cx.cfg, cx.policy, cx.call, request, usage, lease, target).await,
-                        false,
-                    ),
+                    Ok(()) => {
+                        sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                        (
+                            attempt(cx.rt, cx.cfg, cx.policy, cx.call, request, usage, lease, target).await,
+                            false,
+                        )
+                    }
                     Err(error) => {
                         lease.complete(Outcome::Failure(error.clone()));
                         (Attempt::Next(Fault::executing(error)), true)
@@ -1689,7 +1696,13 @@ async fn remote_round(
             let (outcome, prepare_failed) = tokio::select! {
                 biased;
                 outcome = run => outcome,
-                _ = cancelled => (Attempt::Next(Fault::executing(crate::remote::cancelled_error())), false),
+                // A cancel after the send ends the request: the upstream may be running
+                // the inference, which another pick would run again.
+                _ = cancelled => {
+                    let fault = Fault::executing(crate::remote::cancelled_error());
+                    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
+                    (if sent { Attempt::Stop(fault) } else { Attempt::Next(fault) }, false)
+                }
             };
             match outcome {
                 Attempt::Done(done) => return Ok(done),
@@ -2892,5 +2905,146 @@ mod tests {
         assert_eq!(upstream_summary(r#"{"error":"flat"}"#), "flat");
         assert_eq!(upstream_summary("plain text"), "plain text");
         assert_eq!(upstream_summary("status 500: {\"message\":\"m\"}"), "m");
+    }
+
+    /// Hands out one grant per pick, in order, and counts the picks.
+    struct Grants {
+        grants: std::sync::Mutex<
+            std::collections::VecDeque<(cpa_core::credential::Credential, Option<crate::remote::CancelSignal>)>,
+        >,
+        picks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::remote::RemoteDispatch for Grants {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn dispatch(
+            &self,
+            _: crate::remote::RemoteRequest,
+        ) -> futures_util::future::BoxFuture<'_, Result<crate::remote::RemoteGrant, crate::remote::RemoteError>>
+        {
+            Box::pin(async move {
+                self.picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let next = self.grants.lock().unwrap().pop_front();
+                let Some((credential, cancel)) = next else {
+                    let error = ExecError::local(503, cpa_core::exec::FailureScope::Credential, "auth_not_found");
+                    return Err(crate::remote::RemoteError::plain(error, "auth_not_found"));
+                };
+                Ok(crate::remote::RemoteGrant {
+                    credential,
+                    end: Box::new(|| None),
+                    cancel,
+                    request_retry: None,
+                    user_api_key: String::new(),
+                })
+            })
+        }
+
+        fn models(
+            &self,
+            _: Vec<(String, String)>,
+            _: Vec<(String, String)>,
+        ) -> futures_util::future::BoxFuture<'_, Result<Vec<u8>, crate::remote::ModelsError>> {
+            Box::pin(async { Err(crate::remote::ModelsError::Unavailable) })
+        }
+    }
+
+    /// A Claude API-key credential at a loopback upstream.
+    fn home_credential(id: &str, base_url: &str) -> cpa_core::credential::Credential {
+        let meta = serde_json::json!({"type": "claude", "api_key": format!("sk-{id}"), "base_url": base_url});
+        let mut credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/home-fixture"),
+            &std::path::Path::new("/home-fixture").join(format!("{id}.json")),
+            meta.as_object().unwrap().clone(),
+        )
+        .unwrap();
+        credential.id = id.into();
+        credential.attributes.insert("api_key".into(), format!("sk-{id}"));
+        credential.attributes.insert("base_url".into(), base_url.into());
+        crate::testing::local(credential)
+    }
+
+    /// Go's drain cancels a Home attempt: once the request reached the upstream, the
+    /// upstream may be running the inference, so the request ends instead of being sent
+    /// again on the next pick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_home_cancel_after_the_send_is_not_resent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let serve = |app: axum::Router| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            url
+        };
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let held = serve(axum::Router::new().fallback({
+            let reached = reached.clone();
+            move || async move {
+                reached.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }))
+        .await;
+        let resent = Arc::new(AtomicUsize::new(0));
+        let good = serve(axum::Router::new().fallback({
+            let resent = resent.clone();
+            move || async move {
+                resent.fetch_add(1, Ordering::SeqCst);
+                (
+                    [("content-type", "application/json")],
+                    r#"{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                )
+            }
+        }))
+        .await;
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let home = Arc::new(Grants {
+            grants: std::sync::Mutex::new(
+                [
+                    (home_credential("held", &held), Some(cancel)),
+                    (home_credential("good", &good), None),
+                ]
+                .into(),
+            ),
+            picks: AtomicUsize::new(0),
+        });
+        let dir = std::env::temp_dir().join(format!("cpa-home-cancel-{}", uuid::Uuid::new_v4()));
+        let cfg = Config::parse(&format!("auth-dir: '{}'\n", dir.display())).unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
+        rt.set_remote_dispatch(Some(home.clone() as Arc<dyn crate::remote::RemoteDispatch>));
+        let url = serve(crate::app(rt.clone(), axum::Router::new())).await;
+        let request = tokio::spawn(async move {
+            let response = wreq::Client::new()
+                .post(format!("{url}/v1/messages"))
+                .header("content-type", "application/json")
+                .body(r#"{"model":"claude-x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            (status, response.text().await.unwrap())
+        });
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("the first pick reached its upstream");
+        cancel_tx.send(true).unwrap();
+        let (status, text) = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("the cancelled request answered")
+            .unwrap();
+        assert_ne!(status, 200, "{text}");
+        assert!(text.contains("context canceled"), "{text}");
+        assert_eq!(resent.load(Ordering::SeqCst), 0, "the request was sent again");
+        assert_eq!(home.picks.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
