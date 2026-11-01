@@ -3873,18 +3873,16 @@ mod tests {
     }
 
     /// Go `TestHomeLocalSelectionRejectionWaitsForReleaseAcknowledgement`: a pick the
-    /// node rejects (a repeated credential, buffered or streamed, or one beyond
-    /// max-retry-credentials) is released and its release acknowledged before anything
-    /// else; without the acknowledgement within the cancel bound the request fails with
-    /// `home_unavailable`.
+    /// node rejects (a repeated credential, buffered or streamed) is released and its
+    /// release acknowledged before anything else; without the acknowledgement within the
+    /// cancel bound the request fails with `home_unavailable`. A pick beyond
+    /// max-retry-credentials is covered in cpa-server's dispatch tests, which can cancel
+    /// an attempt before its send.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rejected_pick_waits_for_its_release_acknowledgement() {
-        use std::sync::atomic::AtomicUsize;
         let seen = Arc::new(Mutex::new(Vec::new()));
         let good = upstream(seen.clone()).await;
-        let flaky = truncating_upstream(Arc::new(AtomicUsize::new(0))).await;
         const BASE: &str = "port: 0\nrequest-retry: 0\ncredentials:\n  concurrency:\n    cpa-cancel-bound: 200ms\n";
-        const CAPPED: &str = "port: 0\nrequest-retry: 0\nmax-retry-credentials: 1\ncredentials:\n  concurrency:\n    cpa-cancel-bound: 200ms\n";
         // Stream, config, picks, and the (credential, release_seq) Home never acknowledges.
         let cases = [
             (
@@ -3904,15 +3902,6 @@ mod tests {
                     accounted("cred-a", "sk-bad", &good),
                 ],
                 ("cred-a", 2),
-            ),
-            (
-                true,
-                CAPPED,
-                vec![
-                    accounted("cred-a", "sk-flaky", &flaky),
-                    accounted("cred-b", "sk-good", &good),
-                ],
-                ("cred-b", 1),
             ),
         ];
         for (stream, config, picks, (blocked_id, blocked_seq)) in cases {

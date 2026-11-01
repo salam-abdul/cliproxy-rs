@@ -1710,6 +1710,11 @@ async fn remote_round(
             let run = async {
                 let mut lease = lease;
                 match cx.rt.prepare_remote(&mut lease, cx.cfg).await {
+                    // Cancelled before the attempt ran: nothing was sent.
+                    Ok(()) if lease.remote_cancel_requested() => {
+                        drop(lease);
+                        (Attempt::Next(Fault::executing(crate::remote::cancelled_error())), false)
+                    }
                     Ok(()) => {
                         sent.store(true, std::sync::atomic::Ordering::Relaxed);
                         (
@@ -3011,6 +3016,10 @@ mod tests {
             std::collections::VecDeque<(cpa_core::credential::Credential, Option<crate::remote::CancelSignal>)>,
         >,
         picks: std::sync::atomic::AtomicUsize,
+        /// The credential IDs whose release was attempted, in order.
+        released: Arc<std::sync::Mutex<Vec<String>>>,
+        /// A credential whose release Home never acknowledges.
+        unacknowledged: Option<&'static str>,
     }
 
     impl crate::remote::RemoteDispatch for Grants {
@@ -3031,8 +3040,18 @@ mod tests {
                     return Err(crate::remote::RemoteError::plain(error, "auth_not_found"));
                 };
                 Ok(crate::remote::RemoteGrant {
+                    end: {
+                        let (released, id) = (self.released.clone(), credential.id.clone());
+                        let refused = self.unacknowledged == Some(id.as_str());
+                        Box::new(move || {
+                            released.lock().unwrap().push(id);
+                            refused.then(|| {
+                                Box::pin(async { Err("release not acknowledged".to_owned()) })
+                                    as crate::remote::ReleaseWait
+                            })
+                        })
+                    },
                     credential,
-                    end: Box::new(|| None),
                     cancel,
                     request_retry: None,
                     user_api_key: String::new(),
@@ -3107,6 +3126,8 @@ mod tests {
                 .into(),
             ),
             picks: AtomicUsize::new(0),
+            released: Default::default(),
+            unacknowledged: None,
         });
         let dir = std::env::temp_dir().join(format!("cpa-home-cancel-{}", uuid::Uuid::new_v4()));
         let cfg = Config::parse(&format!("auth-dir: '{}'\n", dir.display())).unwrap();
@@ -3143,6 +3164,69 @@ mod tests {
         assert!(text.contains("context canceled"), "{text}");
         assert_eq!(resent.load(Ordering::SeqCst), 0, "the request was sent again");
         assert_eq!(home.picks.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With `max-retry-credentials: 1`, a stream cancelled before its attempt ran leaves
+    /// one same-credential retry pending; a pick Home answers with another credential is
+    /// rejected and released, and without the release acknowledgement the request fails
+    /// with `home_unavailable` instead of going on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rejected_pick_waits_for_its_release_acknowledgement() {
+        use std::sync::atomic::AtomicUsize;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused = format!("http://{}", listener.local_addr().unwrap());
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(true);
+        let home = Arc::new(Grants {
+            grants: std::sync::Mutex::new(
+                [
+                    (home_credential("cred-a", &unused), Some(cancel)),
+                    (home_credential("cred-b", &unused), None),
+                ]
+                .into(),
+            ),
+            picks: AtomicUsize::new(0),
+            released: Default::default(),
+            unacknowledged: Some("cred-b"),
+        });
+        let dir = std::env::temp_dir().join(format!("cpa-home-release-{}", uuid::Uuid::new_v4()));
+        let cfg = Config::parse(&format!(
+            "auth-dir: '{}'\nmax-retry-credentials: 1\nrequest-retry: 0\n",
+            dir.display()
+        ))
+        .unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
+        rt.set_remote_dispatch(Some(home.clone() as Arc<dyn crate::remote::RemoteDispatch>));
+        let app = crate::app(rt.clone(), axum::Router::new());
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", proxy.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(proxy, app).await.unwrap() });
+        let response = wreq::Client::new()
+            .post(format!("{url}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-x","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        let text = response.text().await.unwrap();
+        drop(cancel_tx);
+        assert_eq!(
+            *home.released.lock().unwrap(),
+            ["cred-a", "cred-b"],
+            "the rejected pick was released"
+        );
+        assert!(
+            text.contains("home_unavailable: Home did not acknowledge credential release"),
+            "{text}"
+        );
+        drop(listener);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
