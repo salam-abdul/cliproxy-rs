@@ -64,6 +64,8 @@ pub struct Management {
     /// The zone log line timestamps are parsed in (Go `time.Local` when `None`).
     pub(crate) log_zone: logs::Zone,
     access: access::Access,
+    /// Whether the listener bound at startup is exposed ([`crate::listener_exposed`]).
+    listener_exposed: bool,
 }
 
 #[derive(Default)]
@@ -123,6 +125,7 @@ impl Management {
         let store = options.store.take();
         let auth_dir = options.auth_dir.take();
         let log_zone = options.log_zone;
+        let listener_exposed = crate::access::listener_exposed(&cfg);
         let access = access::Access::new(&cfg, options);
         rt.usage_queue().configure(access.available(), &cfg);
         let state = Arc::new(Self {
@@ -141,6 +144,7 @@ impl Management {
             store,
             auth_dir,
             log_zone,
+            listener_exposed,
         });
         oauth::install_callback_sink(&state);
         access::start_purge(&state);
@@ -167,6 +171,14 @@ impl Management {
         store.delete_auth(path).map_err(|e| format!("{e:#}"))
     }
 
+    /// Refuses a reloaded or written config that would open the proxy API without client
+    /// keys on the listener bound at startup ([`crate::refuse_open_access`]). Its own
+    /// `server.host` and `server.trusted-proxies` apply only at the next start, which
+    /// checks them. Callers check before they write or publish.
+    pub(crate) fn admit(&self, cfg: &Config) -> anyhow::Result<()> {
+        crate::access::refuse_open_access(cfg, self.listener_exposed)
+    }
+
     /// Publishes a config and everything Go derives from it on reload: scheduler
     /// policy, management availability, and the credential set (auth-dir files plus
     /// config API keys). `files` replaces the auth-dir scan when the caller already
@@ -179,7 +191,9 @@ impl Management {
 
     /// Publishes a config Home supplied: what [`Self::publish`] derives from a config,
     /// except the credential set, which Home dispatches. The usage queue stays on, as Go
-    /// enables it in Home mode whatever the management secret.
+    /// enables it in Home mode whatever the management secret. Not checked by
+    /// [`Self::admit`]: Home authenticates every client from its request headers before
+    /// it dispatches an account, so empty client keys open nothing.
     pub fn publish_home(&self, cfg: Config) {
         let _guard = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
         self.access.config_published(&cfg);
@@ -831,6 +845,9 @@ pub(crate) fn config_sync(
         Ok(v) => v,
         Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
     };
+    if let Err(e) = state.admit(&cfg) {
+        return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}"));
+    }
     if let Err(e) = write_config(state, &text) {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1014,5 +1031,29 @@ mod home_tests {
         ));
         assert!(management.routes_enabled());
         assert_eq!(rt.policy().strategy, crate::scheduler::Strategy::FillFirst);
+    }
+
+    /// Home authenticates every client from the headers it is sent before it dispatches
+    /// an account, so a Home config may leave client keys empty on an exposed listener.
+    /// The same config is refused as a local reload or write.
+    #[tokio::test]
+    async fn a_home_config_without_client_keys_is_published_on_an_exposed_listener() {
+        let rt = Arc::new(crate::testing::runtime(
+            crate::testing::config("access: {api-keys: [fake-client]}\n"),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let management = Management::new(rt.clone(), std::env::temp_dir().join("cpa-home-unused-config.yaml"));
+        let keyless = crate::testing::config("server: {host: 0.0.0.0}\n");
+        assert!(management.admit(&keyless).is_err());
+        management.publish_home(keyless);
+        assert!(rt.config().api_keys.is_empty());
+        assert_eq!(rt.config().host, "0.0.0.0");
     }
 }

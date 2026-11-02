@@ -1177,8 +1177,14 @@ async fn serve(
     shutdown: impl std::future::Future<Output = ()>,
     listening: Option<tokio::sync::oneshot::Sender<(SocketAddr, bool)>>,
 ) -> anyhow::Result<()> {
-    if config.api_keys.is_empty() && home_config.is_none() {
-        tracing::warn!("access.api-keys is empty: the proxy API is open to anyone who can reach it");
+    // Home authenticates every client before it dispatches an account, so its configs
+    // may leave client keys empty on any listener.
+    if home_config.is_none() {
+        let exposed = cpa_server::listener_exposed(&config);
+        cpa_server::refuse_open_access(&config, exposed)?;
+        if exposed && config.api_keys.is_empty() {
+            tracing::warn!("access.allow-unauthenticated is set: the proxy API is open to anyone who can reach it");
+        }
     }
     // Go `ensureAuthDir`: outside Home mode a missing auth-dir is created, so the
     // watcher has a folder to watch for the first login.
@@ -1625,6 +1631,66 @@ mod tests {
         assert!(tui::wait_ready(&base, "fake-tui-password").await);
         let _ = stop.send(());
         server.await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A listener other machines can reach does not start without client keys, before
+    /// anything binds, and the error names both remedies. The opt-in starts it. (A
+    /// loopback listener without keys starts: see the standalone test above.)
+    #[tokio::test]
+    async fn an_exposed_listener_without_client_keys_does_not_start() {
+        let dir = std::env::temp_dir().join(format!("cpa-open-access-{}", std::process::id()));
+        let auth = dir.join("auth");
+        std::fs::create_dir_all(&auth).unwrap();
+        let path = dir.join("config.yaml");
+        let start = |server: &str, access: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "server: {{{server}, port: 0}}\naccess: {{{access}}}\nauth-dir: '{}'\n",
+                    auth.display()
+                ),
+            )
+            .unwrap();
+            let config = Config::load(&path).unwrap();
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let (listening, listener) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(serve(
+                config,
+                path.clone(),
+                String::new(),
+                true,
+                None,
+                None,
+                async {
+                    let _ = stopped.await;
+                },
+                Some(listening),
+            ));
+            (stop, listener, server)
+        };
+        for server in [
+            "host: ''",
+            "host: 0.0.0.0",
+            "host: 127.0.0.1, trusted-proxies: [127.0.0.1]",
+        ] {
+            let (_stop, listener, server_task) = start(server, "api-keys: []");
+            assert!(listener.await.is_err(), "{server}: nothing was bound");
+            let refused = format!("{:#}", server_task.await.unwrap().unwrap_err());
+            assert!(
+                refused.contains("add a client key to access.api-keys")
+                    && refused.contains("set access.allow-unauthenticated: true"),
+                "{server}: {refused}"
+            );
+        }
+        // Exposed by its trusted proxies while bound to loopback only.
+        let (stop, listener, server_task) = start(
+            "host: 127.0.0.1, trusted-proxies: [127.0.0.1]",
+            "allow-unauthenticated: true",
+        );
+        listener.await.unwrap();
+        let _ = stop.send(());
+        server_task.await.unwrap().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

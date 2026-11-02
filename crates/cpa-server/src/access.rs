@@ -4,7 +4,8 @@
 //! Candidates, in order: `Authorization` (bearer token or the raw value), `X-Goog-Api-Key`,
 //! `X-Api-Key`, then the first `key` and `auth_token` query values. Comparison is on raw
 //! bytes, like Go strings, in constant time per key. With no keys configured the
-//! provider is unregistered and access is open.
+//! provider is unregistered and access is open, which [`refuse_open_access`] allows on
+//! an exposed listener only with `access.allow-unauthenticated`.
 
 use std::sync::Arc;
 
@@ -12,11 +13,34 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
+use cpa_core::config::Config;
 use cpa_core::config::go_url::query_get;
 use cpa_core::exec::Caller;
 use subtle::ConstantTimeEq;
 
 use crate::runtime::Runtime;
+
+/// Whether the listener `config` describes takes connections from other machines: its
+/// host is not a loopback IP (empty listens on every interface), or trusted proxies are
+/// set, since a tunnel or reverse proxy in front of a loopback listener is the
+/// documented way to expose it.
+pub fn listener_exposed(config: &Config) -> bool {
+    !config.trusted_proxies.is_empty() || !config.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Refuses `config` when it would let anyone who reaches an exposed listener use the
+/// configured accounts: no client keys and no `access.allow-unauthenticated: true`.
+pub fn refuse_open_access(config: &Config, exposed: bool) -> anyhow::Result<()> {
+    if exposed && config.api_keys.is_empty() && !config.allow_unauthenticated {
+        anyhow::bail!(
+            "access.api-keys is empty and the listener is reachable from other machines \
+             (server.host is not a loopback address, or server.trusted-proxies is set): \
+             add a client key to access.api-keys, or set access.allow-unauthenticated: true \
+             to serve the proxy API without client keys"
+        );
+    }
+    Ok(())
+}
 
 /// Client-key authentication for HTTP routes.
 pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
@@ -168,6 +192,39 @@ mod tests {
         let caller = auth("", &[("x-api-key", "nope"), ("x-goog-api-key", "good")]).unwrap();
         assert_eq!((caller.principal.as_str(), caller.source), ("good", "x-goog-api-key"));
         assert_eq!(auth_with(&[], "", &[]).unwrap().principal, "", "no keys means open");
+    }
+
+    #[test]
+    fn an_exposed_listener_needs_client_keys_or_the_opt_in() {
+        let check = |yaml: &str| {
+            let config = Config::parse(yaml).unwrap();
+            refuse_open_access(&config, listener_exposed(&config)).map_err(|e| e.to_string())
+        };
+        for exposed in [
+            "server: {host: ''}\n",
+            "server: {host: 0.0.0.0}\n",
+            "server: {host: '::'}\n",
+            "server: {host: 192.0.2.10}\n",
+            "server: {host: localhost}\n",
+            "server: {host: 127.0.0.1, trusted-proxies: [127.0.0.1]}\n",
+            "server: {host: '::1', trusted-proxies: ['::1']}\n",
+        ] {
+            let refused = check(exposed).expect_err(exposed);
+            assert!(
+                refused.contains("add a client key to access.api-keys")
+                    && refused.contains("set access.allow-unauthenticated: true"),
+                "{exposed}: {refused}"
+            );
+            check(&format!("{exposed}access: {{allow-unauthenticated: true}}\n")).unwrap();
+            check(&format!("{exposed}access: {{api-keys: [fake-client]}}\n")).unwrap();
+        }
+        for loopback in [
+            "server: {host: 127.0.0.1}\n",
+            "server: {host: 127.0.0.2}\n",
+            "server: {host: '::1'}\n",
+        ] {
+            check(loopback).unwrap();
+        }
     }
 
     #[test]

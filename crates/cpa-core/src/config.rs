@@ -81,6 +81,9 @@ pub struct Config {
     pub port: u16,
     /// Client keys for the proxy API, trimmed and de-duplicated. Empty disables client auth.
     pub api_keys: Vec<String>,
+    /// `access.allow-unauthenticated`: an exposed listener may serve the proxy API without
+    /// client keys. The server refuses that combination otherwise.
+    pub allow_unauthenticated: bool,
     /// `server.trusted-proxies`, validated. Go applies it at startup only.
     pub trusted_proxies: Vec<String>,
     pub auth_dir: PathBuf,
@@ -353,6 +356,10 @@ impl Config {
                 .collect::<anyhow::Result<_>>()?,
             Some(_) => bail!("access.api-keys must be a list of strings"),
         };
+        // No legacy spelling: Go has no such setting, and a legacy file can add it under `access`.
+        let allow_unauthenticated = lookup(canonical, "access.allow-unauthenticated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let auth_dir = string_or_empty(pick("oauth.auth-dir", "auth-dir"), "oauth.auth-dir")?;
         let trusted_proxies: Vec<String> = match lookup(canonical, "server.trusted-proxies") {
             Some(Value::Sequence(seq)) => seq.iter().map(go_string).collect(),
@@ -365,6 +372,7 @@ impl Config {
             host,
             port,
             api_keys: normalize_keys(api_keys),
+            allow_unauthenticated,
             trusted_proxies,
             auth_dir: resolve_auth_dir(&auth_dir),
             routing,
@@ -522,6 +530,35 @@ mod tests {
         validate_config_fields(&doc("config-version: 8\nworker-threads: 3\n"), true).unwrap();
         assert!(validate_config_fields(&doc("worker-threads: many\n"), true).is_err());
         assert!(validate_config_fields(&doc("worker-thread: 3\n"), true).is_err());
+    }
+
+    /// `access.allow-unauthenticated` is cliproxy-rs only. It defaults to false, takes
+    /// yaml.v3's bool spellings, and a legacy-layout file sets it under `access`.
+    #[test]
+    fn allow_unauthenticated_is_an_opt_in_bool() {
+        assert!(!Config::parse("access: {api-keys: []}\n").unwrap().allow_unauthenticated);
+        assert!(
+            !Config::parse("access: {allow-unauthenticated: null}\n")
+                .unwrap()
+                .allow_unauthenticated
+        );
+        assert!(
+            Config::parse("access: {allow-unauthenticated: true}\n")
+                .unwrap()
+                .allow_unauthenticated
+        );
+        assert!(
+            Config::parse("access: {allow-unauthenticated: yes}\n")
+                .unwrap()
+                .allow_unauthenticated
+        );
+        let legacy = Config::parse("host: 0.0.0.0\napi-keys: [a]\naccess: {allow-unauthenticated: true}\n").unwrap();
+        assert!(legacy.allow_unauthenticated);
+        assert_eq!(legacy.api_keys, ["a"], "the legacy key list still applies");
+        assert!(Config::parse("access: {allow-unauthenticated: maybe}\n").is_err());
+        assert!(Config::parse("access: {allow-unauthenticated: 'true'}\n").is_err());
+        let doc = |text: &str| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text).unwrap();
+        validate_config_fields(&doc("access: {allow-unauthenticated: true}\n"), true).unwrap();
     }
 
     #[test]

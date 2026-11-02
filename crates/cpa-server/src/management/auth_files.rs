@@ -1239,6 +1239,7 @@ fn toggle_config_key(state: &Management, id: &str, disabled: bool) -> Result<boo
         .map_err(|e| e.to_string())?;
     let text = doc.render_preserving(&basis).map_err(|e| e.to_string())?;
     let next_cfg = cpa_core::config::Config::parse(&text).map_err(|e| e.to_string())?;
+    state.admit(&next_cfg).map_err(|e| format!("{e:#}"))?;
     ConfigDocument::write(&state.path, &text).map_err(|e| e.to_string())?;
     state.publish(next_cfg, None);
     Ok(true)

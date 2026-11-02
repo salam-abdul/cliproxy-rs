@@ -507,7 +507,10 @@ fn reload_snapshot(
                     .and_then(|text| Config::load_text(&state.path, text))
             }) {
                 None => ((*state.rt.config()).clone(), None, false),
-                Some(Ok(cfg)) => (cfg, None, true),
+                Some(Ok(cfg)) => match state.admit(&cfg) {
+                    Ok(()) => (cfg, None, true),
+                    Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
+                },
                 Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
             }
         }
@@ -532,11 +535,17 @@ fn reload_snapshot(
 mod tests {
     use super::*;
 
+    /// Started on loopback, so its reloads may leave client keys empty.
     fn state() -> (Arc<Management>, PathBuf) {
+        state_with("server: {host: 127.0.0.1}\n")
+    }
+
+    /// A runtime started from `startup` plus a private auth-dir.
+    fn state_with(startup: &str) -> (Arc<Management>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("cpa-watch-outcome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
-        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        std::fs::write(&path, format!("{startup}oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
         let rt = Arc::new(crate::testing::runtime(
             Config::load(&path).unwrap(),
             Vec::new(),
@@ -565,6 +574,55 @@ mod tests {
         std::fs::write(&state.path, config(9003)).unwrap();
         assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A reload never opens the proxy API on an exposed listener: a file that empties the
+    /// client keys is rejected, the previous keys keep working, and the opt-in is the
+    /// only way to drop them. The bound listener counts, even when the file moves its
+    /// host to loopback for the next start.
+    #[tokio::test]
+    async fn a_reload_that_empties_client_keys_is_rejected_and_the_old_keys_keep_working() {
+        use tower::ServiceExt;
+        // `host` is empty: the runtime listens on every interface.
+        let (state, dir) = state_with("access: {api-keys: [fake-old]}\n");
+        let auth = format!("oauth: {{auth-dir: {}}}\n", dir.display());
+        let write = |text: &str| std::fs::write(&state.path, format!("{text}{auth}")).unwrap();
+        let status = |key: Option<&str>| {
+            let mut request = axum::http::Request::get("/v1/models");
+            if let Some(key) = key {
+                request = request.header("authorization", format!("Bearer {key}"));
+            }
+            let request = request.body(axum::body::Body::empty()).unwrap();
+            let app = crate::router(state.rt.clone());
+            async move { app.oneshot(request).await.unwrap().status().as_u16() }
+        };
+        for emptied in [
+            "access: {api-keys: []}\n",
+            "server: {host: 127.0.0.1}\naccess: {api-keys: []}\n",
+        ] {
+            write(emptied);
+            let refused = reload(&state).expect_err(emptied).to_string();
+            assert!(refused.contains("access.allow-unauthenticated"), "{refused}");
+            assert_eq!(state.rt.config().api_keys, ["fake-old"], "{emptied}");
+            assert_eq!(status(Some("fake-old")).await, 200, "{emptied}");
+            assert_eq!(status(None).await, 401, "{emptied}");
+        }
+        write("access: {api-keys: [], allow-unauthenticated: true}\n");
+        reload(&state).unwrap();
+        assert_eq!(status(None).await, 200);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // A loopback listener may drop its keys.
+        let (state, dir) = state_with("server: {host: 127.0.0.1}\naccess: {api-keys: [fake-old]}\n");
+        let auth = format!("oauth: {{auth-dir: {}}}\n", dir.display());
+        std::fs::write(
+            &state.path,
+            format!("server: {{host: 127.0.0.1}}\naccess: {{api-keys: []}}\n{auth}"),
+        )
+        .unwrap();
+        reload(&state).unwrap();
+        assert!(state.rt.config().api_keys.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

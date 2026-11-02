@@ -288,7 +288,7 @@ pub(super) mod tests {
         let dir = std::env::temp_dir().join(format!("cpa-reload-write-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config_path = dir.join("config.yaml");
-        std::fs::write(&config_path, format!("auth-dir: {}\n", dir.display())).unwrap();
+        std::fs::write(&config_path, format!("host: 127.0.0.1\nauth-dir: {}\n", dir.display())).unwrap();
         for name in ["a.json", "b.json"] {
             std::fs::write(dir.join(name), r#"{"type":"claude","access_token":"old-fake"}"#).unwrap();
         }

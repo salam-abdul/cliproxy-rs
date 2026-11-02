@@ -41,7 +41,10 @@ observability:
 
 | Setting | What it does |
 |---|---|
-| `api-keys` | The client keys your tools send, as `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`. Keep at least one; with an empty list anyone who can reach the server can use it. |
+| `api-keys` | The client keys your tools send, as `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`. With an empty list the proxy API takes requests without a key. |
+| `allow-unauthenticated` | `false` by default. `true` lets an exposed listener serve the proxy API with an empty `api-keys` list, so anyone who can reach it can use your accounts. |
+
+The listener is exposed when `server.host` is not a loopback IP (`""` listens on every interface) or `server.trusted-proxies` is set, since a tunnel in front of a loopback listener forwards outside requests. With an exposed listener, an empty `api-keys` list and `allow-unauthenticated` not `true`, the server refuses to start. While the server runs, a reloaded file or a dashboard or Management API change that would leave the listener bound at start in that state is rejected, and the previous settings stay in effect. A new `server.host` or `server.trusted-proxies` value is checked at the next start. A loopback listener without trusted proxies may run without client keys. Home mode is exempt, because Home authenticates every client before it dispatches an account. Management access and native CONNECT routing have their own authentication and are unaffected.
 
 ## management
 

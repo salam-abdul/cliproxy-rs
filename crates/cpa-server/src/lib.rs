@@ -62,6 +62,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Router, middleware};
 
+pub use access::{listener_exposed, refuse_open_access};
 pub use runtime::Runtime;
 
 // ponytail: fixed 64 MiB request cap so image-heavy Claude requests pass (axum's default
