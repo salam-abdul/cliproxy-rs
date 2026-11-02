@@ -81,7 +81,7 @@ try {
   await page.getByRole("meter", {name:"5-hour limit remaining"}).waitFor({timeout:5000});
   assert.equal(checks, 1, "a manual check reaches only the enabled account");
   await page.getByText("Updated just now", {exact:true}).waitFor();
-  assert.equal(await page.locator(".top .nav a").count(), 3);
+  assert.deepEqual(await page.locator(".top .nav a").allInnerTexts(), ["Overview", "Accounts", "Activity", "Settings"]);
   await page.goto("http://dashboard.test/management.html#quotas/account-a.json");
   await settle();
   assert.equal(checks, 1, "legacy quota route shares Overview readings without a new check");
@@ -102,9 +102,10 @@ try {
   assert.equal(checks, 3, "manual requests coalesce while pending");
   release(); hold = null;
   await page.getByText("Last reading · check failed", {exact:true}).waitFor({ state: "hidden" });
-  await page.locator('.top a[href="#config"]').click();
+  await page.locator(".top .nav a", {hasText:"Settings"}).click();
   await settle();
-  assert.equal(await page.locator(".section-tabs a").count(), 8, "Settings holds Accounts and seven configuration pages");
+  assert.equal(await page.locator(".section-tabs a").count(), 7, "Settings holds seven configuration pages");
+  assert.equal(await page.locator('.section-tabs a[aria-current="page"]').innerText(), "Use with tools", "Settings opens its first tab");
   await page.clock.fastForward(120_000);
   await settle();
   assert.equal(checks, 3, "no page checks provider quotas on its own");
@@ -316,5 +317,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, mobile and three destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }

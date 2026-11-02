@@ -8,36 +8,25 @@ import {
 } from "./api";
 import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
 
-export const sections = [
-  ["overview", "Overview", ["overview"]],
-  ["activity", "Activity", ["activity", "logs"]],
+/** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
+export const sections: [name: string, pages: [id: string, title: string][]][] = [
+  ["Overview", [["overview", "Overview"]]],
+  ["Accounts", [["credentials", "Accounts"]]],
+  ["Activity", [["activity", "Requests"], ["logs", "Logs"]]],
   [
-    "config",
     "Settings",
-    ["config", "credentials", "connect", "providers", "keys", "models", "payload", "system", "use"],
+    [
+      ["use", "Use with tools"],
+      ["providers", "Provider keys"],
+      ["keys", "Client keys"],
+      ["models", "Models"],
+      ["payload", "Payload rules"],
+      ["config", "Configuration"],
+      ["system", "System"],
+    ],
   ],
-] as const;
-
-export const pages = [
-  ["overview", "Overview"],
-  ["use", "Use with tools"],
-  ["credentials", "Accounts"],
-  ["providers", "Provider keys"],
-  ["keys", "Client keys"],
-  ["models", "Models"],
-  ["payload", "Payload rules"],
-  ["quotas", "Quotas"],
-  ["", ""],
-  ["activity", "Requests"],
-  ["logs", "Logs"],
-  ["", ""],
-  ["config", "Configuration"],
-  ["system", "System"],
-] as const;
-const routes = new Set<string>([
-  ...pages.map((p) => p[0]).filter(Boolean),
-  "connect",
-]);
+];
+const routes = new Set(["connect", ...sections.flatMap((s) => s[1].map((p) => p[0]))]);
 const aliases: Record<string, string> = {
   oauth: "connect",
   configuration: "config",

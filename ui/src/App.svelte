@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, type Component } from "svelte";
-  import { store, pages, sections, every } from "./store.svelte";
+  import { store, sections, every } from "./store.svelte";
   import Overview from "./pages/Overview.svelte";
   import Use from "./pages/Use.svelte";
   import Credentials from "./pages/Credentials.svelte";
@@ -42,17 +42,12 @@
     store.route.page === "connect" ? "credentials" : store.route.page,
   );
   const section = $derived(
-    sections.find((s) =>
-      (s[2] as readonly string[]).includes(store.route.page),
-    )!,
-  );
-  const children = $derived(
-    pages.filter((p) => (section[2] as readonly string[]).includes(p[0])),
+    sections.find((s) => s[1].some((p) => p[0] === current))!,
   );
   const title = $derived(
     store.route.page === "connect"
       ? "Connect an account"
-      : pages.find((p) => p[0] === current)?.[1],
+      : section[1].find((p) => p[0] === current)?.[1],
   );
   const host = location.host;
   const version = $derived(
@@ -176,9 +171,9 @@
     <header class="top">
       <a class="brand" href="#overview">{@render mark()}</a>
       <nav class="nav" aria-label="Pages">
-        {#each sections as [id, name]}<a
-            href={`#${id}`}
-            aria-current={section[0] === id ? "page" : undefined}>{name}</a
+        {#each sections as s}<a
+            href={`#${s[1][0][0]}`}
+            aria-current={section === s ? "page" : undefined}>{s[0]}</a
           >{/each}
       </nav>
       <span class="top-spacer"></span>
@@ -201,13 +196,8 @@
     </header>
     <div class="main">
       <main class="page" id="main" tabindex="-1">
-        {#if children.length > 1}<nav
-            class="row section-tabs"
-            aria-label={section[1]}
-          >
-            {#each children as [id, name]}<a
-                class="key small"
-                class:primary={current === id}
+        {#if section[1].length > 1}<nav class="nav section-tabs" aria-label={section[0]}>
+            {#each section[1] as [id, name]}<a
                 href={`#${id}`}
                 aria-current={current === id ? "page" : undefined}>{name}</a
               >{/each}

@@ -250,7 +250,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .main { min-width: 0; }
 .page { width: 100%; max-width: 1320px; margin: auto; padding: var(--s3) 36px 80px; display: grid; gap: var(--s6); align-content: start; }
 .page:focus { outline: none; }
-.section-tabs { flex-wrap: wrap; margin: 0 0 var(--s2); }
+.nav.section-tabs { flex-wrap: wrap; margin: 0; }
 .head { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; min-height: 40px; }
 .head h1 { margin-right: auto; display: flex; align-items: baseline; gap: var(--s3); }
 .head h1 span { color: var(--ink-muted); font-weight: 500; }
