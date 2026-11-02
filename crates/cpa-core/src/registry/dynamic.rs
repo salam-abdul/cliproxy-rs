@@ -1231,7 +1231,8 @@ impl Registry {
     /// Registered models a client may list or `auto` may pick (Go
     /// `modelRegistrationAvailability`), given each credential's state per model.
     // Go recomputes projections only when a result or refresh is recorded, so
-    // a model can stay hidden after its cooldown lapses; this reads live state instead.
+    // a model can stay hidden after its cooldown lapses; this reads live state instead,
+    // so a model is listed again as soon as its cooldown ends.
     pub fn available_with<'a>(
         &'a self,
         state: impl Fn(&str, &str) -> Suspension + 'a,

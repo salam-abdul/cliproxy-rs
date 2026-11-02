@@ -511,7 +511,7 @@ struct Accumulator {
 struct State {
     /// Tool calls by index.
     // Go keeps these in a map and emits them in map order (random for two or
-    // more calls); this emits them by tool index.
+    // more calls); this emits them by tool index, so the output is deterministic.
     calls: BTreeMap<i64, Accumulator>,
 }
 

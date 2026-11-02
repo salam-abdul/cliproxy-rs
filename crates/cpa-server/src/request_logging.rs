@@ -2833,8 +2833,8 @@ mod tests {
                 assert!(logged_body.starts_with(&body));
                 assert!(logged_body[body.len()..].starts_with(b"\n[DECOMPRESSION ERROR: "));
                 assert!(error.is_some());
-                // Exact malformed-codec diagnostic wording remains an explicit
-                // parity gap; raw bytes and annotation presence are verified here.
+                // Malformed-codec diagnostic wording differs from Go (the ceiling in
+                // `decode`); raw bytes and annotation presence are verified here.
             } else if case["invalid"] == true && case["encoding"] == "br" {
                 // Accepted corrupt-Brotli difference: Go permits partial output;
                 // Rust reports failure and preserves the complete raw input.

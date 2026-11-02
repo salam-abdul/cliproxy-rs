@@ -218,7 +218,8 @@ pub(crate) struct View<'a> {
     /// `$CPA-SESSION-ID`: the request's explicit session, never derived fallbacks.
     pub session: Option<String>,
     /// `oauth.providers.codex.chatgpt-keep-alive` (cliproxy-rs addition, off by default):
-    /// keep idle chatgpt.com connections instead of Go's connection per request. Read
+    /// keep idle chatgpt.com connections, saving a TLS handshake per request, instead of
+    /// Go's connection per request. Read
     /// from the config snapshot of each request, so a reload applies to the next one.
     pub chatgpt_keep_alive: bool,
     /// `requests.tls-handshake-timeout-seconds` for chatgpt.com ([`crate::tls::handshake_timeout`]).

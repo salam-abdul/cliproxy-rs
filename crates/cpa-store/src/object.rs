@@ -553,7 +553,7 @@ impl ObjectStore {
 
     /// Go `filepath.Rel(authDir, path)` on cleaned paths.
     // Go would upload a path outside the mirror as `auths/../<name>`; it is
-    // refused here instead.
+    // refused here so no object key escapes the auths prefix.
     fn auth_key(&self, path: &Path) -> Result<String> {
         let rel = path.strip_prefix(&self.auth_dir).map_err(|_| {
             anyhow!(

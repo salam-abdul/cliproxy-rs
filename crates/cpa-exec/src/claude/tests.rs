@@ -484,8 +484,9 @@ const FOLLOWS_V8_0_27: &[&str] = &[
 ];
 
 /// v8.0.27 scenarios where Go keeps an API key's caller system text top-level and
-/// cliproxy-rs moves it after the leading user run, as it does for every request
-///. Rust's body is compared with Go's after
+/// cliproxy-rs moves it after the leading user run, as it does for every request, so
+/// the cached prefix stays stable across turns (`cloak::install_system`). Rust's body is
+/// compared with Go's after
 /// [`with_relocated_system`].
 const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
     "apikey-cloak-system-single-user",

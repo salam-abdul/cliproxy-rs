@@ -106,7 +106,8 @@ pub fn parse_claims(raw: &str) -> Result<Claims> {
     if claims.ip.trim().is_empty() || claims.port <= 0 {
         return Err(other("home jwt target address is invalid"));
     }
-    // Go accepts ports above 65535 and fails at dial; reject them here.
+    // Go accepts ports above 65535 and fails at dial; rejecting them while the JWT is
+    // checked reports the bad target before any dial.
     if claims.port > i64::from(u16::MAX) {
         return Err(other("home jwt target address is invalid"));
     }

@@ -1249,7 +1249,8 @@ pub struct Client {
     pub node_kind: String,
     pub is_compaction: bool,
     /// Where `session_id` came from (`crate::session::Session::source`), `lcp` for an
-    /// LCP pick's session or `home` for Home's. Not in Go.
+    /// LCP pick's session or `home` for Home's. Not in Go; it shows which source session
+    /// affinity used.
     pub session_source: &'static str,
     pub request_id: String,
     /// `METHOD /route/template`.
@@ -1286,7 +1287,8 @@ pub struct Record {
     pub response_model: String,
     /// Upstream response headers, names as received.
     pub response_headers: Vec<(String, Vec<String>)>,
-    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
+    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go; it
+    /// shows which requests share a cacheable prefix.
     pub prompt_prefix_hash: String,
     pub claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
     /// Present only for additional telemetry-only records that Go omits.

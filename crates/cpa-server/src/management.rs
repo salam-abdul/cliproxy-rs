@@ -631,7 +631,8 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
-/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
+/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding, so
+/// the formatting and comments outside a change survive it.
 pub(crate) fn config_sync(
     state: &Management,
     path: &str,

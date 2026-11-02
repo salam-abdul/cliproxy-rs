@@ -759,7 +759,8 @@ pub fn write_login(auth_dir: &Path, tokens: &Tokens) -> Result<PathBuf, ExecErro
     }
     let text = encode_go_json(&Value::Object(record));
     // Go truncates in place with default permissions; this writes a 0600 temp
-    // file and renames it, like the Claude login.
+    // file and renames it, like the Claude login, so the token file is private and
+    // never left half-written.
     publish(auth_dir, &path, text.as_bytes()).map_err(|_| oauth_error(500, "cannot publish codex credential"))?;
     Ok(path)
 }
