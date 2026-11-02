@@ -363,6 +363,11 @@ mod tests {
         let offset: Quota = serde_json::from_str(r#"{"next_recover_at":"2026-09-21T16:13:20.12+02:00"}"#).unwrap();
         assert_eq!(offset.next_recover_at, Some(t));
         let whole = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
-        assert_eq!(go_time::rfc3339_nano(whole), "2026-09-21T14:13:20Z");
+        let whole = Quota {
+            next_recover_at: Some(whole),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&whole).unwrap();
+        assert!(json.contains(r#""next_recover_at":"2026-09-21T14:13:20Z""#), "{json}");
     }
 }

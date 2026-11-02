@@ -143,7 +143,7 @@ impl Forwarder {
         let _ = self.queue.try_send(Pending {
             line: line.to_owned(),
             level,
-            timestamp: rfc3339_nano(time),
+            timestamp: cpa_core::gotime::rfc3339_nano(&time),
             request_id: request_id.to_owned(),
             client,
         });
@@ -173,17 +173,6 @@ fn unsupported(message: &str) -> bool {
     ["unsupported key", "unknown command", "unsupported command"]
         .iter()
         .any(|needle| message.contains(needle))
-}
-
-/// Go `time.Time.Format(time.RFC3339Nano)`: trimmed nanoseconds, `Z` for UTC.
-fn rfc3339_nano(t: DateTime<FixedOffset>) -> String {
-    let text = t.format("%Y-%m-%dT%H:%M:%S%.9f").to_string();
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    if t.offset().local_minus_utc() == 0 {
-        format!("{text}Z")
-    } else {
-        format!("{text}{}", t.format("%:z"))
-    }
 }
 
 #[cfg(test)]

@@ -2000,7 +2000,7 @@ impl Tracker {
         let (provider, executor_type) = executor_identity(credential);
         let now = chrono::Local::now();
         let record = Record {
-            timestamp: go_timestamp(&now),
+            timestamp: cpa_core::gotime::rfc3339_nano(&now),
             execution_id: uuid::Uuid::new_v4().to_string(),
             executor_type: executor_type.to_owned(),
             model: cpa_common::thinking::parse_suffix(upstream_model).model_name,
@@ -2385,7 +2385,7 @@ pub fn publish_home_unauthorized(
         alias => alias,
     };
     let record = Record {
-        timestamp: go_timestamp(&chrono::Local::now()),
+        timestamp: cpa_core::gotime::rfc3339_nano(&chrono::Local::now()),
         provider: provider.to_owned(),
         executor_type: "home-result".into(),
         model: model.to_owned(),
@@ -2413,50 +2413,12 @@ pub fn publish_home_unauthorized(
     queue.enqueue(queued(&record, &client));
 }
 
-/// Go `time.Time.MarshalJSON` (RFC 3339 with trailing-zero-trimmed nanoseconds).
-pub fn go_timestamp<Tz: chrono::TimeZone>(t: &chrono::DateTime<Tz>) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    use chrono::{Offset, Timelike};
-    let mut out = t.format("%Y-%m-%dT%H:%M:%S").to_string();
-    let nanos = t.nanosecond() % 1_000_000_000;
-    if nanos != 0 {
-        let frac = format!("{nanos:09}");
-        out.push('.');
-        out.push_str(frac.trim_end_matches('0'));
-    }
-    let offset = t.offset().fix().local_minus_utc();
-    if offset == 0 {
-        out.push('Z');
-    } else {
-        let sign = if offset < 0 { '-' } else { '+' };
-        let abs = offset.abs();
-        out.push_str(&format!("{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/server_go.json");
-
-    #[test]
-    fn go_timestamps() {
-        use chrono::TimeZone;
-        let t = chrono::Utc.with_ymd_and_hms(2026, 10, 3, 8, 0, 0).unwrap();
-        assert_eq!(go_timestamp(&t), "2026-10-03T08:00:00Z");
-        let t = t + chrono::Duration::nanoseconds(123_456_000);
-        assert_eq!(go_timestamp(&t), "2026-10-03T08:00:00.123456Z");
-        let east = chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
-        assert_eq!(
-            go_timestamp(&t.with_timezone(&east)),
-            "2026-10-03T13:30:00.123456+05:30"
-        );
-    }
 
     /// Claude's executor-published outcomes through the queue: an apply_patch
     /// rejection is Go's `reporter.PublishFailure(err)` after usage was observed (no

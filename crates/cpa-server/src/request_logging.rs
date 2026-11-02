@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, Local};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::Runtime;
@@ -517,7 +517,7 @@ impl RequestLog {
                 write!(
                     head,
                     "=== API REQUEST {index} ===\nTimestamp: {}\nUpstream URL: {}\n",
-                    timestamp(Local::now()),
+                    cpa_core::gotime::rfc3339_nano(&Local::now()),
                     if info.url.is_empty() {
                         String::from("<unknown>")
                     } else {
@@ -678,7 +678,7 @@ fn upstream_intro(record: &mut Record) {
         part,
         "=== API RESPONSE {} ===\nTimestamp: {}\n\n",
         record.upstream.attempts,
-        timestamp(Local::now())
+        cpa_core::gotime::rfc3339_nano(&Local::now())
     )
     .unwrap();
     record.api_response.append(&record.state.dir, &part);
@@ -731,7 +731,11 @@ fn upstream_auth(out: &mut Vec<u8>, info: &cpa_core::exec::UpstreamRequest<'_>) 
 }
 
 fn websocket_event(event: &str) -> Vec<u8> {
-    format!("Timestamp: {}\nEvent: {event}\n", timestamp(Local::now())).into_bytes()
+    format!(
+        "Timestamp: {}\nEvent: {event}\n",
+        cpa_core::gotime::rfc3339_nano(&Local::now())
+    )
+    .into_bytes()
 }
 
 fn upstream_timeline(out: &mut Section, dir: &Path, part: &[u8]) {
@@ -1274,7 +1278,11 @@ impl Record {
         if !upstream.is_empty() {
             writeln!(out, "Upstream Transport: {upstream}")?;
         }
-        write!(out, "Timestamp: {}\n\n\n=== HEADERS ===\n", timestamp(self.timestamp))?;
+        write!(
+            out,
+            "Timestamp: {}\n\n\n=== HEADERS ===\n",
+            cpa_core::gotime::rfc3339_nano(&self.timestamp)
+        )?;
         headers(out, &self.headers, true)?;
         out.write_all(b"\n\n")?;
         if !websocket {
@@ -1347,17 +1355,6 @@ impl Record {
             out.write_all(b"\n")?;
         }
         Ok(())
-    }
-}
-
-pub(crate) fn timestamp(at: DateTime<Local>) -> String {
-    let text = at.to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let zone = &text[29..];
-    let fraction = text[20..29].trim_end_matches('0');
-    if fraction.is_empty() {
-        format!("{}{zone}", &text[..19])
-    } else {
-        format!("{}.{fraction}{zone}", &text[..19])
     }
 }
 
@@ -1484,7 +1481,7 @@ fn section(out: &mut dyn Write, name: &str, bytes: &Section, at: Option<DateTime
     if !bytes.head.starts_with(format!("=== {name}").as_bytes()) {
         writeln!(out, "=== {name} ===")?;
         if let Some(at) = at {
-            writeln!(out, "Timestamp: {}", timestamp(at))?;
+            writeln!(out, "Timestamp: {}", cpa_core::gotime::rfc3339_nano(&at))?;
         }
     }
     bytes.write_to(out)?;
@@ -2425,7 +2422,6 @@ mod tests {
         let at = DateTime::parse_from_rfc3339("2026-10-03T04:05:06.12001Z")
             .unwrap()
             .with_timezone(&Local);
-        assert!(timestamp(at).contains(".12001"));
         assert_eq!(
             filename("/v1//x:  y?secret=not-in-name", "0198-aaaa-a1b2c3d4", at, true),
             format!("error-v1-x-y-{}-a1b2c3d4.log", at.format("%Y-%m-%dT%H%M%S"))

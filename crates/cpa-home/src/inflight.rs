@@ -80,13 +80,6 @@ impl PublisherConfig {
     }
 }
 
-/// Go `time.Time.MarshalJSON` for a UTC time: RFC 3339 with trimmed nanoseconds.
-pub(crate) fn rfc3339_nano(t: DateTime<Utc>) -> String {
-    let text = t.format("%Y-%m-%dT%H:%M:%S%.9f").to_string();
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{text}Z")
-}
-
 fn utc(t: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(t)
 }
@@ -132,7 +125,7 @@ fn encode_detail(d: &Detail) -> Vec<u8> {
     out.extend_from_slice(b",\"request_kind\":");
     string_into(&mut out, &d.request_kind);
     out.extend_from_slice(b",\"started_at\":\"");
-    out.extend_from_slice(rfc3339_nano(d.started_at).as_bytes());
+    out.extend_from_slice(cpa_core::gotime::rfc3339_nano(&d.started_at).as_bytes());
     out.extend_from_slice(b"\"}");
     out
 }
@@ -298,7 +291,7 @@ fn pack<'a>(
 pub fn encode(freeze: &Freeze, observed_at: SystemTime, cfg: &PublisherConfig) -> Vec<Vec<u8>> {
     let head = Head {
         revision: freeze.revision,
-        observed_at: rfc3339_nano(utc(observed_at)),
+        observed_at: cpa_core::gotime::rfc3339_nano(&utc(observed_at)),
         barrier: freeze.barrier_revision,
     };
     let mut counts: BTreeMap<(Vec<u8>, Vec<u8>, bool), i64> = BTreeMap::new();
@@ -546,7 +539,10 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/credential_in_flight_contract.json")).unwrap();
         let part = &doc["part"];
         let observed = DateTime::parse_from_rfc3339(part["observed_at"].as_str().unwrap()).unwrap();
-        assert_eq!(rfc3339_nano(observed.with_timezone(&Utc)), "2026-07-21T12:00:00Z");
+        assert_eq!(
+            cpa_core::gotime::rfc3339_nano(&observed.with_timezone(&Utc)),
+            "2026-07-21T12:00:00Z"
+        );
         let cfg = PublisherConfig::from_config(&CredentialInFlight::default()).unwrap();
         let freeze = Freeze {
             revision: 7,
@@ -586,20 +582,6 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(frame["details"][0], part["details"][0]);
-    }
-
-    #[test]
-    fn rfc3339_nano_trims_like_go() {
-        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
-        assert_eq!(
-            rfc3339_nano(t("2026-07-21T12:00:00.120000000Z")),
-            "2026-07-21T12:00:00.12Z"
-        );
-        assert_eq!(
-            rfc3339_nano(t("2026-07-21T12:00:00.000000001Z")),
-            "2026-07-21T12:00:00.000000001Z"
-        );
-        assert_eq!(rfc3339_nano(t("2026-07-21T12:00:00Z")), "2026-07-21T12:00:00Z");
     }
 
     /// Go `TestHomeInFlightPublisherConfigFromConfigValidatesAndUpdates`.

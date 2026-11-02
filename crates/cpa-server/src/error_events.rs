@@ -19,7 +19,7 @@ use crate::cooldown_store::Record;
 use crate::gojson::Obj;
 
 fn time(t: SystemTime) -> String {
-    crate::gojson::string(&crate::usage_record::go_timestamp(
+    crate::gojson::string(&cpa_core::gotime::rfc3339_nano(
         &chrono::DateTime::<chrono::Local>::from(t),
     ))
 }
@@ -116,7 +116,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
     }
     let mut event = Obj::new().raw(
         "timestamp",
-        &crate::gojson::string(&crate::usage_record::go_timestamp(&chrono::Local::now())),
+        &crate::gojson::string(&cpa_core::gotime::rfc3339_nano(&chrono::Local::now())),
     );
     let provider = c.provider.trim();
     if !provider.is_empty() {
