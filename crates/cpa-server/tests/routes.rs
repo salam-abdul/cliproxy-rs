@@ -160,7 +160,7 @@ async fn proxy(config: &str, credentials: Vec<Credential>) -> Proxy {
     for c in &mut credentials {
         c.attributes.insert("base_url".into(), upstream_url.clone());
     }
-    let config = Config::parse(&format!("access:\n  api-keys: [client-key]\n{config}")).unwrap();
+    let config = cpa_server::testing::config(&format!("access:\n  api-keys: [client-key]\n{config}"));
     let executors = Executors {
         claude: ClaudeExecutor::new(&upstream_url).unwrap(),
         codex: Default::default(),
@@ -739,7 +739,7 @@ async fn expired_token_is_used_then_refreshed_once_after_401() {
         openai: Default::default(),
         google: Default::default(),
     };
-    let config = Config::parse("access:\n  api-keys: [client-key]\n").unwrap();
+    let config = cpa_server::testing::config("access:\n  api-keys: [client-key]\n");
     let rt = Arc::new(cpa_server::testing::runtime(config, vec![credential], executors));
     let url = serve(router(rt.clone())).await;
     let (status, _, text) = post(
@@ -821,7 +821,7 @@ async fn scripted_proxy(config: &str, tokens: &[&str], replies: Vec<Reply>) -> (
             c
         })
         .collect();
-    let config = Config::parse(&format!("access:\n  api-keys: [client-key]\n{config}")).unwrap();
+    let config = cpa_server::testing::config(&format!("access:\n  api-keys: [client-key]\n{config}"));
     let executors = Executors {
         claude: ClaudeExecutor::new(&upstream_url).unwrap(),
         codex: Default::default(),

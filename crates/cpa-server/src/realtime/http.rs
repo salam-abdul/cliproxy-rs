@@ -910,7 +910,7 @@ mod relay_tests {
         )
         .unwrap();
         let rt = Arc::new(crate::testing::runtime(
-            cpa_core::config::Config::parse(yaml).unwrap(),
+            crate::testing::config(yaml),
             vec![credential],
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

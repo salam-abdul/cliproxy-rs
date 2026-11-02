@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_exec::Executors;
 use cpa_exec::claude::ClaudeExecutor;
@@ -100,7 +99,7 @@ async fn proxy(name: &str) -> Proxy {
     ];
     let yaml = "api-keys:\n  - client-key\n";
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse(yaml).unwrap(),
+        cpa_server::testing::config(yaml),
         credentials,
         Executors {
             claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

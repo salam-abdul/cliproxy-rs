@@ -2701,8 +2701,7 @@ mod tests {
 
     /// A runtime whose usage queue keeps records.
     fn usage_runtime() -> std::sync::Arc<crate::Runtime> {
-        let cfg =
-            cpa_core::config::Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let cfg = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
             codex: Default::default(),
