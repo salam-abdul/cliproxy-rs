@@ -11,7 +11,8 @@ use futures_util::stream::BoxStream;
 // ponytail: the body's end (or error) is taken to arrive with its last bytes, as net/http
 // returns EOF for a Content-Length body and gzip.Reader at its end; the stream cannot
 // tell. When Go's reader reports the end on a read of its own, Go rejects an
-// unterminated final line of exactly `max` bytes that this accepts.
+// unterminated final line of exactly `max` bytes that this accepts. Reading the end
+// separately would need a stream that reports it apart from the last bytes.
 pub fn lines(
     body: BoxStream<'static, Result<Bytes, ExecError>>,
     max: usize,

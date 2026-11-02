@@ -22,7 +22,7 @@ const FALLBACK_INSTRUCTIONS: &str = "You are Codex, a coding agent. You and the 
 const LEVELS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const LEGACY_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
-// --------------------------------------------------------------------------- the store
+// The store
 
 struct Store {
     data: Arc<Vec<u8>>,
@@ -74,7 +74,7 @@ pub fn load(data: &[u8]) -> Result<bool, String> {
 
 /// `ValidateCodexClientModelsJSON`: the fields a complete Codex client catalog needs.
 // ponytail: decode failures carry serde_json's wording, not encoding/json's; the text
-// is only logged.
+// is only logged, so port Go's wording only if logs must match.
 pub fn validate(data: &[u8]) -> Result<(), String> {
     let root: serde_json::Value =
         serde_json::from_slice(data).map_err(|e| format!("decode Codex client model catalog: {e}"))?;
@@ -221,7 +221,7 @@ fn templates() -> Option<Arc<Templates>> {
     parsed
 }
 
-// ------------------------------------------------------------------------ the builder
+// The builder
 
 /// What the model registry knows about one model (Go `*registry.ModelInfo`).
 #[derive(Debug, Clone, Default)]

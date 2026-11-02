@@ -161,7 +161,9 @@ async fn go_reference_scenarios() {
             s["output"].as_str().map(norm),
             "{name}: output"
         );
-        // G30780351 makes packed frames equivalent to the separately recorded frames.
+        // The fixture's Go translates only the first event of a relay chunk that packs
+        // two. The relay translates every event, so a packed scenario streams what Go
+        // recorded for the same events sent as separate chunks.
         let expected = match name {
             "stream_openai_two_events_one_chunk" => {
                 scenarios.iter().find(|s| s["name"] == "stream_openai_sse").unwrap()

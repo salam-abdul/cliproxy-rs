@@ -334,7 +334,6 @@ impl stream::GoStream for Passthrough {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Shared Gemini content helpers (translator/common/gemini.go, util/claude_tool_result.go)
 
 /// common.ReorderGeminiUserParts: when text follows a function response, text parts move

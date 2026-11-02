@@ -45,7 +45,6 @@ pub(crate) fn merges_stream(model: &str) -> bool {
     lower_contains(model, "claude") || model.contains("gemini-3-pro") || model.contains("gemini-3.1-flash-image")
 }
 
-// ---------------------------------------------------------------------------------------
 // Credential fields
 
 fn attr<'a>(credential: &'a Credential, key: &str) -> &'a str {
@@ -87,7 +86,6 @@ pub(crate) fn user_agent(credential: &Credential) -> String {
     crate::antigravity_version::request_user_agent(configured_user_agent(credential))
 }
 
-// ---------------------------------------------------------------------------------------
 // Envelope and identifiers
 
 /// `generateRequestID`.
@@ -220,7 +218,6 @@ pub(crate) fn finish_request(model: &str, mut body: Vec<u8>) -> Vec<u8> {
     body
 }
 
-// ---------------------------------------------------------------------------------------
 // Schema cleaning
 
 const DECLARATION_SCHEMA_KEYS: [&str; 6] = [
@@ -399,7 +396,6 @@ fn nested_clean(schema: &[u8], clean: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini signatures and function responses
 
 /// `sanitizeAntigravityGeminiRequestSignatures`: Gemini-family models only.
@@ -905,7 +901,6 @@ pub(crate) fn obfuscate_system_instruction(body: Vec<u8>, obfuscate: impl Fn(&[u
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Web search
 
 fn has_tool_of_type(body: &[u8], path: &str, kinds: &[&[u8]]) -> bool {
@@ -980,7 +975,6 @@ pub(crate) fn grounding_uris(body: &[u8]) -> Option<(&'static str, Vec<String>)>
     Some((base, uris))
 }
 
-// ---------------------------------------------------------------------------------------
 // Merged streams (convertStreamToNonStream)
 
 /// A run of text or thought parts merged into one part.
@@ -1163,7 +1157,6 @@ pub(crate) fn merge_stream(stream: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // 429 rules
 
 /// What a 429 answer means for the credential (`antigravity429DecisionKind`).

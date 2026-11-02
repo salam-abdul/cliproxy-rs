@@ -767,7 +767,7 @@ mod sys {
                 }
                 // ponytail: every event on a watched descriptor counts, including
                 // unrelated entries of the config file's folder; a busy folder costs
-                // one hash-checked look per change.
+                // one hash-checked look per change. Filter events by entry name if that cost shows.
                 if any {
                     return Ok(());
                 }

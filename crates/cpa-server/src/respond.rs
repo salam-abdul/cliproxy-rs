@@ -150,7 +150,7 @@ pub fn write_upstream_headers(dst: &mut axum::http::HeaderMap, src: &axum::http:
 /// Go `WriteErrorResponse` with passthrough on: the error's addon headers replace the
 /// response's, reserved names excepted. Content-Type stays the response's: Go sets
 /// `application/json` after copying the addon.
-// ponytail: Go copies these unfiltered, so an upstream Content-Length (or other
+// Go copies these unfiltered, so an upstream Content-Length (or other
 // framing header) can declare the wrong length for CPA's error body; framing and
 // hop-by-hop headers are dropped here to keep the response valid.
 pub fn write_error_headers(dst: &mut axum::http::HeaderMap, src: &axum::http::HeaderMap) {

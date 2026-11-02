@@ -6,6 +6,7 @@
 /// ponytail: wreq's exclusion matcher stands in for Go's. Port-specific `NO_PROXY`
 /// entries are dropped (Go bypasses only that port), a leading-dot entry also matches
 /// the bare domain, and the CGI rule ignores `HTTP_PROXY` instead of failing requests.
+/// Port Go's matcher if a deployment relies on those rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EnvProxy {
     pub(super) http: Option<String>,

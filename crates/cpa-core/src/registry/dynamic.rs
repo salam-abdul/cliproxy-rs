@@ -6,7 +6,7 @@
 //! The static catalog is `cpa_core::registry::pinned()`. Each enabled credential
 //! registers its provider's channel (or its configured `models`), minus exclusions, plus
 //! OAuth aliases and forks, plus `prefix/` copies. Selection admits a credential only
-//! when it registered the route model (M4-0028), and route-time provider lookup uses
+//! when it registered the route model, and route-time provider lookup uses
 //! the registered providers, so a model nobody serves is Go's 400 `unknown provider`.
 //!
 //! Execution-model resolution (aliases back to upstream names, force mapping) lives
@@ -994,7 +994,8 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
     };
     let models = apply_excluded(models, &excluded);
     let models = apply_aliases(&oauth_aliases_for(aliases, c), models);
-    // ponytail: oauth.settings max-context-length overrides are not applied yet.
+    // ponytail: oauth.settings max-context-length overrides are not applied; apply them
+    // here, after the aliases, if a deployment sets one.
     apply_prefix(models, credential_prefix(c), cfg.routing.force_model_prefix)
 }
 
@@ -1229,8 +1230,9 @@ impl Registry {
 
     /// Registered models a client may list or `auto` may pick (Go
     /// `modelRegistrationAvailability`), given each credential's state per model.
-    // ponytail: Go recomputes projections only when a result or refresh is recorded, so
-    // a model can stay hidden after its cooldown lapses; this reads live state instead.
+    // Go recomputes projections only when a result or refresh is recorded, so
+    // a model can stay hidden after its cooldown lapses; this reads live state instead,
+    // so a model is listed again as soon as its cooldown ends.
     pub fn available_with<'a>(
         &'a self,
         state: impl Fn(&str, &str) -> Suspension + 'a,

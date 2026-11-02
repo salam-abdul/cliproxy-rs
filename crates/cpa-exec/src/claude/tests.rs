@@ -468,7 +468,7 @@ const GO_EXECUTOR: &str = include_str!("testdata/go_executor.json");
 #[tokio::test]
 async fn executor_scenarios_match_go() {
     // Sequenced through execute(): compat_replay_sequence_matches_go; config keys:
-    // m1_0041_to_m1_0056_config_keys_match_go.
+    // config_keys_match_go.
     scenarios_match_go(GO_EXECUTOR, "all", |name| {
         !name.starts_with("replay-") && !is_config_scenario(name) && !FOLLOWS_V8_0_27.contains(&name)
     })
@@ -484,8 +484,9 @@ const FOLLOWS_V8_0_27: &[&str] = &[
 ];
 
 /// v8.0.27 scenarios where Go keeps an API key's caller system text top-level and
-/// cliproxy-rs moves it after the leading user run, as it does for every request
-///. Rust's body is compared with Go's after
+/// cliproxy-rs moves it after the leading user run, as it does for every request, so
+/// the cached prefix stays stable across turns (`cloak::install_system`). Rust's body is
+/// compared with Go's after
 /// [`with_relocated_system`].
 const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
     "apikey-cloak-system-single-user",
@@ -563,12 +564,11 @@ fn is_config_scenario(name: &str) -> bool {
     name.starts_with("config-") || name == "apikey-cloak-config-strict-sensitive"
 }
 
-/// M1-0041 rebuild-mid-system-message, M1-0043 cloak.strict-mode, M1-0044
-/// cloak.sensitive-words, M1-0048..M1-0055 every header-defaults key (stabilized and
-/// not) and M1-0056 disable-claude-cloak-mode, each set in config.yaml and run through
-/// Go's executor by the scenario generator.
+/// rebuild-mid-system-message, cloak.strict-mode, cloak.sensitive-words, every
+/// header-defaults key (stabilized and not) and disable-claude-cloak-mode, each set in
+/// config.yaml and run through Go's executor by the scenario generator.
 #[tokio::test]
-async fn m1_0041_to_m1_0056_config_keys_match_go() {
+async fn config_keys_match_go() {
     let fixture: Value = serde_json::from_str(include_str!("testdata/go_executor.json")).unwrap();
     let count = fixture["scenarios"]
         .as_array()

@@ -303,7 +303,6 @@ fn rewrite_claude_reasoning(model: &str, raw: &[u8], gemini: Vec<u8>) -> Vec<u8>
     GoValue::Object(root).marshal()
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// ConvertAntigravityResponseToOpenAIResponsesNonStream: the Gemini converter on the

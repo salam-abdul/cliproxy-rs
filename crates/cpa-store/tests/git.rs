@@ -257,7 +257,7 @@ fn explicit_delete_needs_no_second_blocking_thread() {
     assert!(remote_file(&remote, "main", "auths/a.json").is_none());
 }
 
-// ---- corruption recovery (Go gitstore_test.go TestGitTokenStoreCorruption*) ----------
+// Corruption recovery (Go gitstore_test.go TestGitTokenStoreCorruption*)
 
 /// Go `removeHeadFileObject`: commits `path` locally, then deletes its blob object.
 fn remove_head_file_object(repo: &Path, path: &str) {

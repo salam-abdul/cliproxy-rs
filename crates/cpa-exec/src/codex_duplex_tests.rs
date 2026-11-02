@@ -191,7 +191,7 @@ fn get(payload: &str, path: &str) -> String {
     gjson::get(payload, path).str().to_owned()
 }
 
-// ------------------------------------------------------------------ codex_websockets_duplex_test.go
+// Go codex_websockets_duplex_test.go
 
 /// `TestCodexDuplexSteeringLifecycle`: the upstream cannot finish the first response
 /// until it reads the steer, so a serial request/response proxy deadlocks.
@@ -484,7 +484,7 @@ async fn queued_create_does_not_block_subsequent_steer() {
     up.finish().await;
 }
 
-// ------------------------------------------------- codex_websockets_duplex_successor_metadata_test.go
+// Go codex_websockets_duplex_successor_metadata_test.go
 
 /// `TestCodexDuplexAutomaticSuccessorMetadata`: a create queued behind steering must not
 /// supply an automatic successor's settings while it waits to be sent.
@@ -649,7 +649,7 @@ async fn automatic_successor_metadata() {
     }
 }
 
-// ---------------------------------------------------------- codex_websockets_duplex_rejection_test.go
+// Go codex_websockets_duplex_rejection_test.go
 
 /// `TestCodexDuplexRejectedCreateMetadata`: the upstream waits for every explicit create
 /// before rejecting one, so queue ownership is deterministic.
@@ -852,7 +852,7 @@ async fn later_invalid_signature_clears_replay() {
     }
 }
 
-// ----------------------------------------------------- codex_websockets_duplex_initial_failure_test.go
+// Go codex_websockets_duplex_initial_failure_test.go
 
 /// The four upstream rejections of `TestCodexDuplexInitialFailure`: (name, payload,
 /// status, quota, headers).
@@ -946,7 +946,7 @@ async fn initial_failure() {
     }
 }
 
-// ------------------------------------------------- codex_websockets_duplex_bootstrap_input_test.go
+// Go codex_websockets_duplex_bootstrap_input_test.go
 
 /// `TestCodexDuplexBootstrapCancellationPreservesInput`: cancelling before
 /// `response.created` leaves the queued follow-up unread and closes the socket.
@@ -989,7 +989,7 @@ async fn bootstrap_cancellation_preserves_input() {
     assert!(frames.try_recv().is_ok(), "follow-up consumed before response.created");
 }
 
-// ------------------------------------------------------- codex_websockets_duplex_health_test.go
+// Go codex_websockets_duplex_health_test.go
 
 /// `TestCodexDuplexConnectionTimeoutDoesNotCoolHealthyAccount`, executor half: the
 /// client's input failing after a completed response ends the stream with a connection

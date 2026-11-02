@@ -111,7 +111,7 @@ async fn answers_are_rewritten_like_go() {
         let result = prepare_answer(answer, offer, Arc::new(Never), quiet());
         if let Some(want) = case["error"].as_str() {
             let got = result.err().unwrap_or_else(|| panic!("{name}: expected {want}"));
-            // ponytail: pion's SDP lexer words its syntax errors differently; the step matches.
+            // Pion's SDP lexer words its syntax errors differently; the step matches.
             match want.split_once(" for TCP proxy: sdp: ") {
                 Some((step, _)) => assert!(got.starts_with(&format!("{step} for TCP proxy: ")), "{name}: {got}"),
                 None => assert_eq!(got, want, "{name}"),
@@ -125,7 +125,7 @@ async fn answers_are_rewritten_like_go() {
             masked = masked.replace(&at, &format!("LISTEN{i} "));
             assert!(tunnel.candidate.contains(&at), "{name}: {}", tunnel.candidate);
         }
-        // ponytail: rtc-sdp drops whitespace at the end of an attribute value; pion keeps
+        // rtc-sdp drops whitespace at the end of an attribute value; pion keeps
         // it. The answer only feeds the relay's own peer, and credentials are trimmed.
         let lines = |sdp: &str| sdp.split("\r\n").map(str::trim_end).collect::<Vec<_>>().join("\r\n");
         assert_eq!(lines(&masked), lines(case["sdp"].as_str().unwrap()), "{name}");

@@ -802,6 +802,7 @@ pub(crate) async fn error_logs(State(state): State<Arc<Management>>) -> Response
 
 /// gin `FileAttachment` over `http.ServeFile` for a plain log file.
 // ponytail: no Range or conditional requests (the dashboard downloads whole files).
+// Serve through a range-aware file service if a client needs them.
 fn attachment(path: &Path, name: &str) -> Response {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -854,7 +855,7 @@ fn content_type(name: &str, data: &[u8]) -> String {
     {
         return t.clone();
     }
-    // ponytail: Go's sniffer also recognises HTML, XML and binary signatures; log text
+    // Go's sniffer also recognises HTML, XML and binary signatures; log text
     // without binary bytes is text/plain, as there.
     let binary = data
         .iter()

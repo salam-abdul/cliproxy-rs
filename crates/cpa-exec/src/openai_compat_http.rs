@@ -13,7 +13,7 @@ use crate::proxy::{GoClients, Hooks, Proxy};
 
 pub(crate) use crate::proxy::{GoHeaders, Upstream};
 
-/// Go standard-transport clients keyed by effective proxy (crate::proxy, M4-0029).
+/// Go standard-transport clients keyed by effective proxy (crate::proxy).
 pub(crate) struct Clients(GoClients);
 
 impl Clients {
@@ -78,7 +78,7 @@ pub(crate) fn publish_failure(usage: &UsageSink, error: &ExecError) {
     usage.publish_failure(status, &body);
 }
 
-// --- upstream request capture (helps/logging_helpers.go) --------------------------------
+// Upstream request capture (helps/logging_helpers.go)
 
 /// Response headers as Go's `http.Header`: canonical names, every value in order.
 pub(crate) fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {

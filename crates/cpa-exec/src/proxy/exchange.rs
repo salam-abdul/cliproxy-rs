@@ -27,7 +27,7 @@ pub struct Upstream {
 
 /// Largest error body kept from an upstream rejection.
 // ponytail: Go reads error bodies without a bound; 16 MiB keeps a hostile upstream from
-// exhausting a small VPS while covering any real provider error.
+// exhausting a small VPS while covering any real provider error. Raise it if one is larger.
 pub const MAX_ERROR_BODY: usize = 16 << 20;
 
 fn body_error(_: std::io::Error) -> ExecError {
@@ -160,7 +160,8 @@ impl RawUpstream {
     /// it: a body the upstream ended early fails with the scanner's `unexpected EOF`;
     /// every other read failure keeps `upstream request failed`.
     // ponytail: Go names resets and timeouts by their own error text, which can carry
-    // the upstream URL; those keep this crate's generic text.
+    // the upstream URL; those keep this crate's generic text. Keep the client error text
+    // if callers need Go's.
     pub(super) fn scanned(self) -> Upstream {
         let map = |error: std::io::Error| {
             if ended_early(&error) {
@@ -545,7 +546,8 @@ fn origin(url: &url::Url) -> String {
 /// with; never over plain HTTP (no h2c).
 // ponytail: an origin not seen yet counts as HTTP/1.1, so the first request to an h2
 // upstream says Go-http-client/1.1 where Go says /2.0 (only callers that set no
-// User-Agent). The protocol itself is always the negotiated one.
+// User-Agent). The protocol itself is always the negotiated one. Set the header after
+// ALPN if that first request must match.
 fn expects_http2(url: &url::Url) -> bool {
     url.scheme() == "https"
         && origin_protocols()
@@ -573,7 +575,8 @@ fn remember_protocol(url: &url::Url, http2: bool) {
 /// query survives only a reference with neither path nor query. Absolute and
 /// network-path references ignore the base.
 // ponytail: the next hop is a `url::Url`, which reads `%2e` as a dot segment where Go
-// keeps it; only the first request goes out exactly as written.
+// keeps it; only the first request goes out exactly as written. Build the next hop
+// from the raw Location if a redirect target carries `%2e`.
 fn resolve_exact(raw: &str, location: &str, current: &url::Url) -> Result<url::Url, url::ParseError> {
     if location.starts_with("//") || url::Url::parse(location).is_ok() {
         return current.join(location);

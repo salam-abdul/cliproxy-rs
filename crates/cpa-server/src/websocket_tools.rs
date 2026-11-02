@@ -274,6 +274,7 @@ fn repair(key: &str, payload: &str, turn: Option<&mut TurnCache>) -> Option<Stri
         return None;
     }
     // ponytail: Go splices the last case-insensitive `input` member; this edits `input`.
+    // Splice the last case-insensitive match if a client sends both spellings.
     Some(crate::websocket_requests::set_raw(payload, "input", &marshal(&updated)))
 }
 

@@ -394,7 +394,8 @@ impl QuotaSignals {
     /// (`canonicalModelKey`): replaced when `headers` carry any Codex quota signal,
     /// untouched otherwise.
     // ponytail: Go keys model state by the conductor's state model; executors see the
-    // upstream model, which differs only for aliases mapped to another upstream name.
+    // upstream model, which differs only for aliases mapped to another upstream name. Carry
+    // the state model on ExecRequest if those aliases need separate state.
     pub fn observe(&self, credential_id: &str, model: &str, headers: &HeaderMap) {
         self.record(credential_id, model, collect_signals(headers), SystemTime::now());
     }

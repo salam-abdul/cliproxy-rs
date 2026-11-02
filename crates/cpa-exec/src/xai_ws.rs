@@ -10,7 +10,8 @@
 //! fresh target, and a `compaction_trigger` turn compacts that transcript over HTTP.
 // ponytail: Go's branch for a WebSocket turn without a downstream WebSocket (SSE encoding
 // and client translation) is unreachable through `XAIAutoExecutor` and not ported, nor
-// are the sessionless ephemeral sockets or `CloseXAIWebsocketSessionsForAuthID`.
+// are the sessionless ephemeral sockets or `CloseXAIWebsocketSessionsForAuthID`. Port
+// them if a route starts reaching them.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -99,7 +100,7 @@ impl Ws {
     }
 }
 
-// --- per-session ID state (xaiWebsocketIDState) --------------------------------------------
+// Per-session ID state (xaiWebsocketIDState)
 
 #[derive(Default)]
 struct IdState(Mutex<IdInner>);
@@ -430,7 +431,7 @@ impl Ids<'_> {
     }
 }
 
-// --- request and frame helpers ----------------------------------------------------------
+// Request and frame helpers
 
 /// `xaiWebsocketsEnabled`: the `websockets` attribute when it parses, else the metadata
 /// value (a bool, or a string that parses).
@@ -458,7 +459,8 @@ fn plain(message: impl Into<String>) -> ExecError {
 
 /// `buildXAIResponsesWebsocketURL`.
 // ponytail: Go re-serializes the parsed URL (`URL.String()`); the text after the scheme is
-// kept as given, which differs only for escapes Go would normalize.
+// kept as given, which differs only for escapes Go would normalize. Re-serialize as Go
+// does if an upstream rejects such escapes.
 fn ws_url(http_url: &str) -> Result<String, ExecError> {
     let raw = http_url.trim();
     let parsed = crate::xai_url::parse(raw).map_err(plain)?;
@@ -594,7 +596,7 @@ fn go_atoi(s: &str) -> Option<i64> {
 /// other read or write failure is a plain Go error (500) under the xAI executor's name.
 // ponytail: Go's message for other closes is gorilla's ("websocket: close 1011 (internal
 // server error): internal"); the shared reader keeps no close details, so the text is
-// the pool's.
+// the pool's. Keep the close frame in the reader if the message must match.
 fn pool_error(mut error: ExecError) -> ExecError {
     const CODEX: &[u8] = b"codex websockets executor: ";
     if error.status == 413 && error.scope == FailureScope::Request {
@@ -639,7 +641,7 @@ fn handshake_headers(credential: &Credential, token: &str, session_id: &str, req
     headers
 }
 
-// --- compaction (executeCompactionTriggerFromWebsocketContext) ---------------------------
+// Compaction (executeCompactionTriggerFromWebsocketContext)
 
 /// `buildXAIWebsocketCompactionPayload`.
 fn compaction_payload(payload: &[u8], transcript: &[u8]) -> Vec<u8> {
@@ -691,7 +693,7 @@ fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
     Ok((response_id, item))
 }
 
-// --- capture (RecordAPIWebsocket*) ------------------------------------------------------
+// Capture (RecordAPIWebsocket*)
 
 /// The upstream WebSocket's capture: the request log Go builds once per turn (`wsReqLog`)
 /// and the events of its socket. A no-op without an observer.
@@ -823,7 +825,7 @@ fn upgrade_url(raw: &str) -> String {
     }
 }
 
-// --- the turn --------------------------------------------------------------------------
+// The turn
 
 /// One turn on the session's socket, as a stream of downstream payloads. Dropping it
 /// releases the turn lock and the reader.
@@ -1280,7 +1282,7 @@ impl XaiExecutor {
 /// Capture: the first dial records a rejected upgrade (any handshake response, including
 /// a 101 gorilla refuses) as an HTTP attempt and any other failure as a `dial` error; a
 /// retry dial records every failure as `dial_retry`, with gorilla's text for a rejection.
-// ponytail: Go returns `xaiStatusErr(101, body)` for a 101 gorilla refuses; this keeps the
+// Go returns `xaiStatusErr(101, body)` for a 101 gorilla refuses; this keeps the
 // plain handshake error, since a 101 status error has no sensible client response.
 async fn dial(
     client: &wreq::Client,

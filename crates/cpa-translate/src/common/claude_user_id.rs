@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 
 use super::norm;
 
-// ---------------------------------------------------------------------------------------
 // Claude user ID (common/claude_user_id.go)
 
 pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {

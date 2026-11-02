@@ -57,7 +57,8 @@ pub(super) fn extract_betas(body: String) -> (Vec<String>, String) {
 /// `defaultModelMaxTokens`.
 pub(super) const DEFAULT_MAX_TOKENS: i64 = 1024;
 
-/// Fill `thinking.display: updates` for progress-display models with active thinking.
+/// Fill `thinking.display: updates` for progress-display models with adaptive or enabled
+/// thinking, unless the caller set a display.
 pub(super) fn cloak_thinking_display(body: String) -> String {
     if rawjson::get(&body, "thinking.display").exists() || !betas::progress_display(&rawjson::string(&body, "model")) {
         return body;
@@ -68,14 +69,15 @@ pub(super) fn cloak_thinking_display(body: String) -> String {
     }
 }
 
-/// `injectFakeUserID`: a caller's valid Claude Code user ID is kept.
-/// `injectFakeUserID`: a missing or invalid `metadata.user_id` is replaced.
+/// `injectFakeUserID`: true when `metadata` is absent or `metadata.user_id` is empty or
+/// not a valid Claude Code user ID. A caller's valid ID is kept.
 pub(super) fn needs_fake_user_id(body: &str) -> bool {
     let existing = rawjson::string(body, "metadata.user_id");
     !rawjson::get(body, "metadata").exists() || existing.is_empty() || !detect::valid_user_id(&existing)
 }
 
-/// `injectClaudeDiagnosticsWithState`: after context_management when present.
+/// `injectClaudeDiagnosticsWithState`: an existing `diagnostics` is replaced in place;
+/// otherwise it goes right after `context_management` when present, else at the end.
 pub(super) fn inject_diagnostics(body: &str, previous_message_id: &str) -> String {
     let value = if previous_message_id.is_empty() {
         r#"{"previous_message_id":null}"#.to_owned()

@@ -186,7 +186,8 @@ fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
             return None;
         }
         // ponytail: raw-formatting preservation is limited to 128 schema fields and
-        // independent local rules. Other valid schemas use the literal-key arena passes.
+        // independent local rules. Other valid schemas use the literal-key arena passes, which
+        // do not keep the client's formatting; extend the raw pass if a client needs it there.
         if nodes[node].children.len() > 128 {
             return None;
         }
@@ -402,7 +403,6 @@ fn clean_inlined(mut s: Vec<u8>, options: Options) -> Vec<u8> {
     s
 }
 
-// ---------------------------------------------------------------------------------------
 // Path helpers
 
 fn escape_key(key: &[u8]) -> Vec<u8> {
@@ -596,7 +596,6 @@ fn delete(mut json: Vec<u8>, path: &[u8]) -> Vec<u8> {
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 0: malformed object repair (Go's `any` model)
 
 type Map = BTreeMap<String, GoValue>;
@@ -886,7 +885,6 @@ fn repair_node(node: &Map, _add_items: bool) -> (Map, bool) {
     (value.into_object().unwrap(), modified)
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 1: references, enums and hints
 
 fn inline_refs(json: Vec<u8>) -> Vec<u8> {
@@ -1067,7 +1065,6 @@ fn move_not_to_description(mut json: Vec<u8>) -> Vec<u8> {
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 2: flattening
 
 fn merge_conditionals(mut json: Vec<u8>) -> Vec<u8> {
@@ -1501,7 +1498,6 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 3: cleanup
 
 fn delete_keyword_paths(mut json: Vec<u8>, keywords: &[&[u8]], keep: impl Fn(&[u8], &[u8], &[u8]) -> bool) -> Vec<u8> {

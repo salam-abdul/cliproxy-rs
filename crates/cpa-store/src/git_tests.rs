@@ -1,4 +1,4 @@
-//! Go internal/store/gitstore_test.go cases (M4-0361) against local bare remotes. Each
+//! Go internal/store/gitstore_test.go cases against local bare remotes. Each
 //! test names the Go test it mirrors; the expected values are Go's assertions.
 //!
 //! Not ported: the go-git handle cases (`TestRecoverRepositoryCloseFailures*`,

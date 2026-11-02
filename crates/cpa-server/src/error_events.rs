@@ -8,7 +8,8 @@
 // cooldown reports the quota's own `next_recover_at`; here both are the one cooldown
 // deadline. Go's error `code` and `retryable` are not carried (always omitted), and a
 // credential whose cooldown has lapsed reports `active` where Go keeps `error` until
-// the next success.
+// the next success. A separate quota deadline and last-error state in the cooldown
+// store would report all three as Go does.
 
 use std::time::SystemTime;
 

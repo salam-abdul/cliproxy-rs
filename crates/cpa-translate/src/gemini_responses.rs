@@ -77,7 +77,6 @@ fn is_tool_output(item: &Res<'_>) -> bool {
         b"function_call_output" | b"custom_tool_call_output"
     )
 }
-// ---------------------------------------------------------------------------------------
 // Request conversion
 
 /// openAIResponsesAssistantVisibleText: the model-visible text of a message (string

@@ -28,7 +28,6 @@ fn string(res: &Res<'_>) -> Vec<u8> {
     res.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// ConvertGeminiRequestToClaude.
@@ -469,7 +468,6 @@ fn set_tool_choice(out: &mut Vec<u8>, calling: &Res<'_>) {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// ConvertAnthropicResponseToGeminiParams.
@@ -613,7 +611,8 @@ impl GoStream for State {
         if self.created_at == 0 {
             self.created_at = now_unix();
         }
-        // ponytail: Go formats createTime in the process's local zone; this assumes UTC.
+        // ponytail: Go formats createTime in the process's local zone; this assumes UTC, as Go
+        // runs in its container image. Format in the local zone if a server runs outside UTC.
         gj::set_str(&mut template, "createTime", format_rfc3339_utc(self.created_at));
         let index = root.get("index").int();
         let add_part = |template: &mut Vec<u8>, part: &[u8]| {

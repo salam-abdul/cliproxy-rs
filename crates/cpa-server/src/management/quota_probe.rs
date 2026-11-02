@@ -42,8 +42,8 @@ pub(super) async fn execute(
             .into_iter()
             .flatten()
             .any(|(_, v)| v.as_str().is_some_and(|v| v.contains("$TOKEN$")));
-    // ponytail: Go refreshes antigravity, meta and xai tokens here when due (as for
-    // api-call); the stored token is used.
+    // ponytail: Go refreshes antigravity, meta and xai tokens here when due; the stored
+    // token is used. Refresh due credentials as `api_call` does if a probe needs it.
     let token = super::api_call::token_for(auth);
     if needs_token {
         if token.is_empty() {

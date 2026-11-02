@@ -11,7 +11,7 @@
 //!
 //! ponytail: pion behaviour webrtc-rs 0.21 lacks (more at `ice_url`, `advertise`):
 //! `disable-private-remote-ips` filters the client's offered candidates, not peer-reflexive
-//! ones learned from STUN.
+//! ones learned from STUN. Filter those too once webrtc-rs exposes them.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +53,7 @@ const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
 /// pion gives each STUN server its 5 s `stunGatherTimeout`, then completes gathering;
 /// webrtc-rs 0.21 keeps a timed-out STUN client and never completes.
 // ponytail: a TURN allocation slower than this loses its relay candidate, which pion
-// would still wait for.
+// would still wait for. Raise it if a TURN server allocates slower.
 const GATHER_BOUND: Duration = Duration::from_secs(6);
 
 pub(super) struct Relay {
@@ -68,7 +68,8 @@ impl Relay {
         let skipped = ungathered_ice_urls(config);
         if !skipped.is_empty() {
             // ponytail: webrtc-rs 0.21 gathers relay candidates over UDP TURN only; pion
-            // also uses TURN over TCP and TLS. Those servers are skipped with this warning.
+            // also uses TURN over TCP and TLS. Those servers are skipped with this warning until
+            // webrtc-rs supports them.
             tracing::warn!(
                 urls = ?skipped,
                 "codex.live-media-relay: TURN over TCP or TLS is not supported by this build; these ICE servers are skipped"

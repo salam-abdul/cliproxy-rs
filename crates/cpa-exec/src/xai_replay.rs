@@ -55,7 +55,8 @@ struct Entry {
 
 /// The in-process replay cache (Go's package-level map), used outside Home mode.
 // ponytail: Go also purges expired entries from a background ticker; here an expired
-// entry is dropped when read and capacity eviction bounds memory.
+// entry is dropped when read and capacity eviction bounds memory. Add a purge ticker if
+// idle memory matters.
 #[derive(Default)]
 pub(crate) struct Store {
     entries: Mutex<HashMap<String, Entry>>,
@@ -335,7 +336,7 @@ pub(crate) async fn clear(store: &Store, scope: &ReplayScope) {
     }
 }
 
-// --- cache normalization (normalizeXAIReasoningReplayItems) -----------------------------
+// Cache normalization (normalizeXAIReasoningReplayItems)
 
 /// The normalized items, or `None` when none is a reasoning item or tool call.
 fn normalize_items(items: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
@@ -446,7 +447,7 @@ fn normalize_item(item: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-// --- request side (filterXAIReasoningReplayItemsForInput, insertCodexReasoningReplayItems) -
+// Request side (filterXAIReasoningReplayItemsForInput, insertCodexReasoningReplayItems)
 
 /// One part of an assistant message, for equality (`xaiAssistantMessagePart`).
 fn message_parts(content: &Res<'_>) -> Option<Vec<(String, Vec<u8>)>> {

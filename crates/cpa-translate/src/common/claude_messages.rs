@@ -1,6 +1,5 @@
 use cpa_common::json::{self as gj, Kind, Res};
 
-// ---------------------------------------------------------------------------------------
 // Claude messages (common/claude_messages.go)
 
 /// Merges consecutive same-role Claude messages; assistant tool_use parts move after the

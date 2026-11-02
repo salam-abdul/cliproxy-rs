@@ -23,7 +23,7 @@ pub(crate) fn http_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
 
 /// Go's WebSocket dial headers: canonical keys except those Go sets case-preserved
 /// (`setHeaderCasePreserved`).
-// ponytail: a client header Go copies verbatim when cloaking is disabled keeps gin's
+// A client header Go copies verbatim when cloaking is disabled keeps gin's
 // canonical spelling here, which is what Go's map holds after gin parsed it anyway.
 fn websocket_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
     headers

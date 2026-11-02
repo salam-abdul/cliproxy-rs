@@ -316,6 +316,7 @@ async fn http_connect(mut conn: Conn, target: SocketAddr, auth: Option<&str>) ->
 }
 
 // ponytail: Go's reader has no limit on a response head; 64 KiB bounds a hostile proxy.
+// Raise it if a real proxy sends larger heads.
 const MAX_HEAD: usize = 64 << 10;
 
 /// `bufio.Reader.ReadLine` over the proxy connection.

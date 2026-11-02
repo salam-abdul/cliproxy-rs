@@ -36,7 +36,6 @@ fn first_nonempty(values: &[&[u8]]) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// common.ClaudeMessageAccumulator: consecutive same-role messages merge into one, with
@@ -533,7 +532,6 @@ fn claude_text(value: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 const USAGE_KEYS: [&str; 5] = [

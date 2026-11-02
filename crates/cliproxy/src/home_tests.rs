@@ -1708,7 +1708,7 @@ async fn alpha_search_401s_reach_home_as_home_results() {
 }
 
 /// Go `TestHomeExecutionPropagatesRequestMetadata` and
-/// `TestHomeExecutionFailureResultPreservesRequestMetadata` (Go issue #4791): the
+/// `TestHomeExecutionFailureResultPreservesRequestMetadata`: the
 /// usage record of a Home attempt carries the client's requested model, reasoning
 /// effort, service tier (`auto` when omitted) and generate flag, and a failed attempt
 /// keeps the requested tier.
@@ -2247,7 +2247,7 @@ async fn live_401s_reach_home_as_home_results() {
     task.await.unwrap();
 }
 
-// ---- Go home_retry_contract_test.go ---------------------------------------------
+// Go home_retry_contract_test.go
 //
 // `ContractHome` answers like Go's `retryContractHomeDispatcher` and the upstream
 // like `retryContractHomeExecutor` (by credential: an OpenAI-compatible key named
@@ -3375,7 +3375,7 @@ async fn meta_mints_go_through_home() {
     }
 }
 
-// ---- Go home_v8_model_capabilities_test.go and friends: Home's model definition --
+// Go home_v8_model_capabilities_test.go and friends: Home's model definition
 
 /// The credential a Home dispatch reply makes for `requested` (the route model).
 fn home_credential(reply: Value, requested: &str) -> Credential {
@@ -3741,7 +3741,7 @@ async fn credential_options_reach_the_executor_through_a_home_pick() {
     }
 }
 
-// ---- Go home_concurrency_test.go: single picks against a fixture Home ----------
+// Go home_concurrency_test.go: single picks against a fixture Home
 
 /// Go `newHomeSelectionTestManager`: a dispatcher with its own Home client and
 /// registry, outside any subscriber lifetime, recording each release as
@@ -4014,7 +4014,7 @@ async fn home_busy_skips_outer_retries() {
     }
 }
 
-// ---- Go home_execution_paths_test.go: lease lifetimes on the execution paths ------
+// Go home_execution_paths_test.go: lease lifetimes on the execution paths
 
 /// An OpenAI-compatible upstream whose streams send one chunk and then wait for
 /// `close` (a `Notify` permit per stream); buffered requests answer at once.
@@ -4284,7 +4284,7 @@ async fn process_log_lines_reach_home_while_published() {
     assert!(app_logs(&home, "applog-marker-stopped").is_empty());
 }
 
-// ---- Go service_executionregistry_test.go: the registry across lifetimes ----------
+// Go service_executionregistry_test.go: the registry across lifetimes
 
 /// Go `serveRegistryTestHomeConnection`'s Home: lifecycle revision 1 with a short CPA
 /// heartbeat and cancel bound. The first subscription is ACKed at once; later ones
@@ -4298,7 +4298,7 @@ struct LifetimeHome {
 }
 
 impl LifetimeHome {
-    // ponytail: Go's heartbeat is 100ms; 300ms leaves the 50ms pongs room on a loaded
+    // Go's heartbeat is 100ms; 300ms leaves the 50ms pongs room on a loaded
     // test machine without changing what is asserted.
     const CONFIG: &str = "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 300ms\n  cpa-cancel-bound: 100ms\n";
 

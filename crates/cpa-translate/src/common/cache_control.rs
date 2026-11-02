@@ -1,6 +1,5 @@
 use cpa_common::json::{self as gj, Kind, Res};
 
-// ---------------------------------------------------------------------------------------
 // Cache control (common/cache_control.go)
 
 fn valid_cache_control(cc: &Res<'_>) -> bool {

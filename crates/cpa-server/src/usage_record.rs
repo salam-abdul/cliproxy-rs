@@ -364,7 +364,7 @@ fn has_tokens(d: &Detail) -> bool {
         || d.breakdown.is_some_and(|b| b.total != 0)
 }
 
-// ---- parsers -------------------------------------------------------------------
+// Parsers
 
 /// Go `jsonPayload`: the JSON object of an SSE `data:` line or a bare JSON line.
 fn json_payload(line: &[u8]) -> Option<&[u8]> {
@@ -948,7 +948,7 @@ impl StreamUsage {
     }
 }
 
-// ---- response model ------------------------------------------------------------
+// Response model
 
 const MAX_RESPONSE_MODEL: usize = 128;
 
@@ -1232,7 +1232,7 @@ fn warn_model_substitution(record: &Record, upstream_model: &str, auth_id: &str)
     );
 }
 
-// ---- the queued record ---------------------------------------------------------
+// The queued record
 
 /// Downstream request facts (Go `ClientRequestMetadata`, request ID, endpoint).
 #[derive(Debug, Clone, Default)]
@@ -1249,7 +1249,8 @@ pub struct Client {
     pub node_kind: String,
     pub is_compaction: bool,
     /// Where `session_id` came from (`crate::session::Session::source`), `lcp` for an
-    /// LCP pick's session or `home` for Home's. Not in Go.
+    /// LCP pick's session or `home` for Home's. Not in Go; it shows which source session
+    /// affinity used.
     pub session_source: &'static str,
     pub request_id: String,
     /// `METHOD /route/template`.
@@ -1286,7 +1287,8 @@ pub struct Record {
     pub response_model: String,
     /// Upstream response headers, names as received.
     pub response_headers: Vec<(String, Vec<String>)>,
-    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
+    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go; it
+    /// shows which requests share a cacheable prefix.
     pub prompt_prefix_hash: String,
     pub claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
     /// Present only for additional telemetry-only records that Go omits.
@@ -1567,7 +1569,7 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.0
 }
 
-// ---- per-attempt tracking ------------------------------------------------------
+// Per-attempt tracking
 
 /// Request-level facts shared by every attempt of one request (Go's handler context:
 /// client metadata, requested alias, reasoning effort, service tier, generate, stream).
@@ -1667,7 +1669,8 @@ pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
 /// Go executor identity for a credential's provider: `Identifier()` and the
 /// executor's type name (both reach the record and pick the token semantics).
 // ponytail: Codex attempts over the upstream WebSocket report `CodexExecutor`; Go
-// names them `CodexWebsocketsExecutor`.
+// names them `CodexWebsocketsExecutor`. Report the WebSocket name if usage views
+// need Go's split.
 fn executor_identity(c: &cpa_core::credential::Credential) -> (String, &'static str) {
     let provider = c.provider.trim().to_lowercase();
     let executor = match provider.as_str() {

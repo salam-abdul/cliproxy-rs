@@ -72,7 +72,7 @@ const TURN_BUFFER: usize = 4096;
 const MAX_HANDSHAKE_BODY: usize = 64 * 1024;
 /// Largest upstream frame or message read.
 // ponytail: Go sets no read limit; 64 MiB (the HTTP body cap) keeps one socket's memory
-// bounded while fitting image-bearing output items.
+// bounded while fitting image-bearing output items. Raise it if an output item needs more.
 const MAX_UPSTREAM_MESSAGE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -973,7 +973,8 @@ impl CodexExecutor {
                 return Err(response::status_error(status, &body, handshake, model_level_cooling));
             }
             // ponytail: Go reports a failed negotiation (and a bad handshake) as a status
-            // error carrying 101; here both are transport failures.
+            // error carrying 101; here both are transport failures. Return a 101 status error if
+            // a caller must classify them as Go does.
             let socket = upgrade(&mut res, &key, &handshake).await.map_err(|e| match e {
                 UpgradeError::Handshake => transport("codex websockets executor: websocket handshake failed"),
                 UpgradeError::Compression => {

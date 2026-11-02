@@ -20,7 +20,8 @@ use super::auth_files::{auth_kind, fail};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// ponytail: Go reads the upstream body without a bound; 64 MiB keeps a hostile
-/// upstream from exhausting a small VPS and covers every provider usage endpoint.
+/// upstream from exhausting a small VPS and covers every provider usage endpoint. Raise
+/// it if an endpoint returns more.
 const MAX_BODY: usize = 64 << 20;
 const MAX_HEADERS: usize = 16_384;
 
@@ -301,7 +302,7 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
     let Ok(method) = axum::http::Method::from_bytes(method.as_bytes()) else {
         return fail(StatusCode::BAD_REQUEST, "failed to build request");
     };
-    // ponytail: `http::HeaderMap` panics past 32768 entries where Go's map would not;
+    // `http::HeaderMap` panics past 32768 entries where Go's map would not;
     // such a request is refused instead of sent.
     if headers.len() > MAX_HEADERS {
         return fail(StatusCode::BAD_GATEWAY, "request failed");

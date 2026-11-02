@@ -413,7 +413,6 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses (openai_gemini_response.go)
 
 /// mapOpenAIFinishReasonToGemini.
@@ -510,8 +509,8 @@ struct Accumulator {
 #[derive(Default)]
 struct State {
     /// Tool calls by index.
-    // ponytail: Go keeps these in a map and emits them in map order (random for two or
-    // more calls); this emits them by tool index.
+    // Go keeps these in a map and emits them in map order (random for two or
+    // more calls); this emits them by tool index, so the output is deterministic.
     calls: BTreeMap<i64, Accumulator>,
 }
 
@@ -708,7 +707,6 @@ pub fn non_stream(_: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Tolerant argument parsing (parseArgsToObjectRaw)
 
 /// parseArgsToObjectRaw: a JSON object for function call arguments, recovering what it

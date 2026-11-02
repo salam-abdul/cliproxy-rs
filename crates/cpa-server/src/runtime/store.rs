@@ -225,8 +225,10 @@ impl CredentialStore {
     /// Go `Manager.persist` after a result (`FileTokenStore.Save`, metadata branch): the
     /// file gets `"disabled"` and Go's `json.Marshal` form unless it already holds the
     /// same JSON. Checked once per revision, so a file is not read on every request.
-    // ponytail: atomic replace instead of Go's in-place truncate, and a removed file is
-    // not recreated (Go recreates one deleted between watcher reloads).
+    // ponytail: a removed file is not recreated (Go recreates one deleted between watcher
+    // reloads); recreate it if a deleted credential must come back. The write is an
+    // atomic replace instead of Go's in-place truncate, so a crash never leaves a
+    // truncated file.
     pub(super) fn persist_credential(&self, credential: &Arc<Credential>) {
         let Source::File(path) = &credential.source else {
             return;

@@ -41,7 +41,7 @@ fn os_error(op: &str, e: &io::Error) -> String {
 }
 
 fn names(ifaces: &[Iface]) -> String {
-    // ponytail: Go prints whole net.Interface structs here; names identify them.
+    // Go prints whole net.Interface structs here; names identify them.
     let list: Vec<&str> = ifaces.iter().map(|i| i.name.as_str()).collect();
     format!("[{}]", list.join(" "))
 }
@@ -105,7 +105,8 @@ fn join_v6(ifaces: &[Iface]) -> Result<UdpSocket, String> {
 
 /// Multicasts `packet` out of every interface, ignoring send errors as Go does.
 // ponytail: answers go out on every selected interface, not only the one the query
-// arrived on (Go uses IP_PKTINFO); the records are the same either way.
+// arrived on (Go uses IP_PKTINFO); the records are the same either way. Read the arrival
+// interface with IP_PKTINFO if a network drops answers from other interfaces.
 async fn multicast(v4: Option<&UdpSocket>, v6: Option<&UdpSocket>, ifaces: &[Iface], packet: &[u8]) {
     for iface in ifaces {
         if let (Some(sock), Some(addr)) = (v4, iface.ipv4())

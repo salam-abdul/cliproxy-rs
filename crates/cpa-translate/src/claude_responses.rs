@@ -829,7 +829,6 @@ fn tool_result_text_parts(block: &Res<'_>) -> Vec<Vec<u8>> {
     vec![text_part(&text)]
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses input helpers (common/responses.go)
 
 /// common.ExtractResponsesCallID.
@@ -993,7 +992,6 @@ fn normalize_codex_agent_messages(payload: &[u8]) -> Vec<u8> {
     if changed { updated } else { payload.to_vec() }
 }
 
-// ---------------------------------------------------------------------------------------
 // Tool declarations and Claude-safe names (*_request.go, *_tool_names.go)
 
 /// util.QualifyResponsesNamespaceToolName.
@@ -1465,7 +1463,6 @@ pub(crate) fn split_qualified_call(request: &[u8], qualified: &[u8]) -> (Vec<u8>
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Web search (*_web_search.go)
 
 pub(crate) fn web_search_call_id(claude_tool_use_id: &[u8]) -> Vec<u8> {

@@ -1629,7 +1629,7 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
         let result = reader.as_mut().take(limit + 1).read_to_end(&mut output).await;
         drop(reader);
         if let Err(error) = result {
-            // ponytail: M4-0254 accepted partial: malformed Brotli can withhold
+            // ponytail: malformed Brotli can withhold
             // partial decoded bytes that Go accepts, and codec diagnostic text
             // differs. Keep the complete raw fallback; port decoder edge behavior
             // and Go's error classifier only if exact corrupt-stream logs are needed.
@@ -2833,8 +2833,8 @@ mod tests {
                 assert!(logged_body.starts_with(&body));
                 assert!(logged_body[body.len()..].starts_with(b"\n[DECOMPRESSION ERROR: "));
                 assert!(error.is_some());
-                // Exact malformed-codec diagnostic wording remains an explicit
-                // parity gap; raw bytes and annotation presence are verified here.
+                // Malformed-codec diagnostic wording differs from Go (the ceiling in
+                // `decode`); raw bytes and annotation presence are verified here.
             } else if case["invalid"] == true && case["encoding"] == "br" {
                 // Accepted corrupt-Brotli difference: Go permits partial output;
                 // Rust reports failure and preserves the complete raw input.

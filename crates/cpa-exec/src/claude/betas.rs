@@ -45,8 +45,8 @@ const CONSTANT: [&str; 5] = [
 ];
 const TRAILING: [&str; 3] = [SERVER_SIDE_FALLBACK, FALLBACK_CREDIT, STRUCTURED_OUTPUTS];
 
-/// Every beta the proxy assembles or gates. Other caller betas are newer-client
-/// features and pass through (#5738).
+/// Every beta the proxy assembles or gates. Other caller betas pass through, so a
+/// feature of a client newer than the proxy keeps working.
 pub(crate) fn managed(beta: &str) -> bool {
     const MANAGED: [&str; 26] = [
         TOKEN_COUNTING,

@@ -3,7 +3,6 @@ use cpa_core::config::go_trim_space;
 
 use super::{is_claude_code_attribution_text, norm};
 
-// ---------------------------------------------------------------------------------------
 // Structured output (common/claude_system.go)
 
 const JSON_OBJECT_INSTRUCTION: &str = "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.";
@@ -44,7 +43,6 @@ pub fn claude_structured_output_instruction(format: &Res<'_>) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Claude system text (common/claude_system.go)
 
 /// `<system-reminder>\n{text}\n</system-reminder>` (common.SystemReminderText).

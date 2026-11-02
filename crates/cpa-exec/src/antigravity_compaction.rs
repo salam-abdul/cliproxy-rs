@@ -108,7 +108,8 @@ pub(crate) fn unseal(capsule: &str) -> Result<String, String> {
     let plaintext = decrypt_aead(Cipher::aes_256_gcm(), &key(), Some(nonce), &[], ciphertext, tag)
         .map_err(|_| "invalid or corrupted compaction capsule: cipher: message authentication failed".to_owned())?;
     // ponytail: json.Unmarshal's error text for a forged capsule (one that decrypts but
-    // is not the capsule JSON) is not reproduced; Go and Rust capsules always parse.
+    // is not the capsule JSON) is not reproduced; Go and Rust capsules always parse. Port
+    // the text if a client depends on it.
     if !gj::std_valid(&plaintext) || !gj::parse(&plaintext).is_object() {
         return Err("unmarshal compaction capsule: invalid capsule data".into());
     }

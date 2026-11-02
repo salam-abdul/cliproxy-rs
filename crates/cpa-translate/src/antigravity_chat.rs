@@ -32,7 +32,6 @@ const SKIP_SIGNATURE: &str = "skip_thought_signature_validator";
 const CONFIG: &str = "request.generationConfig";
 const THINKING: &str = "request.generationConfig.thinkingConfig";
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// antigravityOpenAIInlineDataPart: camelCase `mimeType`, or `mime_type` for audio.
@@ -542,7 +541,6 @@ fn apply_tool_choice(out: &mut Vec<u8>, raw: &[u8], names: &HashMap<Vec<u8>, Vec
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// ConvertAntigravityResponseToOpenAINonStream: the unwrapped response with restored

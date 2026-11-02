@@ -86,7 +86,6 @@ fn finish_reason(interaction: &Res<'_>, root: &Res<'_>, default: &'static str) -
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> OpenAI Chat
 
 /// interactionsUsageInt.
@@ -406,7 +405,6 @@ pub(crate) fn interactions_to_openai_non_stream(ctx: &ResponseCtx<'_>, body: &[u
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // OpenAI Chat -> Interactions
 
 /// setInteractionsUsageFromOpenAIChat.

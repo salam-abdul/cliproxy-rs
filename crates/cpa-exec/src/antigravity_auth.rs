@@ -673,8 +673,7 @@ fn missing_project(cause: Option<AuthError>) -> ExecError {
 /// the background `Refresh` (refresh grant; a project lookup failure only logs).
 // ponytail: Go shares one refresh per refresh token across credentials (singleflight);
 // the runtime's per-credential prepare lock covers the usual one-file-per-token case.
-// Credits hints and refresh queues (antigravity_executor_credits.go) come with the
-// executor.
+// Key that lock by refresh token if several files ever share one.
 pub(crate) async fn prepare(
     clients: &GoClients,
     credential: &Credential,

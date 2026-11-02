@@ -56,7 +56,7 @@ impl Viewport {
     }
 
     /// The viewport `DefaultKeyMap`. ponytail: no horizontal scrolling (`h`/`l`); lines
-    /// wider than the terminal are cut.
+    /// wider than the terminal are cut. Add a horizontal offset if wide lines must be read.
     pub fn key(&mut self, key: &str) {
         let page = self.height;
         match key {
@@ -93,6 +93,7 @@ impl Viewport {
 
 /// bubbles `textinput.Model`, the parts the TUI uses. ponytail: the cursor does not
 /// blink and `ctrl+v` does not read the system clipboard (a terminal paste does work).
+/// Read the clipboard through a platform crate if `ctrl+v` must paste.
 pub struct TextInput {
     value: Vec<char>,
     pos: usize,

@@ -260,7 +260,8 @@ pub(crate) struct Registered {
 }
 
 fn registered(client: Format, upstream: Format) -> Option<&'static Registered> {
-    // ponytail: static match. Plugin-registered translators (M6) need a runtime table.
+    // ponytail: static match, because the fork has no plugin host. Plugin-registered
+    // translators would need a runtime table here.
     match (client, upstream) {
         (Format::OpenAI, Format::OpenAI) => Some(&openai::PAIR),
         (Format::OpenAI, Format::Claude) => Some(&claude_chat_request::PAIR),
@@ -336,7 +337,8 @@ pub fn go_stream(client: Format, upstream: Format) -> Option<GoStreamFn> {
 /// sdk/translator TranslateRequest. A registered pair runs between summary extraction
 /// (from the client body) and summary application (to the upstream body); without one,
 /// only a differing top-level `model` is rewritten.
-// ponytail: plugin NormalizeRequest/TranslateRequest hooks (M6) are not ported.
+// ponytail: Go's plugin NormalizeRequest/TranslateRequest hooks are not ported because
+// the fork has no plugin host; a plugin host would call them around the pair here.
 pub fn translate_request(
     client: Format,
     upstream: Format,

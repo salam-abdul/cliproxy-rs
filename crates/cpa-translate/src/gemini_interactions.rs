@@ -55,7 +55,6 @@ impl stream::GoStream for Passthrough {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Small Go helpers
 
 /// firstNonEmptyString: the first value that is not blank, trimmed.
@@ -90,7 +89,6 @@ fn requoted(first: (&str, &[u8]), second: (&str, &[u8])) -> Res<'static> {
     gj::parse(text.as_bytes()).into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini parts (interactions_gemini_common.go)
 
 /// geminiTextPartJSON.
@@ -277,7 +275,6 @@ fn with_parts(content: &[u8], extra: &[Vec<u8>], reorder: bool) -> Vec<u8> {
     gj::try_set_raw(content, "parts", gj::join(&parts)).unwrap_or_else(|_| content.to_vec())
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions request -> Gemini request
 
 /// ConvertInteractionsRequestToGemini.
@@ -962,7 +959,6 @@ pub(crate) fn input_contents(input: &Res<'_>) -> Vec<Vec<u8>> {
     ctx.items
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini request -> Interactions request
 
 /// ConvertGeminiRequestToInteractions.

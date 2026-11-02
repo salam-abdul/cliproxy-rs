@@ -895,7 +895,8 @@ async fn run_routed(
         .map(str::to_owned);
     let mut always_excluded: Vec<String> = Vec::new();
     // `WithDisallowFreeAuth`: free-plan Codex credentials are ineligible in every round.
-    // ponytail: Home mode selects remotely and does not see this flag.
+    // ponytail: Home mode selects remotely and does not see this flag. Send the exclusion
+    // with the Home pick if Home mode serves routed images.
     if call.media.as_ref().is_some_and(|m| m.disallow_free) {
         for credential in rt.store().snapshot() {
             let free = credential.provider.trim().eq_ignore_ascii_case("codex")
@@ -1937,7 +1938,8 @@ impl Credits<'_> {
                 unauthorized: None,
             };
             // ponytail: a 401 inside a credits attempt retries with the refreshed
-            // credential, which no longer carries the credits flag.
+            // credential, which no longer carries the credits flag. Carry the flag onto the
+            // refreshed credential to keep the retry a credits attempt.
             if let Attempt::Done(done) = attempt(rt, cfg, policy, call, request, usage, lease, target).await {
                 return Ok(done);
             }
@@ -2235,8 +2237,8 @@ fn usage_client(
 }
 
 /// The downstream peer's part of Go's client request metadata: addresses and agent.
-// ponytail: `server.trusted-proxies` is read from the request's config snapshot; Go
-// applies it at startup only.
+// `server.trusted-proxies` is read from the request's config snapshot, so a reload
+// applies it without a restart; Go applies it at startup only.
 pub(crate) fn request_client(
     cfg: &Config,
     headers: &axum::http::HeaderMap,
@@ -2464,7 +2466,8 @@ fn rewrite_body(body: &Bytes, target: &str) -> Bytes {
 /// Go `StreamRewriter.RewriteChunk` for one complete event: a bare JSON chunk comes
 /// back trimmed and rewritten, SSE text line by line.
 // ponytail: executors emit whole events, so Go's buffering of partial and glued events
-// is not ported; an invalid `data:` JSON line passes through unchanged.
+// is not ported; an invalid `data:` JSON line passes through unchanged. Port the
+// buffering if an executor starts emitting partial events.
 fn rewrite_event(event: &Bytes, target: &str) -> Bytes {
     let trimmed = event.trim_ascii();
     if trimmed.starts_with(b"{") && cpa_common::json::valid(trimmed) {
@@ -2874,7 +2877,7 @@ mod tests {
             retry_wait(&round, 1, 0, Duration::ZERO, -1, false),
             Some(Duration::ZERO)
         );
-        // ponytail: Go's negative-retry-after case (`homeRetryRoundTiming.invalid`) has no
+        // Go's negative-retry-after case (`homeRetryRoundTiming.invalid`) has no
         // Rust counterpart: Duration is unsigned, Home's `retry_after_ms` is kept only
         // when positive (as in Go `home_concurrency.go`), and the upstream Retry-After
         // parsers drop negative values; only Go's test-made errors carry one.

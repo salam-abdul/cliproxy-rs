@@ -527,7 +527,7 @@ impl ObjectStore {
                     continue;
                 }
                 let rel_path = Path::new(rel);
-                // ponytail: Go cleans `sub/../x.json` to `x.json` and fetches it; URL
+                // Go cleans `sub/../x.json` to `x.json` and fetches it; URL
                 // parsing here would rewrite such a key, so any dot segment is skipped.
                 if rel_path.is_absolute() || rel.split('/').any(|s| s == "." || s == "..") {
                     tracing::warn!(key, "object store: skip auth outside mirror");
@@ -552,8 +552,8 @@ impl ObjectStore {
     }
 
     /// Go `filepath.Rel(authDir, path)` on cleaned paths.
-    // ponytail: Go would upload a path outside the mirror as `auths/../<name>`; it is
-    // refused here instead.
+    // Go would upload a path outside the mirror as `auths/../<name>`; it is
+    // refused here so no object key escapes the auths prefix.
     fn auth_key(&self, path: &Path) -> Result<String> {
         let rel = path.strip_prefix(&self.auth_dir).map_err(|_| {
             anyhow!(

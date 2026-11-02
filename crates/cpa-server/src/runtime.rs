@@ -445,7 +445,8 @@ impl Runtime {
                 cancel: grant.cancel,
             }),
             // ponytail: Go's Home dispatch keys its own session aliases on LCP matches
-            // (home_session_alias.go); remote picks here carry no LCP binding.
+            // (home_session_alias.go); remote picks here carry no LCP binding. Bind them in
+            // `lcp` if Home sessions need those aliases.
             lcp: None,
         };
         Ok((lease, grant.request_retry, grant.user_api_key))
@@ -523,6 +524,7 @@ impl Runtime {
     /// committed replacement to retry with.
     // ponytail: refresh goes through `Executors::prepare`; a provider whose prepare only
     // refreshes inside its lead (Claude) cannot recover a revoked but unexpired token.
+    // Force a refresh past the lead here to recover it.
     pub async fn refresh_after_unauthorized(&self, credential: &Credential, cfg: &Config) -> Option<Arc<Credential>> {
         if !self.executors.has_refresh_credential(credential) {
             return None;
@@ -536,8 +538,10 @@ impl Runtime {
 
     /// One replaceable refresh loop. Uses the same preparation lock and atomic
     /// revision-checked commit as request acquisition; executors never persist files.
-    /// ponytail: needs_prepare controls eligibility. Unauthorized lifecycle gating
-    /// and end-to-end token rotation await executor/lifecycle integration (M4-0027).
+    /// ponytail: the executor's `needs_prepare_at` alone decides eligibility, and a
+    /// failed refresh only backs off (`refresh.rs`: `invalid_grant` doubles up to 30
+    /// minutes), so a revoked refresh token is retried at that cap indefinitely. Record a
+    /// terminal refresh state on the credential if those retries must stop.
     pub fn start_auto_refresh(self: &Arc<Self>) {
         let mut task = self.refresh_task.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(previous) = task.take() {

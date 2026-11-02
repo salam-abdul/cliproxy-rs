@@ -86,7 +86,6 @@ fn call_id(item: &Res<'_>) -> Vec<u8> {
     first_nonblank(&[&item.get("call_id").bytes(), &item.get("id").bytes()])
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses request -> Interactions request
 
 /// ConvertOpenAIResponsesRequestToInteractions.
@@ -498,7 +497,6 @@ fn append_tools(out: &mut Vec<u8>, root: &Res<'_>, antigravity: bool, devin: boo
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions request -> Responses request
 
 /// ConvertInteractionsRequestToOpenAIResponses.

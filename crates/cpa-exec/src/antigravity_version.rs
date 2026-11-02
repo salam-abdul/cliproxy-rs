@@ -123,7 +123,8 @@ fn antigravity_family(lower: &str) -> bool {
 /// or the Hub user agent when none is configured.
 // ponytail: matching uses ASCII lower case, so offsets stay valid in the original. Go's
 // strings.ToLower can change byte lengths, which shifts its cut when a non-ASCII
-// character precedes the suffix; every token matched here is ASCII.
+// character precedes the suffix; every token matched here is ASCII. Map offsets through
+// a Unicode lowering if a non-ASCII token is ever matched.
 fn base_user_agent(user_agent: &str) -> String {
     let user_agent = user_agent.trim();
     if user_agent.is_empty() {

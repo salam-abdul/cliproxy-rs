@@ -441,7 +441,8 @@ pub(super) fn media_from_block(block: &Res<'_>) -> Media {
 /// `filepath.Base(url.Parse(raw).Path)`, or empty when Go's url.Parse fails.
 // ponytail: url.Parse is reduced to what decides this path: control bytes, invalid
 // percent escapes in the authority, path or fragment, and a non-numeric port fail;
-// Go's full host-character validation is not ported.
+// Go's full host-character validation is not ported. Port it if invalid hosts must
+// fail here.
 pub(super) fn url_path_base(raw: &[u8]) -> Vec<u8> {
     if raw.iter().any(|&c| c < 0x20 || c == 0x7f) {
         return vec![];

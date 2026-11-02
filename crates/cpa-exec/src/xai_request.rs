@@ -84,8 +84,9 @@ pub(crate) fn inject_x_search(cfg: &Config) -> bool {
 
 /// `TranslateRequestWithAPIKeyModelCompatibility(AndUpdateIntent)ForExecutor` with
 /// target executor xai (Codex-client rewrites, then the pair or its compat variant).
-// ponytail: the configuration-update intent is not exposed by crate::codex_client
-// (owner: Codex), so thinking always sees `updates_changed: false`.
+// ponytail: crate::codex_client does not expose the configuration-update intent, so
+// thinking always sees `updates_changed: false`. Expose it there if thinking must see
+// a translated update.
 fn translate(
     req: &ExecRequest,
     client: &crate::codex_client::Client<'_>,

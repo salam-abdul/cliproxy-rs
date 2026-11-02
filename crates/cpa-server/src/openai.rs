@@ -53,7 +53,8 @@ fn call(req: Request, entry: Format, model: String, body: Bytes, stream: bool, a
 /// first; identity is a no-op) before the JSON is read. A body that fails to decode
 /// but is valid JSON is used as sent; otherwise the handler answers 400.
 // ponytail: decode errors carry the zstd crate's reason, not klauspost/compress's, and
-// the decoded size is bounded by MAX_REQUEST_BYTES (Go reads it unbounded).
+// the decoded size is bounded by MAX_REQUEST_BYTES (Go reads it unbounded). Raise that
+// bound if a client sends larger compressed bodies.
 fn read_body(headers: &HeaderMap, raw: Bytes) -> Result<Bytes, Box<Response>> {
     let encoding = headers
         .get(axum::http::header::CONTENT_ENCODING)

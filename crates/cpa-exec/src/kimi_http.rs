@@ -1,10 +1,12 @@
-//! Helpers shared by the Kimi, Meta and Devin executors: Go runtime facts, per-credential
-//! custom headers and Go's credential expiry rules. Clients and Go net/http wire
-//! behaviour live in crate::proxy.
+//! Helpers for the Kimi, Meta and Devin executors, some also used by Gemini, Antigravity
+//! and xAI: Go runtime facts, per-credential custom headers, upstream capture and Go's
+//! credential expiry rules. Clients and Go net/http wire behaviour live in crate::proxy.
 //!
-//! ponytail: provider-neutral (M4-0030 custom headers, M4-0027 refresh timing); hoist
-//! when the shared executor helpers land. TLS is wreq's default profile, not Go
-//! crypto/tls; these upstreams are not known to fingerprint ClientHello.
+//! ponytail: the custom-header and refresh-timing helpers are provider-neutral but live
+//! in this Kimi-named module; move them to a neutral executor module when another
+//! provider needs them. TLS is wreq's default profile, not Go crypto/tls, because these
+//! upstreams are not known to fingerprint ClientHello; switch to a pinned profile as
+//! `codex_tls.rs` does if one starts to.
 
 use cpa_core::config::go_trim_space;
 
@@ -94,8 +96,6 @@ fn platform_hostname() -> Option<String> {
 /// Go `ApplyPayloadConfigWithRequest` (no target executor) for the device providers:
 /// `requests.payload` rules for `model`, `protocol` the target format, `original` the
 /// client's original request translated to that target.
-// ponytail: ExecRequest has no inbound route path, so path-gated image-generation rules
-// see ""; carrying the route path on ExecRequest would let them match.
 pub(crate) fn payload_rules(
     cfg: &cpa_core::config::Config,
     req: &cpa_core::exec::ExecRequest,
@@ -745,7 +745,7 @@ pub(crate) fn track_first_byte(
 /// `Content-Length` dropped from chunked responses (Content-Length kept for statuses
 /// without a body); identical duplicate `Content-Length` values collapsed; and
 /// `Cache-Control: no-cache` added for `Pragma: no-cache`.
-// ponytail: the capture's view only; proxy::Upstream keeps the transport's headers for
+// The capture's view only; proxy::Upstream keeps the transport's headers for
 // every other use.
 pub(crate) fn go_response_headers(status: u16, headers: &http::HeaderMap) -> Vec<(String, String)> {
     use http::header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, PRAGMA, TRAILER, TRANSFER_ENCODING};
@@ -834,7 +834,7 @@ pub(crate) fn capture_error(capture: &cpa_core::exec::CaptureSink, error: &ExecE
 /// it records after the loop.
 // ponytail: the scan error is recorded when the line reader reports it; Go skips the
 // record when an apply_patch end check already failed the stream (both failures in one
-// stream).
+// stream). Skip the record after a failed end check if logs must match.
 pub(crate) fn capture_lines(
     lines: cpa_core::exec::ExecStream,
     capture: &cpa_core::exec::CaptureSink,

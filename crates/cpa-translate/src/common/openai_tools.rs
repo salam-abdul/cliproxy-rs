@@ -2,7 +2,6 @@ use cpa_common::json as gj;
 use cpa_core::config::go_trim_space;
 use std::collections::{HashMap, HashSet};
 
-// ---------------------------------------------------------------------------------------
 // OpenAI tool-call ordering (common/openai_tools.go)
 
 /// common.AlignOpenAIToolCallMessages: moves each `tool` reply directly after the

@@ -11,7 +11,6 @@ use super::{
     TARGET_FIELD, TEXT, assistant_visible_text, field, is, item_type, trimmed,
 };
 
-// ---------------------------------------------------------------------------------------
 // Go base64 (encoding/base64 skips CR and LF and accepts non-zero trailing bits)
 
 pub(crate) fn go_base64(padded: bool) -> base64::engine::GeneralPurpose {
@@ -34,7 +33,6 @@ pub(crate) fn go_base64_decode(input: &[u8], padded: bool) -> Option<Vec<u8>> {
     go_base64(padded).decode(input).ok()
 }
 
-// ---------------------------------------------------------------------------------------
 // Carriers (signature_carrier.go)
 
 /// encodeGeminiResponsesCarrier.
@@ -257,7 +255,6 @@ pub(super) fn normalize_carriers<'a>(items: &[Res<'a>]) -> (Vec<Res<'a>>, bool) 
     (normalized, has_valid)
 }
 
-// ---------------------------------------------------------------------------------------
 // Trailing text signatures (trailing_signature.go)
 
 fn sha256_hex(text: &[u8]) -> String {

@@ -850,7 +850,7 @@ pub(crate) fn is_bad_credentials(body: &[u8]) -> bool {
     raw.contains("bad-credentials") || raw.contains("access token could not be validated")
 }
 
-// --- usage observation (helps/usage_helpers.go) ------------------------------------------
+// Usage observation (helps/usage_helpers.go)
 
 /// `ParseCodexUsage`'s `ok`: `response.usage` carries OpenAI-style token fields
 /// (`hasOpenAIStyleUsageTokenFields`), or the event names a service tier.

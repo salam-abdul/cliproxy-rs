@@ -631,7 +631,8 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
-/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
+/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding, so
+/// the formatting and comments outside a change survive it.
 pub(crate) fn config_sync(
     state: &Management,
     path: &str,
@@ -778,6 +779,7 @@ pub(crate) fn config_sync(
     // a YAML 1.1 spelling) as `!!str <bool>` and fails to decode its own output; the
     // file is left unchanged. ponytail: YAML uploads are not checked, since quoted
     // and plain scalars are indistinguishable here and Go only fails on quoted ones.
+    // Check them with a YAML parser that keeps scalar styles to match Go.
     if !yaml
         && let Some(value) = written
             .as_ref()

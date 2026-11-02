@@ -55,7 +55,7 @@ fn delete_if_empty_object(body: Vec<u8>, path: &str) -> Vec<u8> {
     }
 }
 
-// ---- Gemini and Antigravity share one shape under different prefixes. ----
+// Gemini and Antigravity share one shape under different prefixes.
 
 /// `Apply` of the gemini/antigravity appliers. `prefix` is the thinkingConfig path.
 fn gemini_like(
@@ -187,7 +187,7 @@ fn include_thoughts(result: Vec<u8>, original: &[u8], prefix: &str) -> Vec<u8> {
     result
 }
 
-// ---- Interactions ----
+// Interactions
 
 fn interactions(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<u8>, Error> {
     let body = object_or_empty(body);
@@ -287,7 +287,7 @@ fn normalize_interactions_level(level: &str, info: Option<&ModelCaps>) -> String
     }
 }
 
-// ---- Claude ----
+// Claude
 
 fn claude_disable(body: &[u8], drop_display: bool) -> Vec<u8> {
     let mut result = with_str(body, "thinking.type", "disabled");
@@ -412,7 +412,7 @@ fn normalize_claude_budget(mut body: Vec<u8>, budget: i64, info: &ModelCaps) -> 
     body
 }
 
-// ---- OpenAI chat and Codex/xAI Responses share one effort rule. ----
+// OpenAI chat and Codex/xAI Responses share one effort rule.
 
 fn effort_applier(body: &[u8], config: &Config, info: Option<&ModelCaps>, path: &str) -> Result<Vec<u8>, Error> {
     if is_user_defined_model(info) {
@@ -467,7 +467,7 @@ fn codex(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<u
     effort_applier(body, config, info, "reasoning.effort")
 }
 
-// ---- Kimi ----
+// Kimi
 
 fn kimi(body: &[u8], config: &Config, info: Option<&ModelCaps>) -> Result<Vec<u8>, Error> {
     let user_defined = is_user_defined_model(info);

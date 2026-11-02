@@ -66,7 +66,7 @@ fn text(model: &Map<String, Value>, key: &str) -> String {
 }
 
 /// Go `decodeHomeModels`: one entry per ID across provider sections, sorted by ID.
-// ponytail: Go walks the sections map in random order, so the provider list and the
+// Go walks the sections map in random order, so the provider list and the
 // metadata of an ID served by several sections follow it; sections are taken in
 // sorted order here, one of Go's possible outcomes.
 pub(crate) fn decode(raw: &[u8]) -> Result<Vec<Entry>, String> {

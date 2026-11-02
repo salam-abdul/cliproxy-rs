@@ -151,7 +151,6 @@ fn incomplete_reason(status: &[u8], reason: &[u8]) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> Responses (non-stream)
 
 /// interactionsStepToResponsesOutput.
@@ -284,7 +283,6 @@ pub(crate) fn interactions_to_responses_non_stream(ctx: &ResponseCtx<'_>, body: 
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> Responses (stream)
 
 /// interactionsFunctionCallState. Errors only matter by presence: every apply_patch
@@ -1421,7 +1419,6 @@ impl GoStream for ToResponses {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses -> Interactions
 
 /// setInteractionsUsageFromResponses.

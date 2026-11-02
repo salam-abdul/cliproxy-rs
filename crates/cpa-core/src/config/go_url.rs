@@ -75,7 +75,8 @@ impl ParseError {
             ErrorKind::InvalidPort(port) => format!("invalid port {} after host", quote(port)),
             ErrorKind::InvalidEscape(escape) => format!("invalid URL escape {}", quote(escape)),
             ErrorKind::InvalidHostCharacter(c) => format!("invalid character {} in host name", quote(&[*c])),
-            // ponytail: netip.ParseAddr's detailed error text is not ported.
+            // ponytail: netip.ParseAddr's detailed error text is not ported; the error says only
+            // that the address is invalid. Port the text if a caller shows it.
             ErrorKind::InvalidHost(text) => {
                 format!(
                     "invalid host: ParseAddr({}): unable to parse IP",

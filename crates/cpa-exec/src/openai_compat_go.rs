@@ -299,7 +299,8 @@ fn instant(year: i32, month: usize, day: u32, (h, m, s, nanos): (u32, u32, u32, 
 /// rules: the weekday must be a valid name but is not checked against the date, layout
 /// spaces match runs of spaces, and fractional seconds are kept.
 // ponytail: a zone abbreviation defined by the host's local zone would shift the instant
-// in Go; servers run in UTC, where none does.
+// in Go; servers run in UTC, where none does. Resolve abbreviations against the local
+// zone if a server runs outside UTC.
 pub(crate) fn parse_http_time(raw: &str) -> Option<SystemTime> {
     let rfc1123 = || {
         let mut c = Cursor(raw);

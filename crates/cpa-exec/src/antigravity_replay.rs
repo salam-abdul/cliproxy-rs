@@ -10,7 +10,8 @@
 //! Claude-facing provenance ID, or its name and arguments.
 // ponytail: Go applies items through a batch splicer that falls back to this sequential
 // path; Go's differential tests assert both give identical payloads, so only the
-// sequential path is ported. Go's debug-level replay logs are not reproduced.
+// sequential path is ported (its cost is the ceiling on `apply_items`). Go's
+// debug-level replay logs are not reproduced.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -215,7 +216,6 @@ fn call_item(content: i64, part: i64, occurrence: i64, call: &Res<'_>, signature
     Some(object(&members))
 }
 
-// ---------------------------------------------------------------------------------------
 // Scope
 
 /// The ledger entry one request reads and its turn commits to, and the cache state it
@@ -361,7 +361,6 @@ fn scope_from_request(req: &ExecRequest, model: &str, payload: &[u8]) -> Scope {
     Scope::default()
 }
 
-// ---------------------------------------------------------------------------------------
 // Tool schemas
 
 type Schemas = HashMap<Vec<u8>, GoValue>;
@@ -527,7 +526,6 @@ fn call_matches(call: &Res<'_>, item: &Res<'_>, schemas: &Schemas) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Request index
 
 struct Content<'a> {
@@ -1369,7 +1367,6 @@ fn apply_items(payload: &[u8], items: &[Vec<u8>], schemas: &Schemas) -> Option<V
     changed.then_some(current)
 }
 
-// ---------------------------------------------------------------------------------------
 // Request preparation
 
 /// `prepareAntigravityGeminiReasoningReplayPayload` for Gemini-family models: the
@@ -1426,7 +1423,6 @@ pub(crate) fn clear_on_invalid_signature(scope: &Scope, status: u16, body: &[u8]
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Response accumulation
 
 struct Pending {

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::now_nanos;
 
-// ---------------------------------------------------------------------------------------
 // Tool IDs and names (common/request.go, util/claude_tool_id.go)
 
 const TOOLU_LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

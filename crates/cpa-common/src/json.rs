@@ -2057,7 +2057,6 @@ fn match_limit(s: &[u8], pattern: &[u8]) -> bool {
     go(s, pattern, s.len(), &mut counter) == R::Match
 }
 
-// ---------------------------------------------------------------------------------------
 // Encoding
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2252,7 +2251,6 @@ pub fn quote_all<S: AsRef<[u8]>>(items: &[S]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Editing (sjson)
 
 struct PathPart {
@@ -2806,7 +2804,6 @@ pub fn set_items<S: AsRef<[u8]>>(out: &mut Vec<u8>, path: &(impl JsonPath + ?Siz
     set_raw(out, path, join(items));
 }
 
-// ---------------------------------------------------------------------------------------
 // gjson's `any` model (`Result.Value()`)
 
 /// What gjson's `Result.Value()` returns, as Go code then edits and marshals it: objects
@@ -3122,7 +3119,6 @@ impl AnyValue {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Go's `any` model (encoding/json decode then marshal)
 
 /// A JSON document decoded the way Go decodes into `any`: objects become maps that

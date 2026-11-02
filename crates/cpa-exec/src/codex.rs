@@ -85,7 +85,7 @@ impl CodexExecutor {
         self
     }
 
-    /// Passive quota snapshots per credential (M4-0016), for the management API.
+    /// Passive quota snapshots per credential, for the management API.
     pub fn quota(&self) -> &QuotaSignals {
         &self.quota
     }
@@ -266,7 +266,8 @@ impl CodexExecutor {
             Ok(upstream) => upstream,
             Err(error) => {
                 // ponytail: the text is this executor's transport message, not net/http's
-                // `Post "<url>": ...`.
+                // `Post "<url>": ...`; keep the client error text on ExecError if callers
+                // need Go's.
                 wire.exec_error(&error);
                 return Err(error);
             }
@@ -738,7 +739,8 @@ const ALPHA_SEARCH_MAX_RESPONSE: usize = 32 << 20;
 /// not cool ordinary Responses traffic. Request faults stop the request; other failures
 /// except auth/payment/quota fail over without cooldown.
 // ponytail: Go also exempts Cloudflare challenges and invalid_grant bodies from both rules;
-// those classifiers are not ported (M4-0024).
+// those classifiers are not ported, so a challenge answered 401-403 keeps its ordinary
+// scope and can cool the credential. Port them here if that starts to happen.
 fn compact_error(mut error: ExecError) -> ExecError {
     let credential_quota = error.status == 429 && error.scope == FailureScope::Credential;
     if credential_quota || matches!(error.status, 401 | 402 | 403 | 429) || error.scope == FailureScope::Transport {

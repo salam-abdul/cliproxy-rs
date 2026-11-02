@@ -3,7 +3,8 @@
 //! applied to a body that is already fully in memory.
 //!
 //! ponytail: no quoted-printable part decoding, no header count or size limits, and
-//! `%q` quoting is exact for ASCII only.
+//! `%q` quoting is exact for ASCII only. Consolidating with the `codex_live` copy would
+//! add the decoding and header limits.
 
 use std::collections::{BTreeMap, HashMap};
 

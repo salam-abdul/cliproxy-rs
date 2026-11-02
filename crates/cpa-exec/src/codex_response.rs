@@ -1061,7 +1061,7 @@ impl Gate {
     }
 }
 
-/// Codex stream bootstrap buffering (`codex.stream-bootstrap-buffering`, M5-0025): hold
+/// Codex stream bootstrap buffering (`codex.stream-bootstrap-buffering`): hold
 /// handshake frames (created, rate limits, empty `*.added`, heartbeats) up to 48 frames,
 /// 1 MiB and the optional timeout, so an overload/rate-limit rejection smuggled into a 200
 /// stream fails over before headers are committed. Lines count as frames, as in Go.

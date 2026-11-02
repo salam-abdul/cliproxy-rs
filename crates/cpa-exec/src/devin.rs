@@ -180,10 +180,11 @@ fn original(req: &ExecRequest) -> &Bytes {
     }
 }
 
-/// ponytail: adapter for `helps.ApplyPatchRequested` / `IsApplyPatchUpstreamTool`
-/// (owner: translators; cpa-translate's `reverse_identity_map` is crate-private).
-/// Minimal: a top-level custom `apply_patch` tool in the original Responses request (or
-/// its `request` wrapper); Go's full resolver also maps namespaced and sanitized names.
+/// ponytail: adapter for `helps.ApplyPatchRequested` / `IsApplyPatchUpstreamTool`,
+/// minimal because cpa-translate's `reverse_identity_map` is crate-private: a top-level
+/// custom `apply_patch` tool in the original Responses request (or its `request`
+/// wrapper). Go's full resolver also maps namespaced and sanitized names; export the
+/// resolver from cpa-translate to cover them.
 fn apply_patch_tool_names(original: &[u8]) -> Vec<Vec<u8>> {
     if original.is_empty() || !gj::valid(original) {
         return Vec::new();

@@ -352,7 +352,7 @@ fn previous_input(last_request: &str) -> Result<String, String> {
     match root.kind() {
         Kind::Null => return Ok("[]".into()),
         Kind::Object => {}
-        // ponytail: Go reports encoding/json's syntax/type text here; unreachable because
+        // Go reports encoding/json's syntax/type text here; unreachable because
         // the remembered request is always one this handler normalized.
         _ => return Err("invalid previous request input".into()),
     }

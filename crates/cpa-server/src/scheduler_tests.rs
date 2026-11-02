@@ -1698,7 +1698,7 @@ fn rules_are_ordered_status_and_body_matches_with_canonical_precedence() {
     }
 }
 
-// ---- soonest-reset (cliproxy-rs addition) ----
+// soonest-reset (cliproxy-rs addition)
 
 const DAY: u64 = 24 * 3600;
 
@@ -2035,13 +2035,11 @@ fn windows_read_claude_and_codex_signals() {
     assert_eq!((w.weekly_reset, w.exhausted), (None, false));
 }
 
-// ---- soonest-reset review fixes ----
-
 fn signals(pairs: &[(&str, String)]) -> std::collections::BTreeMap<String, String> {
     pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
 }
 
-/// P1: an account answering with quota signals but no weekly reset is probed once;
+/// An account answering with quota signals but no weekly reset is probed once;
 /// each new answer (a newer observation) must not re-arm the probe, or it would take
 /// every request ahead of an account with a known reset.
 #[test]
@@ -2289,7 +2287,7 @@ fn soonest_reset_probe_markers_are_kept_per_window() {
     assert_eq!(pick(w), "b", "probed for that rollover");
 }
 
-/// P2: a management reset clears the probe record (the account is probed again) and
+/// A management reset clears the probe record (the account is probed again) and
 /// leaves session affinity alone.
 #[test]
 fn soonest_reset_management_reset_re_arms_the_probe_and_keeps_affinity() {
@@ -2319,7 +2317,7 @@ fn soonest_reset_management_reset_re_arms_the_probe_and_keeps_affinity() {
     assert_eq!(pick(&thread, &[&a, &b]), "a", "the pin is kept");
 }
 
-/// P2: an oversized finite window length neither panics nor holds a used-up window
+/// An oversized finite window length neither panics nor holds a used-up window
 /// past the missing-length policy (five hours).
 #[test]
 fn windows_survive_unrepresentable_window_lengths() {
@@ -2348,7 +2346,7 @@ fn windows_survive_unrepresentable_window_lengths() {
     assert!(Windows::observed("codex", &long, now, now + Duration::from_secs(DAY)).exhausted);
 }
 
-/// P2: `X-Codex-Limit-Reached` ends with the used-up window's own reset; the
+/// `X-Codex-Limit-Reached` ends with the used-up window's own reset; the
 /// five-hour fallback applies only when no window reports a reset.
 #[test]
 fn codex_limit_reached_expires_with_the_window_reset() {
@@ -2375,7 +2373,7 @@ fn codex_limit_reached_expires_with_the_window_reset() {
     assert!(!Windows::observed("codex", &bare, now, now + Duration::from_secs(5 * 3600 + 1)).exhausted);
 }
 
-/// P2: Codex usage, reset and length are parsed independently, so a window whose
+/// Codex usage, reset and length are parsed independently, so a window whose
 /// usage is missing still reports its reset.
 #[test]
 fn codex_windows_parse_usage_reset_and_length_independently() {

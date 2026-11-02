@@ -83,7 +83,7 @@ fn responses_client(client: Format) -> bool {
 /// For executors that pass upstream Responses lines through untranslated: `write` each
 /// chunk, then `flush` at the end of the stream and before writing a terminal error (Go
 /// flushes in both places; an incomplete or invalid pending frame is dropped).
-// ponytail: repairFrame (private-event filtering, completed-output and error repair,
+// Go's repairFrame (private-event filtering, completed-output and error repair,
 // terminal tracking) is route logic and stays with the Responses route in cpa-server.
 #[derive(Default)]
 pub struct ResponsesFramer {

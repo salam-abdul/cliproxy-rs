@@ -130,7 +130,7 @@ fn edit(payload: &[u8], edits: impl FnOnce(&mut Vec<u8>) -> bool) -> Vec<u8> {
     if edits(&mut out) { out } else { payload.to_vec() }
 }
 
-// ---------------------------------------------------------------------- orphan delegation
+// Orphan delegation
 
 /// `RewriteCodexOrphanDelegationInput`.
 pub fn rewrite_orphan_delegation_input(headers: &HeaderMap, payload: &[u8], enabled: bool) -> Vec<u8> {
@@ -191,7 +191,7 @@ pub fn rewrite_orphan_delegation_input(headers: &HeaderMap, payload: &[u8], enab
     })
 }
 
-// ------------------------------------------------------------------ multi-agent v2 input
+// Multi-agent v2 input
 
 /// `RewriteCodexMultiAgentV2Input`: `agent_message` input as standard messages when the
 /// optimization is on for an official client; `compat` also strips non-standard fields.
@@ -268,7 +268,7 @@ fn rewrite_agent_message_content(payload: &[u8]) -> Vec<u8> {
     })
 }
 
-// ------------------------------------------------------------------- collaboration tools
+// Collaboration tools
 
 /// `codexToolPathsByNames`: function tools with these names in `tools`, nested
 /// namespaces and `input[].additional_tools`.
@@ -483,7 +483,7 @@ fn restore_value(value: &mut crate::json::GoValue) -> bool {
     changed
 }
 
-// ------------------------------------------------------------------- spawn-agent models
+// Spawn-agent models
 
 /// One model the proxy serves, as Go's `GetAvailableModels("openai")` lists it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -738,7 +738,7 @@ pub fn spawn_agent_models(available: &[AvailableModel], lookup: &dyn Fn(&str) ->
 /// [`spawn_agent_models`] for the models the installed registry serves now.
 // ponytail: Go caches the list per catalog revision and registry generation; it is
 // rebuilt per request here, only when the optimization is on and a spawn_agent tool is
-// present.
+// present. Cache it on the catalog revision if profiling shows the rebuild.
 pub fn served_spawn_agent_models() -> String {
     let available: Vec<AvailableModel> = cpa_core::registry::available_models()
         .into_iter()
@@ -822,7 +822,7 @@ fn remove_model_sections(description: &str) -> (String, String) {
     (cleaned, indent)
 }
 
-// ------------------------------------------------------------------- Codex request body
+// Codex request body
 
 /// `normalizeCodexInstructions` for non-native requests: a missing or null
 /// `instructions` becomes "".

@@ -42,7 +42,8 @@ pub const MAX_WS_MESSAGE: usize = MAX_BODY;
 /// gorilla keeps at most 1 KiB of a rejected handshake's body.
 const MAX_HANDSHAKE_BODY: usize = 1024;
 // ponytail: Go's sideband dialer has no handshake timeout (request cancellation only);
-// a fixed bound keeps a stalled upstream from holding the call claim forever.
+// a fixed bound keeps a stalled upstream from holding the call claim forever. Make it
+// configurable if a slow upstream needs longer.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `liveProtocolHeaders`: client headers forwarded to every live upstream request.
@@ -1082,7 +1083,7 @@ fn dial_text(error: &wreq::Error) -> String {
 /// memory, as `multipartCallRequest` walks it: `NextPart` then `io.ReadAll(part)`.
 // ponytail: based on cpa-server's management multipart reader (the most Go-accurate of
 // the three in the tree) plus `NextPart`'s quoted-printable decoding and header limits.
-// Consolidate the copies into cpa-common when an owner is free.
+// Consolidate the three copies into cpa-common to give each reader both.
 mod form {
     use super::MediaType;
 

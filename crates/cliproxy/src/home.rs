@@ -256,7 +256,8 @@ impl Dispatcher {
         excluded.sort();
         excluded.dedup();
         // ponytail: no Merkle LCP session matching; Go consults it when no session
-        // identifier was sent.
+        // identifier was sent. Run cpa-server's `lcp` matcher on the Home pick if Home clients
+        // without a session ID need affinity.
         let ttl = self.rt.upgrade().map_or(cpa_home::session_alias::DEFAULT_TTL, |rt| {
             rt.policy().session_affinity_ttl
         });
@@ -655,7 +656,7 @@ fn credential(response: &DispatchResponse, requested: &str) -> Result<Credential
             .attributes
             .insert(cpa_server::remote::MODEL_INFO.into(), info.to_string());
     }
-    // ponytail: without a dispatched model or model info Go uses the attempt's model;
+    // Without a dispatched model or model info Go uses the attempt's model;
     // a Home pick without either is the route model, which this uses.
     let upstream = match (
         response.model.trim(),

@@ -405,7 +405,6 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses (codex_gemini_response.go)
 
 #[derive(Default)]

@@ -323,6 +323,7 @@ fn pkcs1_der(rsa: &btls::rsa::Rsa<btls::pkey::Private>) -> Result<Vec<u8>, Strin
 /// x509 message otherwise.
 // ponytail: Go also accepts keys that omit the CRT values and multi-prime keys, which
 // BoringSSL rejects; Google issues neither. Other parse errors carry no asn1 detail.
+// Use a DER RSA parser that accepts them if such a key ever appears.
 fn parse_pkcs1(der: &[u8]) -> Result<btls::rsa::Rsa<btls::pkey::Private>, String> {
     const FAILED: &str = "x509: failed to parse private key";
     let key = btls::rsa::Rsa::private_key_from_der(der).map_err(|_| FAILED)?;
@@ -364,7 +365,7 @@ fn parse_pkcs8_rsa(der: &[u8]) -> Result<btls::rsa::Rsa<btls::pkey::Private>, bo
 
 /// `ensureRSAPrivateKey`.
 // ponytail: x509 parse errors carry BoringSSL's reason rather than Go's encoding/asn1
-// text; which inputs fail matches.
+// text; which inputs fail matches. Port Go's text if a client depends on it.
 fn ensure_rsa(block: PemBlock) -> Result<PemBlock, String> {
     let pkcs1 = |bytes: Vec<u8>| PemBlock {
         kind: "RSA PRIVATE KEY".into(),
@@ -532,14 +533,15 @@ pub struct KeyFileView<'a> {
 pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, String), String> {
     // ponytail: Go first tries the key as a `web`/`installed` OAuth client file
     // (ConfigFromJSON), whose token source then needs an interactive handler; a Go
-    // service-account file never has those members.
+    // service-account file never has those members. Port ConfigFromJSON if Vertex import
+    // must accept OAuth client files.
     let file = KeyFile::parse(sa)?;
     match file.kind.as_str() {
         "service_account" => {}
         // ponytail: with a refresh token Go refreshes an `authorized_user` key at its token
         // URL, and it runs the external-account, impersonation and GDCH flows for those
         // types. Vertex service-account files carry none of them; without a refresh token
-        // Go fails like this.
+        // Go fails like this. Port those flows if Vertex import must accept other key types.
         "authorized_user" => return Err("oauth2: token expired and refresh token is not set".into()),
         "" => return Err("missing 'type' field in credentials".into()),
         other => return Err(format!("unknown credential type: {}", gostr_quote(other))),

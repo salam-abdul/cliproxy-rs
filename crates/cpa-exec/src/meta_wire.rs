@@ -20,12 +20,14 @@ pub(crate) enum Slot<'a> {
     /// `time.Time`, checked only: a JSON string holding a strict RFC 3339 time
     /// (`Time.UnmarshalJSON` reads the raw string body without unescaping).
     // ponytail: Go reports a bad time with Time.UnmarshalJSON's own message, and it
-    // aborts decoding there; the generic type message is used instead.
+    // aborts decoding there; the generic type message is used instead. Port the time
+    // message if a client depends on it.
     Time,
     /// `[]string`, checked only; `null` elements are allowed.
     Strs,
     /// A nested struct or struct pointer, checked only: an object.
-    // ponytail: the nested struct's own fields are not type-checked.
+    // ponytail: the nested struct's own fields are not type-checked; check them if a
+    // malformed nested value must fail decoding as in Go.
     Object,
 }
 

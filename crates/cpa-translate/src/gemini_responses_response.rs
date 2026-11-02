@@ -131,7 +131,6 @@ fn rune_count(text: &[u8]) -> i64 {
     go_runes(text).count() as i64
 }
 
-// ---------------------------------------------------------------------------------------
 // Function call evidence (geminiRecordFunctionEvidence)
 
 /// What the stream has seen of one function call across repeated snapshots.
@@ -287,7 +286,6 @@ fn resolve_identity(
     })
 }
 
-// ---------------------------------------------------------------------------------------
 // Stream (ConvertGeminiResponseToOpenAIResponses)
 
 struct CompletedMessage {
@@ -1533,7 +1531,6 @@ impl GoStream for State {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Non-stream (ConvertGeminiResponseToOpenAIResponsesNonStream)
 
 enum Output {

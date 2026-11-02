@@ -28,7 +28,6 @@ pub static PAIR: Registered = registered!(
 
 pub(crate) const NAME_FIELDS: [&str; 2] = ["functionCall", "functionResponse"];
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// ConvertInteractionsRequestToAntigravity. Every edit Go makes lands under `request`, so
@@ -271,7 +270,6 @@ fn copy_tools(req: &mut Vec<u8>, root: &Res<'_>, names: &HashMap<Vec<u8>, Vec<u8
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// restoreAntigravityUsageMetadata: `cpaUsageMetadata` becomes `usageMetadata` when the

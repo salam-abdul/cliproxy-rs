@@ -51,7 +51,7 @@ async fn client_version_selects_the_codex_catalog() {
     let gpt = slug("gpt-5.5");
     assert_eq!(gpt["multi_agent_version"], "v2");
     assert!(gpt["base_instructions"].as_str().unwrap().len() > 1000);
-    // M1-0033: the Claude key's max-context-length is the advertised window of the
+    // The Claude key's max-context-length is the advertised window of the
     // synthesized entry, which carries compact instructions.
     let sonnet = slug("sonnet-long");
     assert_eq!(sonnet["context_window"], 150000);

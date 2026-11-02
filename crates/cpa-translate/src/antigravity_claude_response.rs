@@ -111,7 +111,6 @@ fn tool_use_id(model: &str, call: &Res<'_>, fallback: &[u8]) -> Vec<u8> {
     sanitize_claude_tool_id(fallback)
 }
 
-// ---------------------------------------------------------------------------------------
 // Web search grounding (web_search.go)
 
 /// shouldTranslateWebSearchGrounding: a typed web search tool in the client request and
@@ -428,7 +427,6 @@ fn web_search_stream_blocks(out: &mut Vec<u8>, start: i64, id: &[u8], text: &[u8
     index
 }
 
-// ---------------------------------------------------------------------------------------
 // Stream
 
 pub(crate) fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
@@ -868,7 +866,6 @@ impl GoStream for Stream {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Non-stream
 
 /// ConvertAntigravityResponseToClaudeNonStream.

@@ -270,7 +270,7 @@ fn end(entry: Entry, reason: &str) {
     tracing::debug!(call_id = %entry.call.call_id, reason, "codex live call ended");
     // Go `endLiveSession`: resources, then media, then the Home selection, which is
     // released only once the media's peers closed.
-    // ponytail: aborted sideband tasks drop their sockets when next polled, right after.
+    // Aborted sideband tasks drop their sockets when next polled, right after.
     entry.call.resources.close();
     let lease = entry.call.home.as_ref().and_then(|home| home.end());
     match &entry.call.media {

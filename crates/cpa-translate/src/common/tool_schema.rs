@@ -1,7 +1,6 @@
 use cpa_common::json::{self as gj, Kind};
 use std::collections::BTreeMap;
 
-// ---------------------------------------------------------------------------------------
 // Claude tool schema (util/claude_schema.go)
 
 const EMPTY_SCHEMA: &[u8] = br#"{"type":"object","properties":{}}"#;

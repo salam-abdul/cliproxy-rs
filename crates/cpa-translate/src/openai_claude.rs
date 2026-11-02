@@ -166,7 +166,7 @@ fn convert(model: &str, raw: &[u8], stream: bool, preserve_thinking: bool) -> Ve
 }
 
 /// Claude `thinking` (with `output_config.effort`) -> `reasoning_effort`.
-// ponytail: thinking.ConvertBudgetToLevel and the level constants come from
+// Go's thinking.ConvertBudgetToLevel and the level constants come from
 // cpa_common::thinking; the branch logic stays here because it reads raw bytes.
 fn reasoning_effort(out: &mut Vec<u8>, root: &Res<'_>) {
     use cpa_common::thinking::convert_budget_to_level;

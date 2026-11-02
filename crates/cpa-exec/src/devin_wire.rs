@@ -283,7 +283,8 @@ impl FrameReader {
 }
 
 /// The gzip branch of `ReadConnectFrame` (multistream, 64 MiB cap).
-// ponytail: decoder error texts are flate2's, not Go's compress/gzip wording.
+// ponytail: decoder error texts are flate2's, not Go's compress/gzip wording; port
+// Go's wording if a client depends on it.
 fn gunzip(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     use std::io::Read;
     let mut decoder = flate2::read::MultiGzDecoder::new(payload);
@@ -1228,7 +1229,7 @@ impl Utf8Split {
     }
 }
 
-// ---- request logging (helps/devin_wire.go log bodies) ----------------------------------
+// Request logging (helps/devin_wire.go log bodies)
 
 fn go_array(items: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
     let mut out = vec![b'['];

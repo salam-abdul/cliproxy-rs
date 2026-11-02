@@ -59,7 +59,8 @@ struct Thinking {
 
 /// Go `encoding/json` field matching: an exact key wins, otherwise a case-insensitive
 /// one; with duplicates the last matching key in the object wins.
-// ponytail: ASCII case folding; Go also folds the Kelvin sign and long s.
+// ponytail: ASCII case folding; Go also folds the Kelvin sign and long s. Use Unicode
+// simple folding if a Devin model ID ever carries them.
 fn field<'a>(obj: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
     let mut found = None;
     for (key, value) in obj {
@@ -170,7 +171,8 @@ impl Model {
         let mut support_update = false;
         de_bool(field(obj, "support_configuration_update"), &mut support_update)?;
         // ponytail: native_capabilities is type-checked as an object only; the Devin
-        // catalog never carries it and nothing reads it for Devin.
+        // catalog never carries it and nothing reads it for Devin. Check its members if the
+        // catalog starts sending it.
         match field(obj, "native_capabilities") {
             None | Some(Value::Null) | Some(Value::Object(_)) => {}
             Some(_) => return Err(TypeError),
@@ -511,6 +513,7 @@ const DISPLAY_SUFFIXES: [&str; 26] = [
 
 /// `splitDevinModelID`: the base model of an effort variant and that effort.
 // ponytail: ASCII case mapping; Go's ToUpper/ToLower differ only for non-ASCII IDs.
+// Use Unicode case mapping if Devin IDs stop being ASCII.
 pub fn split_model_id(clean: &str) -> (String, String) {
     if clean == "swe-1-6-slow" {
         return (clean.to_owned(), String::new());

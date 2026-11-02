@@ -201,7 +201,6 @@ fn ends_json(name: &str) -> bool {
     name.to_lowercase().ends_with(".json")
 }
 
-// ---------------------------------------------------------------------------
 // Listing
 
 fn meta_str<'a>(c: &'a Credential, key: &str) -> Option<&'a str> {
@@ -530,7 +529,8 @@ fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Va
         .and_then(|m| m.as_ref().ok())
         .and_then(|m| m.modified().ok());
     // ponytail: Go stamps created/updated at synthesis; the store keeps no
-    // timestamps, so both report the file's modification time.
+    // timestamps, so both report the file's modification time. Store timestamps fix
+    // this too (see `runtime_times` above).
     if let Some(t) = modified {
         e.insert("created_at", local(t).into());
         e.insert("updated_at", local(t).into());
@@ -741,7 +741,6 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, RawQuery(raw): Ra
     )
 }
 
-// ---------------------------------------------------------------------------
 // Files
 
 pub(crate) async fn download(State(state): State<Arc<Management>>, RawQuery(raw): RawQuery) -> Response {
@@ -1093,7 +1092,6 @@ fn delete_sync(state: &Management, q: &Query, body: &[u8]) -> Response {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Edits
 
 fn patch_error(e: Option<PatchError>) -> Response {
@@ -1588,7 +1586,6 @@ fn merge_headers(meta: &mut Map<String, Value>, value: &Value) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Models, cooldowns, refresh
 
 fn definitions() -> &'static Map<String, Value> {

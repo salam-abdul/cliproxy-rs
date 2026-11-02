@@ -435,7 +435,7 @@ fn reasoning_summary(cfg: &Res<'_>) -> Option<&'static str> {
 }
 
 /// Generation config fields copied raw (copyRawPaths).
-// ponytail: Go ranges over a map here, so its output key order (and which alias wins when
+// Go ranges over a map here, so its output key order (and which alias wins when
 // both spellings are present) varies between runs; this uses declaration order, the later
 // alias winning. Goldens compare these outputs against every order Go produced.
 const COPY_RAW_PATHS: [(&str, &str); 21] = [
@@ -628,7 +628,6 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses (interactions_codex_response.go)
 
 /// `interaction_%d` from the current UnixNano.

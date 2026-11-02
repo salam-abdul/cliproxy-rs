@@ -60,7 +60,8 @@ impl Claims {
 
 /// `codex.ParseJWTToken`: payload only, no signature check. Go unmarshals into a typed
 /// struct, so a claim with the wrong JSON type rejects the whole token.
-// ponytail: Go's case-insensitive key matching is not reproduced; real tokens use exact keys.
+// ponytail: Go's case-insensitive key matching is not reproduced; real tokens use exact
+// keys. Match case-insensitively if a token issuer ever varies the case.
 pub fn parse_jwt(token: &str) -> Option<Claims> {
     #[derive(Deserialize, Default)]
     #[serde(default)]
@@ -335,7 +336,7 @@ impl CodexOAuth {
                 let token = refresh_token.to_owned();
                 let task = tokio::spawn(async move {
                     let result = oauth.refresh_with_retry(&token).await;
-                    // ponytail: results are retained for 5 minutes, matching Go's refresh
+                    // Results are retained for 5 minutes, matching Go's refresh
                     // failure backoff; success retention absorbs stale duplicate snapshots.
                     if let Some((until, _)) = oauth.refreshes.lock().expect("refresh table").get_mut(&key) {
                         *until = Instant::now() + Duration::from_secs(300);
@@ -596,8 +597,9 @@ fn parse_time(value: &Value) -> Option<DateTime<Utc>> {
 
 /// `Manager.shouldRefresh` with the Codex lead (24h). Without an expiry, `last_refresh`
 /// older than the lead (or missing) is due.
-// ponytail: refresh_interval_seconds overrides and unauthorized/invalid-grant lifecycle
-// gating live in the runtime scheduler (M4-0027).
+// ponytail: a `refresh_interval_seconds` override is ignored here, unlike Kimi and Devin;
+// call `kimi_http::preferred_interval` if a Codex credential needs one. Invalid-grant
+// backoff is the runtime refresh loop's (`cpa-server` `refresh.rs`).
 pub(crate) fn refresh_due(credential: &Credential, now: DateTime<Utc>) -> bool {
     if refresh_token(credential).is_empty() {
         return false;
@@ -756,8 +758,9 @@ pub fn write_login(auth_dir: &Path, tokens: &Tokens) -> Result<PathBuf, ExecErro
         merge_existing(&mut record, existing);
     }
     let text = encode_go_json(&Value::Object(record));
-    // ponytail: Go truncates in place with default permissions; this writes a 0600 temp
-    // file and renames it, like the Claude login.
+    // Go truncates in place with default permissions; this writes a 0600 temp
+    // file and renames it, like the Claude login, so the token file is private and
+    // never left half-written.
     publish(auth_dir, &path, text.as_bytes()).map_err(|_| oauth_error(500, "cannot publish codex credential"))?;
     Ok(path)
 }
@@ -1009,7 +1012,7 @@ const SUCCESS_HTML: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset
 /// The local callback listener (`/auth/callback`, `/success`). One request per
 /// connection; anything else gets 404.
 // ponytail: bounded HTTP/1 parser, not a general server; Go's styled success page with the
-// platform setup notice is reduced to a short page.
+// platform setup notice is reduced to a short page. Port Go's page if users need the notice.
 async fn callback(listener: &tokio::net::TcpListener) -> Result<Callback, ExecError> {
     loop {
         let (mut socket, _) = listener
