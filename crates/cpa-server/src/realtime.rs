@@ -304,8 +304,7 @@ async fn select_oauth(
         .store()
         .snapshot()
         .iter()
-        .filter(|c| c.provider == "codex")
-        .filter(|c| cpa_core::registry::dynamic::auth_kind(c) != Some("oauth") || pinned.is_some_and(|id| id != c.id))
+        .filter(|c| c.provider == "codex" && cpa_core::registry::dynamic::auth_kind(c) != Some("oauth"))
         .map(|c| c.id.clone())
         .collect();
     let (primary, parent, fork) = session_hierarchy(headers, body, execution_session);
@@ -315,6 +314,7 @@ async fn select_oauth(
         session: bound(primary),
         session_parent: bound(parent),
         session_fork: fork,
+        pinned: pinned.map(str::to_owned),
         exclude,
         ..Selection::default()
     };

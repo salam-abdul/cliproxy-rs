@@ -1601,45 +1601,63 @@ impl Scheduler {
                 s.trust.probe = None;
             }
         }
-        let error = match outcome {
-            Outcome::Success => {
-                let Some(entry) = self.cooldowns.get_mut(id) else {
-                    return;
-                };
-                // Active credential quota survives success on an in-flight sibling.
-                if entry.own.as_ref().is_some_and(|s| s.quota && s.deadline > now) {
-                    return;
-                }
-                // A request that started before a bounded window opened leaves it for the
-                // window's own probe.
-                if let Some(ended) = entry
-                    .own
-                    .as_ref()
-                    .filter(|s| s.deadline <= now && !s.newer_than(picked))
-                    .map(|s| s.deadline)
-                {
-                    entry.own = None;
-                    // The credential recovered: model keys that a credential-wide window
-                    // escalated forget it too (their Go state is left as Go keeps it). A
-                    // model's own ended bounded window still waits for its probe, and one
-                    // a newer probe reserved or answered keeps its state.
-                    for s in entry.models.values_mut() {
-                        if s.deadline <= now && (!s.trust.bounded || s.deadline == ended) && !s.newer_than(picked) {
-                            s.trust = Trust::default();
-                        }
-                    }
-                }
-                if !entry.get(model).is_some_and(|s| s.newer_than(picked)) {
-                    entry.remove(model);
-                }
-                if entry.is_empty() {
-                    self.cooldowns.remove(id);
-                }
-                return;
-            }
-            Outcome::Cancelled | Outcome::Neutral(_) => return,
-            Outcome::Failure(error) => error,
+        match outcome {
+            Outcome::Success => self.record_success(id, model, picked, now),
+            Outcome::Failure(error) => self.record_failure(c, rules, model, error, policy, picked, now),
+            Outcome::Cancelled | Outcome::Neutral(_) => {}
+        }
+    }
+
+    /// A success clears the model's cooldown, and an ended credential-wide one it
+    /// answers.
+    fn record_success(&mut self, id: &str, model: &str, picked: u32, now: Instant) {
+        let Some(entry) = self.cooldowns.get_mut(id) else {
+            return;
         };
+        // Active credential quota survives success on an in-flight sibling.
+        if entry.own.as_ref().is_some_and(|s| s.quota && s.deadline > now) {
+            return;
+        }
+        // A request that started before a bounded window opened leaves it for the
+        // window's own probe.
+        if let Some(ended) = entry
+            .own
+            .as_ref()
+            .filter(|s| s.deadline <= now && !s.newer_than(picked))
+            .map(|s| s.deadline)
+        {
+            entry.own = None;
+            // The credential recovered: model keys that a credential-wide window
+            // escalated forget it too (their Go state is left as Go keeps it). A
+            // model's own ended bounded window still waits for its probe, and one
+            // a newer probe reserved or answered keeps its state.
+            for s in entry.models.values_mut() {
+                if s.deadline <= now && (!s.trust.bounded || s.deadline == ended) && !s.newer_than(picked) {
+                    s.trust = Trust::default();
+                }
+            }
+        }
+        if !entry.get(model).is_some_and(|s| s.newer_than(picked)) {
+            entry.remove(model);
+        }
+        if entry.is_empty() {
+            self.cooldowns.remove(id);
+        }
+    }
+
+    /// A failure's cooldown, by cause.
+    #[allow(clippy::too_many_arguments)]
+    fn record_failure(
+        &mut self,
+        c: &Credential,
+        rules: Option<&[ErrorRule]>,
+        model: &str,
+        error: &ExecError,
+        policy: &Policy,
+        picked: u32,
+        now: Instant,
+    ) {
+        let id = c.id.as_str();
         let action = policy.error_action_with(rules, c, error);
         if !action.cooldown {
             return;
@@ -1698,37 +1716,9 @@ impl Scheduler {
                         if !cap.is_zero()
                             && let Some(window) = prev.filter(|s| s.trust.bounded && s.deadline > now)
                         {
-                            // A concurrent answer inside a live bounded window: the probe
-                            // deadline and the count stand, but an earlier stated reset
-                            // moves the probe up to it.
+                            let (old, trust) = (window.deadline, window.trust);
                             let reset = now.checked_add(stated);
-                            let old = window.deadline;
-                            let deadline = reset.map_or(old, |r| old.min(r));
-                            let mut window_trust = window.trust;
-                            if let Some(slot) = self.cooldowns.get_mut(id).and_then(|e| e.get_mut(key)) {
-                                slot.deadline = deadline;
-                                slot.error = text;
-                                slot.trust.stated = reset.or(slot.trust.stated);
-                                window_trust = slot.trust;
-                            }
-                            if credential_quota {
-                                // Model keys that inherited this credential window (same
-                                // deadline, bounded) follow it when it moves up; longer
-                                // independent cooldowns stand.
-                                for state in self
-                                    .cooldowns
-                                    .get_mut(id)
-                                    .into_iter()
-                                    .flat_map(|e| e.models.values_mut())
-                                {
-                                    if state.trust.bounded && state.deadline == old {
-                                        state.deadline = deadline;
-                                        state.trust.stated = window_trust.stated;
-                                        state.trust.window = state.trust.window.max(window_trust.window);
-                                    }
-                                }
-                                self.extend_siblings(c, deadline, None, now);
-                            }
+                            self.quota_in_bounded_window(c, key, old, trust, reset, text, credential_quota, now);
                             return;
                         }
                         Some(match bound(stated, cap, prev_trust.window) {
@@ -1847,6 +1837,47 @@ impl Scheduler {
                 own_state.trust.window = own_state.trust.window.max(own_window);
                 self.set_cooldown(id, model, own_state);
             }
+        }
+    }
+
+    /// A concurrent 429 inside a live bounded window ending at `old`: the probe deadline
+    /// and the count stand, but an earlier stated reset moves the probe up to it.
+    #[allow(clippy::too_many_arguments)]
+    fn quota_in_bounded_window(
+        &mut self,
+        c: &Credential,
+        key: &str,
+        old: Instant,
+        mut window_trust: Trust,
+        reset: Option<Instant>,
+        text: String,
+        credential_quota: bool,
+        now: Instant,
+    ) {
+        let id = c.id.as_str();
+        let deadline = reset.map_or(old, |r| old.min(r));
+        if let Some(slot) = self.cooldown_mut(id, key) {
+            slot.deadline = deadline;
+            slot.error = text;
+            slot.trust.stated = reset.or(slot.trust.stated);
+            window_trust = slot.trust;
+        }
+        if credential_quota {
+            // Model keys that inherited this credential window (same deadline, bounded)
+            // follow it when it moves up; longer independent cooldowns stand.
+            for state in self
+                .cooldowns
+                .get_mut(id)
+                .into_iter()
+                .flat_map(|e| e.models.values_mut())
+            {
+                if state.trust.bounded && state.deadline == old {
+                    state.deadline = deadline;
+                    state.trust.stated = window_trust.stated;
+                    state.trust.window = state.trust.window.max(window_trust.window);
+                }
+            }
+            self.extend_siblings(c, deadline, None, now);
         }
     }
 
