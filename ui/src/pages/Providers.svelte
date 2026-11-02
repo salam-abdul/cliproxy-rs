@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store, Res, every } from "../store.svelte";
-  import { api, missing, text } from "../api";
+  import { api, text } from "../api";
   import { readPath, label, mask, sum, type Data, type Buckets } from "../core";
   import Grille from "../Grille.svelte";
   import Load from "../Load.svelte";
@@ -91,7 +91,7 @@
           </p>
         </div>
       {/if}
-      {#if usage.error}<p class="note"><span class="lamp {missing(usage.error) ? 'off' : 'bad'}"></span>{missing(usage.error) ? "Per-key traffic is not reported by this server." : text(usage.error)}</p>{/if}
+      {#if usage.error}<p class="note"><span class="lamp bad"></span>{text(usage.error)}</p>{/if}
       <form class="form" onsubmit={add}>
         <label class="field">Group name<input required bind:value={form.name} /></label>
         <label class="field"

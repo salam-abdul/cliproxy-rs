@@ -19,11 +19,7 @@ const usageURL: Record<string, string> = {
 };
 export const quotaKey = (a: Data) => a.auth_index || a.name;
 /** The provider has a usage endpoint this server can call. */
-export const hasSource = (a: Data) =>
-  !!usageURL[provider(a)] &&
-  (provider(a) === "claude" && store.kind === "rust"
-    ? store.can("GET", "/observability/claude/usage")
-    : store.can("POST", "/requests/api-call"));
+export const hasSource = (a: Data) => !!usageURL[provider(a)];
 export const canCheck = (a: Data) => !a.disabled && hasSource(a);
 
 /** What is known about one credential's limits: a live check in this tab, else passive signals. */
@@ -97,7 +93,7 @@ async function read(a: Data, lifetime: Lifetime) {
       const account = a.account_id || a.id_token?.chatgpt_account_id;
       if (account) header["Chatgpt-Account-Id"] = account;
     }
-    if (p === "claude" && store.kind === "rust") {
+    if (p === "claude") {
       raw = await api(
         `/observability/claude/usage?auth_index=${encodeURIComponent(a.auth_index)}`,
       );

@@ -166,8 +166,7 @@ test("routing strategy names follow the server's parsing", () => {
   assert.equal(strategy(" FF ").value, "fill-first");
   assert.equal(strategy("wrr").value, "weighted-round-robin");
   assert.equal(strategy("reset-first").value, "soonest-reset");
-  assert.equal(strategy("soonest-reset").rust, true);
-  // Unset or unknown values are round robin, as both servers read them.
+  // Unset or unknown values are round robin, as the server reads them.
   assert.equal(strategy(undefined).value, "round-robin");
   assert.equal(strategy("random").value, "round-robin");
 });

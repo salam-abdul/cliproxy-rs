@@ -10,9 +10,8 @@ let local = false;
 export let requests = new Lifetime();
 let hooks: {
   unauthorized(): void;
-  missing(method: string, path: string): void;
   meta(h: Headers | null): void;
-} = { unauthorized() {}, missing() {}, meta() {} };
+} = { unauthorized() {}, meta() {} };
 
 export class ApiError extends Error {
   status: number;
@@ -31,10 +30,6 @@ export class ApiError extends Error {
     this.code = code;
     this.method = method;
     this.path = path;
-  }
-  /** The server does not implement this route or method (Rust 501/405, Go's empty 404). */
-  get missing() {
-    return this.status === 501 || this.status === 405 || (this.status === 404 && !this.code);
   }
 }
 
@@ -117,14 +112,8 @@ export async function api(
     method,
     route(path),
   );
-  if (error.missing) {
-    error.message = `Not available on this server (${method} ${route(path)} → ${response.status}).`;
-    hooks.missing(method, route(path));
-  }
   throw error;
 }
-/** True when the server lacks the route; other errors are real failures. */
-export const missing = (e: unknown) => e instanceof ApiError && e.missing;
 export const text = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Asks this proxy for its model list with a client key, as a tool would. No upstream call. */

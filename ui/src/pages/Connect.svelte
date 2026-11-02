@@ -2,10 +2,9 @@
   import { store, every } from "../store.svelte";
   import { api, ApiError } from "../api";
   import { label, type Data } from "../core";
-  import Missing from "../Missing.svelte";
 
   const builtIn = ["claude", "codex", "antigravity", "kimi", "kimi-ai", "xai", "devin", "meta"];
-  // Go starts a local callback forwarder for these when asked by a web UI.
+  // The server starts a local callback forwarder for these when asked by a web UI.
   const forwarded = ["claude", "codex", "antigravity", "xai", "devin"];
   const providers = builtIn;
   let gone = $state<string[]>([]),
@@ -13,13 +12,12 @@
     status = $state(""),
     problem = $state(""),
     callback = $state("");
-  const can = $derived(store.can("GET", "/oauth/auth-url"));
 
   async function start(p: string) {
     if (session && status === "wait" && !(await cancel())) return;
     store.act(async () => {
       const r = await api(`/oauth/auth-url?provider=${encodeURIComponent(p)}${forwarded.includes(p) ? "&is_webui=true" : ""}`).catch((e) => {
-        // Go knows every built-in provider; a server that lacks one answers provider_not_found.
+        // A provider this server cannot sign in answers provider_not_found.
         if (e instanceof ApiError && e.code === "provider_not_found") {
           gone = [...gone, p];
           throw new Error(`${label(p)} sign-in is not available on this server.`);
@@ -85,7 +83,6 @@
 </script>
 
 <div class="head"><h1>Connect an account</h1></div>
-<Missing actions={[["GET", "/oauth/auth-url", "provider sign-in"], ["POST", "/oauth/import", "Vertex import"]]} />
 
 <section class="section">
   <h2>Sign in with a provider</h2>
@@ -95,7 +92,7 @@
       <button
         class="key"
         aria-pressed={session?.provider === p && status === "wait"}
-        disabled={store.busy || !can || gone.includes(p)}
+        disabled={store.busy || gone.includes(p)}
         onclick={() => start(p)}>{label(p)}</button
       >
     {/each}
@@ -153,12 +150,12 @@
   <ul class="list">
     <li class="item">
       <span class="grow">Use a Google Cloud service-account JSON for Vertex AI.</span>
-      <label class="key" aria-disabled={!store.can("POST", "/oauth/import") || gone.includes("vertex")}
+      <label class="key" aria-disabled={gone.includes("vertex")}
         ><svg class="i" aria-hidden="true"><use href="#i-upload" /></svg>Import service account<input
           class="file"
           type="file"
           accept=".json,application/json"
-          disabled={store.busy || !store.can("POST", "/oauth/import") || gone.includes("vertex")}
+          disabled={store.busy || gone.includes("vertex")}
           onchange={(e) => vertex(e.currentTarget)}
         /></label
       >

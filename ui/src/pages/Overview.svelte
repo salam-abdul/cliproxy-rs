@@ -4,7 +4,7 @@
   import HistoryPanels from "../HistoryPanels.svelte";
   import Load from "../Load.svelte";
   import { store, every } from "../store.svelte";
-  import { api, missing } from "../api";
+  import { api } from "../api";
   import { accountStatus } from "../accounts";
   import { accountHealth, requestBuckets } from "../history";
   import { checkAll } from "../quota";
@@ -172,7 +172,7 @@
       {/each}
     </div>{/if}
 </div>
-{#if store.creds.error || (store.native.error && !missing(store.native.error)) || !store.online}
+{#if store.creds.error || store.native.error || !store.online}
   <p class="overview-alert">Refresh failed. Showing the last readings.</p>
 {/if}
 <section class="section overview-accounts">
@@ -339,7 +339,7 @@
       <div class="drawer-actions">
         <button
           class="key small"
-          disabled={store.busy || !store.can("PATCH", "/credentials/status")}
+          disabled={store.busy}
           onclick={toggleSelected}
           >{selected.a.disabled ? "Enable" : "Disable"}</button
         >

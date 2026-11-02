@@ -3,7 +3,6 @@ import {
   connect,
   disconnect,
   configValue,
-  route,
   ApiError,
   requests,
 } from "./api";
@@ -83,25 +82,10 @@ class Store {
   theme = $state(document.documentElement.dataset.theme || "light");
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
-  /**
-   * Which server this is, from its version headers. cliproxy-rs sends X-CPA-VERSION
-   * "cliproxy-rs/<version>". Go CLIProxyAPI sends a version ("8.0.10", or "dev" from a source
-   * build) together with X-CPA-COMMIT and X-CPA-BUILD-DATE. Go implements the whole v8
-   * contract, so only other servers are probed for gaps; nothing Rust-specific is assumed.
-   */
-  kind = $derived(
-    this.meta.version.startsWith("cliproxy-rs")
-      ? "rust"
-      : this.meta.commit || this.meta.built
-        ? "go"
-        : "unknown",
-  );
   online = $state(true);
   busy = $state(false);
   dirty = $state(false);
   toast = $state<{ text: string; bad: boolean } | null>(null);
-  /** "METHOD /path" → false when the server does not implement it. */
-  caps = $state<Record<string, false>>({});
   now = $state(Date.now());
   quotaPending = $state<Record<string, boolean>>({});
   native = new Res<Data>(() => api("/observability/native/status"));
@@ -125,7 +109,6 @@ class Store {
       { at: number; windows: Window[]; error?: string } | { error: string }
     >
   >({});
-  #probed = new Set<string>();
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
@@ -139,7 +122,6 @@ class Store {
           this.logout();
           this.notify("The management key was rejected. Sign in again.", true);
         },
-        missing: (method, path) => (this.caps[`${method} ${path}`] = false),
         meta: (h) => {
           this.online = !!h;
           if (!h) return;
@@ -172,8 +154,6 @@ class Store {
     disconnect();
     this.logged = false;
     this.localDashboard = false;
-    this.caps = {};
-    this.#probed.clear();
     for (const resource of [
       this.config,
       this.creds,
@@ -189,24 +169,6 @@ class Store {
     this.quotaPending = {};
     this.busy = false;
     this.dirty = false;
-  }
-  can(method: string, path: string) {
-    return this.caps[`${method} ${route(path)}`] !== false;
-  }
-  /**
-   * Find unimplemented actions before they are offered. Each probe is a request Go rejects
-   * with 400 during input validation, before any side effect: an empty JSON body, or a GET
-   * without its required parameter. A server lacking the route answers 404 with no body (or
-   * 501/405), which api() records as missing. Go itself is never probed.
-   */
-  probe(actions: [string, string, string][]) {
-    if (this.kind === "go") return;
-    for (const [method, path] of actions) {
-      const id = `${method} ${path}`;
-      if (this.#probed.has(id)) continue;
-      this.#probed.add(id);
-      api(path, method, method === "GET" ? undefined : {}).catch(() => {});
-    }
   }
   go(hash: string) {
     if (location.hash.slice(1) !== hash) location.hash = hash;
@@ -296,7 +258,7 @@ class Store {
 
 export const store = new Store();
 
-/** What to do about a failed sign-in, for each answer Go and cliproxy-rs give. */
+/** What to do about a failed sign-in, for each answer the server gives. */
 function signInHelp(e: unknown): string {
   if (!(e instanceof ApiError))
     return e instanceof Error ? e.message : String(e);

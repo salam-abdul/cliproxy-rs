@@ -111,7 +111,7 @@ export function ago(value: unknown, now = Date.now()): string {
 }
 
 export type CredState = { lamp: Lamp; label: string; detail: string };
-/** One state per credential, derived only from fields Go's /credentials reports. */
+/** One state per credential, derived only from fields /credentials reports. */
 export function credState(a: Data, now = Date.now()): CredState {
   if (a.disabled) return { lamp: "off", label: "Disabled", detail: "" };
   const all: Data[] = Array.isArray(a.cooldowns) ? a.cooldowns : [];
@@ -320,20 +320,18 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
 export const otherSignals = (quota: Data | undefined, windows: Window[]): [string, string][] =>
   Object.entries<string>(quota?.signals || {}).filter(([k]) => !windows.some((w) => w.source && k.toLowerCase().startsWith(w.source)));
 
-/** routing.strategy values, with a one-line explanation each. `rust`: offered only by cliproxy-rs. */
+/** routing.strategy values, with a one-line explanation each. */
 export const strategies = [
-  { value: "round-robin", name: "Round robin", rust: false, help: "Takes the accounts in turn, one request each. This is the default." },
-  { value: "fill-first", name: "Fill first", rust: false, help: "Uses one account until it cools down or reaches a limit, then moves to the next." },
+  { value: "round-robin", name: "Round robin", help: "Takes the accounts in turn, one request each. This is the default." },
+  { value: "fill-first", name: "Fill first", help: "Uses one account until it cools down or reaches a limit, then moves to the next." },
   {
     value: "weighted-round-robin",
     name: "Weighted round robin",
-    rust: false,
     help: "Takes the accounts in turn in proportion to each account's weight, which you set on Credentials.",
   },
   {
     value: "soonest-reset",
     name: "Soonest reset first",
-    rust: true,
     help: "Experimental. Uses the account whose weekly limit resets soonest until it cools down or uses up a window, then moves to the next. Conversations bound to an account stay on it.",
   },
 ] as const;

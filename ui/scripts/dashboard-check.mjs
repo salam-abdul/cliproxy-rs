@@ -13,20 +13,19 @@ page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 let historyHold, historyRelease, historyFailure = false, credsFailure = false;
-const rust = process.env.DASHBOARD_KIND === "rust";
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 await page.route("**/*", async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
-  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": rust ? "cliproxy-rs/0.2.6" : "8.0.0", "x-cpa-commit": "synthetic" } });
-  if (path === "/v8/management/observability/native/status") return native === null ? route.fulfill({ status: 501, json: {} }) : send({ enabled: native, allowExtraUsage: overage, model: new URL(request.url()).searchParams.get("model") || "claude", validUntil: expired ? 1 : 9e15, ready: availability === "included", selectionStrategy:"soonest-reset", selectionOrder:availability === "included" ? ["a"] : [], newSessionMinRemaining:5, accounts: creds.map(a => ({id:a.auth_index,fileId:a.id || a.name,name:a.name,availability:a.disabled ? "disabled" : availability})) });
+  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "cliproxy-rs/0.2.6" } });
+  if (path === "/v8/management/observability/native/status") return send({ enabled: native, allowExtraUsage: overage, model: new URL(request.url()).searchParams.get("model") || "claude", validUntil: expired ? 1 : 9e15, ready: availability === "included", selectionStrategy:"soonest-reset", selectionOrder:availability === "included" ? ["a"] : [], newSessionMinRemaining:5, accounts: creds.map(a => ({id:a.auth_index,fileId:a.id || a.name,name:a.name,availability:a.disabled ? "disabled" : availability})) });
   if (path === "/v8/management/routing/native-policy") {
     assert.equal(request.method(), "PATCH");
     if (policyFailure) return route.fulfill({status:500,json:{error:"Could not save policy"}});
     overage = request.postDataJSON().allowExtraUsage;
     return send({allowExtraUsage:overage});
   }
-  if (path === "/v8/management/credentials/fields" && request.postData() !== "{}") {
+  if (path === "/v8/management/credentials/fields") {
     const body = request.postDataJSON();
     saveStarted?.();
     if (saveHold) await saveHold;
@@ -54,24 +53,15 @@ await page.route("**/*", async route => {
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
   if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds });
-  if (path === (rust ? "/v8/management/observability/claude/usage" : "/v8/management/requests/api-call")) {
-    if (rust) {
-      assert.equal(request.method(), "GET");
-      assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a");
-    } else {
-    const body = request.postDataJSON();
-    assert.equal(body.authIndex, "a");
-    assert.equal(body.method, "GET");
-    assert.equal(body.url, "https://api.anthropic.com/api/oauth/usage");
-    }
+  if (path === "/v8/management/observability/claude/usage") {
+    assert.equal(request.method(), "GET");
+    assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a");
     checks++;
     quotaStarted?.();
     if (hold) await hold;
     const body = { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} };
-    if (rust) return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
-    return send({status_code: fail ? 503 : 200, body});
+    return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
-  if (["POST", "PATCH", "PUT", "DELETE"].includes(request.method()) && request.postData() === "{}") return route.fulfill({status:400,json:{error:"invalid request"}});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
   assert.match(asset, /^(index\.html|favicon\.svg|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
@@ -167,10 +157,6 @@ try {
   assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 1, "account details retain additional quota windows");
   await page.getByRole("button", {name:"Close",exact:true}).click();
 
-  native = null;
-  await page.reload();
-  await page.locator(".top .nav").waitFor({state:"attached"});
-  assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0);
   await page.setViewportSize({width:1280,height:900});
   delete creds[0].quota;
   requireKey = true;

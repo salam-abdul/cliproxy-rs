@@ -4,7 +4,6 @@
   import { credName, provider, label, span, type Data } from "../core";
   import { accountStatus } from "../accounts";
   import Load from "../Load.svelte";
-  import Missing from "../Missing.svelte";
   import ClaudePolicy from "../ClaudePolicy.svelte";
 
   $effect(() => every(15000, () => store.creds.load(true), true));
@@ -16,7 +15,7 @@
     open = store.route.arg;
   });
   const key = (a: Data) => `${a.name}\u0000${a.auth_index}`;
-  // Go allows several credentials from one file; its ID is unique and every per-credential
+  // One file can hold several credentials; the ID is unique and every per-credential
   // route accepts it in place of the file name. Downloads and deletes still use the file.
   const id = (a: Data) => String(a.id || a.name);
   const rows = $derived(
@@ -222,7 +221,7 @@
     const patch: Data = { name: id(a), note: fields.note.trim() };
     for (const k of ["priority", "weight", "request_retry"] as const) {
       const v = fields[k].trim();
-      // An emptied field clears the override (Go deletes the key on null).
+      // An emptied field clears the override (the server deletes the key on null).
       if (v === "") {
         if (a[k] !== undefined) patch[k] = null;
         continue;
@@ -251,16 +250,6 @@
     account</a
   >
 </div>
-
-<Missing
-  actions={[
-    ["POST", "/credentials", "upload"],
-    ["POST", "/credentials/refresh", "token refresh"],
-    ["PATCH", "/credentials/fields", "editing fields"],
-    ["DELETE", "/credentials", "delete"],
-    ["POST", "/routing/cooldown/reset", "cooldown reset"],
-  ]}
-/>
 
 <Load res={store.creds} what="Credentials">
   {#snippet children(list)}
@@ -324,8 +313,7 @@
                     <div class="row">
                       <button
                         class="key"
-                        disabled={store.busy ||
-                          !store.can("PATCH", "/credentials/status")}
+                        disabled={store.busy}
                         onclick={() =>
                           store.call(
                             "PATCH",
@@ -380,7 +368,6 @@
                         <form
                           class="form"
                           onsubmit={(e) => (e.preventDefault(), saveFields(a))}
-                          inert={!store.can("PATCH", "/credentials/fields")}
                         >
                           {#each fieldNames as [k, name, hint]}<label
                               class="field"
@@ -393,8 +380,7 @@
                             >{/each}
                           <button
                             class="key"
-                            disabled={store.busy ||
-                              !store.can("PATCH", "/credentials/fields")}
+                            disabled={store.busy}
                             >Save</button
                           >
                         </form>
@@ -416,8 +402,7 @@
                             class:danger={method === "DELETE"}
                             class:quiet={method === "DELETE"}
                             disabled={store.busy ||
-                              off ||
-                              !store.can(method, path)}
+                              off}
                             onclick={() =>
                               store
                                 .call(method, path, body, done, ask)
@@ -431,8 +416,7 @@
                         <button
                           class="key small"
                           disabled={store.busy ||
-                            a.runtime_only ||
-                            !store.can("GET", "/credentials/download")}
+                            a.runtime_only}
                           onclick={() =>
                             store.act(async () =>
                               download(
@@ -471,22 +455,21 @@
 <details class="section">
   <summary>Import and maintenance</summary>
   <div class="row">
-    <label class="key" aria-disabled={!store.can("POST", "/credentials")}>
+    <label class="key">
       <svg class="i" aria-hidden="true"><use href="#i-upload" /></svg>Upload
       <input
         class="file"
         type="file"
         accept=".json,application/json"
         multiple
-        disabled={store.busy || !store.can("POST", "/credentials")}
+        disabled={store.busy}
         onchange={(e) => upload(e.currentTarget)}
       />
     </label>
     <button
       class="key"
       disabled={store.busy ||
-        !rows.length ||
-        !store.can("POST", "/credentials/refresh")}
+        !rows.length}
       onclick={refreshAll}
       ><svg class="i" aria-hidden="true"><use href="#i-refresh" /></svg>Refresh
       tokens</button

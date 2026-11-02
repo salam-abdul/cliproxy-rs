@@ -14,7 +14,6 @@ Commit the rebuilt `dist/` with the source change; CI rebuilds it and fails on a
 ```sh
 npx playwright-core install chromium
 node scripts/dashboard-check.mjs
-DASHBOARD_KIND=rust node scripts/dashboard-check.mjs
 ```
 
 ## Pages

@@ -7,14 +7,7 @@
   const facts = $derived(
     [
       ["Management API", new URL(endpoint()).pathname],
-      [
-        "Server",
-        store.kind === "go"
-          ? `CLIProxyAPI ${store.meta.version} (Go)`
-          : store.kind === "rust"
-            ? store.meta.version.replace("/", " ")
-            : store.meta.version || "Not reported",
-      ],
+      ["Server", store.meta.version.replace("/", " ") || "Not reported"],
       ["Commit", store.meta.commit !== "none" && store.meta.commit],
       ["Built", !isNaN(Date.parse(store.meta.built)) && new Date(store.meta.built).toLocaleString()],
       ["Config layout", c["config-version"] ? `v${c["config-version"]}` : "Legacy (migrated on save)"],
@@ -22,15 +15,7 @@
       ["Auth directory", readPath(c, "oauth/auth-dir", "Server default")],
       // The config cannot show the effective policy: MANAGEMENT_PASSWORD allows remote access too.
       ["Remote management", readPath(c, "management/allow-remote", false) ? "Allowed" : "Local only, unless MANAGEMENT_PASSWORD is set"],
-      // Where this page's code comes from: it runs with the management key.
-      [
-        "Dashboard",
-        store.kind === "rust"
-          ? "Built into the server"
-          : readPath(c, "management/disable-auto-update-panel", false)
-            ? "Local file, auto-update off"
-            : "Auto-updated from GitHub every 3 h",
-      ],
+      ["Dashboard", "Built into the server"],
     ].filter((f) => f[1]),
   );
 </script>
