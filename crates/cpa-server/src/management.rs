@@ -172,11 +172,12 @@ impl Management {
     }
 
     /// Refuses a reloaded or written config that would open the proxy API without client
-    /// keys on the listener bound at startup ([`crate::refuse_open_access`]). Its own
-    /// `server.host` and `server.trusted-proxies` apply only at the next start, which
-    /// checks them. Callers check before they write or publish.
+    /// keys ([`crate::refuse_open_access`]), on the listener bound at startup or on the
+    /// one its own `server.host` and `server.trusted-proxies` describe. Those apply only
+    /// at the next start, but refusing them now keeps that start from failing later.
+    /// Callers check before they write or publish.
     pub(crate) fn admit(&self, cfg: &Config) -> anyhow::Result<()> {
-        crate::access::refuse_open_access(cfg, self.listener_exposed)
+        crate::access::refuse_open_access(cfg, self.listener_exposed || crate::access::listener_exposed(cfg))
     }
 
     /// Publishes a config and everything Go derives from it on reload: scheduler

@@ -21,11 +21,14 @@ use subtle::ConstantTimeEq;
 use crate::runtime::Runtime;
 
 /// Whether the listener `config` describes takes connections from other machines: its
-/// host is not a loopback IP (empty listens on every interface), or trusted proxies are
-/// set, since a tunnel or reverse proxy in front of a loopback listener is the
-/// documented way to expose it.
+/// host is neither a loopback IP nor `localhost` (empty listens on every interface), or
+/// trusted proxies are set, since a tunnel or reverse proxy in front of a loopback
+/// listener is the documented way to expose it.
 pub fn listener_exposed(config: &Config) -> bool {
-    !config.trusted_proxies.is_empty() || !config.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    let host = config.host.as_str();
+    let loopback = host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    !config.trusted_proxies.is_empty() || !loopback
 }
 
 /// Refuses `config` when it would let anyone who reaches an exposed listener use the
@@ -205,8 +208,9 @@ mod tests {
             "server: {host: 0.0.0.0}\n",
             "server: {host: '::'}\n",
             "server: {host: 192.0.2.10}\n",
-            "server: {host: localhost}\n",
+            "server: {host: localhost.example}\n",
             "server: {host: 127.0.0.1, trusted-proxies: [127.0.0.1]}\n",
+            "server: {host: localhost, trusted-proxies: [127.0.0.1]}\n",
             "server: {host: '::1', trusted-proxies: ['::1']}\n",
         ] {
             let refused = check(exposed).expect_err(exposed);
@@ -222,6 +226,8 @@ mod tests {
             "server: {host: 127.0.0.1}\n",
             "server: {host: 127.0.0.2}\n",
             "server: {host: '::1'}\n",
+            "server: {host: localhost}\n",
+            "server: {host: LocalHost.}\n",
         ] {
             check(loopback).unwrap();
         }

@@ -1635,8 +1635,8 @@ mod tests {
     }
 
     /// A listener other machines can reach does not start without client keys, before
-    /// anything binds, and the error names both remedies. The opt-in starts it. (A
-    /// loopback listener without keys starts: see the standalone test above.)
+    /// anything binds, and the error names both remedies. The opt-in starts it, and so
+    /// does a keyless `localhost` (an IP loopback listener: see the standalone test above).
     #[tokio::test]
     async fn an_exposed_listener_without_client_keys_does_not_start() {
         let dir = std::env::temp_dir().join(format!("cpa-open-access-{}", std::process::id()));
@@ -1683,14 +1683,20 @@ mod tests {
                 "{server}: {refused}"
             );
         }
-        // Exposed by its trusted proxies while bound to loopback only.
-        let (stop, listener, server_task) = start(
-            "host: 127.0.0.1, trusted-proxies: [127.0.0.1]",
-            "allow-unauthenticated: true",
-        );
-        listener.await.unwrap();
-        let _ = stop.send(());
-        server_task.await.unwrap().unwrap();
+        // Exposed by its trusted proxies while bound to loopback only; then `localhost`,
+        // which is loopback, without keys.
+        for (server, access) in [
+            (
+                "host: 127.0.0.1, trusted-proxies: [127.0.0.1]",
+                "allow-unauthenticated: true",
+            ),
+            ("host: localhost", "api-keys: []"),
+        ] {
+            let (stop, listener, server_task) = start(server, access);
+            listener.await.unwrap_or_else(|_| panic!("{server}: not started"));
+            let _ = stop.send(());
+            server_task.await.unwrap().unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

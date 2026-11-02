@@ -338,7 +338,7 @@ async fn watcher_keeps_last_good_config_and_reconciles_disabled_deleted_and_self
     std::fs::write(
         f.dir.join("config.yaml"),
         format!(
-            "oauth: {{auth-dir: {}}}\nrequest-retry: 7\n",
+            "host: 127.0.0.1\noauth: {{auth-dir: {}}}\nrequest-retry: 7\n",
             f.dir.join("auth").display()
         ),
     )
@@ -1252,6 +1252,62 @@ async fn a_management_write_cannot_open_an_exposed_listener() {
         .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(models(None).await, 200);
+    server.abort();
+}
+
+/// A keyless loopback server refuses a Management API change that would expose its next
+/// start, a public host or new trusted proxies, with the same error as other refused
+/// writes, and leaves the file unchanged. Keys or the opt-in make the change acceptable.
+#[tokio::test]
+async fn a_management_write_cannot_expose_a_keyless_listener() {
+    let f = Fixture::from_yaml("expose", |auth, hash| {
+        format!(
+            "config-version: 8\nserver:\n  host: 127.0.0.1\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let put = |path: &str, value: Value| {
+        let request = client
+            .put(format!("{base}/v8/management/config{path}"))
+            .bearer_auth("fake-management-only")
+            .json(&value);
+        async move {
+            let r = request.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    for enable in [
+        ("/access/api-keys", json!(["fake-client"])),
+        ("/access/allow-unauthenticated", json!(true)),
+    ] {
+        for change in [
+            ("/server/host", json!("0.0.0.0")),
+            ("/server/trusted-proxies", json!(["127.0.0.1"])),
+        ] {
+            let before = f.file();
+            let (status, body) = put(change.0, change.1.clone()).await;
+            assert_eq!(status, 422, "{change:?}: {body}");
+            assert_eq!(body["error"], "invalid_config");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("access.allow-unauthenticated"),
+                "{body}"
+            );
+            assert_eq!(f.file(), before, "{change:?}");
+            assert_eq!(put(enable.0, enable.1.clone()).await.0, 200, "{enable:?}");
+            assert_eq!(put(change.0, change.1.clone()).await.0, 200, "{enable:?} {change:?}");
+            // Back to a keyless loopback listener.
+            assert_eq!(put("/server/host", json!("127.0.0.1")).await.0, 200);
+            assert_eq!(put("/server/trusted-proxies", json!([])).await.0, 200);
+            assert_eq!(put("/access", json!({})).await.0, 200);
+            assert!(!cpa_server::listener_exposed(&f.rt.config()));
+            assert!(f.rt.config().api_keys.is_empty() && !f.rt.config().allow_unauthenticated);
+        }
+    }
     server.abort();
 }
 
