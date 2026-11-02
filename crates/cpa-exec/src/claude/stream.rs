@@ -100,6 +100,9 @@ struct Relay {
     body: ExecStream,
     reverse: Arc<Reverse>,
     line: BytesMut,
+    /// Prefix of `line` already searched for a newline, so a long line arriving in
+    /// many chunks is scanned once overall.
+    scanned: usize,
     event: BytesMut,
     ready: VecDeque<Result<Bytes, ExecError>>,
     message_id: String,
@@ -201,7 +204,12 @@ impl Relay {
 
     fn chunk(&mut self, chunk: &[u8]) {
         self.line.extend_from_slice(chunk);
-        while let Some(pos) = self.line.iter().position(|b| *b == b'\n') {
+        while let Some(pos) = self.line[self.scanned..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|pos| self.scanned + pos)
+        {
+            self.scanned = 0;
             // bufio.Scanner holds at most MAX_LINE bytes: the line and its newline must fit.
             if pos + 1 > MAX_LINE {
                 self.fail(crate::upstream::plain_error_after_response(
@@ -218,6 +226,7 @@ impl Relay {
                 return;
             }
         }
+        self.scanned = self.line.len();
         if self.line.len() > MAX_LINE {
             self.fail(crate::upstream::plain_error_after_response(
                 "bufio.Scanner: token too long",
@@ -277,6 +286,7 @@ pub(crate) fn relay(
         body,
         reverse,
         line: BytesMut::new(),
+        scanned: 0,
         event: BytesMut::new(),
         ready: VecDeque::new(),
         message_id: String::new(),
@@ -700,6 +710,36 @@ mod tests {
         assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(error.body.as_ref(), b"unexpected EOF");
         assert_eq!(out[1].as_ref().unwrap().as_ref(), b"partial\n");
+    }
+
+    /// A long line that arrives in many small chunks is searched for its newline once
+    /// overall, not from its first byte on every chunk. Rescanning would take tens of
+    /// seconds here; `.config/nextest.toml` runs this test alone.
+    #[tokio::test]
+    async fn a_long_line_in_small_chunks_is_scanned_once() {
+        const LINE: usize = 4 << 20;
+        const CHUNK: usize = 256;
+        let mut line = vec![b'a'; LINE];
+        line[..6].copy_from_slice(b"data: ");
+        line.extend_from_slice(b"\n\n");
+        let body = Bytes::from(line.clone());
+        let pieces: Vec<_> = (0..body.len())
+            .step_by(CHUNK)
+            .map(|at| Ok(body.slice(at..(at + CHUNK).min(body.len()))))
+            .collect();
+        let started = std::time::Instant::now();
+        let out = relay(
+            futures_util::stream::iter(pieces).boxed(),
+            Arc::default(),
+            Box::new(|_| panic!("not complete")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(out[0].as_ref().unwrap().as_ref(), line.as_slice());
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 
     /// An over-long line or an unrestorable tool alias ends a stream the upstream already

@@ -20,6 +20,7 @@ filter = '''
     binary_id(cpa-server::duplex_dispatch)
     | (binary_id(cpa-exec) & (test(/^codex_ws::tests::duplex::/)
         | test(=codex_live::tests::redact_sdp_scans_many_markers_in_one_pass)
+        | test(=claude::stream::tests::a_long_line_in_small_chunks_is_scanned_once)
         | test(=antigravity_request::tests::tool_schemas_are_cleaned_in_one_pass)))
     | (binary_id(cpa-server) & test(/^websocket::tests::/))
     | (binary_id(cliproxy::bin/cliproxy) & (
