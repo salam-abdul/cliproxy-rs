@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::refresh::RefreshState;
 use crate::registry::Registry;
-use crate::scheduler::{Policy, Scheduler};
+use crate::scheduler::{Candidate, Policy, Profile, Scheduler};
 
 mod credential_updates;
 
@@ -34,7 +34,8 @@ use credential_updates::Version;
 type RegistryCache = (Arc<Config>, (u64, u64, u64), Arc<Registry>);
 
 pub struct Runtime {
-    config: RwLock<Arc<Config>>,
+    /// The published config and the policy derived from it, replaced together.
+    published: RwLock<Published>,
     store: Arc<CredentialStore>,
     pub executors: Executors,
     refresh_task: Mutex<Option<tokio::task::AbortHandle>>,
@@ -58,6 +59,15 @@ pub struct Runtime {
     pub(crate) deny_external: std::sync::atomic::AtomicBool,
     /// Marked on every config publish, so background loops sleep until it changes.
     config_changed: tokio::sync::watch::Sender<()>,
+    /// Quota windows by credential, parsed once per observation for selection.
+    quota_windows: Mutex<HashMap<String, crate::scheduler::Observation>>,
+}
+
+/// One config publication: requests read the config and its policy from the same one.
+#[derive(Clone)]
+struct Published {
+    config: Arc<Config>,
+    policy: Arc<Policy>,
 }
 
 /// An OAuth provider redirect received on the main listener.
@@ -79,13 +89,16 @@ impl Runtime {
     /// The scheduler policy is derived from the config (`routing` plus the OAuth
     /// provider rules), as on every publish.
     pub fn new(config: Config, credentials: Vec<Credential>, executors: Executors) -> Self {
-        let mut policy = crate::management::policy(&config);
-        policy.compat_disable_cooling = crate::scheduler::compat_cooling(&config);
+        let policy = Policy::from_config(&config);
         let cooldown_dir = cooldown_dir(&config, &policy);
         let (enabled, strict) = signature_cache_config(&config);
         cpa_translate::set_antigravity_signature_cache_config(enabled, strict);
+        let config = Arc::new(config);
         let rt = Self {
-            config: RwLock::new(Arc::new(config)),
+            published: RwLock::new(Published {
+                config: config.clone(),
+                policy: Arc::new(Policy::default()),
+            }),
             store: CredentialStore::new(credentials),
             executors,
             refresh_task: Mutex::default(),
@@ -101,8 +114,9 @@ impl Runtime {
             remote: RwLock::default(),
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
+            quota_windows: Mutex::default(),
         };
-        rt.publish_policy(policy);
+        rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
         // Failed attempts publish Go's error events on the RESP `errors` channel.
         let _ = rt.store.error_events.set(rt.usage.clone());
@@ -134,7 +148,11 @@ impl Runtime {
 
     /// The config snapshot to use for one whole request.
     pub fn config(&self) -> Arc<Config> {
-        self.config.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.published().config
+    }
+
+    fn published(&self) -> Published {
+        self.published.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Resolves after the next config publish.
@@ -142,39 +160,28 @@ impl Runtime {
         self.config_changed.subscribe()
     }
 
-    /// Replaces the config and the scheduler policy derived from it. Requests already
-    /// running keep their snapshot.
+    /// Replaces the config and the scheduler policy derived from it in one snapshot.
+    /// Requests already running keep theirs. Every config publisher goes through here.
     pub fn publish_config(&self, config: Config) {
-        let policy = crate::management::policy(&config);
-        self.publish_config_and_policy(config, policy);
-    }
-
-    /// Integration should use this when publishing parsed routing settings too.
-    pub fn publish_config_and_policy(&self, config: Config, mut policy: Policy) {
-        policy.compat_disable_cooling = crate::scheduler::compat_cooling(&config);
+        let policy = Policy::from_config(&config);
         let (enabled, strict) = signature_cache_config(&config);
         cpa_translate::set_antigravity_signature_cache_config(enabled, strict);
         let dir = cooldown_dir(&config, &policy);
         let ws_auth = crate::relay::ws_auth(&config);
-        let config = Arc::new(config);
-        let previous = {
-            let mut current = self.config.write().unwrap_or_else(PoisonError::into_inner);
-            std::mem::replace(&mut *current, config.clone())
-        };
+        let previous = self.publish(Arc::new(config), policy);
         // Go's websocket auth change handler: turning ws-auth on ends the relay sessions
         // that connected without a key.
         if ws_auth && !crate::relay::ws_auth(&previous) {
             self.executors.google.aistudio.relay.stop();
         }
-        self.publish_policy(policy);
         self.store.configure_cooldown_store(dir);
         self.config_changed.send_replace(());
     }
 
     /// A coherent config/policy pair for the entire route attempt loop.
     pub fn request_snapshot(&self) -> (Arc<Config>, Arc<Policy>) {
-        let config = self.config.read().unwrap_or_else(PoisonError::into_inner);
-        (config.clone(), self.policy())
+        let Published { config, policy } = self.published();
+        (config, policy)
     }
 
     pub fn store(&self) -> &Arc<CredentialStore> {
@@ -261,20 +268,24 @@ impl Runtime {
     }
 
     pub fn policy(&self) -> Arc<Policy> {
-        self.store.policy.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.published().policy
     }
 
+    /// Replaces the scheduler policy and keeps the config.
     pub fn publish_policy(&self, policy: Policy) {
-        {
-            let mut current = self.store.policy.write().unwrap_or_else(PoisonError::into_inner);
-            self.store
-                .scheduler
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .configure(&current, &policy);
-            *current = Arc::new(policy);
-        }
+        self.publish(self.config(), policy);
+    }
+
+    /// Publishes `config` with `policy` as one snapshot; returns the previous config.
+    fn publish(&self, config: Arc<Config>, policy: Policy) -> Arc<Config> {
+        let policy = Arc::new(policy);
+        let previous = {
+            let mut current = self.published.write().unwrap_or_else(PoisonError::into_inner);
+            self.store.set_policy(policy.clone());
+            std::mem::replace(&mut *current, Published { config, policy }).config
+        };
         self.store.clear_disabled_cooldowns();
+        previous
     }
 
     /// Selects a credential that registered the route model. Waits for preparation only
@@ -291,27 +302,54 @@ impl Runtime {
         let aliases = crate::registry::global_aliases(cfg);
         let scope = selection.clone();
         let admit = admission(registry, &aliases, &scope, &self.executors);
-        // `soonest-reset` ranks by the quota windows the executors last observed.
-        let now = std::time::SystemTime::now();
-        let cap = policy.max_trusted_cooldown;
-        let ranks = |c: &Credential| {
-            let provider = c.provider.trim().to_ascii_lowercase();
-            let snapshot = match provider.as_str() {
-                "claude" => self.executors.claude.quota().snapshot(&c.id),
-                "codex" => self.executors.codex.quota().snapshot(&c.id),
-                _ => None,
+        let mut lease = {
+            // `soonest-reset` ranks by the quota windows the executors last observed,
+            // parsed once per observation.
+            let mut parsed = self.quota_windows.lock().unwrap_or_else(PoisonError::into_inner);
+            if parsed.len() >= 4096 {
+                parsed.clear();
+            }
+            let parsed = std::cell::RefCell::new(&mut *parsed);
+            let now = std::time::SystemTime::now();
+            let cap = policy.max_trusted_cooldown;
+            let ranks = |c: &Credential| {
+                let observation = |provider: &str, s: &cpa_exec::codex_quota::Snapshot| {
+                    let mut parsed = parsed.borrow_mut();
+                    match parsed.get(&c.id) {
+                        Some(o) if o.observed_at() == s.observed_at => *o,
+                        _ => {
+                            let o = crate::scheduler::Observation::parse(provider, &s.signals, s.observed_at);
+                            parsed.insert(c.id.clone(), o);
+                            o
+                        }
+                    }
+                };
+                let provider = c.provider.trim();
+                let observed = if provider.eq_ignore_ascii_case("claude") {
+                    self.executors
+                        .claude
+                        .quota()
+                        .with_snapshot(&c.id, |s| observation("claude", s))
+                } else if provider.eq_ignore_ascii_case("codex") {
+                    self.executors
+                        .codex
+                        .quota()
+                        .with_snapshot(&c.id, |s| observation("codex", s))
+                } else {
+                    None
+                };
+                observed.map_or_else(crate::scheduler::Windows::default, |o| {
+                    let mut windows = o.at(now);
+                    // `max-trusted-cooldown` bounds trust in an observed exhausted window as
+                    // in a cooldown: past the bound, the next request may probe the account.
+                    if !cap.is_zero() && o.observed_at().checked_add(cap).is_some_and(|end| end <= now) {
+                        windows.exhausted = false;
+                    }
+                    windows
+                })
             };
-            snapshot.map_or_else(crate::scheduler::Windows::default, |s| {
-                let mut windows = crate::scheduler::Windows::observed(&provider, &s.signals, s.observed_at, now);
-                // `max-trusted-cooldown` bounds trust in an observed exhausted window as in
-                // a cooldown: past the bound, the next request may probe the account.
-                if !cap.is_zero() && s.observed_at.checked_add(cap).is_some_and(|end| end <= now) {
-                    windows.exhausted = false;
-                }
-                windows
-            })
+            self.store.select_ranked(selection, policy, &admit, &ranks)?
         };
-        let mut lease = self.store.select_ranked(selection, policy, &admit, &ranks)?;
         if self.executors.readiness(&lease.credential, cfg) != Readiness::PrepareNow {
             return Ok(lease);
         }
@@ -685,6 +723,8 @@ pub struct Selection {
     /// A request without an explicit session, for the LCP matcher (Go `pickLCP`). Set
     /// only with session affinity on; it then decides the binding instead of `session`.
     pub lcp: Option<Arc<crate::lcp::Request>>,
+    /// The only credential this selection may use (Go `WithPinnedAuthID`).
+    pub pinned: Option<String>,
     /// Credential IDs already tried in this request.
     pub exclude: Vec<String>,
     pub retry_round: usize,
@@ -787,9 +827,10 @@ pub fn admission<'a>(
     selection: &'a Selection,
     executors: &'a Executors,
 ) -> impl Fn(&Credential) -> Option<String> + 'a {
+    let providers = selection.provider_keys();
     move |c| {
         let provider = crate::registry::provider_key(c);
-        if !selection.provider_keys().contains(&provider) || !executors.supports(&c.provider) {
+        if !providers.contains(&provider) || !executors.supports(&c.provider) {
             return None;
         }
         let key = crate::registry::selection_model(aliases, c, &selection.model);
@@ -928,8 +969,20 @@ struct Inner {
     /// Last revision handed out. Revisions are never reused.
     generation: u64,
     versions: HashMap<String, Version>,
+    /// What selection reads from each stored revision, parsed when it is stored.
+    profiles: HashMap<String, Profile>,
     /// Bumped on every reconcile and patch, including pure removals.
     epoch: u64,
+}
+
+impl Inner {
+    /// The parsed profile of `c`'s revision; parsed now if the store holds another.
+    fn profile(&self, c: &Credential) -> std::borrow::Cow<'_, Profile> {
+        match self.profiles.get(&c.id) {
+            Some(profile) if profile.revision == c.revision => std::borrow::Cow::Borrowed(profile),
+            _ => std::borrow::Cow::Owned(Profile::of(c)),
+        }
+    }
 }
 
 pub struct CredentialStore {
@@ -964,6 +1017,7 @@ impl CredentialStore {
             creds: Vec::new(),
             generation: 0,
             versions: HashMap::new(),
+            profiles: HashMap::new(),
             epoch: 0,
         };
         for mut cred in credentials {
@@ -989,6 +1043,16 @@ impl CredentialStore {
             error_events: std::sync::OnceLock::new(),
             changed: tokio::sync::watch::Sender::new(()),
         })
+    }
+
+    /// Replaces the store's policy; selection state the change invalidates is reset.
+    fn set_policy(&self, policy: Arc<Policy>) {
+        let mut current = self.policy.write().unwrap_or_else(PoisonError::into_inner);
+        self.scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .configure(&current, &policy);
+        *current = policy;
     }
 
     /// Go `ApplyConfigWithCooldownStateStore` plus the restore that follows a config
@@ -1196,6 +1260,8 @@ impl CredentialStore {
     }
 
     /// [`Self::select_with`] with each credential's usage windows (`soonest-reset`).
+    /// Under the store and scheduler locks each credential costs a few lookups: its
+    /// parsed profile, its cooldowns and its windows.
     pub fn select_ranked(
         self: &Arc<Self>,
         selection: Selection,
@@ -1203,30 +1269,44 @@ impl CredentialStore {
         admit: &Admit<'_>,
         ranks: &crate::scheduler::Ranks<'_>,
     ) -> Result<Lease, AcquireError> {
+        let excluded: std::collections::HashSet<&str> = selection.exclude.iter().map(String::as_str).collect();
         let now = Instant::now();
-        let credential = {
+        let (credential, execution_model, lcp, picked) = {
             let inner = self.read();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
             let eligible: Vec<_> = inner
                 .creds
                 .iter()
-                .filter(|c| !c.disabled && !selection.exclude.contains(&c.id))
-                .filter(|c| policy.retry_limit(c) >= selection.retry_round && scheduler.admits(c, &policy))
-                .filter_map(|c| admit(c).map(|m| (c, m)))
+                .filter(|c| {
+                    !c.disabled
+                        && selection.pinned.as_ref().is_none_or(|id| *id == c.id)
+                        && !excluded.contains(c.id.as_str())
+                })
+                .map(|c| (c, inner.profile(c)))
+                .filter(|(_, p)| policy.retry_limit_of(p) >= selection.retry_round && policy.admits_weight(p.weight))
+                .filter_map(|(c, p)| admit(c).map(|m| (c, m, p)))
                 .collect();
-            let candidates: Vec<_> = eligible
+            let candidates: Vec<Candidate<'_>> = eligible
                 .iter()
-                .filter(|(c, m)| scheduler.wait(c, m, now).is_none() && !ranks(c).exhausted)
-                .map(|(c, _)| (c.as_ref(), crate::registry::provider_key(c)))
+                .filter(|(c, m, _)| scheduler.wait(c, m, now).is_none())
+                .map(|(c, m, p)| Candidate {
+                    credential: c,
+                    model: m,
+                    provider: &p.provider,
+                    priority: p.priority,
+                    weight: p.weight,
+                    windows: ranks(c),
+                })
+                .filter(|c| !c.windows.exhausted)
                 .collect();
-            if candidates.is_empty() {
+            let Some((picked, lcp)) = scheduler.pick_candidate(&candidates, &selection, &policy, now) else {
                 let cause = eligible
                     .iter()
-                    .filter_map(|(c, m)| scheduler.last_error(c, m))
+                    .filter_map(|(c, m, _)| scheduler.last_error(c, m))
                     .max_by_key(|s| s.deadline)
                     .map(|s| s.error.clone());
-                let wait = eligible.iter().filter_map(|(c, m)| scheduler.wait(c, m, now)).min();
-                if !eligible.is_empty() && eligible.iter().all(|(c, m)| scheduler.quota_cooling(c, m, now)) {
+                let wait = eligible.iter().filter_map(|(c, m, _)| scheduler.wait(c, m, now)).min();
+                if !eligible.is_empty() && eligible.iter().all(|(c, m, _)| scheduler.quota_cooling(c, m, now)) {
                     return Err(AcquireError::Cooldown {
                         wait: wait.unwrap_or_default(),
                         cause,
@@ -1236,15 +1316,10 @@ impl CredentialStore {
                     retry_after: if eligible.is_empty() { None } else { wait },
                     cause,
                 });
-            }
-            let refs: Vec<(&Credential, &str)> = candidates.iter().map(|(c, p)| (*c, p.as_str())).collect();
-            let (picked, lcp) = scheduler.pick_session(&refs, &selection, &policy, ranks, now).unwrap();
-            let (c, m) = eligible.iter().find(|(c, _)| c.id == picked.id).unwrap();
-            let generation = scheduler.reserve_probe(c, m, now);
-            (Arc::clone(c), lcp, generation)
+            };
+            let generation = scheduler.reserve_probe(picked.credential, picked.model, now);
+            (Arc::clone(picked.credential), picked.model.to_owned(), lcp, generation)
         };
-        let (credential, lcp, picked) = credential;
-        let execution_model = admit(&credential).unwrap_or_else(|| selection.model.clone());
         Ok(Lease {
             store: self.clone(),
             credential,
@@ -1259,6 +1334,17 @@ impl CredentialStore {
         })
     }
 
+    /// [`Policy::error_action`] with the credential's rules as parsed when it was stored.
+    pub(crate) fn error_action(
+        &self,
+        policy: &Policy,
+        c: &Credential,
+        error: &ExecError,
+    ) -> crate::scheduler::ErrorAction {
+        let inner = self.read();
+        policy.error_action_with(inner.profile(c).rules.as_deref(), c, error)
+    }
+
     /// The registry projection of this credential's cooldown state for `model`.
     pub fn suspension(&self, credential: &Credential, model: &str) -> crate::registry::Suspension {
         use crate::registry::Suspension;
@@ -1266,8 +1352,7 @@ impl CredentialStore {
         let now = Instant::now();
         let live = |m: &str| {
             scheduler
-                .cooldowns
-                .get(&(credential.id.clone(), crate::scheduler::canonical_model(m).to_owned()))
+                .cooldown(&credential.id, crate::scheduler::canonical_model(m))
                 .filter(|s| s.deadline > now)
         };
         if let Some(state) = live(model) {
@@ -1330,7 +1415,10 @@ impl CredentialStore {
             .creds
             .iter()
             .filter(|c| !c.disabled)
-            .filter(|c| policy.retry_limit(c) > selection.retry_round && scheduler.admits(c, policy))
+            .filter(|c| {
+                let profile = inner.profile(c);
+                policy.retry_limit_of(&profile) > selection.retry_round && policy.admits_weight(profile.weight)
+            })
             .filter_map(|c| admit(c).map(|m| (c, m)))
             .filter(|(c, m)| scheduler.retry_eligible(c, m, now))
             .map(|(c, m)| {
@@ -1395,9 +1483,20 @@ impl CredentialStore {
                 .is_some();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
             let before = persist.then(|| scheduler.records(&lease.credential, now, wall));
-            scheduler.record_picked(&lease.credential, model, outcome, &lease.policy, lease.picked, now);
-            scheduler.session_result(
+            let profile = inner.profile(&lease.credential);
+            let rules = profile.rules.as_deref();
+            scheduler.record_with(
                 &lease.credential,
+                rules,
+                model,
+                outcome,
+                &lease.policy,
+                lease.picked,
+                now,
+            );
+            scheduler.session_result_with(
+                &lease.credential,
+                rules,
                 &lease.selection,
                 outcome,
                 &lease.policy,
@@ -1521,6 +1620,7 @@ impl CredentialStore {
             .collect();
         next.extend(runtime);
         inner.versions.retain(|id, _| next.iter().any(|c| &c.id == id));
+        inner.profiles.retain(|id, _| next.iter().any(|c| &c.id == id));
         inner.creds = next;
         inner.epoch += 1;
         self.changed.send_replace(());
@@ -1566,6 +1666,7 @@ impl CredentialStore {
             return;
         }
         inner.versions.remove(id);
+        inner.profiles.remove(id);
         inner.epoch += 1;
         self.changed.send_replace(());
         self.scheduler
@@ -2262,13 +2363,11 @@ mod tests {
         assert_eq!(first.execution_model, "m");
         assert!(store.select(selection.clone()).is_none(), "reserved");
         // The first probe's hold lapses, and the next pick probes again.
-        let key = ("a.json".to_owned(), "m".to_owned());
         store
             .scheduler
             .lock()
             .unwrap()
-            .cooldowns
-            .get_mut(&key)
+            .cooldown_mut("a.json", "m")
             .unwrap()
             .trust
             .probe = Some(Instant::now());
@@ -2340,6 +2439,43 @@ mod tests {
         assert_eq!(policy.strategy, crate::scheduler::Strategy::WeightedRoundRobin);
         assert_eq!(policy.request_retry, 0);
         assert_eq!(policy.session_affinity_ttl, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn a_request_snapshot_pairs_each_config_with_its_own_policy() {
+        let rt = Arc::new(crate::testing::runtime(
+            Config::parse("").unwrap(),
+            Vec::new(),
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let configs = ["ff", "wrr"].map(|s| Config::parse(&format!("routing:\n  strategy: {s}\n")).unwrap());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = std::thread::spawn({
+            let (rt, done) = (rt.clone(), done.clone());
+            move || {
+                let mut reads = 0u64;
+                while !done.load(Ordering::Relaxed) {
+                    let (config, policy) = rt.request_snapshot();
+                    assert_eq!(
+                        Policy::from_config(&config).strategy,
+                        policy.strategy,
+                        "after {reads} reads"
+                    );
+                    reads += 1;
+                }
+            }
+        });
+        for i in 0..50_000 {
+            rt.publish_config(configs[i % 2].clone());
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
     }
 
     /// Go `nextModelPoolOffset` (conductor_models.go): per-key cursor, no advance for

@@ -65,9 +65,10 @@ pub fn empty_stream() -> ExecError {
 }
 
 /// Whether the failure came from an upstream attempt (Go `UpstreamAttempted`): an
-/// upstream response, a connection fault, or a stream that ended empty.
+/// upstream response, a connection fault, a stream that ended empty, or any failure
+/// after the upstream accepted the request.
 pub fn upstream_attempted(e: &ExecError) -> bool {
-    !e.headers.is_empty() || e.scope == FailureScope::Transport || e.status == 0
+    !e.headers.is_empty() || e.scope == FailureScope::Transport || e.status == 0 || e.after_accept.is_some()
 }
 
 /// Go `isUnauthorizedError` for an attempt that was not an explicit request fault.
@@ -543,6 +544,19 @@ mod tests {
         let truncated = local(502, AfterAccept::Truncated);
         assert_eq!(go_status(&truncated), 502);
         assert!(policy.error_action(&credential, &truncated).matched);
+    }
+
+    #[test]
+    fn a_failure_after_the_upstream_accepted_the_request_was_an_upstream_attempt() {
+        let local = ExecError::local(502, FailureScope::Request, "closed early");
+        assert!(!upstream_attempted(&local));
+        for after in [
+            AfterAccept::Interrupted,
+            AfterAccept::Truncated,
+            AfterAccept::Unprocessed,
+        ] {
+            assert!(upstream_attempted(&local.clone().accepted(after)), "{after:?}");
+        }
     }
 
     #[test]

@@ -27,6 +27,8 @@ impl Inner {
             _ => fresh,
         };
         self.versions.insert(next.id.clone(), version);
+        self.profiles
+            .insert(next.id.clone(), crate::scheduler::Profile::of(next));
     }
 }
 

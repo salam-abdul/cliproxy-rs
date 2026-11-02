@@ -755,8 +755,8 @@ async fn config_api_keys_become_scheduled_credentials_on_write_and_reload() {
     let rules = &f.rt.policy().oauth_request_scoped_errors["claude"];
     assert_eq!(rules.len(), 1);
     assert_eq!(
-        (rules[0].r#match[0].as_str(), rules[0].action.as_str()),
-        ("overloaded", "stop")
+        (rules[0].r#match[0].as_str(), rules[0].action),
+        ("overloaded", cpa_server::scheduler::RuleAction::Stop)
     );
 
     // A hand edit picked up by the watcher replaces the set; removed keys disappear.

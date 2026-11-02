@@ -1218,9 +1218,7 @@ async fn serve(
     let home = home_config.map(|home_config| {
         let dispatcher = Arc::new(home::Dispatcher::new(&rt));
         rt.set_remote_dispatch(Some(dispatcher.clone()));
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let task = home::spawn_subscriber(home_config, rt.clone(), dispatcher, shutdown.clone());
-        (shutdown, task)
+        (home_config, dispatcher)
     });
     // Translators and thinking validation read model capabilities through the global
     // overlay; without it they see only the static catalog.
@@ -1234,6 +1232,18 @@ async fn serve(
         ..Default::default()
     };
     let management = cpa_server::management::Management::with_options(rt.clone(), config_path, options);
+    // The subscriber publishes Home's configs through management, so it starts after it.
+    let home = home.map(|(home_config, dispatcher)| {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = home::spawn_subscriber(
+            home_config,
+            rt.clone(),
+            management.clone(),
+            dispatcher,
+            shutdown.clone(),
+        );
+        (shutdown, task)
+    });
     if home.is_some() {
         // Go enables the usage queue in Home mode whatever the management secret
         // (`redisqueue.SetEnabled(... || cfg.Home.Enabled)`); the forwarder drains it.

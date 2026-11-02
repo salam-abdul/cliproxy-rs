@@ -431,6 +431,16 @@ impl QuotaSignals {
             .and_then(|e| e.credential.clone())
     }
 
+    /// `f` of the credential's latest snapshot, read in place without a copy.
+    pub fn with_snapshot<R>(&self, credential_id: &str, f: impl FnOnce(&Snapshot) -> R) -> Option<R> {
+        self.snapshots
+            .lock()
+            .expect("quota snapshots")
+            .get(credential_id)
+            .and_then(|e| e.credential.as_ref())
+            .map(f)
+    }
+
     /// The latest snapshot per model (`model_quotas`), empty when none was observed.
     pub fn model_snapshots(&self, credential_id: &str) -> BTreeMap<String, Snapshot> {
         self.snapshots
