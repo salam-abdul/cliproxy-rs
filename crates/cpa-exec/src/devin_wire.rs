@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::{Bytes, BytesMut};
+pub(crate) use cpa_common::devin_tools::{is_codex_app_automation_update, sanitize_tool_description};
 use cpa_common::json::{Object, indent};
 use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecError;
@@ -572,10 +573,6 @@ fn tool_description(name: &[u8], description: &[u8]) -> Vec<u8> {
     sanitize_tool_description(name, &desc)
 }
 
-pub(crate) fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    cpa_common::gostr::index(hay, needle).is_some()
-}
-
 pub(crate) fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     if from.is_empty() {
         return hay.to_vec();
@@ -589,66 +586,6 @@ pub(crate) fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(rest);
     out
-}
-
-fn eq_fold(a: &[u8], b: &str) -> bool {
-    use cpa_common::gostr::GoStr;
-    String::from_utf8_lossy(a).go_eq_fold(b)
-}
-
-/// `IsDevinCodexAppAutomationUpdate`.
-pub(crate) fn is_codex_app_automation_update(namespace: &[u8], tool: &[u8]) -> bool {
-    let (namespace, tool) = (go_trim_space(namespace), go_trim_space(tool));
-    (eq_fold(namespace, "mcp__codex_app") && eq_fold(tool, "automation_update"))
-        || eq_fold(tool, "mcp__codex_app__automation_update")
-}
-
-/// `SanitizeDevinToolDescription`: Codex's `exec_command` and `write_stdin` wording
-/// gets a one-letter change.
-pub(crate) fn sanitize_tool_description(name: &[u8], description: &[u8]) -> Vec<u8> {
-    use std::sync::LazyLock;
-    const EXEC_TARGET: &[u8] = b"returning output or a session ID for ongoing interaction";
-    const EXEC_OBFUSCATED: &[u8] = b"returning output or an session ID for ongoing interaction";
-    const STDIN_TARGET: &[u8] = b"Writes characters to an existing unified exec session and returns recent output.";
-    const STDIN_OBFUSCATED: &[u8] = b"Writes characters to a existing unified exec session and returns recent output.";
-    static EXEC: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-        regex::bytes::Regex::new(r"(?i)returning output or a session ID for ongoing interaction").expect("valid")
-    });
-    static STDIN: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-        regex::bytes::Regex::new(
-            r"(?i)Writes characters to an existing unified exec session and returns recent output(\.?)",
-        )
-        .expect("valid")
-    });
-    if description.is_empty() {
-        return Vec::new();
-    }
-    let lower = String::from_utf8_lossy(cpa_core::config::go_trim_space(name)).to_lowercase();
-    let mut desc = description.to_vec();
-    if lower == "exec_command" || lower.ends_with("__exec_command") {
-        desc = if contains(&desc, EXEC_OBFUSCATED) {
-            desc
-        } else if contains(&desc, EXEC_TARGET) {
-            replace_all(&desc, EXEC_TARGET, EXEC_OBFUSCATED)
-        } else {
-            EXEC.replace_all(&desc, EXEC_OBFUSCATED).into_owned()
-        };
-    }
-    if lower == "write_stdin" || lower.ends_with("__write_stdin") {
-        desc = if contains(&desc, STDIN_OBFUSCATED) {
-            desc
-        } else if contains(&desc, STDIN_TARGET) {
-            replace_all(&desc, STDIN_TARGET, STDIN_OBFUSCATED)
-        } else {
-            STDIN
-                .replace_all(
-                    &desc,
-                    &b"Writes characters to a existing unified exec session and returns recent output${1}"[..],
-                )
-                .into_owned()
-        };
-    }
-    desc
 }
 
 /// `BuildSensitiveWordMatcher` / `SensitiveWordMatcher` (`devin.sensitive-words`).
@@ -685,7 +622,7 @@ impl SensitiveWords {
         self.0
             .replace_all(text, |c: &regex::bytes::Captures<'_>| {
                 let word = &c[0];
-                if contains(word, ZWSP.as_bytes()) {
+                if cpa_common::gostr::contains(word, ZWSP.as_bytes()) {
                     return word.to_vec();
                 }
                 match cpa_common::json::decode_rune(word) {
@@ -714,12 +651,12 @@ pub(crate) fn sanitize_system_prompt(prompt: &[u8], matcher: Option<&SensitiveWo
         let trimmed = go_trim_space(line);
         let drop = trimmed.starts_with(b"x-anthropic-billing-header:")
             || trimmed.starts_with(b"You are Claude Code")
-            || contains(trimmed, b"authorized security testing")
-            || contains(trimmed, b"destructive techniques, DoS attacks")
-            || contains(trimmed, b"Claude Code is available as a CLI")
-            || contains(trimmed, b"Fast mode for Claude Code")
-            || contains(trimmed, b"Codex refers to the open-source agentic coding interface")
-            || contains(
+            || cpa_common::gostr::contains(trimmed, b"authorized security testing")
+            || cpa_common::gostr::contains(trimmed, b"destructive techniques, DoS attacks")
+            || cpa_common::gostr::contains(trimmed, b"Claude Code is available as a CLI")
+            || cpa_common::gostr::contains(trimmed, b"Fast mode for Claude Code")
+            || cpa_common::gostr::contains(trimmed, b"Codex refers to the open-source agentic coding interface")
+            || cpa_common::gostr::contains(
                 trimmed,
                 "- Don\u{2019}t output ANSI escape codes directly \u{2014} the CLI renderer applies them.".as_bytes(),
             )

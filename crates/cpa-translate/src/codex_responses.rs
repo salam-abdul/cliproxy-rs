@@ -44,23 +44,13 @@ pub(crate) fn convert(body: &[u8]) -> Vec<u8> {
     );
     let tier = gj::get(&raw, "service_tier");
     if tier.exists() {
-        if tier.kind == Kind::String {
-            let value = tier.bytes().into_owned();
-            match tier.str().trim().to_lowercase().as_str() {
-                "priority" | "fast" => {
-                    if value != b"priority" {
-                        gj::set_str(&mut raw, "service_tier", "priority");
-                    }
+        match crate::codex_names::service_tier(&tier) {
+            "" => delete_fields(&mut raw, &["service_tier"]),
+            normalized => {
+                if *tier.bytes() != *normalized.as_bytes() {
+                    gj::set_str(&mut raw, "service_tier", normalized);
                 }
-                "ultrafast" => {
-                    if value != b"ultrafast" {
-                        gj::set_str(&mut raw, "service_tier", "ultrafast");
-                    }
-                }
-                _ => delete_fields(&mut raw, &["service_tier"]),
             }
-        } else {
-            delete_fields(&mut raw, &["service_tier"]);
         }
     }
     delete_fields(

@@ -10,8 +10,9 @@ use std::collections::{HashMap, HashSet};
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::config::go_trim_space;
 
-use crate::codex_claude::{short_to_original, shorten_call_id};
-use crate::common::{sanitize_claude_tool_id, sse_event};
+use crate::codex_claude::short_to_original;
+use crate::codex_names::claude_visible_call_id;
+use crate::common::sse_event;
 use crate::stream::GoStream;
 use crate::{Error, ResponseCtx};
 
@@ -359,11 +360,7 @@ impl State {
                 br#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}"#,
                 c.block_index,
             );
-            gj::set_str(
-                &mut start,
-                "content_block.id",
-                shorten_call_id(&sanitize_claude_tool_id(&c.call_id)),
-            );
+            gj::set_str(&mut start, "content_block.id", claude_visible_call_id(&c.call_id));
             let names = self.names.get_or_insert_with(|| short_to_original(&self.original));
             let name = names.get(&c.name).cloned().unwrap_or_else(|| c.name.clone());
             gj::set_str(&mut start, "content_block.name", &name);
@@ -944,11 +941,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                     let name = item.get("name").bytes().into_owned();
                     let name = names.get(&name).cloned().unwrap_or(name);
                     let mut block = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
-                    gj::set_str(
-                        &mut block,
-                        "id",
-                        shorten_call_id(&sanitize_claude_tool_id(&item.get("call_id").bytes())),
-                    );
+                    gj::set_str(&mut block, "id", claude_visible_call_id(&item.get("call_id").bytes()));
                     gj::set_str(&mut block, "name", &name);
                     let arguments = item.get("arguments").bytes();
                     let mut input: Vec<u8> = b"{}".to_vec();

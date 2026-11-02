@@ -5,6 +5,7 @@ use cpa_core::config::go_trim_space;
 
 use cpa_common::json::{self as gj, Kind, Res};
 
+use crate::codex_names::shorten_name;
 use crate::common::{format_rfc3339_utc, go_lower, now_nanos, now_unix, sse_event};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx};
@@ -16,24 +17,6 @@ pub static PAIR: Registered = registered!(
     go_stream: go_stream,
     token_count: None,
 );
-
-const NAME_LIMIT: usize = 64;
-
-/// shortenCodexToolNameIfNeeded.
-fn shorten_name(name: &[u8]) -> Vec<u8> {
-    if name.len() <= NAME_LIMIT {
-        return name.to_vec();
-    }
-    if name.starts_with(b"mcp__")
-        && let Some(idx) = name.windows(2).rposition(|w| w == b"__")
-        && idx > 0
-    {
-        let mut candidate = [&b"mcp__"[..], &name[idx + 2..]].concat();
-        candidate.truncate(NAME_LIMIT);
-        return candidate;
-    }
-    name[..NAME_LIMIT].to_vec()
-}
 
 /// firstString: the first path that exists, even when empty.
 fn first_string(value: &Res<'_>, paths: &[&str]) -> Vec<u8> {

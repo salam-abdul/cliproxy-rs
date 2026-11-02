@@ -4,7 +4,8 @@
 use crate::{
     Error, ResponseCtx, apply_patch,
     claude_responses::{qualify_namespace_name, tool_descriptors, tool_winners},
-    codex_chat_request::{request_tool_names, short_name_map},
+    codex_chat_request::{request_tool_names, shorten_name},
+    codex_names::short_name_map,
     common::now_unix,
     stream::GoStream,
 };
@@ -15,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 /// buildReverseMapFromOriginalOpenAI: short name -> declared name.
 fn reverse_names(original: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
-    short_name_map(&request_tool_names(original))
+    short_name_map(&request_tool_names(original), shorten_name)
         .into_iter()
         .map(|(name, short)| (short, name))
         .collect()

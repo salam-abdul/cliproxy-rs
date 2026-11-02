@@ -6,8 +6,9 @@ use std::collections::{HashMap, HashSet};
 use cpa_common::json::{self as gj, GoValue, Kind, Res};
 use cpa_common::signature::{self as sig, BlockKind, Provider};
 use cpa_core::config::go_trim_space;
-use sha2::{Digest, Sha256};
 
+pub(crate) use crate::codex_names::shorten_call_id;
+use crate::codex_names::{service_tier, short_name_map, shorten_name};
 use crate::common::{self, go_lower};
 use crate::{Error, Registered, RequestCtx, codex_claude_response as response, openai_claude};
 
@@ -25,48 +26,6 @@ pub fn request_with_compat(ctx: &RequestCtx<'_>, body: &[u8]) -> Result<Vec<u8>,
     Ok(convert(ctx.model, body, true))
 }
 
-const NAME_LIMIT: usize = 64;
-
-/// shortenNameIfNeeded: at most 64 bytes, keeping `mcp__` plus the last `__` segment.
-fn shorten_name(name: &[u8]) -> Vec<u8> {
-    if name.len() <= NAME_LIMIT {
-        return name.to_vec();
-    }
-    if name.starts_with(b"mcp__")
-        && let Some(idx) = name.windows(2).rposition(|w| w == b"__")
-        && idx > 0
-    {
-        let mut candidate = [&b"mcp__"[..], &name[idx + 2..]].concat();
-        candidate.truncate(NAME_LIMIT);
-        return candidate;
-    }
-    name[..NAME_LIMIT].to_vec()
-}
-
-/// buildShortNameMap: unique short names, suffixing `_1`, `_2`, ... on collisions.
-fn short_name_map(names: &[Vec<u8>]) -> HashMap<Vec<u8>, Vec<u8>> {
-    let mut used: HashSet<Vec<u8>> = HashSet::new();
-    let mut map = HashMap::new();
-    for name in names {
-        let candidate = shorten_name(name);
-        let unique = if used.contains(&candidate) {
-            (1..)
-                .map(|i| {
-                    let suffix = format!("_{i}");
-                    let allowed = NAME_LIMIT.saturating_sub(suffix.len());
-                    [&candidate[..candidate.len().min(allowed)], suffix.as_bytes()].concat()
-                })
-                .find(|tmp| !used.contains(tmp))
-                .unwrap()
-        } else {
-            candidate
-        };
-        used.insert(unique.clone());
-        map.insert(name.clone(), unique);
-    }
-    map
-}
-
 fn tool_names(raw: &[u8]) -> Vec<Vec<u8>> {
     let tools = gj::get(raw, "tools");
     if !tools.is_array() {
@@ -82,7 +41,7 @@ fn tool_names(raw: &[u8]) -> Vec<Vec<u8>> {
 
 /// buildReverseMapFromClaudeOriginalToShort: original tool name -> short name.
 fn original_to_short(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
-    short_name_map(&tool_names(raw))
+    short_name_map(&tool_names(raw), shorten_name)
 }
 
 /// buildReverseMapFromClaudeOriginalShortToOriginal: short name -> original tool name.
@@ -95,28 +54,6 @@ pub(crate) fn short_to_original(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
 
 fn mapped_name(map: &HashMap<Vec<u8>, Vec<u8>>, name: &[u8]) -> Vec<u8> {
     map.get(name).cloned().unwrap_or_else(|| shorten_name(name))
-}
-
-/// shortenCodexCallIDIfNeeded: call IDs within the Responses 64-byte limit, with a
-/// sha256-derived suffix.
-pub(crate) fn shorten_call_id(id: &[u8]) -> Vec<u8> {
-    if id.len() <= NAME_LIMIT {
-        return id.to_vec();
-    }
-    let sum = Sha256::digest(id);
-    let suffix = format!("_{}", cpa_core::hex::encode(&sum[..8]));
-    [&id[..NAME_LIMIT - suffix.len()], suffix.as_bytes()].concat()
-}
-
-/// normalizeCodexServiceTier.
-fn service_tier(r: &Res<'_>) -> &'static str {
-    if r.kind != Kind::String {
-        return "";
-    }
-    match go_lower(go_trim_space(&r.s)).as_slice() {
-        b"fast" | b"priority" => "priority",
-        _ => "",
-    }
 }
 
 fn is_web_search_tool(kind: &[u8]) -> bool {
@@ -685,4 +622,22 @@ fn convert(model: &str, raw: &[u8], preserve: bool) -> Vec<u8> {
     }
     gj::set_items(&mut out, "input", &state.items);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn service_tiers_reach_codex_normalized() {
+        let tier = |body: &str| {
+            let out = super::convert("gpt-5", body.as_bytes(), false);
+            cpa_common::json::get(&out, "service_tier").str().into_owned()
+        };
+        assert_eq!(tier(r#"{"service_tier":"ultrafast","messages":[]}"#), "ultrafast");
+        assert_eq!(tier(r#"{"service_tier":"fast","messages":[]}"#), "priority");
+        assert_eq!(tier(r#"{"service_tier":"auto","messages":[]}"#), "");
+        assert_eq!(
+            tier(r#"{"service_tier":"ultrafast","speed":"fast","messages":[]}"#),
+            "priority"
+        );
+    }
 }

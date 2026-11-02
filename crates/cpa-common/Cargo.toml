@@ -16,5 +16,6 @@ gjson = "0.8.1"
 base64 = "0.22"
 sha2 = "0.10"
 memchr = "2"
+regex = "1"
 # The idle signal (idle.rs).
 tokio.workspace = true

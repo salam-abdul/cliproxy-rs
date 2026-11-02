@@ -1,12 +1,13 @@
 //! Gemini request -> Codex (OpenAI Responses) request, and Codex events back to Gemini
 //! responses (internal/translator/codex/gemini).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
+use crate::codex_names::{self, shorten_name};
 use crate::common::{format_rfc3339_utc, go_lower, is_gemini_thought_part};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx, gemini};
@@ -18,24 +19,6 @@ pub static PAIR: Registered = registered!(
     go_stream: go_stream,
     token_count: Some(gemini::token_count),
 );
-
-const NAME_LIMIT: usize = 64;
-
-/// shortenNameIfNeeded.
-fn shorten_name(name: &[u8]) -> Vec<u8> {
-    if name.len() <= NAME_LIMIT {
-        return name.to_vec();
-    }
-    if name.starts_with(b"mcp__")
-        && let Some(idx) = name.windows(2).rposition(|w| w == b"__")
-        && idx > 0
-    {
-        let mut candidate = [&b"mcp__"[..], &name[idx + 2..]].concat();
-        candidate.truncate(NAME_LIMIT);
-        return candidate;
-    }
-    name[..NAME_LIMIT].to_vec()
-}
 
 /// buildShortNameMap over every declared function name (empty names included).
 fn short_name_map(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
@@ -54,26 +37,7 @@ fn short_name_map(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
             }
         }
     }
-    let mut used: HashSet<Vec<u8>> = HashSet::new();
-    let mut map = HashMap::new();
-    for name in names {
-        let candidate = shorten_name(&name);
-        let unique = if used.contains(&candidate) {
-            (1..)
-                .map(|i| {
-                    let suffix = format!("_{i}");
-                    let allowed = NAME_LIMIT.saturating_sub(suffix.len());
-                    [&candidate[..candidate.len().min(allowed)], suffix.as_bytes()].concat()
-                })
-                .find(|tmp| !used.contains(tmp))
-                .unwrap()
-        } else {
-            candidate
-        };
-        used.insert(unique.clone());
-        map.insert(name, unique);
-    }
-    map
+    codex_names::short_name_map(names, shorten_name)
 }
 
 fn mapped_name(map: &HashMap<Vec<u8>, Vec<u8>>, name: &[u8]) -> Vec<u8> {

@@ -8,13 +8,12 @@ use cpa_common::json::{self as gj, AnyValue, Kind, Res};
 use cpa_core::config::go_trim_space;
 
 use crate::claude_responses::{extract_call_id, normalize_tool_call_outputs};
+use crate::codex_names::NAME_LIMIT;
 use crate::common::{align_openai_tool_call_messages_with, go_lower};
 use crate::responses_tools::{tool_description, tool_parameters};
 
 // ---------------------------------------------------------------------------------------
 // Tool declarations and Chat names (openai_openai-responses_tools.go)
-
-const NAME_LIMIT: usize = 64;
 
 /// One function or custom tool declaration and its Chat Completions name.
 #[derive(Clone, Debug)]

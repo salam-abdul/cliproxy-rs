@@ -79,6 +79,7 @@ pub mod proxy;
 mod quota;
 mod rawjson;
 mod replay;
+mod response_replay;
 #[cfg(test)]
 mod test_tls;
 mod tls;

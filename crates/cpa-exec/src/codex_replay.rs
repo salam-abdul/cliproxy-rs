@@ -15,6 +15,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::replay::text;
+use crate::response_replay::{
+    align_call_ids, comparable_call_ids, insert_index, is_tool_call, is_tool_output, tool_call_keys,
+};
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecRequest;
@@ -630,14 +633,6 @@ fn insert_turns(body: &[u8], replay: &[Vec<u8>]) -> Option<Vec<u8>> {
     gj::try_set_raw(body, "input", array).ok()
 }
 
-fn is_tool_call(kind: &str) -> bool {
-    matches!(kind, "function_call" | "custom_tool_call")
-}
-
-fn is_tool_output(kind: &str) -> bool {
-    matches!(kind, "function_call_output" | "custom_tool_call_output")
-}
-
 /// `codexReasoningReplayTurnAnchorIndex`.
 fn anchor_index(
     inputs: &[Res<'_>],
@@ -810,131 +805,6 @@ fn assistant_fingerprint(item: &Res<'_>) -> String {
         return String::new();
     }
     cpa_core::hex::encode(&Sha256::digest(&text_bytes))
-}
-
-/// `codexReasoningReplayInsertIndex`: before the output answering a replayed call, else
-/// at the last assistant message, else before the first non-instruction item.
-fn insert_index(inputs: &[Res<'_>], replay: &[Vec<u8>]) -> usize {
-    let mut ids = HashSet::new();
-    for item in replay {
-        let r = gj::parse(item);
-        if is_tool_call(&field(&r, "type")) {
-            ids.extend(comparable_call_ids(&r.get("call_id").str()));
-        }
-    }
-    if !ids.is_empty() {
-        for (index, input) in inputs.iter().enumerate() {
-            if !is_tool_output(&field(input, "type")) {
-                continue;
-            }
-            let id = field(input, "call_id");
-            if id.is_empty() || ids.contains(&id) {
-                return index;
-            }
-        }
-    }
-    if let Some(index) = inputs
-        .iter()
-        .rposition(|i| message_role(i).as_deref() == Some("assistant"))
-    {
-        return index;
-    }
-    inputs
-        .iter()
-        .position(|i| !matches!(message_role(i).as_deref(), Some("developer" | "system")))
-        .unwrap_or(inputs.len())
-}
-
-/// `codexAlignReasoningReplayToolCallIDs`: replayed calls take the call id the input's
-/// output uses.
-fn align_call_ids(inputs: &[Res<'_>], items: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    let mut output_ids: HashMap<String, String> = HashMap::new();
-    for input in inputs {
-        if !is_tool_output(&field(input, "type")) {
-            continue;
-        }
-        let id = field(input, "call_id");
-        if id.is_empty() {
-            continue;
-        }
-        for candidate in comparable_call_ids(&id) {
-            output_ids.insert(candidate, id.clone());
-        }
-    }
-    if output_ids.is_empty() {
-        return items;
-    }
-    items
-        .into_iter()
-        .map(|item| {
-            if !is_tool_call(&item_type(&item)) {
-                return item;
-            }
-            let id = text(&gj::get(&item, "call_id"));
-            let output = comparable_call_ids(&id)
-                .into_iter()
-                .find_map(|c| output_ids.get(&c).filter(|v| !v.is_empty()).cloned());
-            match output {
-                Some(output) if output != id => gj::try_set_str(&item, "call_id", &output).unwrap_or(item),
-                _ => item,
-            }
-        })
-        .collect()
-}
-
-/// `codexReplayMessageRole`.
-fn message_role(item: &Res<'_>) -> Option<String> {
-    let kind = field(item, "type");
-    let role = field(item, "role").to_lowercase();
-    (!role.is_empty() && (kind.is_empty() || kind == "message")).then_some(role)
-}
-
-/// `codexReplayToolCallKeys`.
-fn tool_call_keys(item: &Res<'_>) -> Vec<String> {
-    let kind = field(item, "type");
-    if !is_tool_call(&kind) {
-        return Vec::new();
-    }
-    comparable_call_ids(&item.get("call_id").str())
-        .into_iter()
-        .map(|id| format!("{kind}:{id}"))
-        .collect()
-}
-
-/// `codexReplayComparableCallIDs`: the id, plus the form Claude clients see
-/// (`SanitizeClaudeToolID`, shortened to 64 bytes) when it differs.
-fn comparable_call_ids(id: &str) -> Vec<String> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Vec::new();
-    }
-    let sanitized: String = id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let visible = shorten(sanitized);
-    if visible.is_empty() || visible == id {
-        vec![id.to_owned()]
-    } else {
-        vec![id.to_owned(), visible]
-    }
-}
-
-/// `shortenCodexReplayCallIDIfNeeded`.
-fn shorten(id: String) -> String {
-    const LIMIT: usize = 64;
-    if id.len() <= LIMIT {
-        return id;
-    }
-    let sum = Sha256::digest(id.as_bytes());
-    let suffix = format!("_{}", cpa_core::hex::encode(&sum[..8]));
-    format!("{}{suffix}", &id[..LIMIT - suffix.len()])
 }
 
 #[cfg(test)]

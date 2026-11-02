@@ -13,8 +13,7 @@ use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::signature::{Provider, detect_provider};
 
 use crate::devin_wire::{
-    DEFAULT_MAX_TOKENS, Image, Prompt, Tool, ToolCall, contains, is_codex_app_automation_update,
-    sanitize_tool_description,
+    DEFAULT_MAX_TOKENS, Image, Prompt, Tool, ToolCall, is_codex_app_automation_update, sanitize_tool_description,
 };
 
 /// `devinEmptyToolResultPlaceholder`.
@@ -459,7 +458,7 @@ fn image_headers(images: &[Image]) -> Vec<u8> {
 
 /// Prefixes `text` with the image headers unless it already names an image.
 fn with_image_headers(text: Vec<u8>, images: &[Image]) -> Vec<u8> {
-    if images.is_empty() || contains(&text, b"[Image ") {
+    if images.is_empty() || cpa_common::gostr::contains(&text, b"[Image ") {
         return text;
     }
     let mut out = image_headers(images);

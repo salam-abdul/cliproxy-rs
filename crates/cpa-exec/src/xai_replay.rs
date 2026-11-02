@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::replay::text;
 use crate::replay::{claude_code_session, header_session, payload_session};
+use crate::response_replay::{align_call_ids, comparable_call_ids, insert_index, tool_call_keys};
 
 /// `XAIReasoningReplayCacheTTL`.
 const TTL: Duration = Duration::from_secs(3600);
@@ -447,66 +448,6 @@ fn normalize_item(item: &[u8]) -> Option<Vec<u8>> {
 
 // --- request side (filterXAIReasoningReplayItemsForInput, insertCodexReasoningReplayItems) -
 
-/// `util.SanitizeClaudeToolID` for a non-empty id: every rune outside `[A-Za-z0-9_-]`
-/// (an invalid byte counts as one rune) becomes `_`.
-fn sanitize_tool_id(id: &str) -> String {
-    let bytes = id.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let (c, n) = gj::decode_rune(&bytes[i..]);
-        match c {
-            Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => out.push(c),
-            _ => out.push('_'),
-        }
-        i += n.max(1);
-    }
-    out
-}
-
-/// `shortenCodexReplayCallIDIfNeeded`.
-fn shorten_call_id(id: String) -> String {
-    const LIMIT: usize = 64;
-    if id.len() <= LIMIT {
-        return id;
-    }
-    let digest = Sha256::digest(id.as_bytes());
-    let suffix: String = std::iter::once('_')
-        .chain(
-            digest[..8]
-                .iter()
-                .flat_map(|b| format!("{b:02x}").chars().collect::<Vec<_>>()),
-        )
-        .collect();
-    format!("{}{suffix}", &id[..LIMIT - suffix.len()])
-}
-
-/// `codexReplayComparableCallIDs`: the id and its Claude-visible form.
-fn comparable_call_ids(call_id: &str) -> Vec<String> {
-    let call_id = call_id.trim();
-    if call_id.is_empty() {
-        return vec![];
-    }
-    let visible = shorten_call_id(sanitize_tool_id(call_id));
-    if visible.is_empty() || visible == call_id {
-        vec![call_id.to_owned()]
-    } else {
-        vec![call_id.to_owned(), visible]
-    }
-}
-
-/// `codexReplayToolCallKeys`.
-fn tool_call_keys(item: &Res<'_>) -> Vec<String> {
-    let item_type = text(&item.get("type"));
-    if item_type != "function_call" && item_type != "custom_tool_call" {
-        return vec![];
-    }
-    comparable_call_ids(&item.get("call_id").str())
-        .into_iter()
-        .map(|id| format!("{item_type}:{id}"))
-        .collect()
-}
-
 /// One part of an assistant message, for equality (`xaiAssistantMessagePart`).
 fn message_parts(content: &Res<'_>) -> Option<Vec<(String, Vec<u8>)>> {
     if content.kind == Kind::String {
@@ -616,85 +557,6 @@ fn filter_for_input(body: &[u8], items: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     filtered
 }
 
-/// `codexReplayMessageRole`.
-fn message_role(item: &Res<'_>) -> Option<String> {
-    let item_type = text(&item.get("type"));
-    let role = text(&item.get("role")).go_lower();
-    (!role.is_empty() && (item_type.is_empty() || item_type == "message")).then_some(role)
-}
-
-fn is_call_output(item: &Res<'_>) -> bool {
-    matches!(
-        text(&item.get("type")).as_str(),
-        "function_call_output" | "custom_tool_call_output"
-    )
-}
-
-/// `codexReasoningReplayInsertIndex`.
-fn insert_index(input: &[Res<'_>], replay: &[Res<'_>]) -> usize {
-    let mut replay_ids = HashSet::new();
-    for item in replay {
-        if matches!(text(&item.get("type")).as_str(), "function_call" | "custom_tool_call") {
-            replay_ids.extend(comparable_call_ids(&item.get("call_id").str()));
-        }
-    }
-    if !replay_ids.is_empty()
-        && let Some(index) = input.iter().position(|item| {
-            let call_id = text(&item.get("call_id"));
-            is_call_output(item) && (call_id.is_empty() || replay_ids.contains(&call_id))
-        })
-    {
-        return index;
-    }
-    if let Some(index) = input
-        .iter()
-        .rposition(|item| message_role(item).as_deref() == Some("assistant"))
-    {
-        return index;
-    }
-    input
-        .iter()
-        .position(|item| !matches!(message_role(item).as_deref(), Some("developer" | "system")))
-        .unwrap_or(input.len())
-}
-
-/// `codexAlignReasoningReplayToolCallIDs`: replayed calls take the call id their output
-/// carries in the input.
-fn align_call_ids(input: &[Res<'_>], replay: &[Vec<u8>]) -> Vec<Vec<u8>> {
-    let mut outputs: HashMap<String, String> = HashMap::new();
-    for item in input.iter().filter(|i| is_call_output(i)) {
-        let call_id = text(&item.get("call_id"));
-        if call_id.is_empty() {
-            continue;
-        }
-        for candidate in comparable_call_ids(&call_id) {
-            outputs.insert(candidate, call_id.clone());
-        }
-    }
-    if outputs.is_empty() {
-        return replay.to_vec();
-    }
-    replay
-        .iter()
-        .map(|item| {
-            let r = gj::parse(item);
-            if !matches!(text(&r.get("type")).as_str(), "function_call" | "custom_tool_call") {
-                return item.clone();
-            }
-            let call_id = text(&r.get("call_id"));
-            let output = comparable_call_ids(&call_id)
-                .into_iter()
-                .find_map(|c| outputs.get(&c).filter(|v| !v.is_empty()).cloned());
-            match output {
-                Some(output) if output != call_id => {
-                    gj::try_set_str(item, "call_id", output).unwrap_or_else(|_| item.clone())
-                }
-                _ => item.clone(),
-            }
-        })
-        .collect()
-}
-
 /// `insertCodexReasoningReplayItems`.
 fn insert_items(body: &[u8], replay: &[Vec<u8>]) -> Option<Vec<u8>> {
     let input = gj::get(body, "input");
@@ -702,9 +564,8 @@ fn insert_items(body: &[u8], replay: &[Vec<u8>]) -> Option<Vec<u8>> {
         return None;
     }
     let input_items = input.array();
-    let parsed: Vec<Res<'_>> = replay.iter().map(|i| gj::parse(i)).collect();
-    let index = insert_index(&input_items, &parsed);
-    let replay = align_call_ids(&input_items, replay);
+    let index = insert_index(&input_items, replay);
+    let replay = align_call_ids(&input_items, replay.to_vec());
     let mut items: Vec<&[u8]> = Vec::with_capacity(input_items.len() + replay.len());
     for (i, item) in input_items.iter().enumerate() {
         if i == index {
@@ -724,17 +585,6 @@ fn insert_items(body: &[u8], replay: &[Vec<u8>]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn long_call_ids_shorten_like_go() {
-        // 70 sanitized characters: 47-byte prefix plus `_` and 16 hex digits.
-        let id = "call.".to_owned() + &"x".repeat(65);
-        let ids = comparable_call_ids(&id);
-        assert_eq!(ids.len(), 2);
-        assert_eq!(ids[1].len(), 64);
-        assert!(ids[1].starts_with("call_xxx"));
-        assert_eq!(comparable_call_ids("  call_1 "), vec!["call_1".to_owned()]);
-    }
 
     /// Go's Home KV backend for xAI replay, recorded by the reference's
     /// internal/cache/zz_rustgolden_test.go: keys, base64 values, TTLs, the store
