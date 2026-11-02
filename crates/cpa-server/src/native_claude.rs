@@ -296,16 +296,23 @@ impl State {
             .await
     }
 
-    fn accounts(&self) -> anyhow::Result<Vec<Account>> {
+    /// Reads every Claude account fresh from disk on the blocking pool, so admission
+    /// sees current tokens and flags without stalling an async worker.
+    async fn accounts(self: &Arc<Self>) -> anyhow::Result<Vec<Account>> {
         if let Some(a) = &self.config.fixture_accounts {
             return Ok(a.clone());
         }
+        let s = self.clone();
+        tokio::task::spawn_blocking(move || s.read_accounts()).await?
+    }
+    fn read_accounts(&self) -> anyhow::Result<Vec<Account>> {
         let settings: Value = if self.config.settings_file.is_file() {
             serde_json::from_slice(&private(&self.config.settings_file)?)?
         } else {
             json!({})
         };
         let mut all = Vec::new();
+        let mut root = None;
         for c in self
             .rt
             .store()
@@ -316,9 +323,12 @@ impl State {
             let cpa_core::credential::Source::File(ref path) = c.source else {
                 continue;
             };
-            let root = std::fs::canonicalize(&self.config.auth_dir)?;
+            let root = match &root {
+                Some(root) => root,
+                None => root.insert(std::fs::canonicalize(&self.config.auth_dir)?),
+            };
             let file = std::fs::canonicalize(path)?;
-            anyhow::ensure!(file.starts_with(&root), "Credential outside auth directory");
+            anyhow::ensure!(file.starts_with(root), "Credential outside auth directory");
             let a: Value = serde_json::from_slice(&private(path)?)?;
             anyhow::ensure!(a["type"] == "claude", "Credential provider mismatch");
             let fallback = hash(format!(
@@ -480,7 +490,8 @@ impl State {
                 return Ok((None, None));
             }
             let accounts = self
-                .accounts()?
+                .accounts()
+                .await?
                 .into_iter()
                 .filter(|a| a.enabled && !tried.contains(&a.id))
                 .collect();
@@ -501,7 +512,8 @@ impl State {
             };
             tried.insert(a.id.clone());
             let Some(mut current) = self
-                .accounts()?
+                .accounts()
+                .await?
                 .into_iter()
                 .find(|current| current.id == a.id && current.enabled)
             else {

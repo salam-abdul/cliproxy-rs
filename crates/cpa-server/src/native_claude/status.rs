@@ -75,7 +75,7 @@ impl State {
     pub(crate) async fn status_for(self: &Arc<Self>, model: &str) -> anyhow::Result<Value> {
         let mut all = Vec::new();
         let allow_extra = self.allow_extra_usage();
-        let accounts = self.quota_accounts(self.accounts()?).await;
+        let accounts = self.quota_accounts(self.accounts().await?).await;
         let at = now();
         let mut valid_until = at + 15000;
         let mut ready = false;
