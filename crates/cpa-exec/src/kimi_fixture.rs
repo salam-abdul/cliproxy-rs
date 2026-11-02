@@ -745,7 +745,7 @@ pub(crate) fn assert_usage_like_go(name: &str, fx: &Value, log: &UsageLog, failu
                 "{name}: upstream model"
             ),
             (Some("devin"), Some(model)) => assert!(
-                !model.is_empty() && sent.windows(model.len()).any(|w| w == model.as_bytes()),
+                !model.is_empty() && cpa_common::gostr::contains(&sent, model.as_bytes()),
                 "{name}: upstream model {model:?} is not in Go's request"
             ),
             (Some("meta"), None) => {}

@@ -136,7 +136,7 @@ fn normalize_empty_function_call_arguments(raw: Vec<u8>) -> Vec<u8> {
 }
 
 fn strip_cache_breakpoints(raw: Vec<u8>) -> Vec<u8> {
-    if !raw.windows(25).any(|w| w == b"\"prompt_cache_breakpoint\"") {
+    if !cpa_common::gostr::contains(&raw, b"\"prompt_cache_breakpoint\"") {
         return raw;
     }
     rebuild_input(raw, |item, item_raw| {

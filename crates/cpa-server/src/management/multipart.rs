@@ -279,7 +279,7 @@ fn scan_until_boundary(buf: &[u8], dash: &[u8], nl_dash: &[u8], total: usize) ->
             return (0, Scan::UnexpectedEof);
         }
     }
-    if let Some(i) = buf.windows(nl_dash.len()).position(|w| w == nl_dash) {
+    if let Some(i) = cpa_common::gostr::index(buf, nl_dash) {
         return match match_after_prefix(&buf[i..], nl_dash) {
             true => (i, Scan::End),
             false => (i + nl_dash.len(), Scan::Data),

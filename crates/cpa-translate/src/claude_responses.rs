@@ -427,7 +427,7 @@ fn thinking_separator(parts: &[Vec<u8>]) -> Option<Vec<u8>> {
 
 fn data_url(url: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let trimmed = url.strip_prefix(b"data:").unwrap_or(url);
-    match trimmed.windows(8).position(|w| w == b";base64,") {
+    match cpa_common::gostr::index(trimmed, b";base64,") {
         Some(i) => {
             let media = if i == 0 {
                 b"application/octet-stream".to_vec()
@@ -471,7 +471,7 @@ fn file_part(part: &Res<'_>) -> Option<Vec<u8>> {
     let (mut media, mut data) = (b"application/octet-stream".to_vec(), file.clone());
     if file.starts_with(b"data:") {
         let trimmed = &file[5..];
-        if let Some(i) = trimmed.windows(8).position(|w| w == b";base64,") {
+        if let Some(i) = cpa_common::gostr::index(trimmed, b";base64,") {
             if i > 0 {
                 media = trimmed[..i].to_vec();
             }

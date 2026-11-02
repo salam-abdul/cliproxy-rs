@@ -44,7 +44,7 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 
 /// isAntigravityModel.
 pub(crate) fn is_antigravity(model: &[u8]) -> bool {
-    go_lower(model).windows(11).any(|w| w == b"antigravity")
+    cpa_common::gostr::contains(&go_lower(model), b"antigravity")
 }
 
 const EXTERNAL_TOOL_PREFIX: &[u8] = b"external_";

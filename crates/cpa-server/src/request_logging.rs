@@ -1848,7 +1848,7 @@ mod tests {
         for request in [false, true] {
             let (body, _) = decode(compressed.clone(), &headers, request, None).await;
             assert!(body.len() < source.len() + 128);
-            assert!(body.windows(9).any(|bytes| bytes == b"TRUNCATED"));
+            assert!(cpa_common::gostr::contains(&body, b"TRUNCATED"));
         }
         // One raw-byte block with a 16 MiB window advertised in its frame header.
         let oversized_window = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x70, 9, 0, 0, b'x'];
@@ -2822,16 +2822,13 @@ mod tests {
                 .decode(case["raw"].as_str().unwrap())
                 .unwrap();
             let section = b"=== RESPONSE ===\n";
-            let start = log.windows(section.len()).position(|b| b == section).unwrap() + section.len();
-            let start = start + log[start..].windows(2).position(|b| b == b"\n\n").unwrap() + 2;
+            let start = cpa_common::gostr::index(&log, section).unwrap() + section.len();
+            let start = start + cpa_common::gostr::index(&log[start..], b"\n\n").unwrap() + 2;
             let logged_body = &log[start..log.len() - 1];
             let mut headers = HeaderMap::new();
             headers.insert("content-encoding", case["encoding"].as_str().unwrap().parse().unwrap());
             let (body, error) = decode(raw.clone(), &headers, false, None).await;
-            if logged_body
-                .windows(b"\n[DECOMPRESSION ERROR: ".len())
-                .any(|bytes| bytes == b"\n[DECOMPRESSION ERROR: ")
-            {
+            if cpa_common::gostr::contains(logged_body, b"\n[DECOMPRESSION ERROR: ") {
                 assert_eq!(body, raw);
                 assert!(logged_body.starts_with(&body));
                 assert!(logged_body[body.len()..].starts_with(b"\n[DECOMPRESSION ERROR: "));
@@ -3034,9 +3031,7 @@ mod tests {
         };
         let content = persisted(true, StatusCode::OK, events).await;
         let find = |from: usize, needle: &[u8]| {
-            from + content[from..]
-                .windows(needle.len())
-                .position(|w| w == needle)
+            from + cpa_common::gostr::index(&content[from..], needle)
                 .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(needle)))
         };
         let expect = |at: usize, want: &[u8]| {

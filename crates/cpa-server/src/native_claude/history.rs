@@ -617,8 +617,8 @@ mod tests {
         assert_eq!(data["models"][0]["reportedCacheWrite"], 1);
         assert_eq!(data["statuses"][0]["fiveHourUsed"], 30.0);
         let bytes = std::fs::read(&path).unwrap();
-        assert!(!bytes.windows(15).any(|chunk| chunk == b"private-session"));
-        assert!(!bytes.windows(14).any(|chunk| chunk == b"private-digest"));
+        assert!(!cpa_common::gostr::contains(&bytes, b"private-session"));
+        assert!(!cpa_common::gostr::contains(&bytes, b"private-digest"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

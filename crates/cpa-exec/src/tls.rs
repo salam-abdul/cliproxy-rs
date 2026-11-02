@@ -404,7 +404,7 @@ mod tests {
                             captured.push(socket.read_u8().await.unwrap());
                         }
                         assert!(captured.starts_with(b"CONNECT "));
-                        assert!(!captured.windows(6).any(|w| w == b"secret"));
+                        assert!(!cpa_common::gostr::contains(&captured, b"secret"));
                         if proxy_mode == 2 {
                             socket
                                 .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -416,7 +416,7 @@ mod tests {
                     socket.read_to_end(&mut remaining).await.unwrap();
                     if proxy_mode != 1 {
                         assert_eq!(remaining[0], 22, "ClientHello only before setup succeeds");
-                        assert!(!remaining.windows(6).any(|w| w == b"secret"));
+                        assert!(!cpa_common::gostr::contains(&remaining, b"secret"));
                     } else {
                         assert!(remaining.is_empty(), "no TLS or inference before CONNECT succeeds");
                     }

@@ -53,7 +53,7 @@ async fn read_request(conn: &mut TcpStream) {
         let n = conn.read(&mut tmp).await.unwrap();
         assert!(n > 0, "upstream connection closed before the request was read");
         buf.extend_from_slice(&tmp[..n]);
-        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        let Some(end) = cpa_common::gostr::index(&buf, b"\r\n\r\n") else {
             continue;
         };
         let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();

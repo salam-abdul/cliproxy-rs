@@ -175,7 +175,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     }
     apply_tools(&mut out, raw, &names);
     apply_tool_choice(&mut out, raw, &names);
-    if go_lower(model.as_bytes()).windows(6).any(|w| w == b"claude") {
+    if cpa_common::gostr::contains(&go_lower(model.as_bytes()), b"claude") {
         out = sanitize_claude_signatures(out);
     }
     attach_default_safety_settings(out, "request.safetySettings")

@@ -453,7 +453,7 @@ impl Reader<'_> {
         let mut from = 0;
         while let Some(i) = buf
             .get(from..)
-            .and_then(|b| b.windows(nl_dash.len()).position(|w| w == nl_dash.as_slice()))
+            .and_then(|b| cpa_common::gostr::index(b, nl_dash.as_slice()))
             .map(|i| i + from)
         {
             if match_after_prefix(&buf[i..], nl_dash.len()) {

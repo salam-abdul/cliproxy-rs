@@ -32,7 +32,7 @@ async fn upstream(State(seen): State<Seen>, req: Request) -> Response {
     let model = body["model"].as_str().unwrap_or_default().to_owned();
     seen.lock().unwrap().push(model.clone());
     let reply = r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
-    if raw.windows(8).any(|w| w == b"MODE_429") {
+    if cpa_common::gostr::contains(&raw, b"MODE_429") {
         // A rejected shared window: a credential-scope quota failure.
         return (
             StatusCode::TOO_MANY_REQUESTS,

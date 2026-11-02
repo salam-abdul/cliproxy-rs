@@ -52,7 +52,7 @@ fn request_model(model: &str, root: &Res<'_>) -> Vec<u8> {
 
 /// isDevinModel.
 fn is_devin(model: &[u8]) -> bool {
-    go_lower(go_trim_space(model)).windows(5).any(|w| w == b"devin")
+    cpa_common::gostr::contains(&go_lower(go_trim_space(model)), b"devin")
 }
 
 /// setJSONValue: a string holding valid JSON is set raw (untrimmed).

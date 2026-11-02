@@ -71,7 +71,7 @@ pub(crate) fn convert(model: &str, input: &[u8]) -> Vec<u8> {
         ],
     );
 
-    let raw = if go_lower(model.as_bytes()).windows(6).any(|w| w == b"claude") {
+    let raw = if cpa_common::gostr::contains(&go_lower(model.as_bytes()), b"claude") {
         sanitize_claude_signatures(raw)
     } else {
         sanitize_gemini_request_thought_signatures(&raw, "request.contents")

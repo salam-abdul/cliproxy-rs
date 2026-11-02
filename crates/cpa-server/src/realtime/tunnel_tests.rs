@@ -612,7 +612,7 @@ async fn unauthenticated_connections_never_dial() {
     // A frame for another session (Go: `attacker:local`).
     let mut client = TcpStream::connect(tunnel.0).await.unwrap();
     let mut frame = valid_frame();
-    let at = frame.windows(12).position(|w| w == b"remote:local").unwrap();
+    let at = cpa_common::gostr::index(&frame, b"remote:local").unwrap();
     frame[at..at + 6].copy_from_slice(b"attack");
     client.write_all(&frame).await.unwrap();
     assert!(

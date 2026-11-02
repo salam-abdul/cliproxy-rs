@@ -83,7 +83,7 @@ fn schema_arguments_stream_flushes_deferred_empty_at_end() {
             raw.to_vec()
         };
         let first = stream.line(&raw).unwrap().concat();
-        assert!(!first.windows(16).any(|w| w == b"input_json_delta"));
+        assert!(!cpa_common::gostr::contains(&first, b"input_json_delta"));
         let output = stream.line(b"[DONE]").unwrap().concat();
         let partials: Vec<_> = output
             .split(|b| *b == b'\n')

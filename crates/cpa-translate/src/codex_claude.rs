@@ -214,9 +214,7 @@ fn misses_required(schema: &Res<'_>) -> bool {
 /// codexClaudeTargetAcceptsGrokSignature.
 fn accepts_grok_signature(model: &str) -> bool {
     let base = cpa_common::thinking::parse_suffix(model).model_name;
-    go_lower(go_trim_space(base.as_bytes()))
-        .windows(4)
-        .any(|w| w == b"grok")
+    cpa_common::gostr::contains(&go_lower(go_trim_space(base.as_bytes())), b"grok")
 }
 
 fn data_url(media_type: &[u8], data: &[u8]) -> Vec<u8> {

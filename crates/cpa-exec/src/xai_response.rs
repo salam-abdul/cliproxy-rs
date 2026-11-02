@@ -414,7 +414,7 @@ pub(crate) fn unwrap_dispatcher_arguments(
 
 /// `restoreXAIClientWebSearchName`: the client's `web_search` function back from its alias.
 pub(crate) fn restore_web_search_name(mut data: Vec<u8>, alias: &str) -> Vec<u8> {
-    if alias.is_empty() || !data.windows(alias.len()).any(|w| w == alias.as_bytes()) || !gj::valid(&data) {
+    if alias.is_empty() || !cpa_common::gostr::contains(&data, alias.as_bytes()) || !gj::valid(&data) {
         return data;
     }
     if text(&gj::get(&data, "item.namespace")).is_empty() {

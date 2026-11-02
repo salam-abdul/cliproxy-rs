@@ -158,8 +158,8 @@ fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
 }
 
 fn frame_len(chunk: &[u8]) -> usize {
-    let lf = chunk.windows(2).position(|w| w == b"\n\n");
-    let crlf = chunk.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf = cpa_common::gostr::index(chunk, b"\n\n");
+    let crlf = cpa_common::gostr::index(chunk, b"\r\n\r\n");
     match (lf, crlf) {
         (None, None) => 0,
         (None, Some(c)) => c + 4,

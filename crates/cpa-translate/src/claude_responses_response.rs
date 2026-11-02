@@ -262,7 +262,7 @@ pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
             v.raw.to_vec()
         };
     }
-    let Some(idx) = trimmed.windows(7).position(|w| w == b"\"input\"") else {
+    let Some(idx) = cpa_common::gostr::index(trimmed, b"\"input\"") else {
         return arguments.to_vec();
     };
     let rest = go_trim_space(&trimmed[idx + 7..]);

@@ -1096,7 +1096,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     let thinking_type = thinking.get("type").bytes().into_owned();
     let has_thinking = thinking.is_object() && matches!(thinking_type.as_slice(), b"enabled" | b"adaptive" | b"auto");
     let lower_model = go_lower(model.as_bytes());
-    let has = |needle: &[u8]| lower_model.windows(needle.len()).any(|w| w == needle);
+    let has = |needle: &[u8]| cpa_common::gostr::contains(&lower_model, needle);
     if tools_json.is_some() && !choice_none && has_thinking && has(b"claude") && has(b"thinking") {
         let mut hint = br#"{"text":""}"#.to_vec();
         gj::set_str(&mut hint, "text", INTERLEAVED_HINT);

@@ -34,7 +34,7 @@ pub(crate) fn description(tool: &Res<'_>) -> Vec<u8> {
     let warning: &[u8] = b"This is a FREEFORM tool, so do not wrap the patch in JSON.";
     let mut stripped = vec![];
     let mut rest = &original[..];
-    while let Some(i) = rest.windows(warning.len()).position(|w| w == warning) {
+    while let Some(i) = cpa_common::gostr::index(rest, warning) {
         stripped.extend_from_slice(&rest[..i]);
         rest = &rest[i + warning.len()..];
     }
@@ -47,7 +47,7 @@ pub(crate) fn description(tool: &Res<'_>) -> Vec<u8> {
     out.extend_from_slice(INSTRUCTIONS.as_bytes());
     let grammar = tool.get("format.definition").bytes();
     if !grammar.is_empty() {
-        if grammar.windows(19).any(|w| w == b"*** Environment ID:") {
+        if cpa_common::gostr::contains(&grammar, b"*** Environment ID:") {
             out.extend_from_slice(b"\n\nUse *** Environment ID: as specified by the patch grammar.");
         }
         out.extend_from_slice(b"\n\nOriginal patch grammar:\n");
