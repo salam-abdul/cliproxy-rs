@@ -252,10 +252,6 @@ ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .state-label small { font-weight: 400; font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item > * { min-width: 0; }
 .list > li.group { border-bottom: 0; }
-.open > .item { background: var(--hover); }
-.detail { display: grid; gap: 22px; margin: 4px 0 14px; }
-.detail .form > .field { flex: 0 1 96px; }
-.detail .form > .note-field { flex: 1 1 240px; }
 
 /* Other grids */
 .list .catalog { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 72px 72px; gap: 16px; min-height: 44px; }
@@ -314,8 +310,6 @@ select { appearance: none; padding-right: 34px; background: var(--raised) url("d
 .accounts .name { flex: 1; min-width: 0; }
 .accounts .name strong, .accounts .name small { white-space: normal; overflow-wrap: anywhere; }
 .accounts .state-label { max-width: 21rem; text-align: right; }
-.accounts .detail { display: grid; gap: 1.5rem; }
-.accounts details > summary { cursor: pointer; padding: .75rem 0; }
 .switch-track { display: inline-flex; width: 2.25rem; height: 1.25rem; border-radius: 1rem; background: var(--ink-3); padding: 2px; }
 .switch-track > span { width: 1rem; height: 1rem; border-radius: 50%; background: var(--body); }
 [aria-checked="true"] .switch-track { background: var(--accent); }
@@ -324,7 +318,6 @@ select { appearance: none; padding-right: 34px; background: var(--raised) url("d
 @media (max-width: 600px) {
   .accounts .item { flex-wrap: wrap; gap: .5rem; }
   .accounts .state-label { width: 100%; max-width: none; text-align: left; padding-left: 1.5rem; }
-  .accounts .detail { padding: 1rem; }
   .head { flex-wrap: wrap; }
   .top .host { display: none; }
 }
