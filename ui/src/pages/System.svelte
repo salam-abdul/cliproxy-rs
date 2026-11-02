@@ -7,7 +7,7 @@
   const facts = $derived(
     [
       ["Management API", new URL(endpoint()).pathname],
-      ["Server", store.meta.version.replace("/", " ") || "Not reported"],
+      ["Server", store.meta.version || "Not reported"],
       ["Commit", store.meta.commit !== "none" && store.meta.commit],
       ["Built", !isNaN(Date.parse(store.meta.built)) && new Date(store.meta.built).toLocaleString()],
       ["Config layout", c["config-version"] ? `v${c["config-version"]}` : "Legacy (migrated on save)"],

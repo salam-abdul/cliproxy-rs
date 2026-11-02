@@ -17,7 +17,7 @@ const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", st
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 await page.route("**/*", async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
-  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "cliproxy-rs/0.2.6" } });
+  const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "cliproxy-rs-0.2.6" } });
   if (path === "/v8/management/observability/native/status") return send({ enabled: native, allowExtraUsage: overage, model: new URL(request.url()).searchParams.get("model") || "claude", validUntil: expired ? 1 : 9e15, ready: availability === "included", selectionStrategy:"soonest-reset", selectionOrder:availability === "included" ? ["a"] : [], newSessionMinRemaining:5, accounts: creds.map(a => ({id:a.auth_index,fileId:a.id || a.name,name:a.name,availability:a.disabled ? "disabled" : availability})) });
   if (path === "/v8/management/routing/native-policy") {
     assert.equal(request.method(), "PATCH");
