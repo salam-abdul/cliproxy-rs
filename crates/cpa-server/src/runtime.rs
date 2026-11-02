@@ -725,6 +725,9 @@ pub struct Selection {
     pub lcp: Option<Arc<crate::lcp::Request>>,
     /// The only credential this selection may use (Go `WithPinnedAuthID`).
     pub pinned: Option<String>,
+    /// A route's own credential rule, checked during selection instead of excluding
+    /// every credential it refuses.
+    pub accept: Option<fn(&Credential) -> bool>,
     /// Credential IDs already tried in this request.
     pub exclude: Vec<String>,
     pub retry_round: usize,
@@ -1280,6 +1283,7 @@ impl CredentialStore {
                 .filter(|c| {
                     !c.disabled
                         && selection.pinned.as_ref().is_none_or(|id| *id == c.id)
+                        && selection.accept.is_none_or(|accept| accept(c))
                         && !excluded.contains(c.id.as_str())
                 })
                 .map(|c| (c, inner.profile(c)))
@@ -2046,6 +2050,26 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(store.select(only.clone()).unwrap().credential.id, "c2.json");
         }
+    }
+
+    #[test]
+    fn a_route_credential_rule_narrows_selection() {
+        let store = CredentialStore::new(vec![
+            cred("c1.json", "claude", false),
+            cred("keep.json", "claude", false),
+        ]);
+        let only_kept = Selection {
+            accept: Some(|c| c.id == "keep.json"),
+            ..sel("claude")
+        };
+        for _ in 0..3 {
+            assert_eq!(store.select(only_kept.clone()).unwrap().credential.id, "keep.json");
+        }
+        let none = Selection {
+            accept: Some(|_| false),
+            ..sel("claude")
+        };
+        assert!(store.select(none).is_none());
     }
 
     #[test]

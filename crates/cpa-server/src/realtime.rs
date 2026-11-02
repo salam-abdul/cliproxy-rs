@@ -308,13 +308,6 @@ async fn select_oauth(
             });
     }
     let policy = rt.policy();
-    let exclude = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| c.provider == "codex" && cpa_core::registry::dynamic::auth_kind(c) != Some("oauth"))
-        .map(|c| c.id.clone())
-        .collect();
     let (primary, parent, fork) = session_hierarchy(headers, body, execution_session);
     let bound = |s: String| (!s.is_empty()).then(|| cpa_common::session::bound_session_identity(&s));
     let selection = Selection {
@@ -323,7 +316,7 @@ async fn select_oauth(
         session_parent: bound(parent),
         session_fork: fork,
         pinned: pinned.map(str::to_owned),
-        exclude,
+        accept: Some(|c| c.provider != "codex" || cpa_core::registry::dynamic::auth_kind(c) == Some("oauth")),
         ..Selection::default()
     };
     rt.acquire(selection, cfg, policy, &rt.registry())
