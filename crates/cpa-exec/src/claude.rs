@@ -384,47 +384,57 @@ impl ClaudeExecutor {
                     if !id.is_empty() {
                         completion.complete(&id, &request_id);
                     }
-                    let mut out = Vec::with_capacity(data.len());
-                    for (i, line) in data.split(|b| *b == b'\n').enumerate() {
-                        if i > 0 {
-                            out.push(b'\n');
-                        }
+                    // Lines whose names need no restore keep their bytes: the body is
+                    // copied only from the first line that changes.
+                    let mut out: Option<Vec<u8>> = None;
+                    let mut end = 0;
+                    for line in data.split(|b| *b == b'\n') {
+                        let start = end;
+                        end += line.len() + 1;
                         // ObserveResponseModel and ObserveClaudeStream, before restore.
                         req.usage.response_line(Format::Claude, line);
-                        out.extend(stream::restore_line(line, &reverse).map_err(|m| {
+                        let restored = stream::restore_line(line, &reverse).map_err(|m| {
                             let error = crate::upstream::plain_error_after_response(format!(
                                 "restore Claude OAuth tool name from streaming response: {m}"
                             ));
                             capture_error(capture, &error);
                             wrap(error)
-                        })?);
+                        })?;
+                        if out.is_none() && matches!(restored, std::borrow::Cow::Borrowed(_)) {
+                            continue;
+                        }
+                        let out = out.get_or_insert_with(|| data[..start].to_vec());
+                        out.extend_from_slice(&restored);
+                        if end <= data.len() {
+                            out.push(b'\n');
+                        }
                     }
+                    let out = out.map_or(data, Bytes::from);
                     if let Some(scope) = replay {
                         scope.store_response(&out);
                     }
-                    ResponseBody::Buffered(Bytes::from(out))
+                    ResponseBody::Buffered(out)
                 } else {
                     // ObserveResponseModel and ParseClaudeUsage of the upstream body.
                     req.usage.response_body(Format::Claude, &data);
-                    let text = String::from_utf8_lossy(&data).into_owned();
-                    let id = rawjson::string(&text, "id").trim().to_owned();
+                    let id = rawjson::string(&String::from_utf8_lossy(&data), "id").trim().to_owned();
                     completion.complete(&id, &request_id);
                     // A failed restore returns before ParseClaudeUsage: Go's deferred
                     // TrackFailure publishes no tokens. The error is plain (wrapped for a
                     // fast request with the 2xx status), so Go records no status.
-                    let restored = alias::restore_response(&text, &reverse).map_err(|m| {
+                    let restored = alias::restore_response(data, &reverse).map_err(|m| {
                         let message = format!("restore Claude OAuth tool name from response: {m}");
                         req.usage.publish_failure(0, &message);
                         capture.record(CaptureEvent::ResponseError(&message));
                         wrap(crate::upstream::plain_error_after_response(message))
                     })?;
                     if let Some(scope) = replay {
-                        scope.store_response(restored.as_bytes());
+                        scope.store_response(&restored);
                     }
                     // reporter.Publish(ParseClaudeUsage(data)): native Execute always
                     // publishes, with whatever usage the body carried.
                     req.usage.publish();
-                    ResponseBody::Buffered(Bytes::from(restored))
+                    ResponseBody::Buffered(restored)
                 }
             }
             ResponseBody::Buffered(_) => unreachable!("send returns raw streams"),

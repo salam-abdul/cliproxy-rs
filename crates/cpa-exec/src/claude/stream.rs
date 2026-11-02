@@ -6,6 +6,7 @@
 //! upstream appends after the terminal event is never forwarded. A transport read
 //! failure before `message_stop` becomes Go's `unexpected EOF`; clean truncation is 502.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -72,24 +73,27 @@ fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &
     }
 }
 
-/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line.
-pub(crate) fn restore_line(line: &[u8], reverse: &Reverse) -> Result<Vec<u8>, String> {
+/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line; borrowed when no name
+/// changes.
+pub(crate) fn restore_line<'a>(line: &'a [u8], reverse: &Reverse) -> Result<Cow<'a, [u8]>, String> {
     if reverse.is_empty() {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
     let trimmed = line.trim_ascii();
     if trimmed.is_empty() || trimmed == b"[DONE]" || trimmed.starts_with(b"event:") {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
-    let is_data = trimmed.starts_with(b"data:");
-    let payload = if is_data { trimmed[5..].trim_ascii() } else { trimmed };
+    let (is_data, payload) = match trimmed.strip_prefix(b"data:") {
+        Some(payload) => (true, payload.trim_ascii()),
+        None => (false, trimmed),
+    };
     let Ok(payload) = std::str::from_utf8(payload) else {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     };
     Ok(match alias::restore_event_payload(payload, reverse)? {
-        Some(updated) if is_data => [b"data: ".as_slice(), updated.as_bytes()].concat(),
-        Some(updated) => updated.into_bytes(),
-        None => line.to_vec(),
+        Some(updated) if is_data => Cow::Owned([b"data: ".as_slice(), updated.as_bytes()].concat()),
+        Some(updated) => Cow::Owned(updated.into_bytes()),
+        None => Cow::Borrowed(line),
     })
 }
 

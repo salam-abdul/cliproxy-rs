@@ -782,8 +782,13 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             .await;
             assert_eq!(events, output, "{name}: SSE events");
         } else {
-            let restored = alias::restore_response(reply, &prepared.reverse).unwrap();
-            assert_eq!([restored], output.as_slice(), "{name}: restored response");
+            let restored =
+                alias::restore_response(Bytes::copy_from_slice(reply.as_bytes()), &prepared.reverse).unwrap();
+            assert_eq!(
+                [std::str::from_utf8(&restored).unwrap()],
+                output.as_slice(),
+                "{name}: restored response"
+            );
             let mut prepared = prepared;
             ctx.completion(&mut prepared)
                 .complete(&rawjson::string(reply, "id"), &request_id);
@@ -1205,6 +1210,78 @@ async fn unrestorable_tool_alias_error() -> (ExecError, Arc<Usage>) {
     let cfg = Config::parse("").unwrap();
     let error = executor.execute(&credential, req, &cfg).await.err().unwrap();
     (error, usage)
+}
+
+/// A non-stream reply reaches the client byte for byte, invalid UTF-8 included: as sent
+/// when no tool alias needs restoring, and with only the alias replaced when one does.
+#[tokio::test]
+async fn non_stream_replies_keep_their_bytes_around_restored_aliases() {
+    use axum::response::IntoResponse;
+    fn reply(name: &str) -> Vec<u8> {
+        [
+            br#"{"id":"msg_b","type":"message","role":"assistant","model":"claude-upstream","content":[{"type":"text","text":"a"#.as_slice(),
+            b"\xff\xfe",
+            br#" b"},{"type":"tool_use","id":"toolu_1","name":""#,
+            name.as_bytes(),
+            br#"","input":{}}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]
+        .concat()
+    }
+    let router = axum::Router::new().fallback(|body: String| async move {
+        // Echo the alias the request declared upstream; with no tools, no alias exists.
+        let name = match gjson::get(&body, "tools.0.name").str() {
+            "" => "Read".to_owned(),
+            alias => alias.to_owned(),
+        };
+        ([(http::header::CONTENT_TYPE, "application/json")], reply(&name)).into_response()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let mut credential = harness_credential();
+    credential.attributes.insert("base_url".into(), base);
+    let cfg = Config::parse("").unwrap();
+    // Without tools the request has no aliases; the client tool `other` goes upstream
+    // as an MCP alias.
+    for (tool, tools) in [
+        ("Read", ""),
+        (
+            "other",
+            r#","tools":[{"name":"other","input_schema":{"type":"object"}}]"#,
+        ),
+    ] {
+        let body = Bytes::from(format!(
+            r#"{{"model":"claude-sonnet-4-6","max_tokens":8,"messages":[{{"role":"user","content":"hi"}}]{tools}}}"#
+        ));
+        let req = enrich(ExecRequest {
+            operation: Operation::Generate,
+            source_format: Format::Claude,
+            response_format: Format::Claude,
+            requested_model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-4-6".into(),
+            original_body: body.clone(),
+            body,
+            stream: false,
+            alt: None,
+            session: None,
+            execution_session: None,
+            derived_session: None,
+            resolved_model: None,
+            usage: Default::default(),
+            request_path: String::new(),
+            headers: Default::default(),
+            caller: Caller {
+                principal: "fake-client".into(),
+                source: "authorization",
+            },
+        });
+        let response = executor.execute(&credential, req, &cfg).await.unwrap();
+        let ResponseBody::Buffered(bytes) = response.body else {
+            panic!("non-stream reply is buffered");
+        };
+        assert_eq!(bytes.as_ref(), reply(tool).as_slice(), "{tool}");
+    }
 }
 
 /// Go's reporter calls on each Claude path (claude_executor_execute.go and
