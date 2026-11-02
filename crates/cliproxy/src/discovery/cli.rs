@@ -121,19 +121,8 @@ fn fraction(n: u128, div: u128) -> String {
 
 /// Go `json.MarshalIndent(v, "", "  ")`, including its HTML-safe escapes.
 pub fn go_indent(v: &Value) -> String {
-    let text = serde_json::to_string_pretty(v).expect("JSON values serialize");
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
-    }
-    out
+    let compact = serde_json::to_vec(v).expect("JSON values serialize");
+    String::from_utf8_lossy(&cpa_common::json::marshal_indent(&compact)).into_owned()
 }
 
 /// Go `sanitizeTerminal`: printable characters only, tabs become spaces; bidi

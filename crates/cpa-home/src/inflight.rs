@@ -18,8 +18,8 @@ use crate::config::{
     IN_FLIGHT_MAX_REVISION_BYTES, IN_FLIGHT_MAX_STRING_BYTES,
 };
 use crate::dispatch::valid_concurrency_model_key;
-use crate::gojson::string_into;
 use crate::registry::{Freeze, Observation, Registry};
+use cpa_common::json::marshal_str;
 
 /// Go `HomeInFlightPublisherConfig`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -117,13 +117,13 @@ struct Detail {
 
 fn encode_detail(d: &Detail) -> Vec<u8> {
     let mut out = b"{\"request_id\":".to_vec();
-    string_into(&mut out, &d.request_id);
+    marshal_str(&mut out, &d.request_id, true);
     out.extend_from_slice(b",\"credential_id\":");
-    string_into(&mut out, &d.credential_id);
+    marshal_str(&mut out, &d.credential_id, true);
     out.extend_from_slice(b",\"model\":");
-    string_into(&mut out, &d.model);
+    marshal_str(&mut out, &d.model, true);
     out.extend_from_slice(b",\"request_kind\":");
-    string_into(&mut out, &d.request_kind);
+    marshal_str(&mut out, &d.request_kind, true);
     out.extend_from_slice(b",\"started_at\":\"");
     out.extend_from_slice(cpa_core::gotime::rfc3339_nano(&d.started_at).as_bytes());
     out.extend_from_slice(b"\"}");
@@ -316,9 +316,9 @@ pub fn encode(freeze: &Freeze, observed_at: SystemTime, cfg: &PublisherConfig) -
         .map(|((credential, model, unaccounted), count)| {
             let accounted = !unaccounted;
             let mut out = b"{\"credential_id\":".to_vec();
-            string_into(&mut out, credential);
+            marshal_str(&mut out, credential, true);
             out.extend_from_slice(b",\"model\":");
-            string_into(&mut out, model);
+            marshal_str(&mut out, model, true);
             out.extend_from_slice(if accounted {
                 b",\"status\":\"accounted\""
             } else {

@@ -25,16 +25,12 @@ pub fn normalize_base_url(raw: &str) -> String {
     base.trim_end_matches('/').to_owned()
 }
 
-/// Go `json.Marshal` of a `map[string]any`: keys sorted, `<`, `>` and `&` escaped.
+/// Go `json.Marshal` of a `map[string]any`: keys sorted, HTML characters, U+2028 and
+/// U+2029 escaped.
 pub fn marshal_map(pairs: Vec<(&str, Value)>) -> String {
-    let mut pairs = pairs;
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-    let map: Object = pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
-    Value::Object(map)
-        .to_string()
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
+    let map: Map<String, Value> = pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+    let json = cpa_common::json::GoValue::from_json(&Value::Object(map)).marshal();
+    String::from_utf8_lossy(&json).into_owned()
 }
 
 pub struct Client {
@@ -739,6 +735,14 @@ mod tests {
         assert_eq!(
             marshal_map(vec![("old", Value::Null), ("new", "k<&>".into())]),
             r#"{"new":"k\u003c\u0026\u003e","old":null}"#
+        );
+        // json.Marshal(map[string]any{"v": "a\u2028b\u2029", "m": map[string]any{"z": 1, "a": 2}}).
+        assert_eq!(
+            marshal_map(vec![
+                ("v", "a\u{2028}b\u{2029}".into()),
+                ("m", serde_json::json!({"z": 1, "a": 2}))
+            ]),
+            r#"{"m":{"a":2,"z":1},"v":"a\u2028b\u2029"}"#
         );
     }
 }

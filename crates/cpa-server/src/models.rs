@@ -109,7 +109,7 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
             } else {
                 &m.display_name
             };
-            let mut entry = gojson::Obj::new()
+            let mut entry = cpa_common::json::Object::new()
                 .str("id", &m.id)
                 .str("model", &m.id)
                 .str("name", name);
@@ -123,18 +123,18 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
                 .flat_map(|t| &t.levels)
                 .map(|level| level.trim())
                 .filter(|level| !level.is_empty())
-                .map(|level| gojson::Obj::new().str("value", level).finish())
+                .map(|level| cpa_common::json::Object::new().str("value", level).finish_string())
                 .collect();
             if !efforts.is_empty() {
                 entry = entry.raw("reasoning_efforts", &format!("[{}]", efforts.join(",")));
             }
-            entry.finish()
+            entry.finish_string()
         })
         .collect();
-    gojson::Obj::new()
+    cpa_common::json::Object::new()
         .str("object", "list")
         .raw("data", &format!("[{}]", data.join(",")))
-        .finish()
+        .finish_string()
 }
 
 /// Go `convertModelToMap(model, "claude")` plus `claudemodels.BuildResponse`.

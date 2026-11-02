@@ -29,7 +29,9 @@ pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, ne
         Ok(Access::Granted { caller, .. }) => caller,
         // gin `AbortWithStatusJSON(status, gin.H{"error": msg})`.
         Err(denied) => {
-            let body = crate::gojson::Obj::new().str("error", denied.message).finish();
+            let body = cpa_common::json::Object::new()
+                .str("error", denied.message)
+                .finish_string();
             return crate::respond::gin_json(denied.status, body);
         }
     };

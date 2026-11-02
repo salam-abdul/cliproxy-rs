@@ -17,6 +17,9 @@
 
 use std::borrow::Cow;
 
+mod encode;
+pub use encode::{Object, indent, marshal_indent};
+
 /// A gjson/sjson path. Go paths are byte strings, so keys taken from documents may not be
 /// UTF-8; text paths work as before.
 pub trait JsonPath {
