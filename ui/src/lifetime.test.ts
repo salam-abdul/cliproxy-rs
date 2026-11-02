@@ -59,14 +59,6 @@ test("pending work coalesces per lifetime and cannot suppress reconnect work", a
   done.resolve();
   await first;
   assert.equal(calls, 2);
-  await fresh.once(
-    "quota:a",
-    async () => {
-      calls++;
-    },
-    60_000,
-  );
-  assert.equal(calls, 2);
   await fresh.once("quota:a", async () => {
     calls++;
   });
@@ -77,7 +69,7 @@ test("pending work coalesces per lifetime and cannot suppress reconnect work", a
   assert.equal(calls, 3);
 });
 
-test("failed work releases its slot and automatic retries observe the interval", async () => {
+test("failed work releases its slot", async () => {
   const lifetime = new Lifetime();
   let calls = 0;
   await assert.rejects(
@@ -86,14 +78,6 @@ test("failed work releases its slot and automatic retries observe the interval",
       throw new Error("failed");
     }),
   );
-  await lifetime.once(
-    "a",
-    async () => {
-      calls++;
-    },
-    60_000,
-  );
-  assert.equal(calls, 1);
   await lifetime.once("a", async () => {
     calls++;
   });

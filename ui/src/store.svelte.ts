@@ -3,42 +3,30 @@ import {
   connect,
   disconnect,
   configValue,
-  route,
   ApiError,
   requests,
 } from "./api";
-import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
+import { equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
 
-export const sections = [
-  ["overview", "Overview", ["overview"]],
-  ["activity", "Activity", ["activity", "logs"]],
+/** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
+export const sections: [name: string, pages: [id: string, title: string][]][] = [
+  ["Overview", [["overview", "Overview"]]],
+  ["Accounts", [["credentials", "Accounts"]]],
+  ["Activity", [["activity", "Requests"], ["logs", "Logs"]]],
   [
-    "config",
     "Settings",
-    ["config", "credentials", "connect", "providers", "keys", "models", "payload", "system", "use"],
+    [
+      ["use", "Use with tools"],
+      ["providers", "Provider keys"],
+      ["keys", "Client keys"],
+      ["models", "Models"],
+      ["payload", "Payload rules"],
+      ["config", "Configuration"],
+      ["system", "System"],
+    ],
   ],
-] as const;
-
-export const pages = [
-  ["overview", "Overview"],
-  ["use", "Use with tools"],
-  ["credentials", "Accounts"],
-  ["providers", "Provider keys"],
-  ["keys", "Client keys"],
-  ["models", "Models"],
-  ["payload", "Payload rules"],
-  ["quotas", "Quotas"],
-  ["", ""],
-  ["activity", "Requests"],
-  ["logs", "Logs"],
-  ["", ""],
-  ["config", "Configuration"],
-  ["system", "System"],
-] as const;
-const routes = new Set<string>([
-  ...pages.map((p) => p[0]).filter(Boolean),
-  "connect",
-]);
+];
+const routes = new Set(["connect", ...sections.flatMap((s) => s[1].map((p) => p[0]))]);
 const aliases: Record<string, string> = {
   oauth: "connect",
   configuration: "config",
@@ -80,30 +68,18 @@ function parse(hash: string) {
 class Store {
   logged = $state(false);
   localDashboard = $state(false);
-  theme = $state(document.documentElement.dataset.theme || "light");
+  /** The saved override, else the system theme. */
+  theme = $state(
+    document.documentElement.dataset.theme ||
+      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
+  );
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
-  /**
-   * Which server this is, from its version headers. cliproxy-rs sends X-CPA-VERSION
-   * "cliproxy-rs/<version>". Go CLIProxyAPI sends a version ("8.0.10", or "dev" from a source
-   * build) together with X-CPA-COMMIT and X-CPA-BUILD-DATE. Go implements the whole v8
-   * contract, so only other servers are probed for gaps; nothing Rust-specific is assumed.
-   */
-  kind = $derived(
-    this.meta.version.startsWith("cliproxy-rs")
-      ? "rust"
-      : this.meta.commit || this.meta.built
-        ? "go"
-        : "unknown",
-  );
   online = $state(true);
   busy = $state(false);
   dirty = $state(false);
   toast = $state<{ text: string; bad: boolean } | null>(null);
-  /** "METHOD /path" → false when the server does not implement it. */
-  caps = $state<Record<string, false>>({});
   now = $state(Date.now());
-  quotaPending = $state<Record<string, boolean>>({});
   native = new Res<Data>(() => api("/observability/native/status"));
   activity = new Res<Data>(() => api("/observability/native/events"));
   historyRange = $state("24h");
@@ -125,7 +101,6 @@ class Store {
       { at: number; windows: Window[]; error?: string } | { error: string }
     >
   >({});
-  #probed = new Set<string>();
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
@@ -139,7 +114,6 @@ class Store {
           this.logout();
           this.notify("The management key was rejected. Sign in again.", true);
         },
-        missing: (method, path) => (this.caps[`${method} ${path}`] = false),
         meta: (h) => {
           this.online = !!h;
           if (!h) return;
@@ -172,8 +146,6 @@ class Store {
     disconnect();
     this.logged = false;
     this.localDashboard = false;
-    this.caps = {};
-    this.#probed.clear();
     for (const resource of [
       this.config,
       this.creds,
@@ -186,27 +158,8 @@ class Store {
       resource.loading = false;
     }
     this.quota = {};
-    this.quotaPending = {};
     this.busy = false;
     this.dirty = false;
-  }
-  can(method: string, path: string) {
-    return this.caps[`${method} ${route(path)}`] !== false;
-  }
-  /**
-   * Find unimplemented actions before they are offered. Each probe is a request Go rejects
-   * with 400 during input validation, before any side effect: an empty JSON body, or a GET
-   * without its required parameter. A server lacking the route answers 404 with no body (or
-   * 501/405), which api() records as missing. Go itself is never probed.
-   */
-  probe(actions: [string, string, string][]) {
-    if (this.kind === "go") return;
-    for (const [method, path] of actions) {
-      const id = `${method} ${path}`;
-      if (this.#probed.has(id)) continue;
-      this.#probed.add(id);
-      api(path, method, method === "GET" ? undefined : {}).catch(() => {});
-    }
   }
   go(hash: string) {
     if (location.hash.slice(1) !== hash) location.hash = hash;
@@ -271,6 +224,13 @@ class Store {
       await after();
     }, done);
   }
+  /** Add a generated client key to `keys`, the list as last read. */
+  createKey(keys: string[]) {
+    return this.act(
+      () => this.replace("access/api-keys", keys, [...keys, newKey()]),
+      "Client key created.",
+    );
+  }
   /**
    * Replace one config value after confirming nobody changed it since it was read. `unset`
    * is what an absent value reads as (an empty list or map unless given).
@@ -296,7 +256,7 @@ class Store {
 
 export const store = new Store();
 
-/** What to do about a failed sign-in, for each answer Go and cliproxy-rs give. */
+/** What to do about a failed sign-in, for each answer the server gives. */
 function signInHelp(e: unknown): string {
   if (!(e instanceof ApiError))
     return e instanceof Error ? e.message : String(e);

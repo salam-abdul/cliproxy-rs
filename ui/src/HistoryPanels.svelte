@@ -29,16 +29,16 @@
     });
 </script>
 
-<section class="section history-section">
+<section class="section">
   {#if store.history.error}
-    <p class="overview-alert">
+    <p class="alert">
       History could not be loaded. Current account readings remain available.
     </p>
   {:else if !data}
     <p class="muted">Loading history…</p>
   {:else}
     <div class="history-grid">
-      <section class="insight-card">
+      <section class="card">
         <div class="section-head">
           <h3>Requests & failures</h3>
           <span class="muted small">Selected period</span>
@@ -71,10 +71,10 @@
               </span>
             {/each}
           </div>
-          <div class="history-axis">
+          <div class="history-axis legend">
             <span>{date(data.from)}</span><span>{date(data.to)}</span>
           </div>
-        {:else}<div class="history-empty">
+        {:else}<div class="history-empty muted small">
             The chart will fill as the proxy records activity and account
             status.
           </div>{/if}
@@ -85,7 +85,7 @@
           >
         </div>
         {#if Array.isArray(data.errors) && data.errors.length}
-          <div class="history-errors">
+          <div class="history-errors legend">
             {#each data.errors.slice(0, 3) as error}
               <span
                 >{outcomeLabel(error)} <strong>{error.requests}</strong></span
@@ -94,7 +94,7 @@
           </div>
         {/if}
       </section>
-      <section class="insight-card">
+      <section class="card">
         <div class="section-head">
           <h3>Tokens by category</h3>
           <span class="muted small">Reported counts</span>
@@ -125,7 +125,7 @@
             Some usage is omitted; ≥ values are lower bounds.
           </p>{/if}
       </section>
-      <section class="insight-card top-models">
+      <section class="card top-models">
         <div class="section-head">
           <h3>Top models</h3>
           <span class="muted small">By requests · selected period</span>
@@ -145,7 +145,7 @@
           </p>{/each}
       </section>
     </div>
-    <p class="muted small history-coverage">
+    <p class="muted small">
       {#if data.oldestRequest == null}No requests recorded yet.
       {:else if data.oldestRequest > data.from}Request records begin {date(
           data.oldestRequest,
@@ -159,60 +159,44 @@
 </section>
 
 <style>
-  .history-section .section-head {
-    align-items: center;
-  }
-  .history-section h3 {
-    margin: 0;
-  }
-  .history-coverage {
-    margin: 0;
-  }
   .history-grid {
     display: grid;
     grid-template-columns: 1.2fr 0.8fr;
-    gap: 12px;
+    gap: var(--s3);
   }
-  .insight-card {
-    padding: 18px;
-    border: 1px solid var(--line, #dce4ea);
-    border-radius: 13px;
-    background: var(--raised);
-  }
-  .insight-card .section-head {
-    margin-bottom: 10px;
+  .card .section-head {
+    align-items: center;
+    margin-bottom: var(--s3);
   }
   .history-totals {
     display: flex;
     align-items: baseline;
-    gap: 6px;
-    margin-bottom: 15px;
+    gap: var(--s2);
+    margin-bottom: var(--s4);
   }
   .history-totals strong {
-    font-size: 23px;
+    font-size: var(--t-xl);
     letter-spacing: -0.03em;
   }
   .history-totals span {
-    font-size: 11px;
-    color: var(--muted, #8494a0);
-    margin-right: 12px;
+    font-size: var(--t-xs);
+    color: var(--ink-muted);
+    margin-right: var(--s3);
   }
-  .history-totals .history-failures {
-    font-size: 17px;
-    color: #c47765;
+  .history-totals .history-failures,
+  .history-errors strong {
+    color: var(--bad-ink);
+  }
+  .history-chart,
+  .history-empty {
+    height: 144px;
   }
   .history-chart {
-    height: 142px;
     display: flex;
     align-items: end;
     gap: 3px;
-    border-bottom: 1px solid var(--line, #dce4ea);
-    background: repeating-linear-gradient(
-      to top,
-      transparent 0,
-      transparent 34px,
-      var(--line, #eaf0f3) 35px
-    );
+    border-bottom: 1px solid var(--line);
+    background: repeating-linear-gradient(to top, transparent 0 35px, var(--line) 35px 36px);
   }
   .history-column {
     flex: 1;
@@ -222,130 +206,105 @@
     min-width: 2px;
   }
   .history-column.unknown {
-    background: linear-gradient(to top, #b2bec744 0 3px, transparent 3px);
+    background: linear-gradient(to top, var(--series-unknown) 0 3px, transparent 3px);
   }
   .history-column > i {
     display: block;
     width: 100%;
-    background: #79a9cf;
+    background: var(--series-1);
     border-radius: 2px 2px 0 0;
     position: relative;
   }
   .history-column b {
     display: block;
     position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: #d98b7d;
+    inset: auto 0 0;
+    background: var(--series-fail);
   }
   .history-axis {
     display: flex;
     justify-content: space-between;
-    color: var(--muted, #8494a0);
-    font-size: 10px;
-    margin-top: 5px;
+    margin-top: var(--s1);
   }
-  .history-key {
+  .history-key,
+  .history-errors {
     display: flex;
     flex-wrap: wrap;
-    gap: 12px;
-    margin-top: 12px;
+    gap: var(--s3);
+    margin-top: var(--s3);
   }
   .history-key i,
   .history-token i {
     display: inline-block;
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 2px;
-    margin-right: 5px;
+    margin-right: var(--s1);
   }
   .key-requests {
-    background: #79a9cf;
+    background: var(--series-1);
   }
   .key-failures {
-    background: #d98b7d;
+    background: var(--series-fail);
   }
   .key-unknown {
-    background: #b2bec7;
-  }
-  .history-errors {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 9px;
+    background: var(--series-unknown);
   }
   .history-errors span {
-    border: 1px solid var(--line, #dce4ea);
-    border-radius: 6px;
-    padding: 3px 6px;
-    color: var(--muted, #8494a0);
-    font-size: 10px;
-  }
-  .history-errors strong {
-    color: #c47765;
-    margin-left: 3px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 2px var(--s2);
   }
   .history-empty {
     display: grid;
     place-items: center;
-    height: 142px;
-    color: var(--muted, #8494a0);
-    font-size: 12px;
   }
   .history-mix {
-    height: 7px;
+    height: 8px;
     display: flex;
     overflow: hidden;
-    border-radius: 8px;
-    margin: 12px 0;
+    border-radius: var(--r-pill);
+    margin: var(--s3) 0;
   }
   .mix-0 {
-    background: #3f7faf;
+    background: var(--mix-1);
   }
   .mix-1 {
-    background: #52a48a;
+    background: var(--mix-2);
   }
   .mix-2 {
-    background: #9d82c1;
+    background: var(--mix-3);
   }
   .mix-3 {
-    background: #d9a65f;
+    background: var(--mix-4);
   }
-  .history-token {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 8px;
-    padding: 7px 0;
-    border-top: 1px solid var(--line, #eef2f5);
-    font-size: 11px;
-  }
-  .history-token strong {
-    text-align: right;
-  }
+  .history-token,
   .history-model {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(65px, 0.8fr) 42px;
+    gap: var(--s2);
     align-items: center;
-    gap: 10px;
-    margin: 9px 0;
-    font-size: 11px;
+    font-size: var(--t-xs);
+  }
+  .history-token {
+    grid-template-columns: 1fr auto;
+    padding: var(--s2) 0;
+    border-top: 1px solid var(--line);
+  }
+  .history-model {
+    grid-template-columns: minmax(0, 1fr) minmax(64px, 0.8fr) 48px;
+    margin: var(--s2) 0;
+  }
+  .history-token strong,
+  .history-model strong {
+    text-align: right;
   }
   .history-model code {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .history-model .meter-track {
-    height: 4px;
-  }
   .history-model .meter-track i {
-    display: block;
-    height: 100%;
-    background: #79a9cf;
-  }
-  .history-model strong {
-    text-align: right;
+    background: var(--series-1);
   }
   .top-models {
     grid-column: 1/-1;
@@ -353,9 +312,6 @@
   @media (max-width: 820px) {
     .history-grid {
       grid-template-columns: 1fr;
-    }
-    .top-models {
-      grid-column: 1;
     }
   }
 </style>

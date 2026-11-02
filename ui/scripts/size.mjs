@@ -1,9 +1,9 @@
 // Enforces the bundle budget after `vite build`; the build fails if either grows past it.
-// Gzip ceilings: 54 KB JS includes native diagnostics, account capacity and token history; CSS retains the original 6,853-byte ceiling.
+// Gzip ceilings sit about 1% above the bundle after the Go-support, polling and dead-code removals.
 import { readdirSync, readFileSync, copyFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
-const BUDGET = { js: 54_000, css: 6_853 };
+const BUDGET = { js: 52_100, css: 6_400 };
 
 copyFileSync("dist/index.html", "dist/management.html");
 const html = readFileSync("dist/index.html", "utf8");

@@ -4,7 +4,6 @@
   import { api, download } from "../api";
   import { type Data } from "../core";
   import Load from "../Load.svelte";
-  import Missing from "../Missing.svelte";
 
   const MAX = 1500;
   // Clearing bumps epoch so a tail read already in flight cannot restore the old cursor.
@@ -30,7 +29,7 @@
   const files = new Res<Data[]>(async () => (await api("/observability/logs/errors")).files || []);
   logs.load();
   files.load();
-  $effect(() => every(3000, async () => tail && store.can("GET", "/observability/logs") && (await logs.load(true))));
+  $effect(() => every(3000, async () => tail && (await logs.load(true))));
   // The dashboard's own management calls (including this tail) are hidden unless asked for.
   const shown = $derived(
     (logs.data || []).filter((l) => (own || !l.includes("/management/")) && l.toLowerCase().includes(query.trim().toLowerCase())),
@@ -54,12 +53,12 @@
 
 <div class="head">
   <h1>Logs</h1>
-  <button class="key" disabled={!store.can("GET", "/observability/logs")} aria-pressed={tail} onclick={() => (tail = !tail)}
+  <button class="key" aria-pressed={tail} onclick={() => (tail = !tail)}
     ><span class="lamp {tail ? 'ok live' : 'off'}"></span>{tail ? "Following" : "Paused"}</button
   >
   <button
     class="key quiet danger"
-    disabled={store.busy || !store.can("GET", "/observability/logs") || !store.can("DELETE", "/observability/logs")}
+    disabled={store.busy}
     onclick={() => store.call("DELETE", "/observability/logs", undefined, "Logs cleared.", "Delete the server’s application logs?", () => ((cursor = ""), epoch++, logs.load()))}
     >Clear</button
   >
@@ -70,7 +69,7 @@
     <section class="section">
       <div class="row">
         <label class="search grow"><svg class="i" aria-hidden="true"><use href="#i-search" /></svg><span class="sr">Filter lines</span><input bind:value={query} placeholder="Filter lines" /></label>
-        <label class="check"><input type="checkbox" checked={own} onchange={(e) => (own = e.currentTarget.checked)} />Management API calls</label>
+        <label class="check"><input type="checkbox" bind:checked={own} />Management API calls</label>
       </div>
       <!-- svelte-ignore a11y_no_noninteractive_tabindex: the scrolling log must be reachable by keyboard -->
       <div class="code-window log" bind:this={pane} role="log" aria-label="Application log" tabindex="0">
@@ -116,7 +115,7 @@
               <code class="grow ellipsis">{f.name}</code>
               <span class="legend">{f.modified ? new Date(f.modified * 1000).toLocaleString() : ""}</span>
               <button
-                class="key small"
+                class="key"
                 onclick={() =>
                   store.act(async () =>
                     download(await api(`/observability/logs/errors/${encodeURIComponent(f.name)}`, "GET", undefined, "blob"), f.name),

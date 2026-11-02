@@ -18,8 +18,6 @@
     observability: "Logs and usage statistics.",
   };
   let edit = $state<{ path: string; value: unknown; title: string; yaml: boolean } | null>(null);
-  // Strategies this server understands; "soonest-reset" is a cliproxy-rs addition.
-  const offered = $derived(strategies.filter((s) => !s.rust || store.kind === "rust"));
   const saved = $derived(readPath(store.config.data || {}, "routing/strategy", "") as string);
   const current = $derived(strategy(saved));
   const choose = (value: string) =>
@@ -46,7 +44,7 @@
       <section class="section">
         <h2>Routing strategy</h2>
         <div class="seg" role="group" aria-label="Routing strategy">
-          {#each offered as s}<button aria-pressed={current.value === s.value} disabled={store.busy} onclick={() => current.value !== s.value && choose(s.value)}
+          {#each strategies as s}<button aria-pressed={current.value === s.value} disabled={store.busy} onclick={() => current.value !== s.value && choose(s.value)}
               >{s.name}</button
             >{/each}
         </div>

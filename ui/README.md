@@ -14,14 +14,16 @@ Commit the rebuilt `dist/` with the source change; CI rebuilds it and fails on a
 ```sh
 npx playwright-core install chromium
 node scripts/dashboard-check.mjs
-DASHBOARD_KIND=rust node scripts/dashboard-check.mjs
 ```
 
 ## Pages
 
-- **Overview:** current accounts, quota windows, the default new-session order, and 24-hour, 7-day or 30-day native Claude history. Account details open from its list.
-- **Activity:** recent request attempts grouped into outcomes and errors.
-- **Settings:** account controls, paid-overage policy, provider keys and client setup.
+The top navigation has four sections. Each opens its first page; a section with several pages shows them as tabs.
+
+- **Overview:** current accounts, quota windows, the default new-session order, and 24-hour, 7-day or 30-day native Claude history. Provider quotas are checked only with Check quotas; between checks each account shows the server's passive readings and their age.
+- **Accounts:** every account by provider, the paid-overage policy, sign-in and file import. Overview and Accounts open the same account drawer.
+- **Activity:** recent request attempts grouped into outcomes and errors, and the server logs.
+- **Settings:** client setup, provider keys, client keys, models, payload rules, configuration and system facts.
 
 Legacy `quotas` and `usage` links redirect to Overview and Activity.
 
