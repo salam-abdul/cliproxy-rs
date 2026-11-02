@@ -161,7 +161,7 @@ async fn ensure_files(claims: &Claims, paths: &Paths) -> Result<()> {
         }
         return Ok(());
     }
-    crate::private_fs::create_dir_all(&paths.dir).map_err(|e| other(e.to_string()))?;
+    cpa_core::private_fs::create_dir_all(&paths.dir).map_err(|e| other(e.to_string()))?;
     let key = load_or_create_key(&paths.client_key)?;
     let csr = create_csr(&claims.certificate_id, &key)?;
     let response = request_certificate(claims, &csr).await?;
@@ -224,12 +224,12 @@ pub fn certificate_fingerprint(pem: &[u8]) -> Result<String> {
 }
 
 fn chmod_0600(path: &Path) -> Result<()> {
-    crate::private_fs::restrict(path).map_err(|e| other(e.to_string()))
+    cpa_core::private_fs::restrict(path).map_err(|e| other(e.to_string()))
 }
 
 /// Go `writeFile0600`: create or truncate, then force 0600.
 fn write_0600(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = crate::private_fs::create_truncate(path).map_err(|e| other(e.to_string()))?;
+    let mut file = cpa_core::private_fs::create_truncate(path).map_err(|e| other(e.to_string()))?;
     file.write_all(bytes).map_err(|e| other(e.to_string()))?;
     chmod_0600(path)
 }

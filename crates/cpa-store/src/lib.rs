@@ -1,7 +1,7 @@
 //! Remote homes for `config.yaml` and the auth files, chosen by `PGSTORE_*`,
 //! `OBJECTSTORE_*` and `GITSTORE_*` (Go cmd/server/main.go and internal/store). Each
 //! store mirrors its content into a local workspace; the server runs on those files
-//! and reports changes back through [`cpa_server::persist::StorePersister`].
+//! and reports changes back through [`cpa_core::store::StorePersister`].
 
 // Used only by the object-store tests, which assert Unix modes.
 #[cfg(all(test, unix))]
@@ -10,7 +10,6 @@ mod git;
 mod object;
 mod pgconn;
 mod postgres;
-mod private_fs;
 mod sigv4;
 
 use std::path::{Component, Path, PathBuf};
@@ -21,8 +20,8 @@ pub use git::{GitPersister, GitStore};
 pub use object::{ObjectConfig, ObjectPersister, ObjectStore};
 pub use postgres::{PgCooldown, PostgresConfig, PostgresPersister, PostgresStore};
 
-use cpa_server::cooldown_store::Backend as CooldownBackend;
-use cpa_server::persist::StorePersister;
+use cpa_core::store::StorePersister;
+use cpa_core::store::cooldown::Backend as CooldownBackend;
 
 /// Go main's 30-second contexts around store setup.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30);

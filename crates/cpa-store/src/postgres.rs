@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use cpa_server::cooldown_store::Record;
+use cpa_core::store::cooldown::Record;
 use futures_util::future::BoxFuture;
 use tokio::sync::Mutex;
 
@@ -51,7 +51,7 @@ fn quote_identifier(identifier: &str) -> String {
 }
 
 fn mkdir_0700(path: &Path) -> std::io::Result<()> {
-    crate::private_fs::create_dir_all(path)
+    cpa_core::private_fs::create_dir_all(path)
 }
 
 fn db_error(context: &str, error: tokio_postgres::Error) -> anyhow::Error {
@@ -475,7 +475,7 @@ fn micros(t: SystemTime) -> DateTime<Utc> {
     DateTime::from_timestamp_micros(t.timestamp_micros()).unwrap_or(t)
 }
 
-impl cpa_server::cooldown_store::Backend for PgCooldown {
+impl cpa_core::store::cooldown::Backend for PgCooldown {
     fn load(&self) -> Result<Vec<Record>, String> {
         let sql = format!(
             "SELECT content::text, updated_at FROM {} WHERE deleted = FALSE",
@@ -608,7 +608,7 @@ impl cpa_server::cooldown_store::Backend for PgCooldown {
 
 pub struct PostgresPersister(pub Arc<PostgresStore>);
 
-impl cpa_server::persist::StorePersister for PostgresPersister {
+impl cpa_core::store::StorePersister for PostgresPersister {
     fn persist_config(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.0.persist_config())
     }
