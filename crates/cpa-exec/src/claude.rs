@@ -789,7 +789,10 @@ fn fast_request_error(fast: bool, mut error: ExecError) -> ExecError {
 /// Request facts shared by every stage.
 struct Ctx<'a> {
     credential: &'a Credential,
-    settings: Settings,
+    /// The Claude settings of this config snapshot (parsed once per snapshot).
+    settings: Arc<Settings>,
+    /// The `claude-api-key` entry of the credential, an index into `settings.keys`.
+    key: Option<usize>,
     api_key: String,
     base_url: String,
     first_party: bool,
@@ -956,7 +959,7 @@ impl<'a> Ctx<'a> {
         cfg: &Config,
         delegation: Delegation,
     ) -> Self {
-        let settings = Settings::from_config(cfg);
+        let settings = cfg.derived(Settings::from_config);
         let attr = |k: &str| credential.attributes.get(k).map(String::as_str).unwrap_or_default();
         let api_key = if attr("api_key").is_empty() {
             credential.str("access_token").unwrap_or_default().to_owned()
@@ -968,6 +971,7 @@ impl<'a> Ctx<'a> {
         } else {
             attr("base_url").trim_end_matches('/').to_owned()
         };
+        let key = settings.key_index(&api_key, attr("base_url"));
         let oauth_token = api_key.contains("sk-ant-oat");
         // claudeFingerprintProfileFromConfig: the credential's own value, else the key's.
         let own = Some(attr("fingerprint_profile"))
@@ -981,8 +985,7 @@ impl<'a> Ctx<'a> {
             .map(normalize_fingerprint_profile)
             .unwrap_or_default();
         let profile = if own.is_empty() {
-            settings
-                .key_for(&api_key, attr("base_url"))
+            key.and_then(|i| settings.keys.get(i))
                 .map(|k| normalize_fingerprint_profile(&k.fingerprint_profile))
                 .unwrap_or_default()
         } else {
@@ -1014,6 +1017,7 @@ impl<'a> Ctx<'a> {
             oauth_token,
             bearer,
             settings,
+            key,
             api_key,
             base_url,
             today: String::new(),
@@ -1118,13 +1122,7 @@ impl<'a> Ctx<'a> {
         if !attr_mode.is_empty() {
             mode = attr_mode.clone();
         }
-        let base = self
-            .credential
-            .attributes
-            .get("base_url")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let key_cloak = self.settings.key_for(&self.api_key, base).and_then(|k| k.cloak.clone());
+        let key_cloak = self.key().and_then(|k| k.cloak.clone());
         if let Some(c) = &key_cloak {
             if !c.mode.trim().is_empty() {
                 mode = c.mode.trim().to_owned();
@@ -1616,17 +1614,12 @@ impl<'a> Ctx<'a> {
             .attributes
             .get("rebuild_mid_system_message")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-            || self
-                .settings
-                .key_for(
-                    &self.api_key,
-                    self.credential
-                        .attributes
-                        .get("base_url")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )
-                .is_some_and(|k| k.rebuild_mid_system_message)
+            || self.key().is_some_and(|k| k.rebuild_mid_system_message)
+    }
+
+    /// The `claude-api-key` entry of the credential.
+    fn key(&self) -> Option<&settings::ClaudeKey> {
+        self.key.and_then(|i| self.settings.keys.get(i))
     }
 
     /// `claudeDiagnosticsCredentialIdentity`.

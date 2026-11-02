@@ -140,7 +140,7 @@ fn apply_payload_rules(
     original: &[u8],
     body: Vec<u8>,
 ) -> Vec<u8> {
-    let rules = cpa_common::payload::Rules::from_config(cfg);
+    let rules = cpa_common::payload::Rules::of(cfg);
     cpa_common::payload::apply(
         &rules,
         &cpa_common::payload::Request {

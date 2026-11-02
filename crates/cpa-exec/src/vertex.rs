@@ -413,7 +413,7 @@ impl VertexExecutor {
         let body = g::translate(req, cfg, to, base_model, &req.body, req.stream, false)?;
         let mut body = g::apply_thinking(req, body, from, to, PROVIDER, resolved.as_ref())?;
         body = payload::fix_image_aspect_ratio(base_model, body);
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = g::apply_payload_rules(&rules, base_model, to.as_str(), body, &original, req);
         body = payload::set_str_if_different(body, "model", base_model);
         body = strip_tool_call_ids(body, from);

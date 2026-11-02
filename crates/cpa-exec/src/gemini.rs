@@ -488,7 +488,7 @@ impl GeminiExecutor {
         let (original_translated, body) = translate_pair(req, cfg, to, &base_model, compat)?;
         let mut body = apply_thinking(req, body, from, to, &credential.provider, resolved.as_ref())?;
         body = payload::fix_image_aspect_ratio(&base_model, body);
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &base_model, to.as_str(), body, &original_translated, req);
         body = payload::set_str_if_different(body, "model", &base_model);
         body = payload::cap_max_output_tokens(body, &base_model);
@@ -570,7 +570,7 @@ impl GeminiExecutor {
         }
         // applyGeminiInteractionsThinking: the Gemini applier family for the target.
         body = apply_thinking(req, body, from, to, "gemini", resolved.as_ref())?;
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &target, "interactions", body, &original_translated, req);
         body = payload::sanitize_interactions_input_ids(body);
         if req.stream {
