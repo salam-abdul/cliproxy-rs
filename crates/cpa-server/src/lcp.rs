@@ -78,7 +78,7 @@ pub struct Turn {
 }
 
 fn sha_hex(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
+    cpa_core::hex::encode(Sha256::digest(data))
 }
 
 /// Go `writeFingerprintField`.
@@ -111,7 +111,7 @@ pub fn fingerprint(turn: &Turn) -> String {
             field(&mut hash, &part.value);
         }
     }
-    format!("{:x}", hash.finalize())
+    cpa_core::hex::encode(hash.finalize())
 }
 
 /// Go `ExtractCanonicalTurns`: `format` is the Go translator format name; empty infers
@@ -726,7 +726,7 @@ pub fn environment_digest(turns: &[Turn]) -> String {
         field(&mut hash, fingerprint(turn).as_bytes());
     }
     if any {
-        format!("{:x}", hash.finalize())
+        cpa_core::hex::encode(hash.finalize())
     } else {
         String::new()
     }
@@ -742,7 +742,7 @@ fn fallback_environment(fingerprints: &[String], min_prefix: usize) -> String {
     for fp in &fingerprints[..(min_prefix - 1).min(fingerprints.len())] {
         field(&mut hash, fp.as_bytes());
     }
-    format!("{:x}", hash.finalize())
+    cpa_core::hex::encode(hash.finalize())
 }
 
 fn last_window(fingerprints: &[String]) -> Vec<String> {

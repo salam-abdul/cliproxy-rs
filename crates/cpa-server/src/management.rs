@@ -854,7 +854,8 @@ fn if_match_values(headers: &HeaderMap) -> Vec<String> {
 // Go `configV8ETag`: hash the persisted source, including comments and whitespace.
 fn config_etag(raw: &[u8]) -> HeaderValue {
     use sha2::{Digest, Sha256};
-    HeaderValue::from_str(&format!("\"{:x}\"", Sha256::digest(raw))).expect("SHA-256 is a valid ETag")
+    HeaderValue::from_str(&format!("\"{}\"", cpa_core::hex::encode(Sha256::digest(raw))))
+        .expect("SHA-256 is a valid ETag")
 }
 
 // Go `ifMatchSatisfied`: strong tags across all header lines; quoted commas stay in a tag.
