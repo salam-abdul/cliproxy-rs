@@ -182,7 +182,7 @@ async fn authenticate(
             Ok(crate::access::Access::Open) => Principal::default(),
             Ok(crate::access::Access::Granted { caller, provider }) => Principal {
                 key: caller.principal,
-                provider,
+                provider: provider.to_owned(),
                 secret: None,
             },
             Err(denied) if matches!(mode, Mode::Ordinary) => {
