@@ -621,9 +621,10 @@ pub(crate) fn upgrade_ttl(body: String, ttl: &str) -> String {
     }
     // Go visits the blocks of the payload it was given; each edit touches only its own
     // block, so the remaining blocks read the same before and after the others.
+    let blocks = signals::blocks(&body);
     let mut edits = Vec::new();
-    for (path, block) in signals::blocks(&body) {
-        let parsed = gjson::get(&block, "cache_control");
+    for block in &blocks {
+        let parsed = gjson::get(&block.1, "cache_control");
         if parsed.kind() != gjson::Kind::Object
             || parsed.get("ttl").exists()
             || parsed.get("type").kind() != gjson::Kind::String
@@ -640,11 +641,9 @@ pub(crate) fn upgrade_ttl(body: String, ttl: &str) -> String {
             upgraded.push_str(&format!(r#","scope":{}"#, scope.json()));
         }
         upgraded.push('}');
-        edits.push((format!("{path}.cache_control"), upgraded));
+        edits.push((block, "cache_control", BlockEdit::SetRaw(upgraded)));
     }
-    edits
-        .into_iter()
-        .fold(body, |body, (path, upgraded)| rawjson::set_raw(&body, &path, &upgraded))
+    splice_blocks(&body, edits)
 }
 
 /// `stripClaudeCacheControlTTL`.
@@ -652,15 +651,16 @@ pub(crate) fn strip_ttl(body: String) -> String {
     if !gjson::valid(&body) {
         return body;
     }
-    let paths: Vec<String> = signals::blocks(&body)
-        .into_iter()
+    let blocks = signals::blocks(&body);
+    let edits = blocks
+        .iter()
         .filter(|(_, block)| {
             let cc = gjson::get(block, "cache_control");
             cc.kind() == gjson::Kind::Object && cc.get("ttl").exists()
         })
-        .map(|(path, _)| format!("{path}.cache_control.ttl"))
+        .map(|block| (block, "cache_control.ttl", BlockEdit::Delete))
         .collect();
-    paths.iter().fold(body, |body, path| rawjson::delete(&body, path))
+    splice_blocks(&body, edits)
 }
 
 /// `normalizeCacheControlTTL`: a 1h marker may not follow a 5m one in evaluation order.
@@ -668,10 +668,11 @@ pub(crate) fn normalize_ttl(body: String) -> String {
     if !gjson::valid(&body) {
         return body;
     }
-    let mut paths = Vec::new();
+    let blocks = signals::blocks(&body);
+    let mut edits = Vec::new();
     let mut seen_5m = false;
-    for (path, block) in signals::blocks(&body) {
-        let parsed = gjson::get(&block, "cache_control");
+    for block in &blocks {
+        let parsed = gjson::get(&block.1, "cache_control");
         if !valid_cache_control(&parsed) {
             continue;
         }
@@ -681,18 +682,57 @@ pub(crate) fn normalize_ttl(body: String) -> String {
             continue;
         }
         if seen_5m {
-            paths.push(format!("{path}.cache_control.ttl"));
+            edits.push((block, "cache_control.ttl", BlockEdit::Delete));
         }
     }
-    paths.iter().fold(body, |body, path| rawjson::delete(&body, path))
+    splice_blocks(&body, edits)
+}
+
+/// A block found by [`signals::blocks`]: its path and its raw JSON.
+type Block<'a> = (String, std::borrow::Cow<'a, str>);
+
+/// One edit inside a [`Block`].
+enum BlockEdit {
+    Delete,
+    SetRaw(String),
+}
+
+/// Applies each edit to its own block and splices the edited blocks into one copy of
+/// `body`, so many markers cost one pass. An edit never leaves its block, so the other
+/// blocks' offsets and paths stay valid; a block with no offset into `body` is edited
+/// by its path afterwards.
+fn splice_blocks(body: &str, edits: Vec<(&Block<'_>, &str, BlockEdit)>) -> String {
+    let apply = |json: &str, key: &str, edit: &BlockEdit| match edit {
+        BlockEdit::Delete => rawjson::delete(json, key),
+        BlockEdit::SetRaw(value) => rawjson::set_raw(json, key, value),
+    };
+    let mut spliced = Vec::new();
+    let mut by_path = Vec::new();
+    for ((path, block), key, edit) in edits {
+        match block {
+            std::borrow::Cow::Borrowed(raw) => {
+                let start = raw.as_ptr() as usize - body.as_ptr() as usize;
+                spliced.push((start, start + raw.len(), apply(raw, key, &edit)));
+            }
+            std::borrow::Cow::Owned(_) => by_path.push((format!("{path}.{key}"), edit)),
+        }
+    }
+    spliced.sort_by_key(|(start, ..)| *start);
+    let mut out = String::with_capacity(body.len());
+    let mut at = 0;
+    for (start, end, block) in &spliced {
+        out.push_str(&body[at..*start]);
+        out.push_str(block);
+        at = *end;
+    }
+    out.push_str(&body[at..]);
+    by_path.iter().fold(out, |body, (path, edit)| apply(&body, path, edit))
 }
 
 /// `enforceCacheControlLimit`: drop the earliest non-final system/tool markers, then
 /// message markers, then any remaining system/tool markers.
 ///
-/// One walk finds every marker; the chosen blocks are rewritten on their own and
-/// spliced into one copy of the body (removing a `cache_control` key never moves
-/// another block, so their offsets and paths stay valid).
+/// One walk finds every marker; the chosen blocks are spliced into one copy of the body.
 pub(crate) fn enforce_cache_limit(body: String, mut max: usize) -> String {
     if !gjson::valid(&body) {
         return body;
@@ -724,28 +764,12 @@ pub(crate) fn enforce_cache_limit(body: String, mut max: usize) -> String {
     let last = |marked: &[_]| marked.len().saturating_sub(1);
     let (s, t) = (last(&system), last(&tools));
     let order = [&system[..s], &tools[..t], &messages[..], &system[s..], &tools[t..]].concat();
-    let mut edits = Vec::new();
-    let mut by_path = Vec::new();
-    for (path, block) in order.into_iter().take(total - max) {
-        match block {
-            std::borrow::Cow::Borrowed(raw) => {
-                let start = raw.as_ptr() as usize - body.as_ptr() as usize;
-                edits.push((start, start + raw.len(), rawjson::delete(raw, "cache_control")));
-            }
-            std::borrow::Cow::Owned(_) => by_path.push(format!("{path}.cache_control")),
-        }
-    }
-    edits.sort_by_key(|(start, ..)| *start);
-    let mut out = String::with_capacity(body.len());
-    let mut at = 0;
-    for (start, end, block) in &edits {
-        out.push_str(&body[at..*start]);
-        out.push_str(block);
-        at = *end;
-    }
-    out.push_str(&body[at..]);
-    drop(blocks);
-    by_path.iter().fold(out, |body, path| rawjson::delete(&body, path))
+    let edits = order
+        .into_iter()
+        .take(total - max)
+        .map(|block| (block, "cache_control", BlockEdit::Delete))
+        .collect();
+    splice_blocks(&body, edits)
 }
 
 fn cacheable_system(body: &str) -> bool {
@@ -997,6 +1021,28 @@ mod tests {
         assert_eq!(
             billing_header(&b),
             "x-anthropic-billing-header: cc_version=2.1.280.b43; cc_entrypoint=cli; cch=00000; cc_prompt_id=83ec619f-ab81-4d70-9c67-44c3865291b9; cc_turn_origin=human;"
+        );
+    }
+
+    /// Each ttl pass edits every marker in one copy of the body: a copy per marker
+    /// took minutes here. `.config/nextest.toml` runs this test alone.
+    #[test]
+    fn ttl_passes_edit_many_markers_in_one_pass() {
+        let body = |marker: &str, first: &str| {
+            let blocks = vec![format!(r#"{{"type":"text","text":"b","cache_control":{marker}}}"#); 5_000].join(",");
+            format!(
+                r#"{{"system":[{{"type":"text","text":"s","cache_control":{first}}}],"messages":[{{"role":"user","content":[{blocks}]}}]}}"#
+            )
+        };
+        let (five, hour) = (r#"{"type":"ephemeral"}"#, r#"{"type":"ephemeral","ttl":"1h"}"#);
+        let started = std::time::Instant::now();
+        assert_eq!(strip_ttl(body(hour, hour)), body(five, five));
+        assert_eq!(normalize_ttl(body(hour, five)), body(five, five));
+        assert_eq!(upgrade_ttl(body(five, five), "1h"), body(hour, hour));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
         );
     }
 
