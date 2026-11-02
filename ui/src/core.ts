@@ -152,10 +152,9 @@ export const level = (n: number, max: number) => (n <= 0 || max <= 0 ? 0 : Math.
 
 /**
  * One usage window. `used` is percent used, or null when the limit has no ceiling (an
- * uncapped extra-usage budget) and only `detail` applies. `source` is the signal-name
- * prefix a passive window was read from.
+ * uncapped extra-usage budget) and only `detail` applies.
  */
-export type Window = { label: string; used: number | null; reset: string; source?: string; detail?: string };
+export type Window = { label: string; used: number | null; reset: string; detail?: string };
 const clamp = (n: number) => Math.round(Math.max(0, Math.min(100, n)) * 10) / 10;
 /** Normalised quota groups first; then the built-in Claude, Codex and Kimi usage payloads. */
 export function quotaWindows(p: string, payload: Data): Window[] {
@@ -280,7 +279,6 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
         label: codexWindow(minutes * 60, w === "primary" ? "Primary limit" : "Secondary limit"),
         used: clamp(used),
         reset: resetAt > 0 ? new Date(resetAt * 1000).toISOString() : after >= 0 && at ? new Date(at + after * 1000).toISOString() : "",
-        source: `x-codex-${w}-`,
       });
     }
   else if (p === "claude")
@@ -290,13 +288,13 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
       if (typeof raw !== "string" || !raw.trim() || !Number.isFinite(used) || used < 0) continue;
       const reset = sig[source + "reset"], seconds = Number(reset);
       const date = new Date(seconds > 0 ? seconds * 1000 : reset);
-      out.push({label, used: clamp(used * 100), reset: Number.isFinite(date.getTime()) ? date.toISOString() : "", source});
+      out.push({label, used: clamp(used * 100), reset: Number.isFinite(date.getTime()) ? date.toISOString() : ""});
     }
   else if (p === "devin")
     for (const w of ["daily", "weekly"]) {
       const left = parseFloat(sig[`${w}_quota_remaining_percent`]);
       if (!Number.isNaN(left))
-        out.push({ label: w === "daily" ? "Daily" : "Weekly", used: clamp(100 - left), reset: sig[`${w}_quota_reset_at`] || "", source: `${w}_quota_` });
+        out.push({ label: w === "daily" ? "Daily" : "Weekly", used: clamp(100 - left), reset: sig[`${w}_quota_reset_at`] || "" });
     }
   return out;
 }

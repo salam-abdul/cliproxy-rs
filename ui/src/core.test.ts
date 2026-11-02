@@ -202,16 +202,16 @@ test("passive limits from Codex headers and Devin quota", () => {
     },
   });
   assert.deepEqual(codex, [
-    { label: "5-hour limit", used: 42.5, reset: "2026-10-02T14:00:00.000Z", source: "x-codex-primary-" },
+    { label: "5-hour limit", used: 42.5, reset: "2026-10-02T14:00:00.000Z" },
     // Relative resets count from when the server observed them, not from now.
-    { label: "Weekly limit", used: 7, reset: "2026-10-02T13:00:00.000Z", source: "x-codex-secondary-" },
+    { label: "Weekly limit", used: 7, reset: "2026-10-02T13:00:00.000Z" },
   ]);
   assert.deepEqual(signalWindows("codex", { signals: { "x-codex-primary-window-minutes": "300" } }), []);
   assert.deepEqual(
     signalWindows("devin", { signals: { daily_quota_remaining_percent: "87%", weekly_quota_remaining_percent: "100%", daily_quota_reset_at: "2026-10-03T00:00:00Z" } }),
     [
-      { label: "Daily", used: 13, reset: "2026-10-03T00:00:00Z", source: "daily_quota_" },
-      { label: "Weekly", used: 0, reset: "", source: "weekly_quota_" },
+      { label: "Daily", used: 13, reset: "2026-10-03T00:00:00Z" },
+      { label: "Weekly", used: 0, reset: "" },
     ],
   );
   assert.deepEqual(signalWindows("claude", { signals: { "x-codex-primary-used-percent": "5" } }), []);
@@ -288,8 +288,8 @@ test("Claude response headers provide live included windows without treating mis
     "Anthropic-Ratelimit-Unified-Overage-Status":"rejected",
   }};
   assert.deepEqual(signalWindows("claude", quota), [
-    {label:"5-hour limit",used:42,reset:"2026-10-02T14:00:00.000Z",source:"anthropic-ratelimit-unified-5h-"},
-    {label:"7-day limit (all models)",used:100,reset:"2026-10-03T14:00:00.000Z",source:"anthropic-ratelimit-unified-7d-"},
+    {label:"5-hour limit",used:42,reset:"2026-10-02T14:00:00.000Z"},
+    {label:"7-day limit (all models)",used:100,reset:"2026-10-03T14:00:00.000Z"},
   ]);
   for (const raw of [undefined, "", " ", "Infinity", "NaN", "-0.1"]) {
     assert.deepEqual(signalWindows("claude", {signals:{"anthropic-ratelimit-unified-5h-utilization":raw}}), []);
