@@ -338,7 +338,7 @@ async fn watcher_keeps_last_good_config_and_reconciles_disabled_deleted_and_self
     std::fs::write(
         f.dir.join("config.yaml"),
         format!(
-            "oauth: {{auth-dir: {}}}\nrequest-retry: 7\n",
+            "host: 127.0.0.1\noauth: {{auth-dir: {}}}\nrequest-retry: 7\n",
             f.dir.join("auth").display()
         ),
     )
@@ -897,7 +897,7 @@ async fn config_key_toggle_edits_only_the_target_key_in_the_current_file() {
     let (a, b) = ("- api-key: fake-a # first key", "- api-key: fake-b # second key");
     let f = Fixture::from_yaml("toggle", |auth, hash| {
         format!(
-            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n{}",
+            "config-version: 8\nserver:\n  host: 127.0.0.1\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n{}",
             auth.display(),
             groups(a, b)
         )
@@ -1166,13 +1166,158 @@ async fn runtime_credential_delete_spares_same_named_file() {
     server.abort();
 }
 
+/// On an exposed listener the Management API cannot empty the client keys, through a
+/// field, a whole-file upload, or a key toggle built on a keyless file the watcher
+/// rejected: the write is refused, the file is unchanged and the old key keeps working.
+/// The opt-in allows it.
+#[tokio::test]
+async fn a_management_write_cannot_open_an_exposed_listener() {
+    let f = Fixture::from_yaml("open-access", |auth, hash| {
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\naccess:\n  api-keys: [fake-client]\napi-keys:\n  claude:\n    - keys:\n        - api-key: fake-k\n",
+            auth.display()
+        )
+    });
+    let before = f.file();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = cpa_server::app(f.rt.clone(), management::router(f.state.clone()));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = wreq::Client::new();
+    let put = |path: &str, value: Value| {
+        client
+            .put(format!("{base}/v8/management/config{path}"))
+            .bearer_auth("fake-management-only")
+            .json(&value)
+            .send()
+    };
+    let models = |key: Option<&'static str>| {
+        let mut request = client.get(format!("{base}/v1/models"));
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    let r = put("/access/api-keys", json!([])).await.unwrap();
+    assert_eq!(r.status(), 422);
+    let body: Value = r.json().await.unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("access.allow-unauthenticated"),
+        "{body}"
+    );
+    assert_eq!(f.file(), before);
+    assert_eq!(f.rt.config().api_keys, ["fake-client"]);
+    assert_eq!(models(Some("fake-client")).await, 200);
+    assert_eq!(models(None).await, 401);
+    let keyless = before.replace("  api-keys: [fake-client]\n", "  api-keys: []\n");
+    assert_ne!(keyless, before);
+    let r = client
+        .put(format!("{base}/v0/management/config.yaml"))
+        .bearer_auth("fake-management-only")
+        .body(keyless.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 422);
+    assert_eq!(f.file(), before);
+    let id = cpa_core::config::credentials::from_config(&f.rt.config())
+        .into_iter()
+        .find(|c| c.attributes.get("api_key").map(String::as_str) == Some("fake-k"))
+        .unwrap()
+        .id;
+    std::fs::write(f.dir.join("config.yaml"), &keyless).unwrap();
+    let r = client
+        .patch(format!("{base}/v8/management/credentials/status"))
+        .bearer_auth("fake-management-only")
+        .json(&json!({"name": id, "disabled": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 500);
+    assert_eq!(f.file(), keyless, "the toggle wrote nothing");
+    assert_eq!(models(None).await, 401);
+    std::fs::write(f.dir.join("config.yaml"), &before).unwrap();
+    let r = put("/access", json!({"api-keys": [], "allow-unauthenticated": true}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(models(None).await, 200);
+    server.abort();
+}
+
+/// A keyless loopback server refuses a Management API change that would expose its next
+/// start, a public host or new trusted proxies, with the same error as other refused
+/// writes, and leaves the file unchanged. Keys or the opt-in make the change acceptable.
+#[tokio::test]
+async fn a_management_write_cannot_expose_a_keyless_listener() {
+    let f = Fixture::from_yaml("expose", |auth, hash| {
+        format!(
+            "config-version: 8\nserver:\n  host: 127.0.0.1\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let put = |path: &str, value: Value| {
+        let request = client
+            .put(format!("{base}/v8/management/config{path}"))
+            .bearer_auth("fake-management-only")
+            .json(&value);
+        async move {
+            let r = request.send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    for enable in [
+        ("/access/api-keys", json!(["fake-client"])),
+        ("/access/allow-unauthenticated", json!(true)),
+    ] {
+        for change in [
+            ("/server/host", json!("0.0.0.0")),
+            ("/server/trusted-proxies", json!(["127.0.0.1"])),
+        ] {
+            let before = f.file();
+            let (status, body) = put(change.0, change.1.clone()).await;
+            assert_eq!(status, 422, "{change:?}: {body}");
+            assert_eq!(body["error"], "invalid_config");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("access.allow-unauthenticated"),
+                "{body}"
+            );
+            assert_eq!(f.file(), before, "{change:?}");
+            assert_eq!(put(enable.0, enable.1.clone()).await.0, 200, "{enable:?}");
+            assert_eq!(put(change.0, change.1.clone()).await.0, 200, "{enable:?} {change:?}");
+            // Back to a keyless loopback listener.
+            assert_eq!(put("/server/host", json!("127.0.0.1")).await.0, 200);
+            assert_eq!(put("/server/trusted-proxies", json!([])).await.0, 200);
+            assert_eq!(put("/access", json!({})).await.0, 200);
+            assert!(!cpa_server::listener_exposed(&f.rt.config()));
+            assert!(f.rt.config().api_keys.is_empty() && !f.rt.config().allow_unauthenticated);
+        }
+    }
+    server.abort();
+}
+
 /// `GET /observability/usage/queue` drains queued records oldest first; a record that
 /// is not JSON comes back as a string. Disabling statistics stops queueing.
 #[tokio::test]
 async fn usage_queue_pops_records_in_order() {
     let f = Fixture::from_yaml("usageq", |auth, hash| {
         format!(
-            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\nobservability:\n  usage:\n    usage-statistics-enabled: true\n",
+            "config-version: 8\nserver:\n  host: 127.0.0.1\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\nobservability:\n  usage:\n    usage-statistics-enabled: true\n",
             auth.display()
         )
     });

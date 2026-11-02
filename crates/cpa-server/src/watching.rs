@@ -507,7 +507,10 @@ fn reload_snapshot(
                     .and_then(|text| Config::load_text(&state.path, text))
             }) {
                 None => ((*state.rt.config()).clone(), None, false),
-                Some(Ok(cfg)) => (cfg, None, true),
+                Some(Ok(cfg)) => match state.admit(&cfg) {
+                    Ok(()) => (cfg, None, true),
+                    Err(error) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
+                },
                 Some(Err(error)) => ((*state.rt.config()).clone(), Some(ReloadError::Invalid(error)), false),
             }
         }
@@ -532,11 +535,17 @@ fn reload_snapshot(
 mod tests {
     use super::*;
 
+    /// Started on loopback, so its reloads may leave client keys empty.
     fn state() -> (Arc<Management>, PathBuf) {
+        state_with("server: {host: 127.0.0.1}\n")
+    }
+
+    /// A runtime started from `startup` plus a private auth-dir.
+    fn state_with(startup: &str) -> (Arc<Management>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("cpa-watch-outcome-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
-        std::fs::write(&path, format!("oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
+        std::fs::write(&path, format!("{startup}oauth: {{auth-dir: {}}}\n", dir.display())).unwrap();
         let rt = Arc::new(crate::testing::runtime(
             Config::load(&path).unwrap(),
             Vec::new(),
@@ -554,7 +563,12 @@ mod tests {
     #[tokio::test]
     async fn accepted_config_is_captured_and_skipped_reloads_do_not_advance_it() {
         let (state, dir) = state();
-        let config = |port| format!("port: {port}\noauth: {{auth-dir: {}}}\n", dir.display());
+        let config = |port| {
+            format!(
+                "host: 127.0.0.1\nport: {port}\noauth: {{auth-dir: {}}}\n",
+                dir.display()
+            )
+        };
         std::fs::write(&state.path, config(9001)).unwrap();
         let accepted = reload_config(&state, true).unwrap().unwrap();
         state.rt.publish_config(Config::parse(&config(9002)).unwrap());
@@ -566,6 +580,91 @@ mod tests {
         assert!(reload_config(&state, false).unwrap().is_none()); // Auth-only event.
         assert_eq!(state.rt.config().port, 9002);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A reload never opens the proxy API on an exposed listener: a file that empties the
+    /// client keys is rejected, the previous keys keep working, and the opt-in is the
+    /// only way to drop them. The bound listener counts, even when the file moves its
+    /// host to loopback for the next start.
+    #[tokio::test]
+    async fn a_reload_that_empties_client_keys_is_rejected_and_the_old_keys_keep_working() {
+        use tower::ServiceExt;
+        // `host` is empty: the runtime listens on every interface.
+        let (state, dir) = state_with("access: {api-keys: [fake-old]}\n");
+        let auth = format!("oauth: {{auth-dir: {}}}\n", dir.display());
+        let write = |text: &str| std::fs::write(&state.path, format!("{text}{auth}")).unwrap();
+        let status = |key: Option<&str>| {
+            let mut request = axum::http::Request::get("/v1/models");
+            if let Some(key) = key {
+                request = request.header("authorization", format!("Bearer {key}"));
+            }
+            let request = request.body(axum::body::Body::empty()).unwrap();
+            let app = crate::router(state.rt.clone());
+            async move { app.oneshot(request).await.unwrap().status().as_u16() }
+        };
+        for emptied in [
+            "access: {api-keys: []}\n",
+            "server: {host: 127.0.0.1}\naccess: {api-keys: []}\n",
+        ] {
+            write(emptied);
+            let refused = reload(&state).expect_err(emptied).to_string();
+            assert!(refused.contains("access.allow-unauthenticated"), "{refused}");
+            assert_eq!(state.rt.config().api_keys, ["fake-old"], "{emptied}");
+            assert_eq!(status(Some("fake-old")).await, 200, "{emptied}");
+            assert_eq!(status(None).await, 401, "{emptied}");
+        }
+        write("access: {api-keys: [], allow-unauthenticated: true}\n");
+        reload(&state).unwrap();
+        assert_eq!(status(None).await, 200);
+        std::fs::remove_dir_all(dir).unwrap();
+
+        // A loopback listener may drop its keys.
+        let (state, dir) = state_with("server: {host: 127.0.0.1}\naccess: {api-keys: [fake-old]}\n");
+        let auth = format!("oauth: {{auth-dir: {}}}\n", dir.display());
+        std::fs::write(
+            &state.path,
+            format!("server: {{host: 127.0.0.1}}\naccess: {{api-keys: []}}\n{auth}"),
+        )
+        .unwrap();
+        reload(&state).unwrap();
+        assert!(state.rt.config().api_keys.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A keyless loopback server rejects a file that would expose its next start, a
+    /// public host or new trusted proxies, when the file changes rather than at that
+    /// start. Keys or the opt-in make the same change acceptable; `localhost` is loopback.
+    #[tokio::test]
+    async fn a_reload_that_would_expose_a_keyless_listener_is_rejected() {
+        let exposed = |state: &Management| crate::access::listener_exposed(&state.rt.config());
+        for server in [
+            "{host: localhost}",
+            "{host: 0.0.0.0}",
+            "{host: 127.0.0.1, trusted-proxies: [127.0.0.1]}",
+        ] {
+            let (state, dir) = state_with("server: {host: 127.0.0.1}\n");
+            let auth = format!("oauth: {{auth-dir: {}}}\n", dir.display());
+            let write = |access: &str| {
+                std::fs::write(&state.path, format!("server: {server}\naccess: {access}\n{auth}")).unwrap()
+            };
+            write("{api-keys: []}");
+            if server == "{host: localhost}" {
+                reload(&state).unwrap();
+                assert_eq!(state.rt.config().host, "localhost");
+            } else {
+                let refused = reload(&state).expect_err(server).to_string();
+                assert!(refused.contains("access.allow-unauthenticated"), "{server}: {refused}");
+                assert!(!exposed(&state), "{server}: the previous config stays");
+                for access in ["{api-keys: [fake-new]}", "{allow-unauthenticated: true}"] {
+                    write(access);
+                    reload(&state).unwrap_or_else(|e| panic!("{server} {access}: {e}"));
+                    assert!(exposed(&state), "{server} {access}");
+                    std::fs::write(&state.path, format!("server: {{host: 127.0.0.1}}\n{auth}")).unwrap();
+                    reload(&state).unwrap();
+                }
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -592,7 +691,7 @@ mod tests {
         let (state, dir) = state();
         let auth = dir.join("auth");
         std::fs::create_dir(&auth).unwrap();
-        let config = |port| format!("port: {port}\nauth-dir: {}\n", auth.display());
+        let config = |port| format!("host: 127.0.0.1\nport: {port}\nauth-dir: {}\n", auth.display());
         std::fs::write(&state.path, config(9001)).unwrap();
         std::fs::write(auth.join("account.json"), r#"{"type":"claude","access_token":"fake"}"#).unwrap();
         reload(&state).unwrap();
@@ -614,8 +713,8 @@ mod tests {
     async fn applied_hashes_follow_loaded_bytes_and_revisit_restored_observations() {
         let (state, dir) = state();
         let auth = dir.join("account.json");
-        let config_a = format!("port: 9001\nauth-dir: {}\n", dir.display());
-        let config_b = format!("port: 9002\nauth-dir: {}\n", dir.display());
+        let config_a = format!("host: 127.0.0.1\nport: 9001\nauth-dir: {}\n", dir.display());
+        let config_b = format!("host: 127.0.0.1\nport: 9002\nauth-dir: {}\n", dir.display());
         let auth_a = r#"{"type":"claude","access_token":"fake-a"}"#;
         let auth_b = r#"{"type":"claude","access_token":"fake-b"}"#;
         std::fs::write(&state.path, &config_a).unwrap();
@@ -650,7 +749,11 @@ mod tests {
         std::fs::create_dir(&relative).unwrap();
         let path = relative.join("account.json");
         std::fs::write(&path, "{}").unwrap();
-        std::fs::write(&state.path, format!("auth-dir: {}\n", relative.display())).unwrap();
+        std::fs::write(
+            &state.path,
+            format!("host: 127.0.0.1\nauth-dir: {}\n", relative.display()),
+        )
+        .unwrap();
         state
             .fallbacks
             .lock()
@@ -693,7 +796,7 @@ mod tests {
         let (state, dir) = state();
         let auth = dir.join("auth");
         std::fs::write(&auth, "not a directory").unwrap();
-        std::fs::write(&state.path, format!("auth-dir: {}\n", auth.display())).unwrap();
+        std::fs::write(&state.path, format!("host: 127.0.0.1\nauth-dir: {}\n", auth.display())).unwrap();
         reload(&state).unwrap();
         let unreadable = observe(&state, &mut HashCache::default());
         let (_, read) = reload_snapshot(&state, true, &unreadable);
@@ -758,7 +861,7 @@ mod tests {
         let watcher = start(&state);
         std::fs::write(
             &state.path,
-            format!("port: 9001\noauth: {{auth-dir: {}}}\n", dir.display()),
+            format!("host: 127.0.0.1\nport: 9001\noauth: {{auth-dir: {}}}\n", dir.display()),
         )
         .unwrap();
         capture.wait_for("port: 0 -> 9001").await;
@@ -776,7 +879,7 @@ mod tests {
         // The runtime holds port 0; the file changes before the watcher hashes it.
         std::fs::write(
             &state.path,
-            format!("port: 9001\noauth: {{auth-dir: {}}}\n", dir.display()),
+            format!("host: 127.0.0.1\nport: 9001\noauth: {{auth-dir: {}}}\n", dir.display()),
         )
         .unwrap();
         let watcher = start(&state);
@@ -823,7 +926,11 @@ mod tests {
     async fn auth_folder_created_after_start_is_followed() {
         let (state, dir) = state();
         let auth = dir.join("later");
-        std::fs::write(&state.path, format!("oauth: {{auth-dir: {}}}\n", auth.display())).unwrap();
+        std::fs::write(
+            &state.path,
+            format!("host: 127.0.0.1\noauth: {{auth-dir: {}}}\n", auth.display()),
+        )
+        .unwrap();
         reload(&state).unwrap();
         let capture = Capture::default();
         let _guard = capture.install();

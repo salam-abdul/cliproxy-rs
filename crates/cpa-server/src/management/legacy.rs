@@ -719,6 +719,9 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, header
                 "failed to hash remote management key: bcrypt: password length exceeds 72 bytes".into(),
             );
         }
+        if let Err(e) = state.admit(&cfg) {
+            return fail(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", format!("{e:#}"));
+        }
         if super::write_config(&state, &text).is_err() {
             return fail(
                 StatusCode::INTERNAL_SERVER_ERROR,

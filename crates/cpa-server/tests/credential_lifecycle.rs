@@ -44,7 +44,10 @@ impl Fixture {
         let path = dir.join("account.json");
         std::fs::write(&path, metadata.to_string()).unwrap();
         let hash = bcrypt::hash("fake-management-only", 4).unwrap();
-        let cfg_text = format!("auth-dir: {}\nmanagement:\n  secret-key: '{hash}'\n", dir.display());
+        let cfg_text = format!(
+            "host: 127.0.0.1\nauth-dir: {}\nmanagement:\n  secret-key: '{hash}'\n",
+            dir.display()
+        );
         std::fs::write(dir.join("config.yaml"), &cfg_text).unwrap();
         let cfg = Config::parse(&cfg_text).unwrap();
         let credential = Credential::from_file(&dir, &path, metadata.as_object().unwrap().clone()).unwrap();
