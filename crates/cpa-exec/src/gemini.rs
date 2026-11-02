@@ -121,52 +121,8 @@ pub(crate) fn translate(
 ) -> Result<Vec<u8>, ExecError> {
     let ctx = RequestCtx { model, stream };
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", compat);
-    deep_stack(body, || {
-        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
-    })
-    .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
-}
-
-/// Runs a translator on a thread with Go's maximum goroutine stack when the body nests
-/// deeply, as `cpa_translate::translate_request` does for registered pairs: the ported
-/// schema walkers recurse per nesting level like Go's, whose stacks grow.
-// ponytail: duplicate of cpa_translate's private guard until its exported `...WithCompat`
-// entry points guard themselves (owner: translators).
-pub(crate) fn deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> T + Send) -> T {
-    const DEEP: usize = 256;
-    let (mut depth, mut max, mut in_string, mut escaped) = (0usize, 0usize, false, false);
-    for &b in body {
-        if in_string {
-            match b {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                max = max.max(depth);
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if max <= DEEP {
-        return f();
-    }
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 30)
-            .spawn_scoped(scope, f)
-            .map(|handle| handle.join())
-    })
-    .ok()
-    .and_then(Result::ok)
-    .expect("deep JSON translation thread")
+    crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
+        .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
 
 /// `TranslateRequestPairWithAPIKeyModelCompatibility`: the payload-config baseline from
@@ -488,7 +444,7 @@ impl GeminiExecutor {
         let (original_translated, body) = translate_pair(req, cfg, to, &base_model, compat)?;
         let mut body = apply_thinking(req, body, from, to, &credential.provider, resolved.as_ref())?;
         body = payload::fix_image_aspect_ratio(&base_model, body);
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &base_model, to.as_str(), body, &original_translated, req);
         body = payload::set_str_if_different(body, "model", &base_model);
         body = payload::cap_max_output_tokens(body, &base_model);
@@ -570,7 +526,7 @@ impl GeminiExecutor {
         }
         // applyGeminiInteractionsThinking: the Gemini applier family for the target.
         body = apply_thinking(req, body, from, to, "gemini", resolved.as_ref())?;
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &target, "interactions", body, &original_translated, req);
         body = payload::sanitize_interactions_input_ids(body);
         if req.stream {

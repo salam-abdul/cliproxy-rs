@@ -263,7 +263,7 @@ fn helper_headers(headers: &HeaderMap, settings: &Settings) -> bool {
         ("x-stainless-runtime", "node"),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-timeout", "600"),
-        ("anthropic-version", "2023-06-01"),
+        ("anthropic-version", super::ANTHROPIC_VERSION),
         ("anthropic-dangerous-direct-browser-access", "true"),
     ];
     if expected.iter().any(|(n, v)| raw_header(headers, n) != *v) {

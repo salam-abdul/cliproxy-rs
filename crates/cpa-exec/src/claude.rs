@@ -67,34 +67,12 @@ use settings::Settings;
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The message of the executor's own 404 for a thread continuation whose state is gone.
 pub use thread::NOT_FOUND as THREAD_NOT_FOUND;
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The `Anthropic-Version` the executor sends when the caller sent none.
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Advertised in `CLIProxyAPI/<version>` when a caller-owned request has no User-Agent.
 pub(crate) const PROXY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use crate::proxy::Hooks;
-
-/// The fields of a `"type": "claude"` credential this executor needs.
-pub struct ClaudeView<'a> {
-    pub access_token: &'a str,
-    pub email: &'a str,
-}
-
-impl<'a> ClaudeView<'a> {
-    pub fn new(credential: &'a Credential) -> Result<Self, ExecError> {
-        let access_token = credential
-            .attributes
-            .get("api_key")
-            .map(String::as_str)
-            .filter(|t| !t.is_empty())
-            .or_else(|| credential.str("access_token"))
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| ExecError::local(401, FailureScope::Credential, "claude credential has no access_token"))?;
-        Ok(Self {
-            access_token,
-            email: credential.str("email").unwrap_or_default(),
-        })
-    }
-}
 
 /// The first-party Anthropic transport.
 enum Native {
@@ -352,82 +330,89 @@ impl ClaudeExecutor {
         let request_id = header_value(&response.headers, "request-id");
         let fast = ctx.first_party && prepared.fast;
         let wrap = |e| fast_request_error(fast, e);
-        let body = match response.body {
-            ResponseBody::Stream(raw) if upstream_stream && req.stream && req.operation == Operation::Generate => {
-                let done: stream::OnComplete = Box::new(move |message_id| {
-                    completion.complete(&message_id, &request_id);
-                });
-                // ExecuteStream publishes through its stream buffer only (no
-                // EnsurePublished): a stream that never carried usage records nothing.
+        let raw = response.body;
+        let body = if upstream_stream && req.stream && req.operation == Operation::Generate {
+            let done: stream::OnComplete = Box::new(move |message_id| {
+                completion.complete(&message_id, &request_id);
+            });
+            // ExecuteStream publishes through its stream buffer only (no
+            // EnsurePublished): a stream that never carried usage records nothing.
+            req.usage.usage_required();
+            let (usage, capture) = (req.usage.clone(), req.capture().clone());
+            let relayed = stream::relay(raw, reverse, done, usage, capture);
+            ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
+        } else {
+            let capture = req.capture();
+            let data = collect(raw).await.map_err(|e| {
+                capture_error(capture, &e);
+                wrap(e)
+            })?;
+            capture.record(CaptureEvent::ResponseChunk(&data));
+            if upstream_stream {
+                // Translated Execute publishes with streamUsage.Publish only: no usage
+                // seen, no record. A restore failure below keeps the usage seen so far
+                // (streamUsage.PublishFailure), which the server does for Claude.
                 req.usage.usage_required();
-                let (usage, capture) = (req.usage.clone(), req.capture().clone());
-                let relayed = stream::relay(raw, reverse, done, usage, capture);
-                ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
-            }
-            ResponseBody::Stream(raw) => {
-                let capture = req.capture();
-                let data = collect(raw).await.map_err(|e| {
+                stream::validate_buffered(&data).map_err(|e| {
                     capture_error(capture, &e);
                     wrap(e)
                 })?;
-                capture.record(CaptureEvent::ResponseChunk(&data));
-                if upstream_stream {
-                    // Translated Execute publishes with streamUsage.Publish only: no usage
-                    // seen, no record. A restore failure below keeps the usage seen so far
-                    // (streamUsage.PublishFailure), which the server does for Claude.
-                    req.usage.usage_required();
-                    stream::validate_buffered(&data).map_err(|e| {
-                        capture_error(capture, &e);
-                        wrap(e)
-                    })?;
-                    let id = stream::buffered_message_id(&data);
-                    if !id.is_empty() {
-                        completion.complete(&id, &request_id);
-                    }
-                    let mut out = Vec::with_capacity(data.len());
-                    for (i, line) in data.split(|b| *b == b'\n').enumerate() {
-                        if i > 0 {
-                            out.push(b'\n');
-                        }
-                        // ObserveResponseModel and ObserveClaudeStream, before restore.
-                        req.usage.response_line(Format::Claude, line);
-                        out.extend(stream::restore_line(line, &reverse).map_err(|m| {
-                            let error = crate::upstream::plain_error_after_response(format!(
-                                "restore Claude OAuth tool name from streaming response: {m}"
-                            ));
-                            capture_error(capture, &error);
-                            wrap(error)
-                        })?);
-                    }
-                    if let Some(scope) = replay {
-                        scope.store_response(&out);
-                    }
-                    ResponseBody::Buffered(Bytes::from(out))
-                } else {
-                    // ObserveResponseModel and ParseClaudeUsage of the upstream body.
-                    req.usage.response_body(Format::Claude, &data);
-                    let text = String::from_utf8_lossy(&data).into_owned();
-                    let id = rawjson::string(&text, "id").trim().to_owned();
+                let id = stream::buffered_message_id(&data);
+                if !id.is_empty() {
                     completion.complete(&id, &request_id);
-                    // A failed restore returns before ParseClaudeUsage: Go's deferred
-                    // TrackFailure publishes no tokens. The error is plain (wrapped for a
-                    // fast request with the 2xx status), so Go records no status.
-                    let restored = alias::restore_response(&text, &reverse).map_err(|m| {
-                        let message = format!("restore Claude OAuth tool name from response: {m}");
-                        req.usage.publish_failure(0, &message);
-                        capture.record(CaptureEvent::ResponseError(&message));
-                        wrap(crate::upstream::plain_error_after_response(message))
-                    })?;
-                    if let Some(scope) = replay {
-                        scope.store_response(restored.as_bytes());
-                    }
-                    // reporter.Publish(ParseClaudeUsage(data)): native Execute always
-                    // publishes, with whatever usage the body carried.
-                    req.usage.publish();
-                    ResponseBody::Buffered(Bytes::from(restored))
                 }
+                // Lines whose names need no restore keep their bytes: the body is
+                // copied only from the first line that changes.
+                let mut out: Option<Vec<u8>> = None;
+                let mut end = 0;
+                for line in data.split(|b| *b == b'\n') {
+                    let start = end;
+                    end += line.len() + 1;
+                    // ObserveResponseModel and ObserveClaudeStream, before restore.
+                    req.usage.response_line(Format::Claude, line);
+                    let restored = stream::restore_line(line, &reverse).map_err(|m| {
+                        let error = crate::upstream::plain_error_after_response(format!(
+                            "restore Claude OAuth tool name from streaming response: {m}"
+                        ));
+                        capture_error(capture, &error);
+                        wrap(error)
+                    })?;
+                    if out.is_none() && matches!(restored, std::borrow::Cow::Borrowed(_)) {
+                        continue;
+                    }
+                    let out = out.get_or_insert_with(|| data[..start].to_vec());
+                    out.extend_from_slice(&restored);
+                    if end <= data.len() {
+                        out.push(b'\n');
+                    }
+                }
+                let out = out.map_or(data, Bytes::from);
+                if let Some(scope) = replay {
+                    scope.store_response(&out);
+                }
+                ResponseBody::Buffered(out)
+            } else {
+                // ObserveResponseModel and ParseClaudeUsage of the upstream body.
+                req.usage.response_body(Format::Claude, &data);
+                let id = rawjson::string(&String::from_utf8_lossy(&data), "id").trim().to_owned();
+                completion.complete(&id, &request_id);
+                // A failed restore returns before ParseClaudeUsage: Go's deferred
+                // TrackFailure publishes no tokens. The error is plain (wrapped for a
+                // fast request with the 2xx status), so Go records no status.
+                let restored = alias::restore_response(data, &reverse).map_err(|m| {
+                    let message = format!("restore Claude OAuth tool name from response: {m}");
+                    req.usage.publish_failure(0, &message);
+                    capture.record(CaptureEvent::ResponseError(&message));
+                    wrap(crate::upstream::plain_error_after_response(message))
+                })?;
+                if let Some(scope) = replay {
+                    scope.store_response(&restored);
+                }
+                // reporter.Publish(ParseClaudeUsage(data)): native Execute always
+                // publishes, with whatever usage the body carried.
+                req.usage.publish();
+                ResponseBody::Buffered(restored)
             }
-            ResponseBody::Buffered(_) => unreachable!("send returns raw streams"),
         };
         let response = ExecResponse {
             status: response.status,
@@ -438,13 +423,6 @@ impl ClaudeExecutor {
             return Ok(response);
         }
         // Translated clients: framed events through the registered stream translator.
-        let response = match response.body {
-            ResponseBody::Buffered(_) => response,
-            ResponseBody::Stream(events) => ExecResponse {
-                body: ResponseBody::Stream(events),
-                ..response
-            },
-        };
         translate::response(req, translated, response).await
     }
 
@@ -477,10 +455,9 @@ impl ClaudeExecutor {
         let response = self
             .send(&ctx, &mut prepared, "/v1/messages/count_tokens", None, capture)
             .await?;
-        let body = match response.body {
-            ResponseBody::Stream(raw) => collect(raw).await.inspect_err(|e| capture_error(capture, e))?,
-            ResponseBody::Buffered(b) => b,
-        };
+        let body = collect(response.body)
+            .await
+            .inspect_err(|e| capture_error(capture, e))?;
         capture.record(CaptureEvent::ResponseChunk(&body));
         Ok(ExecResponse {
             status: response.status,
@@ -634,11 +611,7 @@ async fn finish(
             capture.record(CaptureEvent::ResponseError(&m));
             fast_request_error(fast, crate::upstream::plain_error_after_response(m))
         })?;
-        return Ok(RawResponse {
-            status,
-            headers,
-            body: ResponseBody::Stream(body),
-        });
+        return Ok(RawResponse { status, headers, body });
     }
     let data = match body {
         Err(m) => {
@@ -648,12 +621,15 @@ async fn finish(
             return Err(fast_request_error(fast, error));
         }
         Ok(mut body) => {
-            // ponytail: Go reads error bodies without a bound; 16 MiB covers any real
-            // provider error without letting a hostile upstream exhaust a small VPS.
+            // ponytail: Go reads error bodies without a bound; this keeps the
+            // [`crate::proxy::MAX_ERROR_BODY`] prefix.
+            let limit = crate::proxy::MAX_ERROR_BODY;
             let mut data = BytesMut::new();
             loop {
                 match body.next().await {
-                    Some(Ok(chunk)) if data.len() < crate::proxy::MAX_ERROR_BODY => data.extend_from_slice(&chunk),
+                    Some(Ok(chunk)) if data.len() < limit => {
+                        data.extend_from_slice(&chunk[..chunk.len().min(limit - data.len())]);
+                    }
                     Some(Ok(_)) | None => break data.freeze(),
                     Some(Err(e)) => {
                         let reason = if e.scope == FailureScope::Transport {
@@ -693,7 +669,8 @@ impl Completion {
 struct RawResponse {
     status: u16,
     headers: http::HeaderMap,
-    body: ResponseBody,
+    /// The decoded body of a 2xx answer.
+    body: cpa_core::exec::ExecStream,
 }
 
 fn header_value(headers: &http::HeaderMap, name: &str) -> String {
@@ -779,7 +756,10 @@ fn fast_request_error(fast: bool, mut error: ExecError) -> ExecError {
 /// Request facts shared by every stage.
 struct Ctx<'a> {
     credential: &'a Credential,
-    settings: Settings,
+    /// The Claude settings of this config snapshot (parsed once per snapshot).
+    settings: Arc<Settings>,
+    /// The `claude-api-key` entry of the credential, an index into `settings.keys`.
+    key: Option<usize>,
     api_key: String,
     base_url: String,
     first_party: bool,
@@ -946,7 +926,7 @@ impl<'a> Ctx<'a> {
         cfg: &Config,
         delegation: Delegation,
     ) -> Self {
-        let settings = Settings::from_config(cfg);
+        let settings = cfg.derived(Settings::from_config);
         let attr = |k: &str| credential.attributes.get(k).map(String::as_str).unwrap_or_default();
         let api_key = if attr("api_key").is_empty() {
             credential.str("access_token").unwrap_or_default().to_owned()
@@ -958,6 +938,7 @@ impl<'a> Ctx<'a> {
         } else {
             attr("base_url").trim_end_matches('/').to_owned()
         };
+        let key = settings.key_index(&api_key, attr("base_url"));
         let oauth_token = api_key.contains("sk-ant-oat");
         // claudeFingerprintProfileFromConfig: the credential's own value, else the key's.
         let own = Some(attr("fingerprint_profile"))
@@ -971,8 +952,7 @@ impl<'a> Ctx<'a> {
             .map(normalize_fingerprint_profile)
             .unwrap_or_default();
         let profile = if own.is_empty() {
-            settings
-                .key_for(&api_key, attr("base_url"))
+            key.and_then(|i| settings.keys.get(i))
                 .map(|k| normalize_fingerprint_profile(&k.fingerprint_profile))
                 .unwrap_or_default()
         } else {
@@ -1004,6 +984,7 @@ impl<'a> Ctx<'a> {
             oauth_token,
             bearer,
             settings,
+            key,
             api_key,
             base_url,
             today: String::new(),
@@ -1108,13 +1089,7 @@ impl<'a> Ctx<'a> {
         if !attr_mode.is_empty() {
             mode = attr_mode.clone();
         }
-        let base = self
-            .credential
-            .attributes
-            .get("base_url")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let key_cloak = self.settings.key_for(&self.api_key, base).and_then(|k| k.cloak.clone());
+        let key_cloak = self.key().and_then(|k| k.cloak.clone());
         if let Some(c) = &key_cloak {
             if !c.mode.trim().is_empty() {
                 mode = c.mode.trim().to_owned();
@@ -1606,17 +1581,12 @@ impl<'a> Ctx<'a> {
             .attributes
             .get("rebuild_mid_system_message")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-            || self
-                .settings
-                .key_for(
-                    &self.api_key,
-                    self.credential
-                        .attributes
-                        .get("base_url")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )
-                .is_some_and(|k| k.rebuild_mid_system_message)
+            || self.key().is_some_and(|k| k.rebuild_mid_system_message)
+    }
+
+    /// The `claude-api-key` entry of the credential.
+    fn key(&self) -> Option<&settings::ClaudeKey> {
+        self.key.and_then(|i| self.settings.keys.get(i))
     }
 
     /// `claudeDiagnosticsCredentialIdentity`.

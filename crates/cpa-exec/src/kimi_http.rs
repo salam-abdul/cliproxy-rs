@@ -92,8 +92,8 @@ fn platform_hostname() -> Option<String> {
 /// Go `ApplyPayloadConfigWithRequest` (no target executor) for the device providers:
 /// `requests.payload` rules for `model`, `protocol` the target format, `original` the
 /// client's original request translated to that target.
-// ponytail: the rules are parsed per request (the runtime has no per-snapshot slot), and
-// ExecRequest has no inbound route path, so path-gated image-generation rules see "".
+// ponytail: ExecRequest has no inbound route path, so path-gated image-generation rules
+// see ""; carrying the route path on ExecRequest would let them match.
 pub(crate) fn payload_rules(
     cfg: &cpa_core::config::Config,
     req: &cpa_core::exec::ExecRequest,
@@ -103,7 +103,7 @@ pub(crate) fn payload_rules(
     original: &[u8],
 ) -> Vec<u8> {
     use cpa_common::payload;
-    let rules = payload::Rules::from_config(cfg);
+    let rules = payload::Rules::of(cfg);
     // PayloadRequestedModel: the client's model, else req.Model.
     let requested = match req.requested_model.trim() {
         "" => req.model.trim(),

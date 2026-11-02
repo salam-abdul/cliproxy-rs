@@ -6,6 +6,7 @@
 //! upstream appends after the terminal event is never forwarded. A transport read
 //! failure before `message_stop` becomes Go's `unexpected EOF`; clean truncation is 502.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -72,24 +73,27 @@ fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &
     }
 }
 
-/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line.
-pub(crate) fn restore_line(line: &[u8], reverse: &Reverse) -> Result<Vec<u8>, String> {
+/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line; borrowed when no name
+/// changes.
+pub(crate) fn restore_line<'a>(line: &'a [u8], reverse: &Reverse) -> Result<Cow<'a, [u8]>, String> {
     if reverse.is_empty() {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
     let trimmed = line.trim_ascii();
     if trimmed.is_empty() || trimmed == b"[DONE]" || trimmed.starts_with(b"event:") {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
-    let is_data = trimmed.starts_with(b"data:");
-    let payload = if is_data { trimmed[5..].trim_ascii() } else { trimmed };
+    let (is_data, payload) = match trimmed.strip_prefix(b"data:") {
+        Some(payload) => (true, payload.trim_ascii()),
+        None => (false, trimmed),
+    };
     let Ok(payload) = std::str::from_utf8(payload) else {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     };
     Ok(match alias::restore_event_payload(payload, reverse)? {
-        Some(updated) if is_data => [b"data: ".as_slice(), updated.as_bytes()].concat(),
-        Some(updated) => updated.into_bytes(),
-        None => line.to_vec(),
+        Some(updated) if is_data => Cow::Owned([b"data: ".as_slice(), updated.as_bytes()].concat()),
+        Some(updated) => Cow::Owned(updated.into_bytes()),
+        None => Cow::Borrowed(line),
     })
 }
 
@@ -100,6 +104,9 @@ struct Relay {
     body: ExecStream,
     reverse: Arc<Reverse>,
     line: BytesMut,
+    /// Prefix of `line` already searched for a newline, so a long line arriving in
+    /// many chunks is scanned once overall.
+    scanned: usize,
     event: BytesMut,
     ready: VecDeque<Result<Bytes, ExecError>>,
     message_id: String,
@@ -201,7 +208,12 @@ impl Relay {
 
     fn chunk(&mut self, chunk: &[u8]) {
         self.line.extend_from_slice(chunk);
-        while let Some(pos) = self.line.iter().position(|b| *b == b'\n') {
+        while let Some(pos) = self.line[self.scanned..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|pos| self.scanned + pos)
+        {
+            self.scanned = 0;
             // bufio.Scanner holds at most MAX_LINE bytes: the line and its newline must fit.
             if pos + 1 > MAX_LINE {
                 self.fail(crate::upstream::plain_error_after_response(
@@ -218,6 +230,7 @@ impl Relay {
                 return;
             }
         }
+        self.scanned = self.line.len();
         if self.line.len() > MAX_LINE {
             self.fail(crate::upstream::plain_error_after_response(
                 "bufio.Scanner: token too long",
@@ -249,7 +262,7 @@ impl Relay {
             });
             if read_error {
                 error.body = Bytes::from_static(b"unexpected EOF");
-                error = crate::upstream::body_read_error_after_response(200, error);
+                error = crate::upstream::body_read_error_after_response(error);
                 if error.scope == FailureScope::Request && error.headers.is_empty() {
                     error.after_accept.get_or_insert(AfterAccept::Interrupted);
                 }
@@ -277,6 +290,7 @@ pub(crate) fn relay(
         body,
         reverse,
         line: BytesMut::new(),
+        scanned: 0,
         event: BytesMut::new(),
         ready: VecDeque::new(),
         message_id: String::new(),
@@ -700,6 +714,36 @@ mod tests {
         assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(error.body.as_ref(), b"unexpected EOF");
         assert_eq!(out[1].as_ref().unwrap().as_ref(), b"partial\n");
+    }
+
+    /// A long line that arrives in many small chunks is searched for its newline once
+    /// overall, not from its first byte on every chunk. Rescanning would take tens of
+    /// seconds here; `.config/nextest.toml` runs this test alone.
+    #[tokio::test]
+    async fn a_long_line_in_small_chunks_is_scanned_once() {
+        const LINE: usize = 4 << 20;
+        const CHUNK: usize = 256;
+        let mut line = vec![b'a'; LINE];
+        line[..6].copy_from_slice(b"data: ");
+        line.extend_from_slice(b"\n\n");
+        let body = Bytes::from(line.clone());
+        let pieces: Vec<_> = (0..body.len())
+            .step_by(CHUNK)
+            .map(|at| Ok(body.slice(at..(at + CHUNK).min(body.len()))))
+            .collect();
+        let started = std::time::Instant::now();
+        let out = relay(
+            futures_util::stream::iter(pieces).boxed(),
+            Arc::default(),
+            Box::new(|_| panic!("not complete")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(out[0].as_ref().unwrap().as_ref(), line.as_slice());
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 
     /// An over-long line or an unrestorable tool alias ends a stream the upstream already

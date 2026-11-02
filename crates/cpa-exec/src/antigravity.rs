@@ -561,16 +561,14 @@ impl AntigravityExecutor {
         let ctx = RequestCtx { model, stream };
         let client = crate::codex_client::Client::new(&req.headers, cfg, "", false);
         let info = req.resolved_model.as_ref().map(|r| &r.info);
-        gemini::deep_stack(&req.body, || {
-            crate::codex_client::translate_request_envelope(
-                req.source_format,
-                Format::Antigravity,
-                &ctx,
-                &req.body,
-                &client,
-                info,
-            )
-        })
+        crate::codex_client::translate_request_envelope(
+            req.source_format,
+            Format::Antigravity,
+            &ctx,
+            &req.body,
+            &client,
+            info,
+        )
         .map_err(|e| ExecError::local(400, cpa_core::exec::FailureScope::Request, e.to_string()))
     }
 

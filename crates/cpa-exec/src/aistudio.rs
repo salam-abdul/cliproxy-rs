@@ -144,7 +144,7 @@ fn translate(req: &ExecRequest, cfg: &Config, count: bool) -> Result<(Vec<u8>, &
     )
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let mut body = payload::fix_image_aspect_ratio(&base_model, body);
-    let rules = cpa_common::payload::Rules::from_config(cfg);
+    let rules = cpa_common::payload::Rules::of(cfg);
     body = g::apply_payload_rules(&rules, &base_model, to.as_str(), body, &original_translated, req);
     for path in [
         "generationConfig.maxOutputTokens",

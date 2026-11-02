@@ -53,7 +53,7 @@ pub(crate) struct Settings {
     pub default_beta_features: String,
     pub image_generation: bool,
     /// `requests.payload` rules and image-generation mode for this config snapshot.
-    pub payload: cpa_common::payload::Rules,
+    pub payload: std::sync::Arc<cpa_common::payload::Rules>,
     /// Multi-agent v2 and orphan-delegation settings (Go reads them from `ForAPIKey` for
     /// API keys, as [`Settings::scoped`] does).
     pub client: cpa_common::codex_client::Settings,
@@ -174,7 +174,7 @@ impl Settings {
             default_user_agent: text(&["oauth", "providers", "codex", "header-defaults", "user-agent"]),
             default_beta_features: text(&["oauth", "providers", "codex", "header-defaults", "beta-features"]),
             image_generation: image_off,
-            payload: cpa_common::payload::Rules::from_config(cfg),
+            payload: cpa_common::payload::Rules::of(cfg),
             client: cpa_common::codex_client::Settings::from_config(cfg),
             key_models: Vec::new(),
             home: None,

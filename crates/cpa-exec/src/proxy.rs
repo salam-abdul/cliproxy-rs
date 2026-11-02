@@ -18,7 +18,7 @@
 //! ExecRequest carries none. Add a field to the execution envelope when a route needs it.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use cpa_core::config::Config;
@@ -681,7 +681,7 @@ impl RawUpstream {
         Upstream {
             status: self.status,
             headers: self.headers,
-            body: crate::upstream::body_after_response(self.status, self.body.map(|r| r.map_err(body_error)).boxed()),
+            body: crate::upstream::body_after_response(self.body.map(|r| r.map_err(body_error)).boxed()),
         }
     }
 
@@ -701,7 +701,7 @@ impl RawUpstream {
         Upstream {
             status: self.status,
             headers: self.headers,
-            body: crate::upstream::body_after_response(self.status, self.body.map(move |r| r.map_err(map)).boxed()),
+            body: crate::upstream::body_after_response(self.body.map(move |r| r.map_err(map)).boxed()),
         }
     }
 }
@@ -1464,9 +1464,6 @@ pub fn lines(
     .boxed()
 }
 
-/// Shared handle for executors: Go clients plus the hooks used to build them.
-pub type SharedGoClients = Arc<GoClients>;
-
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -1587,6 +1584,7 @@ mod tests {
     }
 
     use super::*;
+    use std::sync::Arc;
 
     /// A body read line by line fails with Go's scanner text `unexpected EOF` only when
     /// the upstream ended it early; a reset keeps the generic transport text. Every

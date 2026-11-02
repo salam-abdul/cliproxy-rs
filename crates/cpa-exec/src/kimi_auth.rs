@@ -67,10 +67,6 @@ fn is_com_host(raw: &str) -> bool {
     host == "kimi.com" || host.ends_with(".kimi.com")
 }
 
-pub fn normalize_domain(domain: &str) -> &'static str {
-    if is_ai_domain(domain) { DOMAIN_AI } else { DOMAIN_COM }
-}
-
 pub fn oauth_host(domain: &str) -> &'static str {
     if is_ai_domain(domain) {
         OAUTH_HOST_AI

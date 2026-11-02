@@ -91,3 +91,33 @@ fn orphan_delegation_written_oauth_only_skips_api_keys() {
     let legacy = Config::parse("codex:\n  orphan-delegation-compatibility: true\n").unwrap();
     assert!(Settings::from_config(&legacy.for_api_key()).orphan_delegation);
 }
+
+/// A Codex client's tools nested many namespaces deep are rewritten and translated on a
+/// sized stack: on an async worker's 2 MiB stack the integer-type rewrite, which recurses
+/// per namespace, overflowed and aborted the process.
+#[test]
+fn deeply_nested_tool_namespaces_do_not_overflow_a_worker_stack() {
+    let depth = 3_000;
+    let body = format!(
+        r#"{{"model":"m","tools":{}{}}}"#,
+        r#"[{"type":"namespace","tools":"#.repeat(depth),
+        "]}".repeat(depth)
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::USER_AGENT, "codex_cli_rs/0.1".parse().unwrap());
+    let cfg = Config::parse("").unwrap();
+    let translated = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let client = Client::new(&headers, &cfg, "", false);
+            let ctx = RequestCtx {
+                model: "m",
+                stream: false,
+            };
+            translate_request(Format::OpenAI, Format::Claude, &ctx, body.as_bytes(), &client).map(|out| out.len())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(translated.is_ok(), "{translated:?}");
+}

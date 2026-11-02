@@ -475,6 +475,13 @@ pub(crate) fn levels(bodies: &[&[u8]]) -> usize {
         .unwrap_or(0)
 }
 
+/// [`deep_stack`] for callers outside the translators whose own request rewrites walk
+/// `body` per nesting level before translating it. The translator entry points `f`
+/// calls run on the same stack instead of spawning another.
+pub fn on_deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> Result<T, Error> + Send) -> Result<T, Error> {
+    deep_stack(levels(&[body]), f)
+}
+
 /// Runs `f` on a thread with a stack sized for `levels` of nesting when that exceeds what
 /// a caller's stack (a 2 MiB async worker) safely holds. Go's JSON walkers recurse per
 /// nesting level on growable stacks (up to 1 GiB); the ported walkers recurse too, so
