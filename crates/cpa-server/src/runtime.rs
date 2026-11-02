@@ -2444,7 +2444,7 @@ mod tests {
     #[test]
     fn a_request_snapshot_pairs_each_config_with_its_own_policy() {
         let rt = Arc::new(crate::testing::runtime(
-            Config::parse("").unwrap(),
+            crate::testing::config(""),
             Vec::new(),
             Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -2454,7 +2454,7 @@ mod tests {
                 google: Default::default(),
             },
         ));
-        let configs = ["ff", "wrr"].map(|s| Config::parse(&format!("routing:\n  strategy: {s}\n")).unwrap());
+        let configs = ["ff", "wrr"].map(|s| crate::testing::config(&format!("routing:\n  strategy: {s}\n")));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader = std::thread::spawn({
             let (rt, done) = (rt.clone(), done.clone());

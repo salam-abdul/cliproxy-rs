@@ -1011,7 +1011,7 @@ mod home_tests {
     #[tokio::test]
     async fn a_home_config_sets_management_availability_with_its_policy() {
         let rt = Arc::new(crate::testing::runtime(
-            Config::parse("").unwrap(),
+            crate::testing::config(""),
             Vec::new(),
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -1023,9 +1023,9 @@ mod home_tests {
         ));
         let management = Management::new(rt.clone(), std::env::temp_dir().join("cpa-home-unused-config.yaml"));
         assert!(!management.routes_enabled());
-        management.publish_home(
-            Config::parse("remote-management:\n  secret-key: fake-secret\nrouting:\n  strategy: ff\n").unwrap(),
-        );
+        management.publish_home(crate::testing::config(
+            "remote-management:\n  secret-key: fake-secret\nrouting:\n  strategy: ff\n",
+        ));
         assert!(management.routes_enabled());
         assert_eq!(rt.policy().strategy, crate::scheduler::Strategy::FillFirst);
     }
