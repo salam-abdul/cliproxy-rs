@@ -3,7 +3,6 @@ use crate::schema_support::{
     decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, pointer_unescape, ref_name,
 };
 use std::collections::{BTreeMap, HashMap};
-// ---------------------------------------------------------------------------------------
 // Phase 0: malformed object repair (Go's `any` model)
 
 type Map = BTreeMap<String, GoValue>;

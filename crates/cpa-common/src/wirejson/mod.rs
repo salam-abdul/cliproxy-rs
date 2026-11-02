@@ -277,7 +277,6 @@ pub fn decode_field_value<T: GoJson>(slot: &mut T, v: &Node, strukt: &str, field
         .map_err(|e| in_field(e, strukt.rsplit('.').next().unwrap_or(strukt), field))
 }
 
-// ----------------------------------------------------------------------------------------
 // Scalars
 
 impl GoJson for String {
@@ -410,7 +409,6 @@ pub fn encode_any(v: &Value, out: &mut Vec<u8>) {
     }
 }
 
-// ----------------------------------------------------------------------------------------
 // Containers
 
 /// A slice: decoding reuses existing elements and truncates to the array's length.

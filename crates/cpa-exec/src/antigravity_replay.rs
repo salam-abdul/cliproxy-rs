@@ -216,7 +216,6 @@ fn call_item(content: i64, part: i64, occurrence: i64, call: &Res<'_>, signature
     Some(object(&members))
 }
 
-// ---------------------------------------------------------------------------------------
 // Scope
 
 /// The ledger entry one request reads and its turn commits to, and the cache state it
@@ -362,7 +361,6 @@ fn scope_from_request(req: &ExecRequest, model: &str, payload: &[u8]) -> Scope {
     Scope::default()
 }
 
-// ---------------------------------------------------------------------------------------
 // Tool schemas
 
 type Schemas = HashMap<Vec<u8>, GoValue>;
@@ -528,7 +526,6 @@ fn call_matches(call: &Res<'_>, item: &Res<'_>, schemas: &Schemas) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Request index
 
 struct Content<'a> {
@@ -1370,7 +1367,6 @@ fn apply_items(payload: &[u8], items: &[Vec<u8>], schemas: &Schemas) -> Option<V
     changed.then_some(current)
 }
 
-// ---------------------------------------------------------------------------------------
 // Request preparation
 
 /// `prepareAntigravityGeminiReasoningReplayPayload` for Gemini-family models: the
@@ -1427,7 +1423,6 @@ pub(crate) fn clear_on_invalid_signature(scope: &Scope, status: u16, body: &[u8]
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Response accumulation
 
 struct Pending {

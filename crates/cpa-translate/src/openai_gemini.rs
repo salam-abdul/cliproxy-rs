@@ -413,7 +413,6 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses (openai_gemini_response.go)
 
 /// mapOpenAIFinishReasonToGemini.
@@ -708,7 +707,6 @@ pub fn non_stream(_: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Tolerant argument parsing (parseArgsToObjectRaw)
 
 /// parseArgsToObjectRaw: a JSON object for function call arguments, recovering what it

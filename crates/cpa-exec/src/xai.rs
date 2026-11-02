@@ -67,7 +67,7 @@ pub struct XaiExecutor {
     pub(crate) ws: Arc<crate::xai_ws::Ws>,
 }
 
-// --- credentials and endpoints (xai_executor_request.go) ---------------------------------
+// Credentials and endpoints (xai_executor_request.go)
 
 fn attribute<'a>(c: &'a Credential, key: &str) -> &'a str {
     c.attributes.get(key).map_or("", |v| v.trim())
@@ -1054,7 +1054,7 @@ impl Pipeline {
     }
 }
 
-// --- compaction trigger stream (xaiBuildCompactionTriggerStreamChunks) -------------------
+// Compaction trigger stream (xaiBuildCompactionTriggerStreamChunks)
 
 /// `xaiCompactionResponseID`.
 pub(crate) fn compaction_response_id(data: &[u8], now: SystemTime) -> String {
@@ -1206,7 +1206,7 @@ pub(crate) fn compaction_frames(p: &Prepared, data: &[u8], now: SystemTime) -> V
     ]
 }
 
-// --- token counting (xai_executor_tokens.go) ----------------------------------------------
+// Token counting (xai_executor_tokens.go)
 
 /// `countXAIInputTokens`: O200kBase over instructions, input, function tools and the
 /// text format, joined by newlines.

@@ -12,7 +12,6 @@ use crate::codex_names::NAME_LIMIT;
 use crate::common::{align_openai_tool_call_messages_with, go_lower};
 use crate::responses_tools::{tool_description, tool_parameters};
 
-// ---------------------------------------------------------------------------------------
 // Tool declarations and Chat names (openai_openai-responses_tools.go)
 
 /// One function or custom tool declaration and its Chat Completions name.
@@ -404,7 +403,6 @@ pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Tool outputs (setFunctionCallOutputContent and helpers)
 
 /// normalizeChatImageDetail: (detail, ok).
@@ -559,7 +557,6 @@ fn standalone_output(output: &Res<'_>, set: SetOutput) -> Option<Vec<u8>> {
     Some(message)
 }
 
-// ---------------------------------------------------------------------------------------
 // Reasoning helpers
 
 const UNAVAILABLE: &[u8] = b"[reasoning unavailable]";
@@ -601,7 +598,6 @@ fn effort_enables_reasoning(value: &Res<'_>) -> bool {
     !matches!(effort.as_slice(), b"" | b"none" | b"0" | b"false")
 }
 
-// ---------------------------------------------------------------------------------------
 // Request conversion
 
 /// convertResponsesToolChoiceWithIndex.

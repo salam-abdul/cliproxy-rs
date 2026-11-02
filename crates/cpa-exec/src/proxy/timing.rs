@@ -2,7 +2,7 @@ use bytes::Bytes;
 use cpa_core::exec::{UpstreamStage, UsageSink};
 use futures_util::StreamExt;
 
-// ---- exchange timings ------------------------------------------------------------
+// Exchange timings
 //
 // Cost for a timed request (one with a usage record): a clock read and a lock of the
 // attempt's record per stage, one boxed body per HTTP/1.1 hop, a task-local scope per

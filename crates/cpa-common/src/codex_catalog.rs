@@ -22,7 +22,7 @@ const FALLBACK_INSTRUCTIONS: &str = "You are Codex, a coding agent. You and the 
 const LEVELS: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const LEGACY_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
-// --------------------------------------------------------------------------- the store
+// The store
 
 struct Store {
     data: Arc<Vec<u8>>,
@@ -221,7 +221,7 @@ fn templates() -> Option<Arc<Templates>> {
     parsed
 }
 
-// ------------------------------------------------------------------------ the builder
+// The builder
 
 /// What the model registry knows about one model (Go `*registry.ModelInfo`).
 #[derive(Debug, Clone, Default)]

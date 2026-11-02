@@ -42,7 +42,6 @@ pub fn now_nanos() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
 }
 
-// ---------------------------------------------------------------------------------------
 // Request model (common/request.go)
 
 /// `event: <event>\ndata: <payload>\n\n` (common.SSEEventData).
@@ -73,7 +72,6 @@ pub fn request_model_name(original: &[u8], request: &[u8]) -> Vec<u8> {
     vec![]
 }
 
-// ---------------------------------------------------------------------------------------
 // Go string helpers on bytes
 
 /// strings.TrimLeftFunc(s, unicode.IsSpace).
@@ -313,7 +311,6 @@ pub fn thinking_text(part: &Res<'_>) -> Vec<u8> {
     vec![]
 }
 
-// ---------------------------------------------------------------------------------------
 // Function names and file data (util/util.go, common/file_data.go)
 
 /// util.SanitizeFunctionName: runes outside `[a-zA-Z0-9_.:-]` (each invalid byte counts

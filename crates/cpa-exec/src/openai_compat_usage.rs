@@ -236,7 +236,7 @@ fn record(reports: &[Report], failed: bool) -> (Value, bool) {
     (value, has_usage)
 }
 
-// --- upstream capture ---------------------------------------------------------------------
+// Upstream capture
 
 /// One capture event, owned.
 #[derive(Debug, Clone, PartialEq)]

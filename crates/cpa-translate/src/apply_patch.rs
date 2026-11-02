@@ -56,7 +56,6 @@ pub(crate) fn description(tool: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Streamed input decoding (translator/common/apply_patch_input.go)
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -311,7 +310,6 @@ impl InputDecoder {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Call state and events (translator/common/apply_patch_events.go)
 
 /// ApplyPatchCallState: one apply_patch call's identity and input decoder.

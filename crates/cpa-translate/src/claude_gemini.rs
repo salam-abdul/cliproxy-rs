@@ -28,7 +28,6 @@ fn string(res: &Res<'_>) -> Vec<u8> {
     res.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// ConvertGeminiRequestToClaude.
@@ -469,7 +468,6 @@ fn set_tool_choice(out: &mut Vec<u8>, calling: &Res<'_>) {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// ConvertAnthropicResponseToGeminiParams.

@@ -28,7 +28,6 @@ pub static PAIR: Registered = registered!(
 /// The part fields that can carry a function name.
 pub(crate) const NAME_FIELDS: [&str; 4] = ["functionCall", "functionResponse", "function_call", "function_response"];
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// ConvertGeminiRequestToAntigravity: wraps the Gemini request in the Antigravity
@@ -327,7 +326,6 @@ pub(crate) fn rewrite_function_names(
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Function response grouping (fixCLIToolResponse)
 
 /// normalizeAntigravityInlineDataPart: an inline image part in canonical form; a missing
@@ -510,7 +508,6 @@ pub(crate) fn fix_cli_tool_response(input: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Claude thinking signatures (SanitizeAntigravityClaudeGeminiRequestSignatures)
 
 /// Where a part can carry a thought signature.
@@ -670,7 +667,6 @@ pub(crate) fn sanitize_claude_signatures(raw: Vec<u8>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// restoreUsageMetadata: the executor's `cpaUsageMetadata` back to `usageMetadata`.

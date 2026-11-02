@@ -35,7 +35,6 @@ pub(crate) fn thought_signature(part: &Res<'_>) -> Vec<u8> {
     .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini -> Interactions
 
 /// geminiThoughtStepJSON.
@@ -438,7 +437,6 @@ pub(crate) fn gemini_to_interactions_non_stream(ctx: &ResponseCtx<'_>, body: &[u
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> Gemini
 
 /// interactionsToGeminiStreamState.

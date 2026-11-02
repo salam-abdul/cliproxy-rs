@@ -446,7 +446,6 @@ pub fn replay_delete_if_unchanged(model: &str, session: &str, snapshot: &ReplayS
     caches().delete_if_unchanged(key, snapshot, Instant::now())
 }
 
-// ---------------------------------------------------------------------------------------
 // Thinking signature cache (signature_cache.go)
 
 const SIGNATURE_TTL: Duration = Duration::from_secs(3 * 3600);

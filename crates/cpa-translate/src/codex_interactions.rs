@@ -628,7 +628,6 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses (interactions_codex_response.go)
 
 /// `interaction_%d` from the current UnixNano.

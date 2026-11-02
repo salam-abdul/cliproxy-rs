@@ -704,7 +704,7 @@ async fn terminal_error_survives_a_full_queue() {
     server.abort();
 }
 
-// --- unit-level ports of xai_websockets_executor_test.go -------------------------------
+// Unit-level ports of xai_websockets_executor_test.go
 
 /// The server's `classify::upstream_attempted` (Go `UpstreamAttempted`).
 fn attempted(e: &ExecError) -> bool {

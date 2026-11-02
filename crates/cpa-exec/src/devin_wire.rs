@@ -1229,7 +1229,7 @@ impl Utf8Split {
     }
 }
 
-// ---- request logging (helps/devin_wire.go log bodies) ----------------------------------
+// Request logging (helps/devin_wire.go log bodies)
 
 fn go_array(items: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
     let mut out = vec![b'['];

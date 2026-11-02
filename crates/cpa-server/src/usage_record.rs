@@ -364,7 +364,7 @@ fn has_tokens(d: &Detail) -> bool {
         || d.breakdown.is_some_and(|b| b.total != 0)
 }
 
-// ---- parsers -------------------------------------------------------------------
+// Parsers
 
 /// Go `jsonPayload`: the JSON object of an SSE `data:` line or a bare JSON line.
 fn json_payload(line: &[u8]) -> Option<&[u8]> {
@@ -948,7 +948,7 @@ impl StreamUsage {
     }
 }
 
-// ---- response model ------------------------------------------------------------
+// Response model
 
 const MAX_RESPONSE_MODEL: usize = 128;
 
@@ -1232,7 +1232,7 @@ fn warn_model_substitution(record: &Record, upstream_model: &str, auth_id: &str)
     );
 }
 
-// ---- the queued record ---------------------------------------------------------
+// The queued record
 
 /// Downstream request facts (Go `ClientRequestMetadata`, request ID, endpoint).
 #[derive(Debug, Clone, Default)]
@@ -1569,7 +1569,7 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.0
 }
 
-// ---- per-attempt tracking ------------------------------------------------------
+// Per-attempt tracking
 
 /// Request-level facts shared by every attempt of one request (Go's handler context:
 /// client metadata, requested alias, reasoning effort, service tier, generate, stream).

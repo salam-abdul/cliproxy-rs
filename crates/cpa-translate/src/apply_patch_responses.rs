@@ -77,7 +77,6 @@ fn str_of(r: &Res<'_>) -> Vec<u8> {
     r.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request normalization
 
 /// translator/common NormalizeApplyPatchResponsesRequest: the winning custom `apply_patch`
@@ -262,7 +261,6 @@ fn prefer_chat_function_patch_tools(original: &[u8], declarations: &[u8]) -> Vec
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Bridge
 
 #[derive(Default)]
@@ -947,7 +945,6 @@ fn envelope_item(index: i64, item: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Executor state
 
 #[derive(Default)]

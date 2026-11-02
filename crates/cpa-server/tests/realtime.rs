@@ -352,7 +352,6 @@ async fn realtime_http_matches_go() {
     );
 }
 
-// ---------------------------------------------------------------------------------------
 // WebSockets
 
 /// One relayed frame as both harnesses record it.

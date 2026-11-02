@@ -30,7 +30,6 @@ fn string(res: &Res<'_>) -> Vec<u8> {
     res.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// convertClaudeRequestToInteractions.
@@ -422,7 +421,6 @@ fn claude_text(value: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// `event: <event>\ndata: <payload>\n\n\n` (common.AppendSSEEventBytes with three newlines).

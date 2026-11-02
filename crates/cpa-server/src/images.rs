@@ -44,7 +44,7 @@ const XAI_DEFAULT_RESOLUTION: &str = "1k";
 const GENERATIONS_PATH: &str = "/v1/images/generations";
 const EDITS_PATH: &str = "/v1/images/edits";
 
-// --- models -----------------------------------------------------------------------------
+// Models
 
 /// `imagesModelParts`: `prefix/base` split at the last slash (a trailing slash keeps the
 /// whole model as base).
@@ -96,7 +96,7 @@ fn unsupported(model: &str) -> Option<Response> {
     )))
 }
 
-// --- request builders ---------------------------------------------------------------------
+// Request builders
 
 /// `normalizeImagesResponseFormat`.
 fn response_format(raw: &str) -> &'static str {
@@ -349,7 +349,7 @@ fn parse_bool(raw: &str, fallback: bool) -> bool {
     }
 }
 
-// --- responses ----------------------------------------------------------------------------
+// Responses
 
 struct XaiImage {
     b64_json: String,
@@ -477,7 +477,7 @@ fn completed_events(payload: &[u8], format: &str, prefix: &str) -> Result<Vec<u8
     Ok(out)
 }
 
-// --- execution ----------------------------------------------------------------------------
+// Execution
 
 /// What a route parsed, ready for one of the three execution paths.
 struct Prepared {
@@ -660,7 +660,7 @@ fn not_found() -> Response {
     axum::http::StatusCode::NOT_FOUND.into_response()
 }
 
-// --- routes -------------------------------------------------------------------------------
+// Routes
 
 #[allow(clippy::too_many_arguments)]
 pub async fn generations(
@@ -876,7 +876,7 @@ async fn edits_json(p: Prepared, body: &[u8]) -> Response {
     normalized(p, &model, req, format, "image_edit", false).await
 }
 
-// --- net/http DetectContentType (sniff.go) ------------------------------------------------
+// net/http DetectContentType (sniff.go)
 
 /// Go `http.DetectContentType`.
 pub(crate) fn detect_content_type(data: &[u8]) -> &'static str {

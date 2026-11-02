@@ -1698,7 +1698,7 @@ fn rules_are_ordered_status_and_body_matches_with_canonical_precedence() {
     }
 }
 
-// ---- soonest-reset (cliproxy-rs addition) ----
+// soonest-reset (cliproxy-rs addition)
 
 const DAY: u64 = 24 * 3600;
 
@@ -2034,8 +2034,6 @@ fn windows_read_claude_and_codex_signals() {
     let w = Windows::observed("gemini", &codex, now, now);
     assert_eq!((w.weekly_reset, w.exhausted), (None, false));
 }
-
-// ---- soonest-reset review fixes ----
 
 fn signals(pairs: &[(&str, String)]) -> std::collections::BTreeMap<String, String> {
     pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()

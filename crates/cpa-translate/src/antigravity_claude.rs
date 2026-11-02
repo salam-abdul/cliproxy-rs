@@ -36,7 +36,6 @@ pub(crate) const SKIP_SIGNATURE: &[u8] = b"skip_thought_signature_validator";
 const INTERLEAVED_HINT: &str = "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them.";
 pub(crate) const WEB_SEARCH_INSTRUCTION: &str = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.";
 
-// ---------------------------------------------------------------------------------------
 // Gemini signature carriers (signature_validation.go)
 
 const CARRIER_PREFIX: &[u8] = b"cpa-gemini-carrier-v1:";
@@ -373,7 +372,6 @@ pub(crate) fn strip_invalid_gemini_signature_thinking_blocks(payload: &[u8]) -> 
     gj::try_set_raw(payload, "messages", gj::join(&message_items)).unwrap_or_else(|_| payload.to_vec())
 }
 
-// ---------------------------------------------------------------------------------------
 // Signature resolution
 
 fn provider(model: &str) -> Provider {
@@ -494,7 +492,6 @@ fn tool_use_signature(model: &str, block: &Res<'_>) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Native web search (web_search.go)
 
 /// isClaudeTypedWebSearchToolType.
@@ -611,7 +608,6 @@ fn web_search_query(raw: &[u8]) -> Vec<u8> {
     vec![]
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 const SKIP: &str = "skip_thought_signature_validator";

@@ -40,7 +40,7 @@ fn item_type(item: &[u8]) -> String {
     text(&gj::get(item, "type"))
 }
 
-// ------------------------------------------------------------------------------- cache
+// Cache
 
 struct Entry {
     items: Vec<Vec<u8>>,
@@ -327,7 +327,7 @@ fn normalize(item: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-// ------------------------------------------------------------------------------- scope
+// Scope
 
 /// Where one request's replay lives (`codexReasoningReplayScope`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -496,7 +496,7 @@ pub(crate) fn clear_on_invalid_signature(cache: &Cache, scope: &Scope, status: u
     }
 }
 
-// --------------------------------------------------------------------------- insertion
+// Insertion
 
 /// `codexReplayInputPrefixFingerprint`.
 fn prefix_fingerprint(items: &[Res<'_>], end: usize) -> String {

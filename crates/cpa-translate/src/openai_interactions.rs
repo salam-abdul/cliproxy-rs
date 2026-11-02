@@ -89,7 +89,6 @@ fn copy_raw(out: &mut Vec<u8>, path: &str, value: &Res<'_>) {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // OpenAI Chat request -> Interactions request
 
 /// ConvertOpenAIRequestToInteractions.
@@ -524,7 +523,6 @@ fn chat_content_text(content: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions request -> OpenAI Chat request
 
 /// ConvertInteractionsRequestToOpenAI.

@@ -100,7 +100,7 @@ impl Ws {
     }
 }
 
-// --- per-session ID state (xaiWebsocketIDState) --------------------------------------------
+// Per-session ID state (xaiWebsocketIDState)
 
 #[derive(Default)]
 struct IdState(Mutex<IdInner>);
@@ -431,7 +431,7 @@ impl Ids<'_> {
     }
 }
 
-// --- request and frame helpers ----------------------------------------------------------
+// Request and frame helpers
 
 /// `xaiWebsocketsEnabled`: the `websockets` attribute when it parses, else the metadata
 /// value (a bool, or a string that parses).
@@ -641,7 +641,7 @@ fn handshake_headers(credential: &Credential, token: &str, session_id: &str, req
     headers
 }
 
-// --- compaction (executeCompactionTriggerFromWebsocketContext) ---------------------------
+// Compaction (executeCompactionTriggerFromWebsocketContext)
 
 /// `buildXAIWebsocketCompactionPayload`.
 fn compaction_payload(payload: &[u8], transcript: &[u8]) -> Vec<u8> {
@@ -693,7 +693,7 @@ fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
     Ok((response_id, item))
 }
 
-// --- capture (RecordAPIWebsocket*) ------------------------------------------------------
+// Capture (RecordAPIWebsocket*)
 
 /// The upstream WebSocket's capture: the request log Go builds once per turn (`wsReqLog`)
 /// and the events of its socket. A no-op without an observer.
@@ -825,7 +825,7 @@ fn upgrade_url(raw: &str) -> String {
     }
 }
 
-// --- the turn --------------------------------------------------------------------------
+// The turn
 
 /// One turn on the session's socket, as a stream of downstream payloads. Dropping it
 /// releases the turn lock and the reader.
