@@ -2547,7 +2547,7 @@ mod tests {
                 self.0.upstream_stage(UpstreamStage::BodyRead { bytes: 42 });
             }
         }
-        let cfg = Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let cfg = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
             codex: Default::default(),

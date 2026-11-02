@@ -2326,7 +2326,7 @@ mod tests {
         };
         // Legacy top-level keys and the canonical routing block both reach the scheduler.
         let rt = crate::testing::runtime(
-            Config::parse("request-retry: 2\nrouting:\n  strategy: ff\n  session-affinity-ttl: 250ms\n").unwrap(),
+            crate::testing::config("request-retry: 2\nrouting:\n  strategy: ff\n  session-affinity-ttl: 250ms\n"),
             Vec::new(),
             executors(),
         );
@@ -2347,7 +2347,7 @@ mod tests {
     #[test]
     fn pool_offsets_rotate_per_key_like_go() {
         let rt = crate::testing::runtime(
-            Config::parse("").unwrap(),
+            crate::testing::config(""),
             Vec::new(),
             Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -2594,7 +2594,7 @@ mod tests {
     #[tokio::test]
     async fn preparation_waiter_observes_deletion_and_refresh_loop_is_replaceable() {
         let rt = Arc::new(crate::testing::runtime(
-            Config::parse("").unwrap(),
+            crate::testing::config(""),
             vec![cred("a.json", "claude", false)],
             Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -2634,7 +2634,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_loop_sleeps_until_the_store_changes() {
         let rt = Arc::new(crate::testing::runtime(
-            Config::parse("").unwrap(),
+            crate::testing::config(""),
             Vec::new(),
             Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
