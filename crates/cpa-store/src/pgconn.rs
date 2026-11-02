@@ -123,19 +123,6 @@ fn escape_option(text: &str) -> String {
     out
 }
 
-/// Percent-encodes all but unreserved characters (tokio-postgres decodes only `%XX`).
-fn percent_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
 /// libpq keyword/value pairs: `key = value`, values optionally single-quoted, `\`
 /// escaping the next character.
 fn keyword_pairs(dsn: &str) -> Result<Vec<(String, String)>> {
@@ -230,7 +217,10 @@ impl Dsn {
                 }
                 seen.push(key.clone());
                 if keep(&key, value.clone().into_owned()) {
-                    kept.push(format!("{key}={}", percent_encode(&value)));
+                    kept.push(format!(
+                        "{key}={}",
+                        cpa_core::config::go_url::escape_unreserved(value.as_bytes())
+                    ));
                 }
             }
             if kept.is_empty() {

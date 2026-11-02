@@ -573,8 +573,8 @@ pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, Strin
     )?;
     let body = format!(
         "assertion={}&grant_type={}",
-        cpa_common::gostr::query_escape(&assertion),
-        cpa_common::gostr::query_escape(GRANT_TYPE)
+        cpa_core::config::go_url::query_escape(&assertion),
+        cpa_core::config::go_url::query_escape(GRANT_TYPE)
     );
     Ok((token_url.to_owned(), body))
 }

@@ -228,6 +228,57 @@ pub fn percent_decode_lenient(s: &str) -> Vec<u8> {
     out
 }
 
+/// Go `shouldEscape`-style percent-encoding: unreserved bytes and `keep` stay, a space is
+/// `+` when `plus_space`, every other byte is `%XX`.
+fn escape(s: &[u8], keep: impl Fn(u8) -> bool, plus_space: bool) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for &b in s {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') || keep(b) {
+            out.push(char::from(b));
+        } else if b == b' ' && plus_space {
+            out.push('+');
+        } else {
+            out.push('%');
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 15)]));
+        }
+    }
+    out
+}
+
+/// Go `url.QueryEscape`: unreserved bytes kept, space as `+`, everything else `%XX`.
+pub fn query_escape(s: impl AsRef<[u8]>) -> String {
+    escape(s.as_ref(), |_| false, true)
+}
+
+/// Every byte but the unreserved ones as `%XX`, a space as `%20`: for decoders that
+/// read only `%XX`.
+pub fn escape_unreserved(s: impl AsRef<[u8]>) -> String {
+    escape(s.as_ref(), |_| false, false)
+}
+
+/// Go `url.PathEscape`: a single path segment.
+pub fn path_escape(s: impl AsRef<[u8]>) -> String {
+    escape(
+        s.as_ref(),
+        |b| matches!(b, b'$' | b'&' | b'+' | b':' | b'=' | b'@'),
+        false,
+    )
+}
+
+/// Go `url.Values.Encode` for single-valued pairs: sorted by key, `key=value` joined with
+/// `&`, both query-escaped.
+pub fn values_encode(pairs: &[(&str, &str)]) -> String {
+    let mut sorted: Vec<&(&str, &str)> = pairs.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    sorted
+        .iter()
+        .map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Go `url.ParseQuery` pairs in order, decoded. Pairs with a `;` or a malformed escape in
 /// the name or value are skipped, as Go does.
 pub fn parse_query(query: &str) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
@@ -291,6 +342,17 @@ mod tests {
         assert_eq!(query_unescape("a%2Bb+c%FF").unwrap(), b"a+b c\xff");
         assert_eq!(path_unescape("a%2Bb+c").unwrap(), b"a+b+c");
         assert_eq!(percent_decode_lenient("a%2fb+%zz%41"), b"a/b+%zzA");
+    }
+
+    #[test]
+    fn escaping_follows_go() {
+        // url.QueryEscape("a b/c?d=é~") and url.Values{"z": {"1"}, "a b": {"x&y"}}.Encode().
+        assert_eq!(query_escape("a b/c?d=\u{e9}~"), "a+b%2Fc%3Fd%3D%C3%A9~");
+        assert_eq!(values_encode(&[("z", "1"), ("a b", "x&y")]), "a+b=x%26y&z=1");
+        assert_eq!(escape_unreserved("a b+c/\u{ff}"), "a%20b%2Bc%2F%C3%BF");
+        assert_eq!(query_escape(b"\xff"), "%FF");
+        // url.PathEscape("a b/c;d,e?f$&+:=@").
+        assert_eq!(path_escape("a b/c;d,e?f$&+:=@"), "a%20b%2Fc%3Bd%2Ce%3Ff$&+:=@");
     }
 
     #[test]

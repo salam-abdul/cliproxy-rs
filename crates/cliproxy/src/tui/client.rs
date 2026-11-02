@@ -4,6 +4,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use cpa_core::config::go_url::query_escape;
 use serde_json::{Map, Value};
 
 /// A JSON object as Go decodes it into `map[string]any`.
@@ -22,19 +23,6 @@ pub fn normalize_base_url(raw: &str) -> String {
         format!("http://{base}")
     };
     base.trim_end_matches('/').to_owned()
-}
-
-/// Go `url.QueryEscape`.
-pub fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// Go `json.Marshal` of a `map[string]any`: keys sorted, `<`, `>` and `&` escaped.

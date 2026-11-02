@@ -355,14 +355,7 @@ pub(crate) fn mask_query(raw: &str) -> String {
             }
             let value = cpa_core::config::go_url::query_unescape(value).unwrap_or_else(|| value.as_bytes().to_owned());
             let value = hide_key(cpa_core::config::go_trim_space(&value));
-            let escaped: String = value
-                .iter()
-                .map(|b| match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (*b as char).to_string(),
-                    b' ' => "+".to_owned(),
-                    _ => format!("%{b:02X}"),
-                })
-                .collect();
+            let escaped = cpa_core::config::go_url::query_escape(value);
             format!("{key}={escaped}")
         })
         .collect::<Vec<_>>()

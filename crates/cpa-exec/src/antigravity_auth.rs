@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use cpa_common::gostr::{GoStr, values_encode};
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, GoValue};
 use cpa_core::config::Config;
+use cpa_core::config::go_url::values_encode;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, FailureScope};
 use serde_json::{Map, Value};

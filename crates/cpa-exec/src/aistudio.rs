@@ -115,11 +115,11 @@ fn endpoint(model: &str, action: &str, alt: &str) -> String {
         return if alt.is_empty() {
             format!("{base}?alt=sse")
         } else {
-            format!("{base}?$alt={}", cpa_common::gostr::query_escape(alt))
+            format!("{base}?$alt={}", cpa_core::config::go_url::query_escape(alt))
         };
     }
     if !alt.is_empty() && action != "countTokens" {
-        return format!("{base}?$alt={}", cpa_common::gostr::query_escape(alt));
+        return format!("{base}?$alt={}", cpa_core::config::go_url::query_escape(alt));
     }
     base
 }

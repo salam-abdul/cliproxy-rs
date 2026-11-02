@@ -357,13 +357,19 @@ impl DevinAuth {
         let redirect = redirect_uri.trim();
         let mut parts = Vec::new();
         if !redirect.is_empty() {
-            parts.push(format!("redirect_uri={}", query_escape(redirect)));
+            parts.push(format!(
+                "redirect_uri={}",
+                cpa_core::config::go_url::query_escape(redirect)
+            ));
         }
         if !state.is_empty() {
-            parts.push(format!("state={}", query_escape(state)));
+            parts.push(format!("state={}", cpa_core::config::go_url::query_escape(state)));
         }
         parts.push("prompt=select_account".into());
-        parts.push(format!("code_challenge={}", query_escape(code_challenge)));
+        parts.push(format!(
+            "code_challenge={}",
+            cpa_core::config::go_url::query_escape(code_challenge)
+        ));
         parts.push("code_challenge_method=S256".into());
         if redirect.is_empty() {
             parts.push("cli_pkce_marker=1".into());
@@ -587,19 +593,6 @@ fn lossy(b: &[u8]) -> String {
 /// `fmt.Sprintf("%x", sha256(b)[:8])`.
 fn hex8(b: &[u8]) -> String {
     Sha256::digest(b)[..8].iter().map(|x| format!("{x:02x}")).collect()
-}
-
-/// Go `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// The credential a Devin login produces (Go's `*coreauth.Auth` from `CreateAuthRecord`).

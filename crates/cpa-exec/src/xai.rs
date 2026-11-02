@@ -294,20 +294,6 @@ fn chat_headers(c: &Credential, token: &str, stream: bool, session: &str, req: &
     h
 }
 
-/// `url.PathEscape`.
-fn path_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@')
-        {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// A non-2xx response: `xaiStatusErr` over the whole body (captured), upstream headers
 /// kept. Like Go, a failed body read is returned (and captured) instead.
 async fn upstream_error(upstream: wire::Upstream, capture: &wire::Capture) -> ExecError {
@@ -669,7 +655,10 @@ impl XaiExecutor {
         let request_id = text(&gj::get(&payload, "request_id"));
         let (method, path) = match route {
             Some(path) => (wreq::Method::POST, path.to_owned()),
-            None if !request_id.is_empty() => (wreq::Method::GET, format!("/videos/{}", path_escape(&request_id))),
+            None if !request_id.is_empty() => (
+                wreq::Method::GET,
+                format!("/videos/{}", cpa_core::config::go_url::path_escape(&request_id)),
+            ),
             None => (wreq::Method::POST, VIDEOS_GENERATIONS.to_owned()),
         };
         self.media(credential, &req, cfg.as_ref(), method, &path, payload, true)
