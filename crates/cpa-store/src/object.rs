@@ -186,14 +186,14 @@ fn query_unescape(value: &str) -> String {
 }
 
 fn mkdir_0700(path: &Path) -> Result<()> {
-    crate::private_fs::create_dir_all(path)?;
+    cpa_core::private_fs::create_dir_all(path)?;
     Ok(())
 }
 
 /// Go `os.WriteFile(path, data, 0o600)`.
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut file = crate::private_fs::create_truncate(path)?;
+    let mut file = cpa_core::private_fs::create_truncate(path)?;
     file.write_all(bytes)?;
     Ok(())
 }
@@ -619,7 +619,7 @@ impl ObjectStore {
 
 pub struct ObjectPersister(pub Arc<ObjectStore>);
 
-impl cpa_server::persist::StorePersister for ObjectPersister {
+impl cpa_core::store::StorePersister for ObjectPersister {
     fn persist_config(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.0.persist_config())
     }

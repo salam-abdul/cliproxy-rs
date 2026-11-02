@@ -19,7 +19,6 @@ pub mod fake;
 mod gojson;
 pub mod inflight;
 pub mod kv;
-mod private_fs;
 pub mod refresh;
 pub mod registry;
 pub mod release;

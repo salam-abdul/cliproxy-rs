@@ -232,7 +232,7 @@ fn credentials_never_appear_in_errors() {
 /// blocking task would never complete.
 #[test]
 fn explicit_delete_needs_no_second_blocking_thread() {
-    use cpa_server::persist::StorePersister;
+    use cpa_core::store::StorePersister;
     let dir = scratch("delete-pool");
     let remote = bare_remote(&dir);
     let store = std::sync::Arc::new(GitStore::new(&remote, "", "", "main", &dir.join("a")));

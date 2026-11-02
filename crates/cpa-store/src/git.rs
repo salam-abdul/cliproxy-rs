@@ -38,7 +38,7 @@ pub struct GitStore {
 }
 
 fn mkdir_0700(path: &Path) -> Result<()> {
-    crate::private_fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))
+    cpa_core::private_fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))
 }
 
 fn write_0600(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -46,9 +46,9 @@ fn write_0600(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         mkdir_0700(parent)?;
     }
-    let mut file = crate::private_fs::create_truncate(path).with_context(|| format!("write {}", path.display()))?;
+    let mut file = cpa_core::private_fs::create_truncate(path).with_context(|| format!("write {}", path.display()))?;
     file.write_all(bytes)?;
-    crate::private_fs::restrict(path)?;
+    cpa_core::private_fs::restrict(path)?;
     Ok(())
 }
 
@@ -421,7 +421,7 @@ impl GitStore {
         for path in split_nul(&listed) {
             let full = self.repo.join(&path);
             if full.is_file() {
-                crate::private_fs::restrict(&full)?;
+                cpa_core::private_fs::restrict(&full)?;
             }
         }
         Ok(())
@@ -980,7 +980,7 @@ impl GitStore {
 /// The async face the server calls; git work runs on the blocking pool.
 pub struct GitPersister(pub Arc<GitStore>);
 
-impl cpa_server::persist::StorePersister for GitPersister {
+impl cpa_core::store::StorePersister for GitPersister {
     fn persist_config(&self) -> BoxFuture<'_, Result<()>> {
         let store = self.0.clone();
         Box::pin(async move { blocking(move || store.persist_config()).await })
