@@ -482,24 +482,7 @@ fn decode_2231(v: &str) -> Option<String> {
 
 /// Go `percentHexUnescape`.
 fn percent_unescape(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-            out.push(
-                u8::from_str_radix(hex, 16)
-                    .ok()
-                    .filter(|_| hex.bytes().all(|c| c.is_ascii_hexdigit()))?,
-            );
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    Some(String::from_utf8_lossy(&out).into_owned())
+    cpa_core::config::go_url::path_unescape(s).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 #[cfg(test)]

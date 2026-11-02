@@ -1,6 +1,7 @@
 //! What Go 1.26 `net/url.Parse` accepts (strict host colons, as CLIProxyAPI's
 //! `go 1.26.0` module selects), plus `URL.Scheme` and `URL.Hostname()`. Config and
-//! credential checks use it where Go branches on a parse error.
+//! credential checks use it where Go branches on a parse error. Also Go's query and path
+//! unescaping and `url.ParseQuery`.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -147,6 +148,8 @@ fn valid_optional_port(port: &str) -> bool {
 enum Mode {
     Host,
     Zone,
+    /// `encodeQueryComponent`: `+` is a space.
+    Query,
     Other,
 }
 
@@ -154,8 +157,8 @@ fn host_byte_ok(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!\"$&'()*+,-.:;<=>[]_~".contains(&b)
 }
 
-/// Go `unescape` validation and decoding for the modes `Parse` uses.
-fn unescape(s: &str, mode: Mode) -> Option<String> {
+/// Go `unescape` validation and decoding: `%XX` must be two hex digits (never a sign).
+fn unescape_bytes(s: &str, mode: Mode) -> Option<Vec<u8>> {
     let b = s.as_bytes();
     let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let mut out = Vec::with_capacity(b.len());
@@ -175,13 +178,71 @@ fn unescape(s: &str, mode: Mode) -> Option<String> {
             i += 3;
             continue;
         }
-        if mode != Mode::Other && b[i] < 0x80 && !host_byte_ok(b[i]) {
+        if mode == Mode::Query && b[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if matches!(mode, Mode::Host | Mode::Zone) && b[i] < 0x80 && !host_byte_ok(b[i]) {
             return None;
         }
         out.push(b[i]);
         i += 1;
     }
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(out)
+}
+
+fn unescape(s: &str, mode: Mode) -> Option<String> {
+    unescape_bytes(s, mode).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// Go `url.QueryUnescape`; `None` for a malformed escape.
+pub fn query_unescape(s: &str) -> Option<Vec<u8>> {
+    unescape_bytes(s, Mode::Query)
+}
+
+/// Go `url.PathUnescape`; `None` for a malformed escape.
+pub fn path_unescape(s: &str) -> Option<Vec<u8>> {
+    unescape_bytes(s, Mode::Other)
+}
+
+/// Decodes each well-formed `%XX` and keeps every other byte, `+` included: a request
+/// path the HTTP server has already accepted.
+pub fn percent_decode_lenient(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b.get(i + 1..i + 3) {
+            Some(&[hi, lo]) if b[i] == b'%' && hi.is_ascii_hexdigit() && lo.is_ascii_hexdigit() => {
+                let hex = |c: u8| (c as char).to_digit(16).unwrap_or_default() as u8;
+                out.push(hex(hi) << 4 | hex(lo));
+                i += 3;
+            }
+            _ => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Go `url.ParseQuery` pairs in order, decoded. Pairs with a `;` or a malformed escape in
+/// the name or value are skipped, as Go does.
+pub fn parse_query(query: &str) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> + '_ {
+    query
+        .split('&')
+        .filter(|p| !p.is_empty() && !p.contains(';'))
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            Some((query_unescape(k)?, query_unescape(v)?))
+        })
+}
+
+/// `url.ParseQuery(query).Get(name)`: the first value whose decoded name matches.
+pub fn query_get(query: &str, name: &str) -> Option<Vec<u8>> {
+    parse_query(query).find_map(|(k, v)| (k == name.as_bytes()).then_some(v))
 }
 
 #[cfg(test)]
@@ -218,5 +279,32 @@ mod tests {
         assert_eq!(parse("turn:%zz").map(|u| u.scheme), Some("turn".into()));
         assert!(parse("postgres://a:1,b:2/db").is_some());
         assert!(parse("http://h/?%zz").is_some(), "Go leaves the query unvalidated");
+    }
+
+    #[test]
+    fn unescape_requires_two_hex_digits() {
+        for bad in ["%+5", "%-5", "%zz", "%5", "%"] {
+            assert_eq!(query_unescape(bad), None, "{bad}");
+            assert_eq!(path_unescape(bad), None, "{bad}");
+            assert_eq!(percent_decode_lenient(bad), bad.as_bytes(), "{bad}");
+        }
+        assert_eq!(query_unescape("a%2Bb+c%FF").unwrap(), b"a+b c\xff");
+        assert_eq!(path_unescape("a%2Bb+c").unwrap(), b"a+b+c");
+        assert_eq!(percent_decode_lenient("a%2fb+%zz%41"), b"a/b+%zzA");
+    }
+
+    #[test]
+    fn parse_query_skips_malformed_pairs_like_go() {
+        let pairs: Vec<_> = parse_query("a=1&b=%+5&c;=2&&d&a=%32&e=%zz").collect();
+        assert_eq!(
+            pairs,
+            [
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"d".to_vec(), vec![]),
+                (b"a".to_vec(), b"2".to_vec())
+            ]
+        );
+        assert_eq!(query_get("x=%-1&x=y+z", "x").unwrap(), b"y z");
+        assert_eq!(query_get("x=1", "y"), None);
     }
 }

@@ -177,12 +177,10 @@ fn xml_unescape(text: &str) -> String {
     out
 }
 
-/// Go `url.QueryUnescape` (S3 `encoding-type=url` keys).
+/// Go `url.QueryUnescape` (S3 `encoding-type=url` keys); a malformed key stays raw.
 fn query_unescape(value: &str) -> String {
-    url::form_urlencoded::parse(format!("k={value}").as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default()
+    cpa_core::config::go_url::query_unescape(value)
+        .map_or_else(|| value.to_owned(), |b| String::from_utf8_lossy(&b).into_owned())
 }
 
 fn mkdir_0700(path: &Path) -> Result<()> {

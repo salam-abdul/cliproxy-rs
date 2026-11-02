@@ -342,7 +342,7 @@ pub(crate) fn mask_query(raw: &str) -> String {
     raw.split('&')
         .map(|part| {
             let (key, value) = part.split_once('=').unwrap_or((part, ""));
-            let decoded = crate::access::unescape(key).unwrap_or_else(|| key.as_bytes().to_owned());
+            let decoded = cpa_core::config::go_url::query_unescape(key).unwrap_or_else(|| key.as_bytes().to_owned());
             let lower = cpa_common::gostr::lower_bytes(cpa_core::config::go_trim_space(&decoded));
             let lower = lower.strip_suffix("[]").unwrap_or(&lower);
             if !(lower == "key"
@@ -353,7 +353,7 @@ pub(crate) fn mask_query(raw: &str) -> String {
             {
                 return part.to_owned();
             }
-            let value = crate::access::unescape(value).unwrap_or_else(|| value.as_bytes().to_owned());
+            let value = cpa_core::config::go_url::query_unescape(value).unwrap_or_else(|| value.as_bytes().to_owned());
             let value = hide_key(cpa_core::config::go_trim_space(&value));
             let escaped: String = value
                 .iter()

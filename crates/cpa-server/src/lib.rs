@@ -219,7 +219,7 @@ fn html() -> Response {
 /// (server_routes.go).
 fn callback_query(query: &str, trim: bool) -> (String, String, String) {
     let get = |name| {
-        let value = access::query_get(query, name)
+        let value = cpa_core::config::go_url::query_get(query, name)
             .map(|v| String::from_utf8_lossy(&v).into_owned())
             .unwrap_or_default();
         if trim { gojson::trim(&value).to_owned() } else { value }

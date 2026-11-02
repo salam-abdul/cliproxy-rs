@@ -606,26 +606,9 @@ pub(crate) async fn config(
         .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))
 }
 
+/// The decoded request path, as gin's `*path` parameter sees it.
 pub(crate) fn percent_decode(path: &str) -> String {
-    let bytes = path.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
-        match (bytes[i], hex) {
-            (b'%', Some(b)) => {
-                out.push(b);
-                i += 3;
-            }
-            (b, _) => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy(&cpa_core::config::go_url::percent_decode_lenient(path)).into_owned()
 }
 
 /// Root-level comment lines after the last mapping entry.

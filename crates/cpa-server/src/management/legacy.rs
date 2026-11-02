@@ -368,33 +368,10 @@ fn query_first(raw: Option<&str>, name: &str) -> Option<String> {
         .map(|(_, v)| v)
 }
 
-/// `url.ParseQuery` pairs (malformed pairs skipped).
+/// `url.ParseQuery` pairs (malformed and non-UTF-8 pairs skipped).
 fn url_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    raw.split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .filter_map(|p| {
-            let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            Some((unescape(k)?, unescape(v)?))
-        })
-}
-
-fn unescape(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => out.push(b' '),
-            b'%' => {
-                let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
+    cpa_core::config::go_url::parse_query(raw)
+        .filter_map(|(k, v)| Some((String::from_utf8(k).ok()?, String::from_utf8(v).ok()?)))
 }
 
 /// Go's `api-keys` routes (`putStringList`, `patchStringList`, `deleteFromStringList`).

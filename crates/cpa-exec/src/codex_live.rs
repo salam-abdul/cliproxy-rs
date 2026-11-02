@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cpa_common::gostr::{GoStr, quote as go_quote, trim_space};
 use cpa_common::json::{self as gj, GoValue, Kind};
-use cpa_core::config::Config;
+use cpa_core::config::{Config, go_url};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{CaptureEvent, CaptureSink, ExecError, UpstreamRequest};
 use http::HeaderMap;
@@ -522,7 +522,7 @@ pub fn call_id_from_location(location: &str) -> String {
     let Some((path, query)) = go_url_path_query(location) else {
         return String::new();
     };
-    if let Some(id) = query_first(&query, "call_id").map(|id| trim(&id).to_owned())
+    if let Some(id) = go_url::query_get(&query, "call_id").map(|id| trim(&String::from_utf8_lossy(&id)).to_owned())
         && valid_call_id(&id)
     {
         return id;
@@ -542,7 +542,7 @@ fn go_url_path_query(raw: &str) -> Option<(String, String)> {
         return None;
     }
     let (rest, fragment) = raw.split_once('#').unwrap_or((raw, ""));
-    unescape(fragment, false)?;
+    go_url::path_unescape(fragment)?;
     let scheme_end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
     let (scheme, mut rest) = match scheme_end {
         Some(0) if rest.starts_with(':') => return None,
@@ -573,45 +573,8 @@ fn go_url_path_query(raw: &str) -> Option<(String, String)> {
         let end = after.find('/').unwrap_or(after.len());
         rest = &after[end..];
     }
-    let path = unescape(rest, false)?;
+    let path = go_url::path_unescape(rest)?;
     Some((String::from_utf8_lossy(&path).into_owned(), query.into()))
-}
-
-/// Go `url.unescape`: `%XX` must be hex; `+` is a space only in query components.
-fn unescape(s: &str, query: bool) -> Option<Vec<u8>> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'%' => {
-                let hex = b.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
-                out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
-                i += 3;
-            }
-            b'+' if query => {
-                out.push(b' ');
-                i += 1;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    Some(out)
-}
-
-/// `url.ParseQuery(query).Get(name)`.
-fn query_first(query: &str, name: &str) -> Option<String> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let (k, v) = (unescape(k, true)?, unescape(v, true)?);
-            (k == name.as_bytes()).then(|| String::from_utf8_lossy(&v).into_owned())
-        })
 }
 
 /// `url.QueryEscape`.

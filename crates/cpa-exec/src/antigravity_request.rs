@@ -955,27 +955,8 @@ pub(crate) fn is_search_redirect(raw: &str) -> bool {
     let (authority, path) = rest.split_at(end);
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     host == "vertexaisearch.cloud.google.com"
-        && unescape(fragment).is_some()
-        && unescape(path).is_some_and(|p| p.starts_with(b"/grounding-api-redirect/"))
-}
-
-/// Go `url.unescape`: `None` for a malformed `%` escape.
-fn unescape(s: &str) -> Option<Vec<u8>> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = bytes.get(i + 1..i + 3)?;
-            let value = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-            out.push(value);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Some(out)
+        && cpa_core::config::go_url::path_unescape(fragment).is_some()
+        && cpa_core::config::go_url::path_unescape(path).is_some_and(|p| p.starts_with(b"/grounding-api-redirect/"))
 }
 
 /// The grounding chunks of a response: their array path and each chunk's trimmed URI.

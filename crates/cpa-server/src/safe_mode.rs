@@ -62,7 +62,7 @@ async fn guard(State(rt): State<Arc<Runtime>>, request: Request, next: Next) -> 
     }
     let path = crate::management::percent_decode(request.uri().path());
     if path == "/management.html"
-        && crate::access::query_get(request.uri().query().unwrap_or_default(), "safe-mode").as_deref()
+        && cpa_core::config::go_url::query_get(request.uri().query().unwrap_or_default(), "safe-mode").as_deref()
             == Some(b"configure")
     {
         return next.run(request).await;

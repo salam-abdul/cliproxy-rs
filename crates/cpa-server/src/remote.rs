@@ -349,7 +349,7 @@ fn query_credential(query: &str) -> String {
     ["key", "auth_token"]
         .iter()
         .map(|name| {
-            crate::access::query_get(query, name)
+            cpa_core::config::go_url::query_get(query, name)
                 .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
                 .unwrap_or_default()
         })

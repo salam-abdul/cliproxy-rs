@@ -222,8 +222,9 @@ impl Dsn {
             // pgx: Go's `url.Query()` decoding (`+` is a space), first value per key.
             let mut seen: Vec<String> = Vec::new();
             let mut kept: Vec<String> = Vec::new();
-            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-                let key = canonical(key.into_owned());
+            for (key, value) in cpa_core::config::go_url::parse_query(query) {
+                let key = canonical(String::from_utf8_lossy(&key).into_owned());
+                let value = String::from_utf8_lossy(&value);
                 if seen.contains(&key) {
                     continue;
                 }
@@ -671,6 +672,14 @@ mod tests {
         .unwrap();
         assert_eq!(dsn.config.get_options(), Some(r"-c search_path=tenant\ one"));
         assert_eq!(dsn.config.get_application_name(), Some("a+b c"));
+        // Go's `url.ParseQuery` drops a malformed escape or a `;` pair before "first wins".
+        let dsn = Dsn::parse(
+            "postgres://u@db/app?search_path=%zz&search_path=%+5&search_path=ok&application_name=a;b",
+            &no_env,
+        )
+        .unwrap();
+        assert_eq!(dsn.config.get_options(), Some("-c search_path=ok"));
+        assert_eq!(dsn.config.get_application_name(), None);
         // Keyword form: the last value per key, hosts included.
         let dsn = Dsn::parse("host=a host=b search_path=x search_path=y", &no_env).unwrap();
         assert_eq!(dsn.config.get_hosts(), &[Host::Tcp("b".into())]);

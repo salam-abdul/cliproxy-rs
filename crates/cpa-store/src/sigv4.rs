@@ -200,9 +200,6 @@ mod tests {
     }
 
     fn percent_decode(path: &str) -> String {
-        url::form_urlencoded::parse(format!("x={}", path.replace('+', "%2B")).as_bytes())
-            .next()
-            .map(|(_, v)| v.into_owned())
-            .unwrap()
+        String::from_utf8_lossy(&cpa_core::config::go_url::percent_decode_lenient(path)).into_owned()
     }
 }
