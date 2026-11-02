@@ -6,8 +6,9 @@
 //! Formats and providers are Go's lowercase identifiers (`openai`, `openai-response`,
 //! `codex`, `claude`, `gemini`, `antigravity`, `interactions`, `kimi`, `xai`).
 //!
-//! ponytail: Go's plugin-registered appliers (RegisterPluginProvider, M6) are not
-//! ported; only the built-in appliers exist. Debug logging is omitted.
+//! ponytail: Go's plugin-registered appliers (RegisterPluginProvider) are not ported
+//! because the fork has no plugin host; only the built-in appliers exist, and a plugin
+//! host would need a runtime applier table. Debug logging is omitted.
 
 use crate::gostr::GoStr;
 mod apply;

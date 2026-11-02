@@ -220,7 +220,7 @@ async fn chat_completions_translate_and_stream_upstream_for_non_stream_clients()
     assert!(text.contains(r#""content":"hi""#));
 }
 
-/// Go `StartNonStreamingKeepAlive` (M2-0036), expectations from the Go golden
+/// Go `StartNonStreamingKeepAlive`, expectations from the Go golden
 /// `nonstream_keepalive` (tests/reference/server/main.go): a result within one interval
 /// is untouched; a slower one commits 200 `application/json` with a `\n` per interval,
 /// then the rendered body, even when it is an error.

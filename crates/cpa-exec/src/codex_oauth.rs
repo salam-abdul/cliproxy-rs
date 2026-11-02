@@ -596,8 +596,9 @@ fn parse_time(value: &Value) -> Option<DateTime<Utc>> {
 
 /// `Manager.shouldRefresh` with the Codex lead (24h). Without an expiry, `last_refresh`
 /// older than the lead (or missing) is due.
-// ponytail: refresh_interval_seconds overrides and unauthorized/invalid-grant lifecycle
-// gating live in the runtime scheduler (M4-0027).
+// ponytail: a `refresh_interval_seconds` override is ignored here, unlike Kimi and Devin;
+// call `kimi_http::preferred_interval` if a Codex credential needs one. Invalid-grant
+// backoff is the runtime refresh loop's (`cpa-server` `refresh.rs`).
 pub(crate) fn refresh_due(credential: &Credential, now: DateTime<Utc>) -> bool {
     if refresh_token(credential).is_empty() {
         return false;

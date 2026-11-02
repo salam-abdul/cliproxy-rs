@@ -6,7 +6,7 @@
 //! The static catalog is `cpa_core::registry::pinned()`. Each enabled credential
 //! registers its provider's channel (or its configured `models`), minus exclusions, plus
 //! OAuth aliases and forks, plus `prefix/` copies. Selection admits a credential only
-//! when it registered the route model (M4-0028), and route-time provider lookup uses
+//! when it registered the route model, and route-time provider lookup uses
 //! the registered providers, so a model nobody serves is Go's 400 `unknown provider`.
 //!
 //! Execution-model resolution (aliases back to upstream names, force mapping) lives

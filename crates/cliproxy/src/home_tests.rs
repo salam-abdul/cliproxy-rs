@@ -1708,7 +1708,7 @@ async fn alpha_search_401s_reach_home_as_home_results() {
 }
 
 /// Go `TestHomeExecutionPropagatesRequestMetadata` and
-/// `TestHomeExecutionFailureResultPreservesRequestMetadata` (Go issue #4791): the
+/// `TestHomeExecutionFailureResultPreservesRequestMetadata`: the
 /// usage record of a Home attempt carries the client's requested model, reasoning
 /// effort, service tier (`auto` when omitted) and generate flag, and a failed attempt
 /// keeps the requested tier.

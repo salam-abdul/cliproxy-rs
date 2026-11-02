@@ -860,7 +860,7 @@ fn go_account(credential: &Credential) -> [String; 5] {
     ]
 }
 
-/// Upstream capture (M4-0250) at Go's Codex HTTP sites (`codex_executor_execute.go:93,264`,
+/// Upstream capture at Go's Codex HTTP sites (`codex_executor_execute.go:93,264`,
 /// `codex_executor_stream.go:101`). Go records the request header map and body as sent,
 /// the response status, the error body or, on success, the whole body (Execute, compact)
 /// or each scanned line (streams), and every stream failure it reports. So for each case

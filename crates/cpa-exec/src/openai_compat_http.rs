@@ -13,7 +13,7 @@ use crate::proxy::{GoClients, Hooks, Proxy};
 
 pub(crate) use crate::proxy::{GoHeaders, Upstream};
 
-/// Go standard-transport clients keyed by effective proxy (crate::proxy, M4-0029).
+/// Go standard-transport clients keyed by effective proxy (crate::proxy).
 pub(crate) struct Clients(GoClients);
 
 impl Clients {

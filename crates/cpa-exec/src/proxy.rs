@@ -1,5 +1,5 @@
 //! Proxy-aware HTTP clients with Go net/http semantics, shared by every executor
-//! (helps/proxy_helpers.go, sdk/proxyutil, net/http client behaviour; M4-0029).
+//! (helps/proxy_helpers.go, sdk/proxyutil, net/http client behaviour).
 //!
 //! - [`Proxy`]: the effective proxy for a request (credential, then
 //!   `requests.proxy-url`), parsed like `proxyutil.Parse`.
