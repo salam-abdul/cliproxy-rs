@@ -97,7 +97,9 @@ pub(crate) fn restore_line<'a>(line: &'a [u8], reverse: &Reverse) -> Result<Cow<
     })
 }
 
-/// Message ID of a completed stream; `None` when `message_stop` was never seen.
+/// Runs once with the message ID (empty when no `message_start` carried one) after a
+/// stream completed with `message_stop` or a bare message object with a stop reason.
+/// It never runs for a stream that did not complete.
 pub(crate) type OnComplete = Box<dyn FnOnce(String) + Send>;
 
 struct Relay {
@@ -274,8 +276,7 @@ impl Relay {
     }
 }
 
-/// Relays decoded upstream bytes as whole native SSE events. `done` runs once with
-/// the message ID when the upstream completed with `message_stop`.
+/// Relays decoded upstream bytes as whole native SSE events; `done` is an [`OnComplete`].
 /// Every upstream line is reported to `usage` and `capture` before alias restore.
 pub(crate) fn relay(
     body: ExecStream,
