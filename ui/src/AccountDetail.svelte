@@ -160,7 +160,7 @@
     >
   </div>
   <div class="drawer-body">
-    <section class="drawer-card">
+    <section class="card">
       <h3>Current capacity</h3>
       <QuotaBrief {a} />
       <p class="muted small">
@@ -174,7 +174,7 @@
         </p>{/if}
     </section>
     {#if n?.id}
-      <section class="drawer-card">
+      <section class="card">
         <div class="section-head">
           <h3>Availability history</h3>
           <span class="muted small">{store.historyRange}</span>
@@ -198,7 +198,7 @@
             No availability observations in this period.
           </p>{/if}
       </section>
-      <section class="drawer-card">
+      <section class="card">
         <div class="section-head">
           <h3>Usage history</h3>
           <span class="muted small">{store.historyRange}</span>
@@ -229,7 +229,7 @@
         {/if}
       </section>
     {/if}
-    <details class="drawer-card">
+    <details class="card">
       <summary>Advanced account settings</summary>
       <dl class="facts">
         {#each facts as [k, v, mono]}<div>
@@ -325,7 +325,7 @@
 
 <style>
   .account-drawer::backdrop {
-    background: rgb(14 28 43 / 0.5);
+    background: var(--shade);
   }
   .account-drawer[open] {
     position: fixed;
@@ -338,48 +338,45 @@
     padding: 0;
     border: 0;
     color: var(--ink);
-    background: var(--body);
-    box-shadow: -10px 0 30px rgb(14 28 43 / 0.25);
+    background: var(--bg);
+    box-shadow: -10px 0 30px var(--shade);
     display: flex;
     flex-direction: column;
   }
   .drawer-head {
     display: flex;
     justify-content: space-between;
-    gap: 12px;
-    padding: 20px;
+    gap: var(--s3);
+    padding: var(--s4);
     border-bottom: 1px solid var(--line);
   }
   .drawer-head h2 {
-    margin: 4px 0 8px;
+    margin: var(--s1) 0 var(--s2);
   }
   .drawer-body {
     overflow: auto;
-    padding: 16px;
+    padding: var(--s4);
     flex: 1;
     display: grid;
-    gap: 12px;
+    gap: var(--s3);
     align-content: start;
   }
-  .drawer-card {
-    background: var(--raised);
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 16px;
+  .card {
     display: grid;
-    gap: 12px;
+    gap: var(--s3);
   }
-  .drawer-card h3,
-  .drawer-card h4 {
-    font-size: 13px;
+  .card :global(.quota-meters) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  details > summary {
-    cursor: pointer;
+  .card h3 {
+    font-size: var(--t-sm);
+  }
+  summary {
     font-weight: 600;
   }
   .facts {
     grid-template-columns: 1fr 1fr;
-    gap: 12px 16px;
+    gap: var(--s3) var(--s4);
   }
   .form > .field {
     flex: 0 1 88px;
@@ -395,39 +392,39 @@
   .availability-strip span {
     flex: 1;
     border-radius: 2px;
-    background: #cdd5dc;
+    background: var(--series-unknown);
   }
   .availability-strip span.included {
-    background: #5dae91;
+    background: var(--ok);
   }
   .availability-strip span.extra {
-    background: #d5a75a;
+    background: var(--warn);
   }
   .availability-strip span.cooling,
   .availability-strip span.limited,
   .availability-strip span.signin {
-    background: #d88274;
+    background: var(--bad);
   }
   .availability-strip span.disabled {
-    background: #8c99a4;
+    background: var(--ink-muted);
   }
   .availability-strip span.unknown {
     background: transparent;
-    border: 1px solid #aebbc5;
+    border: 1px solid var(--series-unknown);
   }
   .drawer-numbers {
     display: flex;
-    gap: 24px;
+    gap: var(--s6);
   }
   .drawer-numbers div {
     display: grid;
   }
   .drawer-numbers strong {
-    font-size: 24px;
+    font-size: var(--t-xl);
   }
   .drawer-numbers span {
-    font-size: 12px;
-    color: var(--ink-2);
+    font-size: var(--t-xs);
+    color: var(--ink-muted);
   }
   .quota-trend {
     height: 56px;
@@ -438,15 +435,15 @@
   }
   .quota-trend span {
     flex: 1;
-    background: #55a88b;
+    background: var(--accent);
     min-width: 2px;
   }
   .drawer-actions {
-    padding: 12px 16px;
+    padding: var(--s3) var(--s4);
     border-top: 1px solid var(--line);
     display: flex;
-    gap: 8px;
+    gap: var(--s2);
     justify-content: flex-end;
-    background: var(--raised);
+    background: var(--surface);
   }
 </style>

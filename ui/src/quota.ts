@@ -59,9 +59,8 @@ export function quotaSummary(a: Data) {
         : [],
     failed: !!(q?.error || (native && store.native.error)),
     at: native ? 0 : q && "at" in q ? q.at : 0,
-    stale: native
-      ? !(store.native.data?.validUntil > store.now)
-      : !!(q && "at" in q && store.now - q.at > 90000),
+    // Native status refreshes every 10 seconds; other readings show their age instead.
+    stale: !!native && !(store.native.data?.validUntil > store.now),
   };
 }
 

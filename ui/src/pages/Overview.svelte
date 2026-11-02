@@ -85,7 +85,7 @@
 
 <div class="overview-heading">
   <div>
-    <p class="overview-eyebrow">Local routing</p>
+    <p class="eyebrow">Local routing</p>
     <h1>Overview</h1>
     <p class="muted small">Accounts, capacity, and history in one place.</p>
   </div>
@@ -99,9 +99,9 @@
     </div>{/if}
 </div>
 {#if !store.creds.error && (store.native.error || !store.online)}
-  <p class="overview-alert">Refresh failed. Showing the last readings.</p>
+  <p class="alert">Refresh failed. Showing the last readings.</p>
 {/if}
-<section class="section overview-accounts">
+<section class="section card overview-accounts">
   <div class="section-head account-panel-head">
     <h2>
       Accounts <span class="muted account-count"
@@ -178,18 +178,18 @@
   .account-history span {
     height: 4px;
     flex: 1;
-    background: #c9d4dc;
+    background: var(--line-strong);
     border-radius: 2px;
   }
   .account-history span.served {
-    background: #58ae91;
+    background: var(--series-1);
   }
   .account-history span.failed {
-    background: #db887b;
+    background: var(--series-fail);
   }
   .account-history span.unknown {
     background: transparent;
-    border: 1px solid #c9d4dc;
+    border: 1px solid var(--series-unknown);
   }
   .account-title {
     border: 0;

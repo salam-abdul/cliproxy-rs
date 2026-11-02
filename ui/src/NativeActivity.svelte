@@ -146,39 +146,34 @@
   </p>{/if}
 
 <style>
-  .request-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  .request-toolbar > span {
-    margin-left: auto;
-  }
   .section {
     gap: 0;
   }
   .request-toolbar {
-    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+    margin-bottom: var(--s3);
+  }
+  .request-toolbar > span {
+    margin-left: auto;
   }
   .native-event {
     border-bottom: 1px solid var(--line);
   }
   summary {
-    cursor: pointer;
     display: grid;
-    grid-template-columns:
-      70px minmax(0, 1.2fr) minmax(70px, 0.6fr) minmax(0, 1.4fr)
-      10px;
-    gap: 12px;
+    grid-template-columns: 72px minmax(0, 1.2fr) minmax(72px, 0.6fr) minmax(0, 1.4fr) 12px;
+    gap: var(--s3);
     align-items: center;
-    padding: 10px 0;
-    font-size: 12px;
+    padding: var(--s3) 0;
+    font-size: var(--t-xs);
   }
   summary::after {
     content: "›";
-    color: var(--ink-2);
-    font-size: 18px;
+    color: var(--ink-muted);
+    font-size: var(--t-lg);
   }
   details[open] > summary::after {
     transform: rotate(90deg);
@@ -189,27 +184,27 @@
   }
   .request-account {
     overflow-wrap: anywhere;
-    color: var(--ink-2);
+    color: var(--ink-muted);
   }
   .request-result {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: var(--s2);
     flex-wrap: wrap;
   }
   .request-result .lamp {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
   }
   dl {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
-    gap: 0.35rem 1rem;
-    padding: 12px;
-    margin: 12px 0;
-    background: var(--panel);
-    border-radius: 8px;
-    font-size: 12px;
+    gap: var(--s1) var(--s4);
+    padding: var(--s3);
+    margin: var(--s3) 0;
+    background: var(--sunken);
+    border-radius: var(--r);
+    font-size: var(--t-xs);
   }
   dd {
     margin: 0;
@@ -217,8 +212,8 @@
   }
   @media (max-width: 600px) {
     summary {
-      grid-template-columns: 60px minmax(0, 1fr) 10px;
-      gap: 6px 10px;
+      grid-template-columns: 60px minmax(0, 1fr) 12px;
+      gap: var(--s2) var(--s3);
     }
     summary::after {
       grid-column: 3;

@@ -79,7 +79,11 @@ function parse(hash: string) {
 class Store {
   logged = $state(false);
   localDashboard = $state(false);
-  theme = $state(document.documentElement.dataset.theme || "light");
+  /** The saved override, else the system theme. */
+  theme = $state(
+    document.documentElement.dataset.theme ||
+      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
+  );
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
   online = $state(true);

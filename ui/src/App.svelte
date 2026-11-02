@@ -116,7 +116,7 @@
     aria-hidden="true"
     ><rect width="40" height="40" rx="10" fill="var(--ink)" /><path
       d="M11 11h0M20 11h0M29 11h0M11 20h0M29 20h0M11 29h0M20 29h0M29 29h0"
-      stroke="var(--ink-3)"
+      stroke="var(--ink-muted)"
       stroke-width="7"
       stroke-linecap="round"
     /><circle cx="20" cy="20" r="4.5" fill="var(--accent)" /></svg
