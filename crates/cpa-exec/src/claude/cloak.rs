@@ -92,7 +92,7 @@ fn fingerprint(message: &str, version: &str) -> String {
         .collect();
     let sampled = String::from_utf16_lossy(&sampled);
     let digest = Sha256::digest(format!("{FINGERPRINT_SALT}{sampled}{version}").as_bytes());
-    cpa_core::hex::encode(&digest)[..3].to_owned()
+    cpa_core::hex::encode(digest)[..3].to_owned()
 }
 
 pub(crate) struct Billing<'a> {
@@ -902,7 +902,7 @@ pub(crate) fn fake_user_id(session_id: &str) -> String {
     let _ = getrandom::fill(&mut bytes);
     format!(
         r#"{{"device_id":"{}","account_uuid":"","session_id":{}}}"#,
-        cpa_core::hex::encode(&bytes),
+        cpa_core::hex::encode(bytes),
         cpa_common::json::marshal_string(&session, true)
     )
 }

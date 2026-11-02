@@ -41,7 +41,7 @@ fn tool_names(raw: &[u8]) -> Vec<Vec<u8>> {
 
 /// buildReverseMapFromClaudeOriginalToShort: original tool name -> short name.
 fn original_to_short(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
-    short_name_map(&tool_names(raw), shorten_name)
+    short_name_map(tool_names(raw), shorten_name)
 }
 
 /// buildReverseMapFromClaudeOriginalShortToOriginal: short name -> original tool name.

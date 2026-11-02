@@ -114,7 +114,7 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
                 .str("model", &m.id)
                 .str("name", name);
             if m.context_length > 0 {
-                entry = entry.raw("context_window", &m.context_length.to_string());
+                entry = entry.raw("context_window", m.context_length.to_string());
             }
             entry = entry.str("api_backend", "responses").raw("supported_in_api", "true");
             let efforts: Vec<String> = m
@@ -126,14 +126,14 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
                 .map(|level| cpa_common::json::Object::new().str("value", level).finish_string())
                 .collect();
             if !efforts.is_empty() {
-                entry = entry.raw("reasoning_efforts", &format!("[{}]", efforts.join(",")));
+                entry = entry.raw("reasoning_efforts", format!("[{}]", efforts.join(",")));
             }
             entry.finish_string()
         })
         .collect();
     cpa_common::json::Object::new()
         .str("object", "list")
-        .raw("data", &format!("[{}]", data.join(",")))
+        .raw("data", format!("[{}]", data.join(",")))
         .finish_string()
 }
 

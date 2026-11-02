@@ -35,7 +35,7 @@ impl Ids {
             hasher.update([0]);
             hasher.update(part.trim().as_bytes());
         }
-        let mut short = crate::hex::encode(&hasher.finalize())[..12].to_owned();
+        let mut short = crate::hex::encode(hasher.finalize())[..12].to_owned();
         let index = self.0.entry(format!("{kind}:{short}")).or_insert(0);
         if *index > 0 {
             short = format!("{short}-{index}");

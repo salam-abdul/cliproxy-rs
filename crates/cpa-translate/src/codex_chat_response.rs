@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 /// buildReverseMapFromOriginalOpenAI: short name -> declared name.
 fn reverse_names(original: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
-    short_name_map(&request_tool_names(original), shorten_name)
+    short_name_map(request_tool_names(original), shorten_name)
         .into_iter()
         .map(|(name, short)| (short, name))
         .collect()

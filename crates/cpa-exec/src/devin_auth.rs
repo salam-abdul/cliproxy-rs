@@ -69,7 +69,7 @@ pub fn generate_pkce() -> Result<Pkce, String> {
 pub fn random_state() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| format!("failed to generate random bytes: {e}"))?;
-    Ok(cpa_core::hex::encode(&bytes))
+    Ok(cpa_core::hex::encode(bytes))
 }
 
 /// `DevinUserStatus`: plan, quota and account metadata from `GetUserStatus`.

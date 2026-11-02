@@ -1413,7 +1413,7 @@ impl ToolNames {
                     seed.push(0);
                     seed.extend_from_slice(n.to_string().as_bytes());
                 }
-                let digest = cpa_core::hex::encode(&Sha256::digest(&seed));
+                let digest = cpa_core::hex::encode(Sha256::digest(&seed));
                 let mut name = base.clone();
                 name.push(b'_');
                 name.extend_from_slice(&digest.as_bytes()[..10]);

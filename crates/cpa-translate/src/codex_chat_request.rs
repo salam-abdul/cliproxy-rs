@@ -121,7 +121,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
         }
         custom_names.retain(|n| !function_names.contains(n));
     }
-    let short_names = codex_names::short_name_map(&request_tool_names(raw), shorten_name);
+    let short_names = codex_names::short_name_map(request_tool_names(raw), shorten_name);
     let short = |name: &[u8]| short_names.get(name).cloned().unwrap_or_else(|| shorten_name(name));
 
     // (custom, name, input)

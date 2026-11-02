@@ -313,14 +313,14 @@ pub(crate) fn device_fingerprint(seed: &str) -> String {
     if seed.is_empty() {
         let mut b = [0u8; FINGERPRINT_HEX_LEN / 2];
         if getrandom::fill(&mut b).is_ok() {
-            return cpa_core::hex::encode(&b);
+            return cpa_core::hex::encode(b);
         }
         seed = uuid::Uuid::new_v4().to_string();
     }
     let mut out = String::with_capacity(FINGERPRINT_HEX_LEN + 64);
     let mut counter = 0;
     while out.len() < FINGERPRINT_HEX_LEN {
-        out.push_str(&cpa_core::hex::encode(&Sha256::digest(
+        out.push_str(&cpa_core::hex::encode(Sha256::digest(
             format!("{seed}-{counter}").as_bytes(),
         )));
         counter += 1;
@@ -1323,16 +1323,16 @@ pub(crate) fn request_log_body(r: &RequestLog<'_>) -> Vec<u8> {
         o = o.str_opt("role", role);
         o = o.str_opt("content", &p.content);
         o = o.str_opt("thinking", &p.thinking);
-        o = o.str_opt("signature", &signature_for_log(&p.signature));
+        o = o.str_opt("signature", signature_for_log(&p.signature));
         o = o.str_opt("signature_type", &p.signature_type);
         if !p.tool_calls.is_empty() {
-            o = o.raw("tool_calls", &tool_calls_json(&p.tool_calls));
+            o = o.raw("tool_calls", tool_calls_json(&p.tool_calls));
         }
         o = o.str_opt("tool_call_id", &p.tool_call_id);
         if !p.images.is_empty() {
             o = o.raw(
                 "images",
-                &go_array(p.images.iter().map(|img| {
+                go_array(p.images.iter().map(|img| {
                     let mut i = Object::new();
                     i = i.str("mime_type", &img.mime);
                     i = i.int("data_len", img.base64.len());
@@ -1349,10 +1349,10 @@ pub(crate) fn request_log_body(r: &RequestLog<'_>) -> Vec<u8> {
         .map(|t| {
             let mut o = Object::new();
             o = o.str("name", &t.name);
-            o = o.str_opt("description", &tool_description(&t.name, &t.description));
+            o = o.str_opt("description", tool_description(&t.name, &t.description));
             if !t.parameters.is_empty() && cpa_common::json::std_valid(&t.parameters) {
                 // json.RawMessage: compacted with HTML escapes.
-                o = o.raw("parameters", &cpa_common::json::compact(&t.parameters, true));
+                o = o.raw("parameters", cpa_common::json::compact(&t.parameters, true));
             }
             o.finish()
         });
@@ -1374,10 +1374,10 @@ pub(crate) fn request_log_body(r: &RequestLog<'_>) -> Vec<u8> {
                 o = o.int("max_tokens", r.max_tokens);
             }
             if !prompts.is_empty() {
-                o = o.raw("prompts", &go_array(prompts));
+                o = o.raw("prompts", go_array(prompts));
             }
             if !tools.is_empty() {
-                o = o.raw("tools", &go_array(tools));
+                o = o.raw("tools", go_array(tools));
             }
             indent(&o.finish()).unwrap_or_default()
         }
@@ -1417,15 +1417,15 @@ impl ResponseLog {
         o = o.str_opt("signature", &self.signature);
         o = o.str_opt("signature_type", &self.signature_type);
         if !self.tool_calls.is_empty() {
-            o = o.raw("tool_calls", &tool_calls_json(&self.tool_calls));
+            o = o.raw("tool_calls", tool_calls_json(&self.tool_calls));
         }
         if let Some(u) = &self.usage {
-            o = o.raw("usage", &usage_json(u));
+            o = o.raw("usage", usage_json(u));
         }
         if !self.unknown_fields.is_empty() {
             o = o.raw(
                 "unknown_fields",
-                &go_array(self.unknown_fields.iter().map(|n| n.to_string().into_bytes())),
+                go_array(self.unknown_fields.iter().map(|n| n.to_string().into_bytes())),
             );
         }
         indent(&o.finish()).unwrap_or_default()

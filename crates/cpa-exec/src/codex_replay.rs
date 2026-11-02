@@ -446,7 +446,7 @@ pub(crate) fn cache_completed(cache: &Cache, scope: &Scope, completed: &[u8]) {
         hasher.update(item);
     }
     let mut marker = format!(r#"{{"type":"{TURN_TYPE}"}}"#).into_bytes();
-    gj::set_str(&mut marker, "id", cpa_core::hex::encode(&hasher.finalize()));
+    gj::set_str(&mut marker, "id", cpa_core::hex::encode(hasher.finalize()));
     if !assistant.is_empty() {
         gj::set_str(&mut marker, "assistant_fingerprint", &assistant);
     }
@@ -505,7 +505,7 @@ fn prefix_fingerprint(items: &[Res<'_>], end: usize) -> String {
         hasher.update(b"\0item\0");
         hasher.update(item.raw());
     }
-    cpa_core::hex::encode(&hasher.finalize())
+    cpa_core::hex::encode(hasher.finalize())
 }
 
 /// `codexReplayPrefixFingerprints`: every prefix fingerprint from one hashing pass,
@@ -519,7 +519,7 @@ struct Prefixes<'r, 'a> {
 impl<'r, 'a> Prefixes<'r, 'a> {
     fn new(items: &'r [Res<'a>]) -> Self {
         let hasher = Sha256::new();
-        let first = cpa_core::hex::encode(&hasher.clone().finalize());
+        let first = cpa_core::hex::encode(hasher.clone().finalize());
         Self {
             items,
             hasher,
@@ -532,7 +532,7 @@ impl<'r, 'a> Prefixes<'r, 'a> {
             let next = self.sums.len() - 1;
             self.hasher.update(b"\0item\0");
             self.hasher.update(self.items[next].raw());
-            self.sums.push(cpa_core::hex::encode(&self.hasher.clone().finalize()));
+            self.sums.push(cpa_core::hex::encode(self.hasher.clone().finalize()));
         }
         &self.sums[end]
     }
@@ -804,7 +804,7 @@ fn assistant_fingerprint(item: &Res<'_>) -> String {
     if text_bytes.is_empty() {
         return String::new();
     }
-    cpa_core::hex::encode(&Sha256::digest(&text_bytes))
+    cpa_core::hex::encode(Sha256::digest(&text_bytes))
 }
 
 #[cfg(test)]

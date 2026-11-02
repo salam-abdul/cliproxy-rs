@@ -93,7 +93,7 @@ pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {
     if seed.is_empty() {
         return b"unknown".to_vec();
     }
-    cpa_core::hex::encode(&Sha256::digest(&seed)).into_bytes()
+    cpa_core::hex::encode(Sha256::digest(&seed)).into_bytes()
 }
 
 fn joined_texts(content: &Res<'_>, accept: impl Fn(&Res<'_>) -> bool) -> Vec<u8> {

@@ -275,7 +275,7 @@ pub(crate) fn begin(credential: &str, session: &str, new_turn: bool, explicit_pr
     if credential.is_empty() || session.is_empty() {
         return Continuity::default();
     }
-    let key = cpa_core::hex::encode(&Sha256::digest(format!("{credential}\0{session}").as_bytes()));
+    let key = cpa_core::hex::encode(Sha256::digest(format!("{credential}\0{session}").as_bytes()));
     let now = Instant::now();
     let mut s = store().lock().expect("continuity store");
     if s.last_cleanup

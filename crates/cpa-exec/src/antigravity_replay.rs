@@ -134,7 +134,7 @@ fn tool_use_id(call_id: &[u8], name: &[u8], args: &[u8]) -> Vec<u8> {
 }
 
 fn text_hash(kind: &str, text: &[u8]) -> String {
-    cpa_core::hex::encode(&Sha256::digest([kind.as_bytes(), b"\x00", text].concat()))
+    cpa_core::hex::encode(Sha256::digest([kind.as_bytes(), b"\x00", text].concat()))
 }
 
 /// `antigravityReplayPartFingerprint`: the kind and hash of a text part, else empty.
@@ -561,7 +561,7 @@ impl Fingerprints {
     /// The empty fingerprint until a byte was hashed.
     fn sum(&self) -> String {
         if self.wrote {
-            cpa_core::hex::encode(&self.hasher.clone().finalize())
+            cpa_core::hex::encode(self.hasher.clone().finalize())
         } else {
             String::new()
         }

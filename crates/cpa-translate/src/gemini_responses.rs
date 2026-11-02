@@ -321,7 +321,7 @@ fn normalize_carriers<'a>(items: &[Res<'a>]) -> (Vec<Res<'a>>, bool) {
 // Trailing text signatures (trailing_signature.go)
 
 fn sha256_hex(text: &[u8]) -> String {
-    cpa_core::hex::encode(&Sha256::digest(text))
+    cpa_core::hex::encode(Sha256::digest(text))
 }
 
 fn replay_model(model: &str) -> String {

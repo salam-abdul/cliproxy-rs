@@ -259,43 +259,43 @@ fn completions_to_chat(root: &Value) -> String {
     let model = gojson::gjson_string(root.get("model"));
     let message = Object::new()
         .str("role", "user")
-        .raw("content", &gojson::sjson_string(&prompt))
+        .raw("content", gojson::sjson_string(&prompt))
         .finish_string();
     let mut out = Object::new()
-        .raw("model", &gojson::sjson_string(&model))
-        .raw("messages", &format!("[{message}]"));
+        .raw("model", gojson::sjson_string(&model))
+        .raw("messages", format!("[{message}]"));
     let get = |k: &str| root.get(k);
     if let Some(v) = get("max_tokens") {
-        out = out.raw("max_tokens", &go_int(v).to_string());
+        out = out.raw("max_tokens", go_int(v).to_string());
     }
     for key in ["temperature", "top_p", "frequency_penalty", "presence_penalty"] {
         if let Some(v) = get(key) {
-            out = out.raw(key, &go_float(v));
+            out = out.raw(key, go_float(v));
         }
     }
     if let Some(v) = get("stop") {
-        out = out.raw("stop", &v.to_string());
+        out = out.raw("stop", v.to_string());
     }
     for key in ["stream", "logprobs"] {
         if let Some(v) = get(key) {
-            out = out.raw(key, &truthy(v).to_string());
+            out = out.raw(key, truthy(v).to_string());
         }
     }
     if let Some(v) = get("top_logprobs") {
-        out = out.raw("top_logprobs", &go_int(v).to_string());
+        out = out.raw("top_logprobs", go_int(v).to_string());
     }
     if let Some(v) = get("echo") {
-        out = out.raw("echo", &truthy(v).to_string());
+        out = out.raw("echo", truthy(v).to_string());
     }
     out.finish_string()
 }
 
 fn completion_head(root: &Value) -> Object {
     Object::new()
-        .raw("id", &gojson::sjson_string(&gojson::gjson_string(root.get("id"))))
+        .raw("id", gojson::sjson_string(&gojson::gjson_string(root.get("id"))))
         .str("object", "text_completion")
-        .raw("created", &root.get("created").map_or(0, go_int).to_string())
-        .raw("model", &gojson::sjson_string(&gojson::gjson_string(root.get("model"))))
+        .raw("created", root.get("created").map_or(0, go_int).to_string())
+        .raw("model", gojson::sjson_string(&gojson::gjson_string(root.get("model"))))
 }
 
 /// Go `convertChatCompletionsResponseToCompletions`.
@@ -323,7 +323,7 @@ fn chat_to_completions(root: &Value) -> String {
     };
     let mut out = completion_head(root).raw("choices", &choices);
     if let Some(usage) = root.get("usage") {
-        out = out.raw("usage", &usage.to_string());
+        out = out.raw("usage", usage.to_string());
     }
     out.finish_string()
 }
@@ -371,7 +371,7 @@ fn chat_chunk_to_completions(root: &Value) -> Option<String> {
     };
     let mut out = completion_head(root).raw("choices", &choices);
     if let Some(usage) = root.get("usage") {
-        out = out.raw("usage", &usage.to_string());
+        out = out.raw("usage", usage.to_string());
     }
     Some(out.finish_string())
 }
@@ -722,7 +722,7 @@ fn stream_error_frame(codex: bool, status: u16, text: &str, seq: i64, lead: bool
             .finish_string();
         let chunk = Object::new()
             .str("type", "response.failed")
-            .raw("sequence_number", &seq.to_string())
+            .raw("sequence_number", seq.to_string())
             .raw("response", &response)
             .finish_string();
         Bytes::from(format!("{lead}event: response.failed\ndata: {chunk}\n\n"))
@@ -730,7 +730,7 @@ fn stream_error_frame(codex: bool, status: u16, text: &str, seq: i64, lead: bool
         let chunk = Object::new()
             .str("type", "error")
             .raw("error", &detail)
-            .raw("sequence_number", &seq.to_string())
+            .raw("sequence_number", seq.to_string())
             .finish_string();
         Bytes::from(format!("{lead}event: error\ndata: {chunk}\n\n"))
     }

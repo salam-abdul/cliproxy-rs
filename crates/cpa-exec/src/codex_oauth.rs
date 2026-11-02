@@ -774,7 +774,7 @@ fn publish(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     builder.create(dir)?;
     let mut nonce = [0u8; 8];
     getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
-    let temp = dir.join(format!(".codex-{}.tmp", cpa_core::hex::encode(&nonce)));
+    let temp = dir.join(format!(".codex-{}.tmp", cpa_core::hex::encode(nonce)));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -799,7 +799,7 @@ fn publish(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn random_state() -> Result<String, ExecError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| oauth_error(500, "secure random source unavailable"))?;
-    Ok(cpa_core::hex::encode(&bytes))
+    Ok(cpa_core::hex::encode(bytes))
 }
 
 /// `GenerateAuthURL`. Go's `url.Values.Encode` sorts parameters.

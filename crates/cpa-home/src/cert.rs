@@ -220,7 +220,7 @@ pub fn certificate_fingerprint(pem: &[u8]) -> Result<String> {
     if cert.to_der().map_err(|e| other(format!("x509: {e}")))? != der {
         return Err(other("x509: trailing data"));
     }
-    Ok(cpa_core::hex::encode(&Sha256::digest(&der)))
+    Ok(cpa_core::hex::encode(Sha256::digest(&der)))
 }
 
 fn chmod_0600(path: &Path) -> Result<()> {

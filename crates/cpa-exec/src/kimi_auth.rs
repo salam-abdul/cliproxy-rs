@@ -537,7 +537,7 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()>
     let mut suffix = [0u8; 8];
     getrandom::fill(&mut suffix).map_err(std::io::Error::other)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("credential");
-    let temporary = directory.join(format!(".{name}.{}.tmp", cpa_core::hex::encode(&suffix)));
+    let temporary = directory.join(format!(".{name}.{}.tmp", cpa_core::hex::encode(suffix)));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);

@@ -45,7 +45,7 @@ pub fn openai_body(status: u16, text: &str) -> String {
     if !code.is_empty() {
         detail = detail.str("code", code);
     }
-    Object::new().raw("error", &detail.finish_string()).finish_string()
+    Object::new().raw("error", detail.finish_string()).finish_string()
 }
 
 /// Go `claudeErrorTypeFromStatus`.
@@ -98,7 +98,7 @@ pub fn claude_body(status: u16, text: &str) -> String {
     }
     Object::new()
         .str("type", "error")
-        .raw("error", &detail.finish_string())
+        .raw("error", detail.finish_string())
         .finish_string()
 }
 
