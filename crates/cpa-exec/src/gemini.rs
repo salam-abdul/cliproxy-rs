@@ -121,52 +121,8 @@ pub(crate) fn translate(
 ) -> Result<Vec<u8>, ExecError> {
     let ctx = RequestCtx { model, stream };
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", compat);
-    deep_stack(body, || {
-        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
-    })
-    .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
-}
-
-/// Runs a translator on a thread with Go's maximum goroutine stack when the body nests
-/// deeply, as `cpa_translate::translate_request` does for registered pairs: the ported
-/// schema walkers recurse per nesting level like Go's, whose stacks grow.
-// ponytail: duplicate of cpa_translate's private guard until its exported `...WithCompat`
-// entry points guard themselves (owner: translators).
-pub(crate) fn deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> T + Send) -> T {
-    const DEEP: usize = 256;
-    let (mut depth, mut max, mut in_string, mut escaped) = (0usize, 0usize, false, false);
-    for &b in body {
-        if in_string {
-            match b {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                max = max.max(depth);
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if max <= DEEP {
-        return f();
-    }
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 30)
-            .spawn_scoped(scope, f)
-            .map(|handle| handle.join())
-    })
-    .ok()
-    .and_then(Result::ok)
-    .expect("deep JSON translation thread")
+    crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
+        .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
 
 /// `TranslateRequestPairWithAPIKeyModelCompatibility`: the payload-config baseline from
