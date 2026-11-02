@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import { store } from "../store.svelte";
   import { base, clientModels } from "../api";
-  import { readPath, mask, newKey, tools, snippet, flag, type Lamp } from "../core";
+  import { readPath, mask, tools, snippet, type Lamp } from "../core";
   import Load from "../Load.svelte";
 
   const keys = $derived(readPath(store.config.data || {}, "access/api-keys", []) as string[]);
@@ -47,7 +47,7 @@
     if (key) check();
   });
   async function create() {
-    if (!(await store.act(() => store.replace("access/api-keys", keys, [...keys, newKey()]), "Client key created."))) return;
+    if (!(await store.createKey(keys))) return;
     // The button is gone now; continue at the tool choice unless the user already moved on.
     await tick();
     if (document.activeElement === document.body) document.querySelector<HTMLElement>('.seg button[aria-pressed="true"]')?.focus();
@@ -98,7 +98,7 @@
           </div>{/if}
         <div class="row">
           <p class="note grow" role="status"><span class="lamp {test.lamp}" class:live={test.text.endsWith("…")}></span>{test.text}</p>
-          <button class="key small" onclick={check}>Test again</button>
+          <button class="key" onclick={check}>Test again</button>
         </div>
       {:else}
         <div class="state">
@@ -122,10 +122,7 @@
         <div class="row">
           <button
             class="key primary"
-            onclick={async () => {
-              if (await store.act(() => navigator.clipboard.writeText(snippet(tool, target, key, model || "MODEL_ID")), "Copied, with the full key."))
-                flag.set("start-tool", "1");
-            }}
+            onclick={() => store.act(() => navigator.clipboard.writeText(snippet(tool, target, key, model || "MODEL_ID")), "Copied, with the full key.")}
             ><svg class="i" aria-hidden="true"><use href="#i-copy" /></svg>Copy</button
           >
           <span class="legend">The copy includes the full key; the page shows it shortened.</span>

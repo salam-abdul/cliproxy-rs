@@ -108,11 +108,12 @@
         >{store.creds.data ? accounts.length : ""}</span
       >
     </h2>
-    {#if native?.enabled}<span class="muted small order-summary" title="Session affinity and model limits can change the account selected for a request.">
+    {#if native?.enabled}<span class="muted small order-summary">
         {#if order === null}New-session order · awaiting fresh status{:else if native.selectionStrategy === "soonest-reset"}New-session order · soonest weekly reset{#if native.newSessionMinRemaining > 0} · ≥{native.newSessionMinRemaining}% preferred{/if}{:else}New-session order · strategy unavailable{/if}
+        · bound conversations and model limits can override it
       </span>{/if}
     <button
-      class="key small"
+      class="key"
       disabled={refreshing || !store.creds.data?.length}
       onclick={refreshQuotas}
       >{refreshing ? "Checking…" : "Check quotas"}</button
@@ -126,7 +127,8 @@
       <article class="account-row" class:account-disabled={a.disabled}>
         <div class="account-identity">
           <div class="row">
-            <span class="rank-badge" title={rank >= 0 ? "Default new-session order" : "Excluded from new-session order"}>{rank >= 0 ? rank + 1 : "—"}</span>
+            <span class="sr">{rank >= 0 ? "New-session position" : "Not in the new-session order"}</span>
+            <span class="rank-badge" aria-hidden={rank < 0}>{rank >= 0 ? rank + 1 : "—"}</span>
             <span class="account-avatar" aria-hidden="true">{(n?.name || a.label || credName(a)).slice(0, 1).toUpperCase()}</span>
             <button
               class="account-title"
@@ -134,29 +136,27 @@
               >{n?.name || a.label || credName(a)}</button
             >
           </div>
-          <span class="account-state" title={state.detail}
-            ><span class="muted">{label(provider(a))}</span><span
-              class="lamp {state.lamp}"
-            ></span><span>{state.label}</span></span
+          <span class="account-state"
+            ><span class="muted">{label(provider(a))}</span><span class="lamp {state.lamp}"
+            ></span><span>{state.label}</span>{#if state.detail}<span class="muted">· {state.detail}</span>{/if}</span
           >
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">
           {#if !native?.enabled || !n?.id}<span class="muted small">Not tracked</span>
-          {:else if recent.length}<div
-              class="account-history"
-              role="img"
-              aria-label={`${recent.reduce((sum, b) => sum + b.requests, 0)} recorded requests in ${store.historyRange}`}
-            >
+          {:else if recent.length}<div class="account-history" aria-hidden="true">
               {#each recent as bucket}<span
                   class:unknown={!bucket.known}
                   class:failed={bucket.failures > 0}
                   class:served={bucket.requests > 0}
-                  title={bucket.known
-                    ? `${bucket.requests} requests · ${bucket.failures} failed`
-                    : "No observation"}
                 ></span>{/each}
-            </div>{:else}<span class="muted small">{historyData ? "No history" : store.history.error ? "History unavailable" : "Loading history…"}</span>{/if}
+            </div>
+            <span class="muted small"
+              >{recent.reduce((sum, b) => sum + b.requests, 0)} requests · {recent.reduce(
+                (sum, b) => sum + b.failures,
+                0,
+              )} failed in {store.historyRange}</span
+            >{:else}<span class="muted small">{historyData ? "No history" : store.history.error ? "History unavailable" : "Loading history…"}</span>{/if}
         </div>
       </article>
     {:else}<div class="state">

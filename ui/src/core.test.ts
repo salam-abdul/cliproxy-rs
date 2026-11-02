@@ -9,7 +9,6 @@ import {
   fieldPath,
   level,
   lineDiff,
-  otherSignals,
   quotaWindows,
   reconcile,
   signalWindows,
@@ -218,29 +217,6 @@ test("passive limits from Codex headers and Devin quota", () => {
   assert.deepEqual(signalWindows("claude", { signals: { "x-codex-primary-used-percent": "5" } }), []);
 });
 
-test("signals not drawn as a window stay visible", () => {
-  const quota = {
-    signals: {
-      "X-Codex-Primary-Used-Percent": "40",
-      "x-codex-primary-window-minutes": "300",
-      // No used percent, so no secondary window: its reset must stay visible.
-      "x-codex-secondary-reset-at": "1790000000",
-      "x-codex-code-review-primary-used-percent": "100",
-      "x-codex-credits-balance": "5",
-      "retry-after": "30",
-    },
-  };
-  const keys = (w: ReturnType<typeof signalWindows>) => otherSignals(quota, w).map(([k]) => k);
-  assert.deepEqual(keys(signalWindows("codex", quota)), [
-    "x-codex-secondary-reset-at",
-    "x-codex-code-review-primary-used-percent",
-    "x-codex-credits-balance",
-    "retry-after",
-  ]);
-  // Windows from a live check carry no source, so every signal shows beside them.
-  assert.equal(keys([{ label: "5-hour", used: 1, reset: "" }]).length, 6);
-});
-
 test("expired sign-ins ask for a new sign-in; other errors stay errors", () => {
   assert.equal(credState({ status: "error", status_message: "refresh token was revoked" }, now).label, "Sign in again");
   assert.equal(credState({ status: "error", status_message: "upstream returned 401" }, now).label, "Sign in again");
@@ -318,5 +294,4 @@ test("Claude response headers provide live included windows without treating mis
   for (const raw of [undefined, "", " ", "Infinity", "NaN", "-0.1"]) {
     assert.deepEqual(signalWindows("claude", {signals:{"anthropic-ratelimit-unified-5h-utilization":raw}}), []);
   }
-  assert.deepEqual(otherSignals(quota, signalWindows("claude",quota)), [["Anthropic-Ratelimit-Unified-Overage-Status","rejected"]]);
 });

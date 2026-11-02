@@ -210,7 +210,7 @@
 <div class="toast" role="status">{#if store.toast}<span
       class="lamp {store.toast.bad ? 'bad' : 'ok'}"
     ></span>{store.toast.text}{#if store.toast.bad}<button
-        class="key quiet round small"
+        class="key quiet round"
         aria-label="Dismiss"
         onclick={() => (store.toast = null)}
         ><svg class="i" aria-hidden="true"><use href="#i-close" /></svg></button

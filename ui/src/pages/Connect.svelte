@@ -6,7 +6,6 @@
   const builtIn = ["claude", "codex", "antigravity", "kimi", "kimi-ai", "xai", "devin", "meta"];
   // The server starts a local callback forwarder for these when asked by a web UI.
   const forwarded = ["claude", "codex", "antigravity", "xai", "devin"];
-  const providers = builtIn;
   let gone = $state<string[]>([]),
     session = $state<Data | null>(null),
     status = $state(""),
@@ -88,7 +87,7 @@
   <h2>Sign in with a provider</h2>
   <p class="muted">You approve access on the provider’s own page (OAuth). The proxy stores the resulting token and renews it; it never sees your password.</p>
   <div class="providers">
-    {#each providers as p}
+    {#each builtIn as p}
       <button
         class="key"
         aria-pressed={session?.provider === p && status === "wait"}
@@ -137,7 +136,7 @@
       <div class="row"><button class="key quiet" onclick={cancel}>Cancel sign-in</button></div>
     {:else if status === "ok"}
       <p>Saved on the server and in rotation.</p>
-      <div class="row"><a class="key primary" href="#credentials">View credentials</a></div>
+      <div class="row"><a class="key primary" href="#credentials">View accounts</a></div>
     {:else}
       {#if problem}<p class="error">{problem}</p>{/if}
       <div class="row"><button class="key" onclick={() => start(session!.provider)}>Start again</button></div>

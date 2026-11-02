@@ -16,20 +16,10 @@ let hooks: {
 export class ApiError extends Error {
   status: number;
   code: string;
-  method: string;
-  path: string;
-  constructor(
-    message: string,
-    status: number,
-    code: string,
-    method: string,
-    path: string,
-  ) {
+  constructor(message: string, status: number, code: string) {
     super(message);
     this.status = status;
     this.code = code;
-    this.method = method;
-    this.path = path;
   }
 }
 
@@ -47,7 +37,6 @@ export function disconnect() {
   requests = new Lifetime();
 }
 export const endpoint = () => `${base}/v8/management`;
-export const route = (path: string) => path.split("?")[0];
 
 async function send(path: string, method: string, body?: unknown) {
   if (!key && !local) throw new Error("Sign in with your management key.");
@@ -105,14 +94,11 @@ export async function api(
   if (!lifetime.active) throw new Error("Connection changed.");
   if (ok) return value;
   if (response.status === 401) hooks.unauthorized();
-  const error = new ApiError(
+  throw new ApiError(
     String(value.message || value.error || `HTTP ${response.status}`),
     response.status,
     String(value.code || value.error || ""),
-    method,
-    route(path),
   );
-  throw error;
 }
 export const text = (e: unknown) => (e instanceof Error ? e.message : String(e));
 

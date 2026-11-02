@@ -6,7 +6,7 @@ import {
   ApiError,
   requests,
 } from "./api";
-import { equal, fieldPath, reconcile, type Data, type Window } from "./core";
+import { equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
 
 /** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
@@ -223,6 +223,13 @@ class Store {
       await api(path, method, body);
       await after();
     }, done);
+  }
+  /** Add a generated client key to `keys`, the list as last read. */
+  createKey(keys: string[]) {
+    return this.act(
+      () => this.replace("access/api-keys", keys, [...keys, newKey()]),
+      "Client key created.",
+    );
   }
   /**
    * Replace one config value after confirming nobody changed it since it was read. `unset`

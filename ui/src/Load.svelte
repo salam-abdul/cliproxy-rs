@@ -13,7 +13,7 @@
 {#if res.data !== undefined}
   {#if error}<p class="note error" role="alert">
       <span class="lamp bad"></span>Showing the last good read. {error.message}
-      <button class="key small quiet" onclick={() => res.load()}>Retry</button>
+      <button class="key quiet" onclick={() => res.load()}>Retry</button>
     </p>{/if}
   {@render children(res.data)}
 {:else if error}
@@ -21,7 +21,7 @@
     <div class="row"><span class="lamp bad"></span>Could not load {what.toLowerCase()}</div>
     <p>{error.message}</p>
     <div class="actions">
-      <button class="key small" onclick={() => res.load()}>Try again</button>
+      <button class="key" onclick={() => res.load()}>Try again</button>
     </div>
   </div>
 {:else}

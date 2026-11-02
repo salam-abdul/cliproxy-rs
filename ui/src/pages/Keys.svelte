@@ -1,18 +1,17 @@
 <script lang="ts">
   import { store } from "../store.svelte";
-  import { readPath, mask, newKey } from "../core";
+  import { readPath, mask } from "../core";
   import Load from "../Load.svelte";
 
   let draft = $state(""),
     reveal = $state(false);
   const keys = $derived(readPath(store.config.data || {}, "access/api-keys", []) as string[]);
-  const generate = () => (draft = newKey());
   function add(e: SubmitEvent) {
     e.preventDefault();
     const k = draft.trim();
     if (keys.includes(k)) return store.notify("That key is already in the list.", true);
     store
-      .act(() => store.replace("access/api-keys", keys, [...keys, k]), "Key added.")
+      .act(() => store.replace("access/api-keys", keys, [...keys, k]), "Client key added.")
       .then((ok) => ok && (draft = ""));
   }
 </script>
@@ -22,6 +21,9 @@
   {#if keys.length}<button class="key quiet" aria-pressed={reveal} onclick={() => (reveal = !reveal)}
       >{reveal ? "Hide keys" : "Show keys"}</button
     >{/if}
+  <button class="key primary" disabled={store.busy} onclick={() => store.createKey(keys)}
+    ><svg class="i" aria-hidden="true"><use href="#i-plus" /></svg>Create key</button
+  >
 </div>
 
 <Load res={store.config} what="Client keys">
@@ -37,12 +39,12 @@
             <li class="item">
               <code class="grow ellipsis">{reveal ? k : mask(k)}</code>
               <button
-                class="key small"
+                class="key"
                 onclick={() => store.act(() => navigator.clipboard.writeText(k), "Copied.")}
                 ><svg class="i" width="14" height="14" aria-hidden="true"><use href="#i-copy" /></svg>Copy</button
               >
               <button
-                class="key small quiet danger"
+                class="key quiet danger"
                 disabled={store.busy}
                 onclick={() =>
                   confirm("Remove this key? Clients using it lose access immediately.") &&
@@ -59,9 +61,8 @@
         </div>
       {/if}
       <form class="form" onsubmit={add}>
-        <label class="field">New key<input type="password" autocomplete="off" required bind:value={draft} /></label>
-        <button type="button" class="key" onclick={generate}>Generate</button>
-        <button class="key primary" disabled={store.busy}><svg class="i" aria-hidden="true"><use href="#i-plus" /></svg>Add key</button>
+        <label class="field">Existing key<input type="password" autocomplete="off" required bind:value={draft} /></label>
+        <button class="key" disabled={store.busy}>Add key</button>
       </form>
     </section>
   {/snippet}

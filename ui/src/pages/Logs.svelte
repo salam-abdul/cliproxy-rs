@@ -69,7 +69,7 @@
     <section class="section">
       <div class="row">
         <label class="search grow"><svg class="i" aria-hidden="true"><use href="#i-search" /></svg><span class="sr">Filter lines</span><input bind:value={query} placeholder="Filter lines" /></label>
-        <label class="check"><input type="checkbox" checked={own} onchange={(e) => (own = e.currentTarget.checked)} />Management API calls</label>
+        <label class="check"><input type="checkbox" bind:checked={own} />Management API calls</label>
       </div>
       <!-- svelte-ignore a11y_no_noninteractive_tabindex: the scrolling log must be reachable by keyboard -->
       <div class="code-window log" bind:this={pane} role="log" aria-label="Application log" tabindex="0">
@@ -115,7 +115,7 @@
               <code class="grow ellipsis">{f.name}</code>
               <span class="legend">{f.modified ? new Date(f.modified * 1000).toLocaleString() : ""}</span>
               <button
-                class="key small"
+                class="key"
                 onclick={() =>
                   store.act(async () =>
                     download(await api(`/observability/logs/errors/${encodeURIComponent(f.name)}`, "GET", undefined, "blob"), f.name),

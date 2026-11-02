@@ -77,21 +77,6 @@ export const provider = (a: Data) => String(a.provider || a.type || "unknown").r
 export const credName = (a: Data) => String(a.email || a.label || a.account || a.name);
 /** A random client key: "sk-" and 48 hex characters. */
 export const newKey = () => `sk-${Array.from(crypto.getRandomValues(new Uint8Array(24)), (n) => n.toString(16).padStart(2, "0")).join("")}`;
-/** Small flags this browser keeps for the first-run card. Never keys. */
-export const flag = {
-  get: (k: string) => {
-    try {
-      return localStorage.getItem(`cliproxy-${k}`);
-    } catch {
-      return null;
-    }
-  },
-  set: (k: string, v: string) => {
-    try {
-      localStorage.setItem(`cliproxy-${k}`, v);
-    } catch {}
-  },
-};
 export const mask = (k: string) => (k.length > 10 ? `${k.slice(0, 3)}…${k.slice(-4)}` : "••••");
 
 /** Durations like 45s, 4m, 2h 5m, 3d. */
@@ -152,7 +137,7 @@ export function credState(a: Data, now = Date.now()): CredState {
 }
 
 export type Buckets = { total: number[]; failed: number[] };
-/** Go reports 20 ten-minute buckets per credential. Null means the server did not report history. */
+/** Ten-minute request buckets, oldest first. Null means the server did not report history. */
 export function buckets(a: Data): Buckets | null {
   if (!Array.isArray(a.recent_requests)) return null;
   const rows = a.recent_requests as Data[];
@@ -316,9 +301,6 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
   return out;
 }
 
-/** Signals no window was read from (code-review limits, credits, retry-after), to show as they are. */
-export const otherSignals = (quota: Data | undefined, windows: Window[]): [string, string][] =>
-  Object.entries<string>(quota?.signals || {}).filter(([k]) => !windows.some((w) => w.source && k.toLowerCase().startsWith(w.source)));
 
 /** routing.strategy values, with a one-line explanation each. */
 export const strategies = [
@@ -327,7 +309,7 @@ export const strategies = [
   {
     value: "weighted-round-robin",
     name: "Weighted round robin",
-    help: "Takes the accounts in turn in proportion to each account's weight, which you set on Credentials.",
+    help: "Takes the accounts in turn in proportion to each account's weight, which you set on each account.",
   },
   {
     value: "soonest-reset",

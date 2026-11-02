@@ -17,13 +17,12 @@
   );
   let filter = $state("all");
   let account = $state("");
-  const failures = isFailure;
   const visible = $derived(
     events
       .filter(
         (e) =>
           (filter === "all" ||
-            (filter === "failed" ? failures(e) : switchedAccounts(e))) &&
+            (filter === "failed" ? isFailure(e) : switchedAccounts(e))) &&
           (!account ||
             e.events.some((attempt: Data) => attempt.account === account)),
       )
@@ -85,7 +84,7 @@
               ? "No final outcome recorded in this history"
               : undefined}
             ><span
-              class="lamp {failures(e)
+              class="lamp {isFailure(e)
                 ? 'bad'
                 : e.outcome !== 'success'
                   ? 'warn'

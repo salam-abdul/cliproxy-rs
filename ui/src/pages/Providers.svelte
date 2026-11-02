@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store, Res, every } from "../store.svelte";
   import { api, text } from "../api";
-  import { readPath, label, mask, sum, type Data, type Buckets } from "../core";
+  import { readPath, label, mask, sum, buckets, type Data, type Buckets } from "../core";
   import Grille from "../Grille.svelte";
   import Load from "../Load.svelte";
 
@@ -18,9 +18,7 @@
   function traffic(group: Data, k: Data): Buckets | null {
     const byKey = usage.data?.[compat ? String(group.name || "").toLowerCase() : family];
     const hit = byKey?.[`${group["base-url"] || ""}|${k["api-key"]}`];
-    if (!hit) return null;
-    const rows: Data[] = hit.recent_requests || [];
-    return { total: rows.map((b) => (b.success || 0) + (b.failed || 0)), failed: rows.map((b) => b.failed || 0) };
+    return hit ? buckets({ recent_requests: [], ...hit }) : null;
   }
   const max = $derived(
     Math.max(1, ...groups.flatMap((g) => (g.keys || []).flatMap((k: Data) => traffic(g, k)?.total || []))),
@@ -57,11 +55,11 @@
               <div class="section-head">
                 <h2>{g.name || `Group ${i + 1}`}</h2>
                 {#if g.disabled}<span class="row legend"><span class="lamp off"></span>Disabled</span>{/if}
-                {#if compat}<button class="key small" disabled={store.busy} onclick={() => write(groups.map((x, n) => (n === i ? { ...x, disabled: !x.disabled } : x)), g.disabled ? "Group enabled." : "Group disabled.")}
+                {#if compat}<button class="key" disabled={store.busy} onclick={() => write(groups.map((x, n) => (n === i ? { ...x, disabled: !x.disabled } : x)), g.disabled ? "Group enabled." : "Group disabled.")}
                     >{g.disabled ? "Enable" : "Disable"}</button
                   >{/if}
                 <button
-                  class="key small quiet danger"
+                  class="key quiet danger"
                   disabled={store.busy}
                   onclick={() => confirm(`Delete group ${g.name || i + 1} and its keys?`) && write(groups.filter((_, n) => n !== i), "Group deleted.")}
                   >Delete</button

@@ -11,7 +11,8 @@
     ["filter", "Remove paths from the request."],
   ];
   let kind = $state("default");
-  let form = $state({ model: "*", protocol: "", params: '{\n  "temperature": 0.7\n}' });
+  const blank = () => ({ model: "*", protocol: "", params: '{\n  "temperature": 0.7\n}' });
+  let form = $state(blank());
   const payload = $derived(readPath(store.config.data || {}, "requests/payload", {}) as Data);
   const rules = $derived((payload[kind] || []) as Data[]);
   function add(e: SubmitEvent) {
@@ -27,7 +28,9 @@
       return store.notify(kind === "filter" ? "Filter parameters are a JSON list of paths." : "Parameters are a JSON object of path → value.", true);
     const model: Data = { name: form.model.trim() };
     if (form.protocol) model.protocol = form.protocol;
-    store.act(() => store.replace(`requests/payload/${kind}`, rules, [...rules, { models: [model], params }]), "Rule added.");
+    store
+      .act(() => store.replace(`requests/payload/${kind}`, rules, [...rules, { models: [model], params }]), "Rule added.")
+      .then((ok) => ok && (form = blank()));
   }
 </script>
 
@@ -54,7 +57,7 @@
                   <pre class="legend">{JSON.stringify(rule.params, null, 2)}</pre>
                 </div>
                 <button
-                  class="key small quiet danger"
+                  class="key quiet danger"
                   disabled={store.busy}
                   onclick={() => store.act(() => store.replace(`requests/payload/${kind}`, rules, rules.filter((_, n) => n !== i)), "Rule removed.")}
                   >Remove</button
@@ -67,7 +70,7 @@
           <div class="form">
             <label class="field">Model pattern<input required bind:value={form.model} /></label>
             <label class="field"
-              >Protocol<select value={form.protocol} onchange={(e) => (form.protocol = e.currentTarget.value)}
+              >Protocol<select bind:value={form.protocol}
                 ><option value="">Any</option>{#each ["openai", "claude", "gemini", "codex", "antigravity"] as p}<option>{p}</option>{/each}</select
               ></label
             >

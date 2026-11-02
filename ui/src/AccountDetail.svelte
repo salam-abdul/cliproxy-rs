@@ -152,7 +152,7 @@
       <h2>{name}</h2>
       <span class="account-state"
         ><span class="muted">{label(provider(a))}</span><span class="lamp {status.lamp}"
-        ></span>{status.label}{#if status.detail}<span class="muted">· {status.detail}</span>{/if}</span
+        ></span><span>{status.label}</span>{#if status.detail}<span class="muted">· {status.detail}</span>{/if}</span
       >
     </div>
     <button class="key quiet round" aria-label="Close" onclick={close}
