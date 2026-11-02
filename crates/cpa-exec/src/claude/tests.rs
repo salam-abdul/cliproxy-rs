@@ -772,6 +772,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
                 Box::new(move |id| completion.complete(&id, &request_id)),
                 Default::default(),
                 Default::default(),
+                Default::default(),
             )
             .map(|e| String::from_utf8(e.unwrap().to_vec()).unwrap())
             .collect()
