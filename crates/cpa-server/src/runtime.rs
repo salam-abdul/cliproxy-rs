@@ -34,7 +34,8 @@ use credential_updates::Version;
 type RegistryCache = (Arc<Config>, (u64, u64, u64), Arc<Registry>);
 
 pub struct Runtime {
-    config: RwLock<Arc<Config>>,
+    /// The published config and the policy derived from it, replaced together.
+    published: RwLock<Published>,
     store: Arc<CredentialStore>,
     pub executors: Executors,
     refresh_task: Mutex<Option<tokio::task::AbortHandle>>,
@@ -60,6 +61,13 @@ pub struct Runtime {
     config_changed: tokio::sync::watch::Sender<()>,
 }
 
+/// One config publication: requests read the config and its policy from the same one.
+#[derive(Clone)]
+struct Published {
+    config: Arc<Config>,
+    policy: Arc<Policy>,
+}
+
 /// An OAuth provider redirect received on the main listener.
 #[derive(Debug, Clone)]
 pub struct OAuthCallback {
@@ -79,13 +87,16 @@ impl Runtime {
     /// The scheduler policy is derived from the config (`routing` plus the OAuth
     /// provider rules), as on every publish.
     pub fn new(config: Config, credentials: Vec<Credential>, executors: Executors) -> Self {
-        let mut policy = crate::management::policy(&config);
-        policy.compat_disable_cooling = crate::scheduler::compat_cooling(&config);
+        let policy = Policy::from_config(&config);
         let cooldown_dir = cooldown_dir(&config, &policy);
         let (enabled, strict) = signature_cache_config(&config);
         cpa_translate::set_antigravity_signature_cache_config(enabled, strict);
+        let config = Arc::new(config);
         let rt = Self {
-            config: RwLock::new(Arc::new(config)),
+            published: RwLock::new(Published {
+                config: config.clone(),
+                policy: Arc::new(Policy::default()),
+            }),
             store: CredentialStore::new(credentials),
             executors,
             refresh_task: Mutex::default(),
@@ -102,7 +113,7 @@ impl Runtime {
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
         };
-        rt.publish_policy(policy);
+        rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
         // Failed attempts publish Go's error events on the RESP `errors` channel.
         let _ = rt.store.error_events.set(rt.usage.clone());
@@ -134,7 +145,11 @@ impl Runtime {
 
     /// The config snapshot to use for one whole request.
     pub fn config(&self) -> Arc<Config> {
-        self.config.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.published().config
+    }
+
+    fn published(&self) -> Published {
+        self.published.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Resolves after the next config publish.
@@ -142,39 +157,28 @@ impl Runtime {
         self.config_changed.subscribe()
     }
 
-    /// Replaces the config and the scheduler policy derived from it. Requests already
-    /// running keep their snapshot.
+    /// Replaces the config and the scheduler policy derived from it in one snapshot.
+    /// Requests already running keep theirs. Every config publisher goes through here.
     pub fn publish_config(&self, config: Config) {
-        let policy = crate::management::policy(&config);
-        self.publish_config_and_policy(config, policy);
-    }
-
-    /// Integration should use this when publishing parsed routing settings too.
-    pub fn publish_config_and_policy(&self, config: Config, mut policy: Policy) {
-        policy.compat_disable_cooling = crate::scheduler::compat_cooling(&config);
+        let policy = Policy::from_config(&config);
         let (enabled, strict) = signature_cache_config(&config);
         cpa_translate::set_antigravity_signature_cache_config(enabled, strict);
         let dir = cooldown_dir(&config, &policy);
         let ws_auth = crate::relay::ws_auth(&config);
-        let config = Arc::new(config);
-        let previous = {
-            let mut current = self.config.write().unwrap_or_else(PoisonError::into_inner);
-            std::mem::replace(&mut *current, config.clone())
-        };
+        let previous = self.publish(Arc::new(config), policy);
         // Go's websocket auth change handler: turning ws-auth on ends the relay sessions
         // that connected without a key.
         if ws_auth && !crate::relay::ws_auth(&previous) {
             self.executors.google.aistudio.relay.stop();
         }
-        self.publish_policy(policy);
         self.store.configure_cooldown_store(dir);
         self.config_changed.send_replace(());
     }
 
     /// A coherent config/policy pair for the entire route attempt loop.
     pub fn request_snapshot(&self) -> (Arc<Config>, Arc<Policy>) {
-        let config = self.config.read().unwrap_or_else(PoisonError::into_inner);
-        (config.clone(), self.policy())
+        let Published { config, policy } = self.published();
+        (config, policy)
     }
 
     pub fn store(&self) -> &Arc<CredentialStore> {
@@ -261,20 +265,24 @@ impl Runtime {
     }
 
     pub fn policy(&self) -> Arc<Policy> {
-        self.store.policy.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.published().policy
     }
 
+    /// Replaces the scheduler policy and keeps the config.
     pub fn publish_policy(&self, policy: Policy) {
-        {
-            let mut current = self.store.policy.write().unwrap_or_else(PoisonError::into_inner);
-            self.store
-                .scheduler
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .configure(&current, &policy);
-            *current = Arc::new(policy);
-        }
+        self.publish(self.config(), policy);
+    }
+
+    /// Publishes `config` with `policy` as one snapshot; returns the previous config.
+    fn publish(&self, config: Arc<Config>, policy: Policy) -> Arc<Config> {
+        let policy = Arc::new(policy);
+        let previous = {
+            let mut current = self.published.write().unwrap_or_else(PoisonError::into_inner);
+            self.store.set_policy(policy.clone());
+            std::mem::replace(&mut *current, Published { config, policy }).config
+        };
         self.store.clear_disabled_cooldowns();
+        previous
     }
 
     /// Selects a credential that registered the route model. Waits for preparation only
@@ -989,6 +997,16 @@ impl CredentialStore {
             error_events: std::sync::OnceLock::new(),
             changed: tokio::sync::watch::Sender::new(()),
         })
+    }
+
+    /// Replaces the store's policy; selection state the change invalidates is reset.
+    fn set_policy(&self, policy: Arc<Policy>) {
+        let mut current = self.policy.write().unwrap_or_else(PoisonError::into_inner);
+        self.scheduler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .configure(&current, &policy);
+        *current = policy;
     }
 
     /// Go `ApplyConfigWithCooldownStateStore` plus the restore that follows a config
@@ -2340,6 +2358,43 @@ mod tests {
         assert_eq!(policy.strategy, crate::scheduler::Strategy::WeightedRoundRobin);
         assert_eq!(policy.request_retry, 0);
         assert_eq!(policy.session_affinity_ttl, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn a_request_snapshot_pairs_each_config_with_its_own_policy() {
+        let rt = Arc::new(crate::testing::runtime(
+            Config::parse("").unwrap(),
+            Vec::new(),
+            Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let configs = ["ff", "wrr"].map(|s| Config::parse(&format!("routing:\n  strategy: {s}\n")).unwrap());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = std::thread::spawn({
+            let (rt, done) = (rt.clone(), done.clone());
+            move || {
+                let mut reads = 0u64;
+                while !done.load(Ordering::Relaxed) {
+                    let (config, policy) = rt.request_snapshot();
+                    assert_eq!(
+                        Policy::from_config(&config).strategy,
+                        policy.strategy,
+                        "after {reads} reads"
+                    );
+                    reads += 1;
+                }
+            }
+        });
+        for i in 0..50_000 {
+            rt.publish_config(configs[i % 2].clone());
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
     }
 
     /// Go `nextModelPoolOffset` (conductor_models.go): per-key cursor, no advance for

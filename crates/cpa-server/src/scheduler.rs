@@ -1,5 +1,5 @@
-//! Credential routing policy. Config parsing remains owned by cpa-core; integration
-//! publishes this policy through Runtime::publish_policy.
+//! Credential routing policy. Config parsing remains owned by cpa-core; the runtime
+//! publishes this policy with its config through Runtime::publish_config.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
@@ -300,68 +300,44 @@ impl Default for Policy {
     }
 }
 
-/// Raw config values, independent of the config stream's RoutingConfig type.
-#[derive(Default)]
-pub struct RawRouting<'a> {
-    pub strategy: &'a str,
-    pub force_model_prefix: bool,
-    pub session_affinity: bool,
-    pub session_affinity_ttl: &'a str,
-    pub session_affinity_subagents: Option<bool>,
-    pub request_retry: i64,
-    pub max_retry_credentials: i64,
-    pub max_retry_interval: i64,
-    pub disable_cooling: bool,
-    pub save_cooldown_status: bool,
-    pub transient_error_cooldown_seconds: i64,
-    pub max_trusted_cooldown: &'a str,
-}
-
-// ponytail: OAuth-provider disable-cooling and request-scoped-error maps stay empty until
-// the config stream synthesizes provider overrides; per-credential metadata still applies.
 impl From<&cpa_core::config::RoutingConfig> for Policy {
     fn from(r: &cpa_core::config::RoutingConfig) -> Self {
-        normalize(RawRouting {
-            strategy: &r.strategy,
+        let ttl = cpa_core::config::parse_duration(r.session_affinity_ttl.trim())
+            .filter(|d| *d > 0)
+            .map(|n| Duration::from_nanos(n as u64).max(Duration::from_secs(1)))
+            .unwrap_or(Duration::from_secs(3600));
+        Policy {
+            strategy: match r.strategy.trim().to_ascii_lowercase().as_str() {
+                "weighted-round-robin" | "weightedroundrobin" | "wrr" => Strategy::WeightedRoundRobin,
+                "fill-first" | "fillfirst" | "ff" => Strategy::FillFirst,
+                "soonest-reset" | "soonestreset" | "reset-first" | "resetfirst" => Strategy::SoonestReset,
+                _ => Strategy::RoundRobin,
+            },
             force_model_prefix: r.force_model_prefix,
             session_affinity: r.session_affinity,
-            session_affinity_ttl: &r.session_affinity_ttl,
-            session_affinity_subagents: r.session_affinity_subagents,
-            request_retry: r.retry.request_retry,
-            max_retry_credentials: r.retry.max_retry_credentials,
-            max_retry_interval: r.retry.max_retry_interval,
+            session_affinity_ttl: ttl,
+            session_affinity_subagents: !r.session_affinity || r.session_affinity_subagents.unwrap_or(true),
+            request_retry: r.retry.request_retry.max(0) as usize,
+            max_retry_credentials: r.retry.max_retry_credentials.max(0) as usize,
+            max_retry_interval: Duration::from_secs(r.retry.max_retry_interval.max(0) as u64),
             disable_cooling: r.cooldown.disable_cooling,
             save_cooldown_status: r.cooldown.save_cooldown_status,
             transient_error_cooldown_seconds: r.cooldown.transient_error_cooldown_seconds,
-            max_trusted_cooldown: &r.cooldown.max_trusted_cooldown,
-        })
+            max_trusted_cooldown: trusted_cooldown(&r.cooldown.max_trusted_cooldown),
+            ..Policy::default()
+        }
     }
 }
 
-pub fn normalize(raw: RawRouting<'_>) -> Policy {
-    let ttl = cpa_core::config::parse_duration(raw.session_affinity_ttl.trim())
-        .filter(|d| *d > 0)
-        .map(|n| Duration::from_nanos(n as u64).max(Duration::from_secs(1)))
-        .unwrap_or(Duration::from_secs(3600));
-    Policy {
-        strategy: match raw.strategy.trim().to_ascii_lowercase().as_str() {
-            "weighted-round-robin" | "weightedroundrobin" | "wrr" => Strategy::WeightedRoundRobin,
-            "fill-first" | "fillfirst" | "ff" => Strategy::FillFirst,
-            "soonest-reset" | "soonestreset" | "reset-first" | "resetfirst" => Strategy::SoonestReset,
-            _ => Strategy::RoundRobin,
-        },
-        force_model_prefix: raw.force_model_prefix,
-        session_affinity: raw.session_affinity,
-        session_affinity_ttl: ttl,
-        session_affinity_subagents: !raw.session_affinity || raw.session_affinity_subagents.unwrap_or(true),
-        request_retry: raw.request_retry.max(0) as usize,
-        max_retry_credentials: raw.max_retry_credentials.max(0) as usize,
-        max_retry_interval: Duration::from_secs(raw.max_retry_interval.max(0) as u64),
-        disable_cooling: raw.disable_cooling,
-        save_cooldown_status: raw.save_cooldown_status,
-        transient_error_cooldown_seconds: raw.transient_error_cooldown_seconds,
-        max_trusted_cooldown: trusted_cooldown(raw.max_trusted_cooldown),
-        ..Policy::default()
+impl Policy {
+    /// The policy a config publishes: `routing`, the `disable-cooling` of enabled
+    /// OpenAI-compatibility entries, and `oauth.request-scoped-errors`.
+    pub fn from_config(cfg: &cpa_core::config::Config) -> Self {
+        Self {
+            compat_disable_cooling: compat_cooling(cfg),
+            oauth_request_scoped_errors: oauth_rules(cfg),
+            ..Self::from(&cfg.routing)
+        }
     }
 }
 
@@ -400,16 +376,157 @@ fn trusted_cooldown(raw: &str) -> Duration {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// What a matched request-scoped error rule does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleAction {
+    Stop,
+    StopAndCooldown,
+    Continue,
+    ContinueAndCooldown,
+}
+
+impl RuleAction {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stop" => Some(Self::Stop),
+            "stop-and-cooldown" => Some(Self::StopAndCooldown),
+            "continue" => Some(Self::Continue),
+            "continue-and-cooldown" => Some(Self::ContinueAndCooldown),
+            _ => None,
+        }
+    }
+}
+
+/// A request-scoped error rule, parsed once: from `oauth.request-scoped-errors` when the
+/// policy is built, from a credential's `request_scoped_errors` once per revision.
+#[derive(Debug, Clone)]
 pub struct ErrorRule {
-    #[serde(default)]
     pub status: i64,
-    #[serde(default)]
     pub r#match: Vec<String>,
-    #[serde(default, rename = "match-regexr")]
-    pub match_regex: Vec<String>,
+    pub regex: Vec<regex::Regex>,
+    pub action: RuleAction,
+}
+
+impl ErrorRule {
+    /// A rule that can match, or `None` with the reason in `problems`. Empty match
+    /// strings and patterns match nothing and are dropped; an invalid pattern is dropped
+    /// and reported.
+    fn parse(
+        status: i64,
+        words: Vec<String>,
+        patterns: &[String],
+        action: &str,
+        problems: &mut Vec<String>,
+    ) -> Option<Self> {
+        let r#match: Vec<String> = words.into_iter().filter(|w| !w.is_empty()).collect();
+        let regex: Vec<regex::Regex> = patterns
+            .iter()
+            .filter(|p| !p.is_empty())
+            .filter_map(|p| {
+                regex::Regex::new(p)
+                    .map_err(|e| problems.push(format!("status {status}: match-regexr {p:?} is invalid: {e}")))
+                    .ok()
+            })
+            .collect();
+        let Some(action) = RuleAction::parse(action) else {
+            problems.push(format!("status {status}: unknown action {action:?}"));
+            return None;
+        };
+        (status > 0 && !(r#match.is_empty() && regex.is_empty())).then_some(Self {
+            status,
+            r#match,
+            regex,
+            action,
+        })
+    }
+
+    fn matches(&self, status: i64, body: &str) -> bool {
+        self.status == status
+            && (self.r#match.iter().any(|s| body.contains(s.as_str())) || self.regex.iter().any(|re| re.is_match(body)))
+    }
+}
+
+/// A credential's own `request_scoped_errors`, as it is stored in its file.
+#[derive(Deserialize)]
+struct FileRule {
     #[serde(default)]
-    pub action: String,
+    status: i64,
+    #[serde(default)]
+    r#match: Vec<String>,
+    #[serde(default, rename = "match-regexr")]
+    match_regex: Vec<String>,
+    #[serde(default)]
+    action: String,
+}
+
+/// A credential's own rules. `Some` whenever it lists any, even when none of them can
+/// match: a listed set replaces the OAuth provider rules.
+fn file_rules(c: &Credential) -> Option<Vec<ErrorRule>> {
+    let raw: Vec<FileRule> = serde_json::from_value(metadata(c, "request_scoped_errors")?.clone()).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut problems = Vec::new();
+    let rules = raw
+        .into_iter()
+        .filter_map(|r| ErrorRule::parse(r.status, r.r#match, &r.match_regex, &r.action, &mut problems))
+        .collect();
+    for problem in problems {
+        tracing::warn!(id = %c.id, "request_scoped_errors rule ignored: {problem}");
+    }
+    Some(rules)
+}
+
+/// `oauth.request-scoped-errors` by lowercase channel (Go
+/// `SanitizeOAuthRequestScopedErrors`), with what was dropped and why.
+fn parse_oauth_rules(cfg: &cpa_core::config::Config) -> (HashMap<String, Vec<ErrorRule>>, Vec<String>) {
+    let mut out = HashMap::new();
+    let mut problems = Vec::new();
+    let channels = cfg
+        .document
+        .get("oauth")
+        .and_then(|o| o.get("request-scoped-errors"))
+        .and_then(serde_yaml_ng::Value::as_mapping);
+    for (channel, list) in channels.into_iter().flatten() {
+        let channel = channel.as_str().unwrap_or_default().trim().to_lowercase();
+        let mut issues = Vec::new();
+        let rules: Vec<ErrorRule> = list
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let words = |k: &str| -> Vec<String> {
+                    r.get(k)
+                        .and_then(serde_yaml_ng::Value::as_sequence)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_owned()))
+                        .collect()
+                };
+                let status = r.get("status").and_then(serde_yaml_ng::Value::as_i64).unwrap_or(0);
+                let action = r
+                    .get("action")
+                    .and_then(serde_yaml_ng::Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                ErrorRule::parse(status, words("match"), &words("match-regexr"), &action, &mut issues)
+            })
+            .collect();
+        problems.extend(issues.into_iter().map(|p| format!("{channel}: {p}")));
+        if !channel.is_empty() && !rules.is_empty() {
+            out.insert(channel, rules);
+        }
+    }
+    (out, problems)
+}
+
+fn oauth_rules(cfg: &cpa_core::config::Config) -> HashMap<String, Vec<ErrorRule>> {
+    let (rules, problems) = parse_oauth_rules(cfg);
+    for problem in problems {
+        tracing::warn!("oauth.request-scoped-errors rule ignored: {problem}");
+    }
+    rules
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -501,34 +618,31 @@ impl Policy {
     }
 
     pub fn error_action(&self, c: &Credential, error: &ExecError) -> ErrorAction {
-        let file_rules: Option<Vec<ErrorRule>> =
-            metadata(c, "request_scoped_errors").and_then(|v| serde_json::from_value(v.clone()).ok());
-        let rules = file_rules.as_ref().filter(|r| !r.is_empty()).or_else(|| {
+        self.error_action_with(file_rules(c).as_deref(), c, error)
+    }
+
+    /// [`Self::error_action`] with the credential's own rules already parsed.
+    pub(crate) fn error_action_with(
+        &self,
+        own: Option<&[ErrorRule]>,
+        c: &Credential,
+        error: &ExecError,
+    ) -> ErrorAction {
+        let rules = own.or_else(|| {
             oauth(c)
                 .then(|| self.oauth_request_scoped_errors.get(&c.provider))
                 .flatten()
+                .map(Vec::as_slice)
         });
         if let Some(rules) = rules {
             let body = crate::classify::rule_text(error);
             let status = i64::from(crate::classify::go_status(error));
-            for rule in rules {
-                if rule.status <= 0 || rule.status != status {
-                    continue;
-                }
-                let matches = rule.r#match.iter().any(|s| !s.is_empty() && body.contains(s))
-                    || rule
-                        .match_regex
-                        .iter()
-                        .any(|s| !s.is_empty() && regex::Regex::new(s).is_ok_and(|re| re.is_match(&body)));
-                if !matches {
-                    continue;
-                }
-                let (stop, cooldown) = match rule.action.trim().to_ascii_lowercase().as_str() {
-                    "stop" => (true, false),
-                    "stop-and-cooldown" => (true, true),
-                    "continue" => (false, false),
-                    "continue-and-cooldown" => (false, true),
-                    _ => continue,
+            if let Some(rule) = rules.iter().find(|r| r.matches(status, &body)) {
+                let (stop, cooldown) = match rule.action {
+                    RuleAction::Stop => (true, false),
+                    RuleAction::StopAndCooldown => (true, true),
+                    RuleAction::Continue => (false, false),
+                    RuleAction::ContinueAndCooldown => (false, true),
                 };
                 return ErrorAction {
                     matched: true,
@@ -676,7 +790,7 @@ pub(crate) struct Scheduler {
 
 /// Go `cfg.OpenAICompatibility` for cooling: enabled entries with a base URL (Go
 /// `SanitizeOpenAICompatibility`), in config order, with their `disable-cooling`.
-pub fn compat_cooling(cfg: &cpa_core::config::Config) -> Vec<(String, Option<bool>)> {
+fn compat_cooling(cfg: &cpa_core::config::Config) -> Vec<(String, Option<bool>)> {
     cfg.document
         .get("api-keys")
         .and_then(|k| k.get("openai-compatibility"))
@@ -1824,6 +1938,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cpa_core::config::RoutingConfig;
     use std::path::Path;
 
     #[test]
@@ -1880,8 +1995,8 @@ mod tests {
             ("anything", Strategy::RoundRobin),
         ] {
             assert_eq!(
-                normalize(RawRouting {
-                    strategy: raw,
+                Policy::from(&RoutingConfig {
+                    strategy: raw.into(),
                     ..Default::default()
                 })
                 .strategy,
@@ -1899,8 +2014,8 @@ mod tests {
             (" 2m ", 120),
         ] {
             assert_eq!(
-                normalize(RawRouting {
-                    session_affinity_ttl: ttl,
+                Policy::from(&RoutingConfig {
+                    session_affinity_ttl: ttl.into(),
                     ..Default::default()
                 })
                 .session_affinity_ttl,
@@ -1908,10 +2023,12 @@ mod tests {
                 "{ttl}"
             );
         }
-        let policy = normalize(RawRouting {
-            request_retry: -1,
-            max_retry_credentials: -5,
-            max_retry_interval: -3,
+        let policy = Policy::from(&RoutingConfig {
+            retry: cpa_core::config::RetryConfig {
+                request_retry: -1,
+                max_retry_credentials: -5,
+                max_retry_interval: -3,
+            },
             session_affinity_subagents: Some(false),
             ..Default::default()
         });
@@ -1920,7 +2037,7 @@ mod tests {
         assert_eq!(policy.max_retry_interval, Duration::ZERO);
         assert!(policy.session_affinity_subagents, "ignored when affinity disabled");
         assert!(
-            !normalize(RawRouting {
+            !Policy::from(&RoutingConfig {
                 session_affinity: true,
                 session_affinity_subagents: Some(false),
                 ..Default::default()
@@ -1928,7 +2045,7 @@ mod tests {
             .session_affinity_subagents
         );
         assert!(
-            normalize(RawRouting {
+            Policy::from(&RoutingConfig {
                 session_affinity: true,
                 ..Default::default()
             })
@@ -2059,9 +2176,12 @@ mod tests {
 
     #[test]
     fn max_trusted_cooldown_reads_durations_seconds_and_off() {
-        let read = |raw| {
-            normalize(RawRouting {
-                max_trusted_cooldown: raw,
+        let read = |raw: &str| {
+            Policy::from(&RoutingConfig {
+                cooldown: cpa_core::config::CooldownConfig {
+                    max_trusted_cooldown: raw.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .max_trusted_cooldown
@@ -3388,6 +3508,29 @@ mod tests {
             .headers
             .insert(axum::http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
         assert!(!Policy::default().error_action(&c, &upstream).matched);
+    }
+
+    #[test]
+    fn config_rules_are_parsed_once_and_unusable_parts_are_reported() {
+        let cfg = cpa_core::config::Config::parse(
+            "oauth:\n  request-scoped-errors:\n    Claude:\n      - {status: 429, match-regexr: ['[', 'quota [0-9]+'], action: ' Continue '}\n      - {status: 400, match: [x], action: explode}\n",
+        )
+        .unwrap();
+        let (rules, problems) = parse_oauth_rules(&cfg);
+        let claude = &rules["claude"];
+        assert_eq!(claude.len(), 1);
+        assert_eq!((claude[0].action, claude[0].regex.len()), (RuleAction::Continue, 1));
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems[0].starts_with("claude: status 429: match-regexr \"[\" is invalid"),
+            "{problems:?}"
+        );
+        assert_eq!(problems[1], "claude: status 400: unknown action \"explode\"");
+        let action = Policy::from_config(&cfg).error_action(
+            &cred("a", serde_json::json!({})),
+            &ExecError::local(429, FailureScope::Request, "quota 12"),
+        );
+        assert!(action.matched && !action.stop && !action.cooldown);
     }
 
     #[test]

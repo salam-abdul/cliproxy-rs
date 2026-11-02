@@ -688,10 +688,10 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, header
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if !if_match.is_empty() {
-                    return super::error(412, "precondition_failed");
+                    return super::json_error(StatusCode::PRECONDITION_FAILED, "precondition_failed");
                 }
             }
-            Err(_) => return super::error(500, "read_failed"),
+            Err(_) => return super::json_error(StatusCode::INTERNAL_SERVER_ERROR, "read_failed"),
         }
         let Ok(text) = std::str::from_utf8(&body) else {
             return fail(
