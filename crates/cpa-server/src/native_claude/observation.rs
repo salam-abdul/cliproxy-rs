@@ -1,7 +1,7 @@
 use super::{Account, State};
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -378,10 +378,10 @@ impl Observation {
                 match reader.read(&mut buffer).await {
                     Ok(0) => break,
                     Err(_) => {
-                        sink.lock().unwrap().observer_failed = true;
+                        sink.lock().unwrap_or_else(PoisonError::into_inner).observer_failed = true;
                         break;
                     }
-                    Ok(n) => sink.lock().unwrap().push(&buffer[..n]),
+                    Ok(n) => sink.lock().unwrap_or_else(PoisonError::into_inner).push(&buffer[..n]),
                 }
             }
         });
@@ -412,7 +412,10 @@ impl Observation {
             && tokio::time::timeout(Duration::from_secs(1), &mut task).await.is_err()
         {
             task.abort();
-            self.usage.lock().unwrap().observer_failed = true;
+            self.usage
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observer_failed = true;
         }
         self.publish(end);
     }
@@ -422,7 +425,7 @@ impl Observation {
         }
         let f = &self.facts;
         let (usage, outcome) = {
-            let scan = self.usage.lock().unwrap();
+            let scan = self.usage.lock().unwrap_or_else(PoisonError::into_inner);
             (scan.value(), scan.outcome(f.status, f.sse, end))
         };
         let success = outcome == "success";

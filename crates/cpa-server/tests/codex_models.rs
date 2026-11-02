@@ -4,13 +4,12 @@
 
 use std::sync::Arc;
 
-use cpa_core::config::Config;
 use cpa_exec::Executors;
 use cpa_server::router;
 use serde_json::Value;
 
 async fn get(path: &str, cfg: &str) -> (u16, String, Value) {
-    let cfg = Config::parse(cfg).unwrap();
+    let cfg = cpa_server::testing::config(cfg);
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

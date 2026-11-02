@@ -928,6 +928,13 @@ mod tests {
 
     const ACK: &str = "*3\r\n$9\r\nsubscribe\r\n$6\r\nconfig\r\n:1\r\n";
 
+    /// The Home overlay of a bare config, with a private auth-dir for a test runtime.
+    fn home_config() -> Config {
+        let mut config = overlay(b"port: 0\n", None).unwrap();
+        config.auth_dir = cpa_server::testing::config("").auth_dir;
+        config
+    }
+
     /// A Claude upstream on loopback that records what reached it.
     async fn upstream(seen: Arc<Mutex<Vec<(String, String)>>>) -> String {
         let app = axum::Router::new().route(
@@ -1136,7 +1143,7 @@ mod tests {
         local: Vec<Credential>,
     ) -> (String, Arc<Runtime>, CancellationToken, tokio::task::JoinHandle<()>) {
         let guard = ONE_NODE.lock().await;
-        let config = overlay(b"port: 0\n", None).unwrap();
+        let config = home_config();
         let rt = Arc::new(cpa_server::testing::runtime(config, local, executors));
         let dispatcher = Arc::new(Dispatcher::new(&rt));
         rt.set_remote_dispatch(Some(dispatcher.clone()));
@@ -1933,7 +1940,7 @@ mod tests {
         .await;
         let client = home.client();
         fake::set_heartbeat(&client, true);
-        let config = overlay(b"port: 0\n", None).unwrap();
+        let config = home_config();
         let rt = Arc::new(cpa_server::testing::runtime(
             config.clone(),
             vec![],
@@ -2077,7 +2084,7 @@ mod tests {
     /// whose canonical ID later requests send.
     #[test]
     fn dispatch_sessions_follow_go() {
-        let config = overlay(b"port: 0\n", None).unwrap();
+        let config = home_config();
         let rt = Arc::new(cpa_server::testing::runtime(
             config,
             vec![],
@@ -2147,7 +2154,7 @@ mod tests {
 
     fn test_runtime() -> Arc<Runtime> {
         Arc::new(cpa_server::testing::runtime(
-            overlay(b"port: 0\n", None).unwrap(),
+            home_config(),
             vec![],
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
@@ -4682,7 +4689,7 @@ mod tests {
                 openai: Default::default(),
                 google: Default::default(),
             };
-            let config = overlay(b"port: 0\n", None).unwrap();
+            let config = home_config();
             let rt = Arc::new(cpa_server::testing::runtime(config, vec![], executors));
             let dispatcher = Dispatcher::new(&rt);
             let client = Client::new(home.config());

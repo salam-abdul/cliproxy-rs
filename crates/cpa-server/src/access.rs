@@ -3,8 +3,8 @@
 //!
 //! Candidates, in order: `Authorization` (bearer token or the raw value), `X-Goog-Api-Key`,
 //! `X-Api-Key`, then the first `key` and `auth_token` query values. Comparison is on raw
-//! bytes, like Go strings. With no keys configured the provider is unregistered and
-//! access is open.
+//! bytes, like Go strings, in constant time per key. With no keys configured the
+//! provider is unregistered and access is open.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use cpa_core::exec::Caller;
+use subtle::ConstantTimeEq;
 
 use crate::runtime::Runtime;
 
@@ -62,10 +63,12 @@ pub(crate) fn authenticate(keys: &[String], headers: &HeaderMap, query: &str) ->
         .into_iter()
         .filter(|(value, _)| !value.is_empty())
         .find_map(|(value, source)| {
-            keys.iter().find(|k| k.as_bytes() == value).map(|k| Caller {
-                principal: k.clone(),
-                source,
-            })
+            keys.iter()
+                .find(|k| bool::from(k.as_bytes().ct_eq(value)))
+                .map(|k| Caller {
+                    principal: k.clone(),
+                    source,
+                })
         })
         .ok_or("Invalid API key")
 }
@@ -122,7 +125,7 @@ pub(crate) enum Access {
     /// No provider registered: Go's manager returns no result and sets nothing.
     Open,
     /// Go `sdkaccess.Result`: the caller and the provider identifier that accepted it.
-    Granted { caller: Caller, provider: String },
+    Granted { caller: Caller, provider: &'static str },
 }
 
 /// Go `sdkaccess.AuthError` as the middlewares answer it.
@@ -139,7 +142,7 @@ pub(crate) fn authenticate_request(rt: &Runtime, req: Request) -> (Request, Resu
         authenticate(&config.api_keys, req.headers(), req.uri().query().unwrap_or_default())
             .map(|caller| Access::Granted {
                 caller,
-                provider: "config-inline".to_owned(),
+                provider: "config-inline",
             })
             .map_err(|message| Denied { status: 401, message })
     };

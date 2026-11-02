@@ -31,10 +31,50 @@ pub const DENY_PROXY: &str = "http://127.0.0.1:9";
 const LOCAL: &str = "cpa_test_local";
 
 /// [`Runtime::new`] whose executor calls cannot leave the machine.
+///
+/// Panics when `config.auth_dir` is the default (`~/.cli-proxy-api`) or any other path
+/// in the home directory outside the temp directory and this workspace (where
+/// `CARGO_TARGET_TMPDIR` lives): a test must not read or write a real auth directory.
 pub fn runtime(config: Config, credentials: Vec<Credential>, executors: Executors) -> Runtime {
+    assert!(
+        is_private_auth_dir(&config.auth_dir),
+        "test runtime refuses auth-dir {}: give the test a temp auth-dir",
+        config.auth_dir.display()
+    );
     let rt = Runtime::new(config, credentials, executors);
     rt.deny_external.store(true, Ordering::Relaxed);
     rt
+}
+
+/// `Config::parse(yaml)` for a test, with the default auth-dir replaced by a fresh,
+/// uncreated path under the temp directory. An auth-dir the YAML names is kept, so
+/// [`runtime`] still refuses one in the home directory.
+pub fn config(yaml: &str) -> Config {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut config = Config::parse(yaml).expect("test config parses");
+    if config.auth_dir == Config::default().auth_dir {
+        config.auth_dir = std::env::temp_dir().join(format!(
+            "cpa-test-auth-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+    }
+    config
+}
+
+/// Whether `dir` cannot be a real auth directory: not the default, and outside the home
+/// directory unless it is in the temp directory or this workspace.
+fn is_private_auth_dir(dir: &std::path::Path) -> bool {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if dir == Config::default().auth_dir {
+        return false;
+    }
+    if dir.starts_with(std::env::temp_dir()) || std::fs::canonicalize(&workspace).is_ok_and(|w| dir.starts_with(w)) {
+        return true;
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .is_none_or(|home| !dir.starts_with(home))
 }
 
 /// Marks a credential whose executor the test pointed at a local mock (for example
@@ -191,9 +231,36 @@ mod tests {
             google: Default::default(),
         };
         let c = credential(&[], serde_json::json!({}));
-        let plain = Runtime::new(Config::default(), Vec::new(), executors());
+        let plain = Runtime::new(config(""), Vec::new(), executors());
         assert!(Arc::ptr_eq(&plain.for_executor(&c), &c));
-        let test = runtime(Config::default(), Vec::new(), executors());
+        let test = runtime(config(""), Vec::new(), executors());
         assert_eq!(test.for_executor(&c).attributes["proxy_url"], DENY_PROXY);
+    }
+
+    /// A test runtime never resolves a real auth directory: the default and any path in
+    /// the home directory are refused, a temp path is accepted.
+    #[test]
+    fn test_runtimes_refuse_a_real_auth_dir() {
+        let executors = || Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let refused = |yaml: &str| {
+            let cfg = Config::parse(yaml).unwrap();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime(cfg, Vec::new(), executors()))).is_err()
+        };
+        assert!(refused(""), "default auth-dir");
+        assert!(refused("auth-dir: ~/.cli-proxy-api\n"), "home-relative auth-dir");
+        assert!(refused("auth-dir: ~\n"), "the home directory itself");
+        let temp = config("");
+        assert!(temp.auth_dir.starts_with(std::env::temp_dir()));
+        assert!(!refused(&format!("auth-dir: {}\n", temp.auth_dir.display())));
+        // A named auth-dir is kept, so the refusal still sees it.
+        let named = config("auth-dir: ~/x\n");
+        assert_eq!(named.auth_dir, Config::parse("auth-dir: ~/x\n").unwrap().auth_dir);
+        assert!(refused("auth-dir: ~/x\n"));
     }
 }

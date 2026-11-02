@@ -51,10 +51,9 @@ async fn upstream_loss_while_the_client_stalls_releases_the_session() {
     let upstream =
         serve(axum::Router::new().fallback(|ws: WebSocketUpgrade| async move { ws.on_upgrade(flood_then_close) }))
             .await;
-    let cfg = Config::parse(&format!(
+    let cfg = crate::testing::config(&format!(
         "codex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-fixture\n"
-    ))
-    .unwrap();
+    ));
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     assert_eq!(
         credentials[0].metadata["models"],
@@ -136,10 +135,9 @@ async fn steering_reader_cancels_the_turn_when_the_client_leaves() {
         }
     }))
     .await;
-    let cfg = Config::parse(&format!(
+    let cfg = crate::testing::config(&format!(
         "codex:\n  response-steering: true\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n"
-    ))
-    .unwrap();
+    ));
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -341,10 +339,9 @@ async fn a_client_close_cancels_a_stalled_steering_turn() {
         }
     }))
     .await;
-    let cfg = Config::parse(&format!(
+    let cfg = crate::testing::config(&format!(
         "codex:\n  response-steering: true\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n"
-    ))
-    .unwrap();
+    ));
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

@@ -1250,6 +1250,73 @@ async fn api_call_head_does_not_negotiate_gzip() {
     up.abort();
 }
 
+/// api-call refreshes a due xAI token through the runtime before it fills `$TOKEN$`,
+/// and commits the refreshed credential.
+#[tokio::test]
+async fn api_call_refreshes_a_due_xai_token_first() {
+    use axum::http::HeaderMap;
+    let upstream = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(json!({
+                    "access_token": "fresh-xai-token", "refresh_token": "rt-next",
+                    "token_type": "Bearer", "expires_in": 3600
+                }))
+            }),
+        )
+        .route(
+            "/echo",
+            axum::routing::get(
+                |headers: HeaderMap| async move { headers["authorization"].to_str().unwrap().to_owned() },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_base = format!("http://{}", listener.local_addr().unwrap());
+    let up = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let token_endpoint = format!("{up_base}/token");
+    let f = Fixture::from_yaml("apirefresh", |auth, hash| {
+        std::fs::write(
+            auth.join("xai-synthetic.json"),
+            serde_json::to_vec(&json!({
+                "type": "xai", "access_token": "stale-xai-token", "refresh_token": "rt-synthetic",
+                "expired": "2000-01-01T00:00:00Z", "token_endpoint": token_endpoint,
+                "base_url": up_base
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\n",
+            auth.display()
+        )
+    });
+    let index = cpa_core::config::credentials::auth_index(&f.rt.store().snapshot()[0]);
+    let (base, server) = f.server().await;
+    let r: Value = wreq::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("{base}/v8/management/requests/api-call"))
+        .bearer_auth("fake-management-only")
+        .json(&json!({
+            "method": "GET", "url": format!("{up_base}/echo"), "auth_index": index,
+            "header": {"Authorization": "Bearer $TOKEN$"}
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["status_code"], 200, "{r}");
+    assert_eq!(r["body"], "Bearer fresh-xai-token");
+    let stored: Value = serde_json::from_slice(&std::fs::read(f.dir.join("auth/xai-synthetic.json")).unwrap()).unwrap();
+    assert_eq!(stored["access_token"], "fresh-xai-token");
+    server.abort();
+    up.abort();
+}
+
 /// Fake provider login endpoints (Claude, Codex, Kimi) on one local server; records
 /// the form or JSON bodies it receives.
 async fn fake_logins() -> (
