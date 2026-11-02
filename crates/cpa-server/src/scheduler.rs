@@ -106,14 +106,24 @@ fn window_length(minutes: f64, observed_at: SystemTime) -> Option<Duration> {
 
 use crate::quota_time::reset_time;
 
-impl Windows {
+/// One quota observation's windows, parsed once: what [`Windows`] reads, before it is
+/// judged at a point in time.
+#[derive(Debug, Clone, Copy)]
+pub struct Observation {
+    observed_at: SystemTime,
+    /// The long (weekly) window.
+    long: Option<Window>,
+    /// Until when a used-up window, or Codex's limit flag, holds.
+    until: Option<SystemTime>,
+}
+
+impl Observation {
     /// Reads a snapshot's `signals` (header name to value), observed at `observed_at`,
     /// for `provider` (`claude` or `codex`; anything else knows nothing).
-    pub fn observed(
+    pub fn parse(
         provider: &str,
         signals: &std::collections::BTreeMap<String, String>,
         observed_at: SystemTime,
-        now: SystemTime,
     ) -> Self {
         let get = |name: &str| {
             signals
@@ -125,15 +135,18 @@ impl Windows {
         let codex = provider.trim().eq_ignore_ascii_case("codex");
         let (long, short) = match provider.trim().to_ascii_lowercase().as_str() {
             "claude" => {
-                let window = |id: WindowId, label: &str, minutes: f64| Window {
-                    id,
-                    used_up: get(&format!("anthropic-ratelimit-unified-{label}-status"))
-                        .is_some_and(|s| s.eq_ignore_ascii_case("rejected"))
-                        || number(&format!("anthropic-ratelimit-unified-{label}-utilization"))
-                            .is_some_and(|u| u >= 1.0),
-                    reset: get(&format!("anthropic-ratelimit-unified-{label}-reset")).and_then(reset_time),
-                    stated_reset: get(&format!("anthropic-ratelimit-unified-{label}-reset")).and_then(reset_time),
-                    length: window_length(minutes, observed_at),
+                let window = |id: WindowId, label: &str, minutes: f64| {
+                    let reset = get(&format!("anthropic-ratelimit-unified-{label}-reset")).and_then(reset_time);
+                    Window {
+                        id,
+                        used_up: get(&format!("anthropic-ratelimit-unified-{label}-status"))
+                            .is_some_and(|s| s.eq_ignore_ascii_case("rejected"))
+                            || number(&format!("anthropic-ratelimit-unified-{label}-utilization"))
+                                .is_some_and(|u| u >= 1.0),
+                        reset,
+                        stated_reset: reset,
+                        length: window_length(minutes, observed_at),
+                    }
                 };
                 (
                     Some(window(WindowId::Claude7d, "7d", 7.0 * 24.0 * 60.0)),
@@ -196,9 +209,22 @@ impl Windows {
                     .or_else(|| observed_at.checked_add(FALLBACK_WINDOW))
             })
             .flatten();
-        let long_reset = long.and_then(|w| w.reset);
         Self {
-            weekly_reset: long_reset.filter(|r| *r > now),
+            observed_at,
+            long,
+            until: until.max(flag_until),
+        }
+    }
+
+    pub fn observed_at(&self) -> SystemTime {
+        self.observed_at
+    }
+
+    /// What the observation says at `now`.
+    pub fn at(&self, now: SystemTime) -> Windows {
+        let long = self.long;
+        Windows {
+            weekly_reset: long.and_then(|w| w.reset).filter(|r| *r > now),
             rolled_over: long.and_then(|w| {
                 let at = w.stated_reset.filter(|r| *r <= now)?;
                 Some(Rollover {
@@ -207,8 +233,20 @@ impl Windows {
                     gap: w.length.unwrap_or(FALLBACK_WINDOW) / 2,
                 })
             }),
-            exhausted: until.max(flag_until).is_some_and(|u| u > now),
+            exhausted: self.until.is_some_and(|u| u > now),
         }
+    }
+}
+
+impl Windows {
+    /// [`Observation::parse`] judged at `now`.
+    pub fn observed(
+        provider: &str,
+        signals: &std::collections::BTreeMap<String, String>,
+        observed_at: SystemTime,
+        now: SystemTime,
+    ) -> Self {
+        Observation::parse(provider, signals, observed_at).at(now)
     }
 
     /// `soonest-reset` order. Usable accounts come before used-up ones. Among them, an
@@ -586,6 +624,16 @@ impl Policy {
             .unwrap_or(self.request_retry)
     }
 
+    /// [`Self::retry_limit`] of a parsed credential.
+    pub(crate) fn retry_limit_of(&self, profile: &Profile) -> usize {
+        profile.request_retry.unwrap_or(self.request_retry)
+    }
+
+    /// Whether the strategy can pick a credential of this weight.
+    pub(crate) fn admits_weight(&self, weight: i64) -> bool {
+        self.strategy != Strategy::WeightedRoundRobin || weight > 0
+    }
+
     /// Go `quotaCooldownDisabledForAuthWithConfig`: the credential's `disable_cooling`
     /// metadata, then its OpenAI-compatibility entry's `disable-cooling`, then global.
     pub(crate) fn cooling_disabled(&self, c: &Credential) -> bool {
@@ -685,6 +733,46 @@ fn weight(c: &Credential) -> i64 {
 
 pub use cpa_core::registry::dynamic::canonical_model;
 
+/// What selection and outcome recording read from one credential revision, parsed when
+/// the revision is stored rather than on every pick.
+#[derive(Debug, Clone)]
+pub(crate) struct Profile {
+    pub revision: u64,
+    /// The provider key it serves (`registry::provider_key`).
+    pub provider: String,
+    pub priority: i64,
+    pub weight: i64,
+    /// Its own `request_retry`, when set and not negative.
+    pub request_retry: Option<usize>,
+    /// Its own request-scoped error rules ([`file_rules`]).
+    pub rules: Option<Vec<ErrorRule>>,
+}
+
+impl Profile {
+    pub fn of(c: &Credential) -> Self {
+        Self {
+            revision: c.revision,
+            provider: crate::registry::provider_key(c),
+            priority: integer(c, "priority").unwrap_or(0),
+            weight: weight(c),
+            request_retry: integer(c, "request_retry").filter(|n| *n >= 0).map(|n| n as usize),
+            rules: file_rules(c),
+        }
+    }
+}
+
+/// A credential selection may pick, with what the pick reads about it.
+#[derive(Clone, Copy)]
+pub(crate) struct Candidate<'a> {
+    pub credential: &'a std::sync::Arc<Credential>,
+    /// The model key its cooldowns live under for this selection.
+    pub model: &'a str,
+    pub provider: &'a str,
+    pub priority: i64,
+    pub weight: i64,
+    pub windows: Windows,
+}
+
 #[derive(Default)]
 struct Rotation {
     last: String,
@@ -766,12 +854,69 @@ impl Cooldown {
     }
 }
 
+/// One credential's cooldowns: the credential-wide one and one per model.
+#[derive(Default)]
+pub(crate) struct Cooldowns {
+    own: Option<Cooldown>,
+    models: HashMap<String, Cooldown>,
+}
+
+impl Cooldowns {
+    /// The cooldown of `model`; the empty model is the credential-wide one.
+    fn get(&self, model: &str) -> Option<&Cooldown> {
+        if model.is_empty() {
+            self.own.as_ref()
+        } else {
+            self.models.get(model)
+        }
+    }
+
+    fn get_mut(&mut self, model: &str) -> Option<&mut Cooldown> {
+        if model.is_empty() {
+            self.own.as_mut()
+        } else {
+            self.models.get_mut(model)
+        }
+    }
+
+    fn insert(&mut self, model: &str, state: Cooldown) {
+        match self.get_mut(model) {
+            Some(slot) => *slot = state,
+            None if model.is_empty() => self.own = Some(state),
+            None => {
+                self.models.insert(model.to_owned(), state);
+            }
+        }
+    }
+
+    fn remove(&mut self, model: &str) {
+        if model.is_empty() {
+            self.own = None;
+        } else {
+            self.models.remove(model);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.own.is_none() && self.models.is_empty()
+    }
+
+    /// Every cooldown by model, the credential-wide one under the empty model.
+    fn iter(&self) -> impl Iterator<Item = (&str, &Cooldown)> {
+        self.own
+            .iter()
+            .map(|s| ("", s))
+            .chain(self.models.iter().map(|(m, s)| (m.as_str(), s)))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Scheduler {
     rotations: HashMap<(String, String), Rotation>,
     /// Mixed-provider round-robin cursors (Go `mixedCursors`).
     cursors: HashMap<(String, String), usize>,
-    pub(crate) cooldowns: HashMap<(String, String), Cooldown>,
+    /// Cooldowns by credential ID; no entry is empty.
+    cooldowns: HashMap<String, Cooldowns>,
     /// Session affinity bindings (Go `SessionAffinitySelector.cache`).
     affinity: crate::affinity::Cache,
     /// Bindings of requests without an explicit session (Go
@@ -902,56 +1047,78 @@ impl Scheduler {
         policy.session_affinity && !self.affinity_off
     }
 
-    pub fn quota_cooling(&self, c: &Credential, model: &str, now: Instant) -> bool {
+    /// The cooldown of `id` for the canonical `model`; the empty model is the
+    /// credential-wide one.
+    pub(crate) fn cooldown(&self, id: &str, model: &str) -> Option<&Cooldown> {
+        self.cooldowns.get(id)?.get(model)
+    }
+
+    pub(crate) fn cooldown_mut(&mut self, id: &str, model: &str) -> Option<&mut Cooldown> {
+        self.cooldowns.get_mut(id)?.get_mut(model)
+    }
+
+    fn set_cooldown(&mut self, id: &str, model: &str, state: Cooldown) {
+        match self.cooldowns.get_mut(id) {
+            Some(entry) => entry.insert(model, state),
+            None => {
+                let mut entry = Cooldowns::default();
+                entry.insert(model, state);
+                self.cooldowns.insert(id.to_owned(), entry);
+            }
+        }
+    }
+
+    fn remove_cooldown(&mut self, id: &str, model: &str) {
+        if let Some(entry) = self.cooldowns.get_mut(id) {
+            entry.remove(model);
+            if entry.is_empty() {
+                self.cooldowns.remove(id);
+            }
+        }
+    }
+
+    /// The cooldowns of `model` and of the whole credential.
+    fn both(&self, c: &Credential, model: &str) -> [Option<&Cooldown>; 2] {
         let model = canonical_model(model);
-        [model, ""].into_iter().any(|m| {
-            self.cooldowns
-                .get(&(c.id.clone(), m.to_owned()))
-                .is_some_and(|s| s.quota && s.until(now).is_some())
-        })
+        match self.cooldowns.get(c.id.as_str()) {
+            Some(entry) => [entry.get(model), entry.own.as_ref()],
+            None => [None, None],
+        }
+    }
+
+    pub fn quota_cooling(&self, c: &Credential, model: &str, now: Instant) -> bool {
+        self.both(c, model)
+            .into_iter()
+            .flatten()
+            .any(|s| s.quota && s.until(now).is_some())
     }
 
     pub fn wait(&self, c: &Credential, model: &str, now: Instant) -> Option<Duration> {
-        let model = canonical_model(model);
-        [model, ""]
+        self.both(c, model)
             .into_iter()
-            .filter_map(|model| {
-                self.cooldowns
-                    .get(&(c.id.clone(), model.to_owned()))
-                    .and_then(|s| s.until(now)?.checked_duration_since(now))
-                    .filter(|d| !d.is_zero())
-            })
+            .flatten()
+            .filter_map(|s| s.until(now)?.checked_duration_since(now).filter(|d| !d.is_zero()))
             .max()
     }
 
     /// Whether a cooldown deadline (not a probe reservation) is ahead for `model`.
     pub fn cooling(&self, c: &Credential, model: &str, now: Instant) -> bool {
-        let model = canonical_model(model);
-        [model, ""].into_iter().any(|m| {
-            self.cooldowns
-                .get(&(c.id.clone(), m.to_owned()))
-                .is_some_and(|s| s.deadline > now)
-        })
+        self.both(c, model).into_iter().flatten().any(|s| s.deadline > now)
     }
 
     /// The last failure recorded for this credential and model, if any.
     pub fn last_error(&self, c: &Credential, model: &str) -> Option<&Cooldown> {
-        let model = canonical_model(model);
-        self.cooldowns
-            .get(&(c.id.clone(), model.to_owned()))
-            .or_else(|| self.cooldowns.get(&(c.id.clone(), String::new())))
+        let [model, own] = self.both(c, model);
+        model.or(own)
     }
 
     pub fn retry_eligible(&self, c: &Credential, model: &str, now: Instant) -> bool {
-        let model = canonical_model(model);
         // A bounded window or an unanswered probe is not waited for: the probe answers
         // for everyone, and holding requests to the window's end would release them
         // together as a burst of probes.
-        [model, ""].into_iter().all(|model| {
-            self.cooldowns.get(&(c.id.clone(), model.to_owned())).is_none_or(|s| {
-                let probing = s.trust.probe.is_some_and(|p| p > now);
-                !probing && (s.deadline <= now || (retry_status(s.status) && !s.trust.bounded))
-            })
+        self.both(c, model).into_iter().flatten().all(|s| {
+            let probing = s.trust.probe.is_some_and(|p| p > now);
+            !probing && (s.deadline <= now || (retry_status(s.status) && !s.trust.bounded))
         })
     }
 
@@ -967,13 +1134,16 @@ impl Scheduler {
     /// are not newer than the lease change; their count stays until the stream's own
     /// outcome is recorded. When the credential-wide window ended, the model keys that
     /// share its deadline (its copies) are disarmed too; a model's own window is not.
-    /// Cost: two lookups, and a scan of the cooldown table only when the credential-wide
-    /// window ended.
+    /// Cost: two lookups, and a scan of the credential's model cooldowns only when its
+    /// credential-wide window ended.
     pub fn accept_probe_picked(&mut self, c: &Credential, model: &str, picked: u32, now: Instant) {
         let model = canonical_model(model);
+        let Some(entry) = self.cooldowns.get_mut(c.id.as_str()) else {
+            return;
+        };
         let mut credential_window = None;
         for m in [model, ""] {
-            if let Some(s) = self.cooldowns.get_mut(&(c.id.clone(), m.to_owned()))
+            if let Some(s) = entry.get_mut(m)
                 && s.trust.bounded
                 && s.deadline <= now
                 && !s.newer_than(picked)
@@ -985,8 +1155,8 @@ impl Scheduler {
             }
         }
         if let Some(ended) = credential_window {
-            for ((id, m), s) in &mut self.cooldowns {
-                if *id == c.id && !m.is_empty() && s.trust.bounded && s.deadline == ended && !s.newer_than(picked) {
+            for s in entry.models.values_mut() {
+                if s.trust.bounded && s.deadline == ended && !s.newer_than(picked) {
                     s.trust.accept();
                 }
             }
@@ -1012,7 +1182,7 @@ impl Scheduler {
         let model = canonical_model(model);
         let next = self.generation.wrapping_add(1);
         for m in [model, ""] {
-            if let Some(s) = self.cooldowns.get_mut(&(c.id.clone(), m.to_owned()))
+            if let Some(s) = self.cooldown_mut(&c.id, m)
                 && s.trust.bounded
                 && s.deadline <= now
             {
@@ -1055,8 +1225,8 @@ impl Scheduler {
             .map(|(c, _)| c)
     }
 
-    /// [`Self::pick_ranked`], with the LCP binding of a request without an explicit
-    /// session (Go `pickLCP`): its session identity, lineage and access generation.
+    /// [`Self::pick_candidate`] over credentials paired with their provider keys.
+    #[cfg(test)]
     pub fn pick_session<'a>(
         &mut self,
         candidates: &[(&'a Credential, &str)],
@@ -1065,6 +1235,38 @@ impl Scheduler {
         ranks: &Ranks<'_>,
         now: Instant,
     ) -> Option<(&'a Credential, Option<crate::lcp::Match>)> {
+        let owned: Vec<std::sync::Arc<Credential>> = candidates
+            .iter()
+            .map(|(c, _)| std::sync::Arc::new((*c).clone()))
+            .collect();
+        let ready: Vec<Candidate<'_>> = owned
+            .iter()
+            .zip(candidates)
+            .map(|(c, (_, provider))| Candidate {
+                credential: c,
+                model: &selection.model,
+                provider,
+                priority: integer(c, "priority").unwrap_or(0),
+                weight: weight(c),
+                windows: ranks(c),
+            })
+            .collect();
+        let (picked, lcp) = self.pick_candidate(&ready, selection, policy, now)?;
+        candidates
+            .iter()
+            .find(|(c, _)| c.id == picked.credential.id)
+            .map(|(c, _)| (*c, lcp))
+    }
+
+    /// Picks one of `candidates`, with the LCP binding of a request without an explicit
+    /// session (Go `pickLCP`): its session identity, lineage and access generation.
+    pub(crate) fn pick_candidate<'c, 'a>(
+        &mut self,
+        candidates: &'c [Candidate<'a>],
+        selection: &Selection,
+        policy: &Policy,
+        now: Instant,
+    ) -> Option<(&'c Candidate<'a>, Option<crate::lcp::Match>)> {
         if candidates.is_empty() {
             return None;
         }
@@ -1072,30 +1274,30 @@ impl Scheduler {
             let namespace = request.namespace(&selection.model);
             // A known trajectory stays on its credential while that one is available.
             if let Some(found) = self.lcp.find(&namespace, request.prepared(), now)
-                && let Some((c, _)) = candidates.iter().find(|(c, _)| c.id == found.auth)
+                && let Some(c) = candidates.iter().find(|c| c.credential.id == found.auth)
             {
                 return Some((c, Some(found)));
             }
-            let picked = self.pick_unbound(candidates, selection, policy, ranks, now)?;
-            let bound = self.lcp.bind(&namespace, request.prepared(), &picked.id, now);
+            let picked = self.pick_unbound(candidates, selection, policy)?;
+            let bound = self
+                .lcp
+                .bind(&namespace, request.prepared(), &picked.credential.id, now);
             return Some((picked, bound));
         }
-        self.pick_legacy(candidates, selection, policy, ranks, now)
-            .map(|c| (c, None))
+        self.pick_legacy(candidates, selection, policy, now).map(|c| (c, None))
     }
 
     /// Go `SessionAffinitySelector.Pick` after the LCP step.
-    fn pick_legacy<'a>(
+    fn pick_legacy<'c, 'a>(
         &mut self,
-        candidates: &[(&'a Credential, &str)],
+        candidates: &'c [Candidate<'a>],
         selection: &Selection,
         policy: &Policy,
-        ranks: &Ranks<'_>,
         now: Instant,
-    ) -> Option<&'a Credential> {
+    ) -> Option<&'c Candidate<'a>> {
         let ttl = policy.session_affinity_ttl;
         let Some(keys) = self.affinity(policy).then(|| session_keys(selection)).flatten() else {
-            return self.pick_unbound(candidates, selection, policy, ranks, now);
+            return self.pick_unbound(candidates, selection, policy);
         };
         self.affinity.sweep(now, ttl);
         let fork = selection.session_fork;
@@ -1104,7 +1306,7 @@ impl Scheduler {
             Some(fallback) if !subagent && !fork => vec![keys.primary.clone(), fallback.clone()],
             _ => vec![keys.primary.clone()],
         };
-        let find = |id: &str| candidates.iter().find(|(c, _)| c.id == id).map(|(c, _)| *c);
+        let find = |id: &str| candidates.iter().find(|c| c.credential.id == id);
         let reuse = match self.affinity.get_and_refresh(&keys.primary, now, ttl) {
             // A bound credential that is no longer available is replaced, not inherited.
             Some(id) => find(&id),
@@ -1117,9 +1319,9 @@ impl Scheduler {
         };
         let picked = match reuse {
             Some(c) => c,
-            None => self.pick_unbound(candidates, selection, policy, ranks, now)?,
+            None => self.pick_unbound(candidates, selection, policy)?,
         };
-        self.affinity.bind(&picked.id, &bind_keys, now, ttl);
+        self.affinity.bind(&picked.credential.id, &bind_keys, now, ttl);
         Some(picked)
     }
 
@@ -1130,9 +1332,25 @@ impl Scheduler {
     /// A request without an explicit session refreshes its LCP sequence on success; a
     /// credential failure removes that exact sequence unless a newer request refreshed
     /// it after `lcp`'s generation. Such a request never touches the session cache.
+    #[cfg(test)]
     pub fn session_result(
         &mut self,
         c: &Credential,
+        selection: &Selection,
+        outcome: &Outcome,
+        policy: &Policy,
+        lcp: Option<&crate::lcp::Match>,
+        now: Instant,
+    ) {
+        self.session_result_with(c, file_rules(c).as_deref(), selection, outcome, policy, lcp, now);
+    }
+
+    /// [`Self::session_result`] with the credential's own error rules already parsed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn session_result_with(
+        &mut self,
+        c: &Credential,
+        rules: Option<&[ErrorRule]>,
         selection: &Selection,
         outcome: &Outcome,
         policy: &Policy,
@@ -1144,7 +1362,7 @@ impl Scheduler {
         }
         let success = match outcome {
             Outcome::Success => true,
-            Outcome::Failure(error) if policy.error_action(c, error).cooldown => false,
+            Outcome::Failure(error) if policy.error_action_with(rules, c, error).cooldown => false,
             _ => return,
         };
         if let Some(request) = selection.lcp.as_deref() {
@@ -1178,38 +1396,29 @@ impl Scheduler {
         }
     }
 
-    fn pick_unbound<'a>(
+    fn pick_unbound<'c, 'a>(
         &mut self,
-        candidates: &[(&'a Credential, &str)],
+        candidates: &'c [Candidate<'a>],
         selection: &Selection,
         policy: &Policy,
-        ranks: &Ranks<'_>,
-        _now: Instant,
-    ) -> Option<&'a Credential> {
+    ) -> Option<&'c Candidate<'a>> {
         let model = canonical_model(&selection.model).to_owned();
         let provider_keys = selection.provider_keys();
         let providers_key = provider_keys.join(",");
-        let tier = candidates
-            .iter()
-            .map(|(c, _)| integer(c, "priority").unwrap_or(0))
-            .max()?;
-        let mut ready: Vec<(&Credential, &str)> = candidates
-            .iter()
-            .copied()
-            .filter(|(c, _)| integer(c, "priority").unwrap_or(0) == tier)
-            .collect();
-        ready.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        let tier = candidates.iter().map(|c| c.priority).max()?;
+        let mut ready: Vec<&Candidate<'a>> = candidates.iter().filter(|c| c.priority == tier).collect();
+        ready.sort_by(|a, b| a.credential.id.cmp(&b.credential.id));
         // Providers that have ready candidates, in the request's provider order.
-        let mut groups: Vec<(&str, Vec<&Credential>)> = Vec::new();
+        let mut groups: Vec<(&str, Vec<&Candidate<'a>>)> = Vec::new();
         for provider in provider_keys
             .iter()
             .map(String::as_str)
-            .chain(ready.iter().map(|(_, p)| *p))
+            .chain(ready.iter().map(|c| c.provider))
         {
             if groups.iter().any(|(p, _)| *p == provider) {
                 continue;
             }
-            let members: Vec<&Credential> = ready.iter().filter(|(_, p)| *p == provider).map(|(c, _)| *c).collect();
+            let members: Vec<&Candidate<'a>> = ready.iter().copied().filter(|c| c.provider == provider).collect();
             if !members.is_empty() {
                 groups.push((provider, members));
             }
@@ -1218,128 +1427,132 @@ impl Scheduler {
             self.rotations.clear();
             self.cursors.clear();
         }
-        let picked = if groups.len() == 1 {
-            let (provider, members) = &groups[0];
-            self.pick_within(provider, &model, members, policy.strategy, ranks)
-        } else {
-            match policy.strategy {
-                Strategy::FillFirst => groups[0].1[0],
-                // Like fill-first: the first provider group, then its soonest reset.
-                Strategy::SoonestReset => {
-                    let (provider, members) = &groups[0];
-                    self.pick_within(provider, &model, members, Strategy::SoonestReset, ranks)
-                }
-                Strategy::WeightedRoundRobin => {
-                    let all: Vec<&Credential> = ready.iter().map(|(c, _)| *c).collect();
-                    self.pick_within(&providers_key, &model, &all, Strategy::WeightedRoundRobin, ranks)
-                }
-                Strategy::RoundRobin => {
-                    // Go `pickMixed`: a cursor over provider segments sized by their ready
-                    // counts, then that provider's own round-robin.
-                    let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
-                    let cursor = self.cursors.entry((providers_key.clone(), model.clone())).or_default();
-                    let slot = *cursor % total;
-                    *cursor = slot + 1;
-                    let mut start = 0;
-                    let mut index = 0;
-                    for (i, (_, members)) in groups.iter().enumerate() {
-                        if slot < start + members.len() {
-                            index = i;
-                            break;
-                        }
-                        start += members.len();
-                    }
-                    let (provider, members) = &groups[index];
-                    self.pick_within(provider, &model, members, Strategy::RoundRobin, ranks)
-                }
-            }
+        let (provider, members) = match groups.as_slice() {
+            [] => return None,
+            [only] => return self.pick_within(only.0, &model, &only.1, policy.strategy),
+            [first, ..] => first,
         };
-        Some(picked)
+        match policy.strategy {
+            Strategy::FillFirst => members.first().copied(),
+            // Like fill-first: the first provider group, then its soonest reset.
+            Strategy::SoonestReset => self.pick_within(provider, &model, members, Strategy::SoonestReset),
+            Strategy::WeightedRoundRobin => {
+                self.pick_within(&providers_key, &model, &ready, Strategy::WeightedRoundRobin)
+            }
+            Strategy::RoundRobin => {
+                // Go `pickMixed`: a cursor over provider segments sized by their ready
+                // counts, then that provider's own round-robin.
+                let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
+                let cursor = self.cursors.entry((providers_key.clone(), model.clone())).or_default();
+                let slot = *cursor % total;
+                *cursor = slot + 1;
+                let mut start = 0;
+                let (provider, members) = groups
+                    .iter()
+                    .find(|(_, members)| {
+                        start += members.len();
+                        slot < start
+                    })
+                    .or(groups.first())?;
+                self.pick_within(provider, &model, members, Strategy::RoundRobin)
+            }
+        }
     }
 
-    fn pick_within<'a>(
+    fn pick_within<'c, 'a>(
         &mut self,
         scope: &str,
         model: &str,
-        members: &[&'a Credential],
+        members: &[&'c Candidate<'a>],
         strategy: Strategy,
-        ranks: &Ranks<'_>,
-    ) -> &'a Credential {
+    ) -> Option<&'c Candidate<'a>> {
         let state = self.rotations.entry((scope.to_owned(), model.to_owned())).or_default();
-        match strategy {
-            Strategy::FillFirst => members[0],
+        let picked = match strategy {
+            Strategy::FillFirst => return members.first().copied(),
             Strategy::SoonestReset => {
                 let probes = &mut self.probes;
                 let ranked: Vec<_> = members
                     .iter()
                     .map(|c| {
-                        let windows = ranks(c);
-                        let order = windows.order(probed(probes.get(&c.id), windows.rolled_over));
+                        let windows = c.windows;
+                        let order = windows.order(probed(probes.get(&c.credential.id), windows.rolled_over));
                         (order, windows.rolled_over, *c)
                     })
                     .collect();
-                let best = ranked.iter().map(|(order, ..)| *order).min().expect("members");
+                let best = ranked.iter().map(|(order, ..)| *order).min()?;
                 // Equal ranks take turns.
                 let tied: Vec<_> = ranked.iter().filter(|(o, ..)| *o == best).collect();
                 let (order, rolled_over, picked) = *tied
                     .iter()
-                    .find(|(.., c)| c.id > state.last)
-                    .copied()
-                    .unwrap_or(tied[0]);
+                    .find(|(.., c)| c.credential.id > state.last)
+                    .or(tied.first())
+                    .copied()?;
                 if order.1 == 0 {
                     // Its one probe, spent whatever the answer: the next pick ranks it
                     // by what the answer reports, if anything.
-                    let markers = probes.entry(picked.id.clone()).or_default();
+                    let markers = probes.entry(picked.credential.id.clone()).or_default();
                     if let Some(r) = rolled_over {
                         markers.insert(r.window, r.at);
                     }
                 }
-                state.last.clone_from(&picked.id);
                 picked
             }
-            Strategy::RoundRobin => {
-                let picked = members
-                    .iter()
-                    .find(|c| c.id > state.last)
-                    .copied()
-                    .unwrap_or(members[0]);
-                state.last.clone_from(&picked.id);
-                picked
-            }
+            Strategy::RoundRobin => members
+                .iter()
+                .find(|c| c.credential.id > state.last)
+                .or(members.first())
+                .copied()?,
             Strategy::WeightedRoundRobin => {
                 if members
                     .iter()
-                    .any(|c| state.weights.get(&c.id).is_some_and(|w| *w != weight(c)))
+                    .any(|c| state.weights.get(&c.credential.id).is_some_and(|w| *w != c.weight))
                 {
                     state.current.clear();
                 }
                 if state.weights.len() > 1024 || state.current.len() > 1024 {
-                    state.weights.retain(|id, _| members.iter().any(|c| c.id == *id));
-                    state.current.retain(|id, _| members.iter().any(|c| c.id == *id));
+                    state
+                        .weights
+                        .retain(|id, _| members.iter().any(|c| c.credential.id == *id));
+                    state
+                        .current
+                        .retain(|id, _| members.iter().any(|c| c.credential.id == *id));
                 }
                 let mut total = 0i64;
-                let mut best = i64::MIN;
-                let mut picked = members[0];
+                let mut best: Option<(i64, &'c Candidate<'a>)> = None;
                 for c in members {
-                    let w = weight(c);
-                    state.weights.insert(c.id.clone(), w);
-                    let current = state.current.entry(c.id.clone()).or_default();
-                    *current = current.saturating_add(w);
-                    total = total.saturating_add(w);
-                    if *current > best {
-                        best = *current;
-                        picked = c;
+                    let id = &c.credential.id;
+                    match state.weights.get_mut(id) {
+                        Some(w) => *w = c.weight,
+                        None => {
+                            state.weights.insert(id.clone(), c.weight);
+                        }
+                    }
+                    if !state.current.contains_key(id) {
+                        state.current.insert(id.clone(), 0);
+                    }
+                    let current = state.current.get_mut(id).map_or(0, |current| {
+                        *current = current.saturating_add(c.weight);
+                        *current
+                    });
+                    total = total.saturating_add(c.weight);
+                    if best.is_none_or(|(b, _)| current > b) {
+                        best = Some((current, c));
                     }
                 }
-                let current = state.current.get_mut(&picked.id).unwrap();
-                *current = current.saturating_sub(total);
-                picked
+                let (_, picked) = best?;
+                if let Some(current) = state.current.get_mut(&picked.credential.id) {
+                    *current = current.saturating_sub(total);
+                }
+                return Some(picked);
             }
-        }
+        };
+        state.last.clone_from(&picked.credential.id);
+        Some(picked)
     }
 
+    #[cfg(test)]
     pub fn admits(&self, c: &Credential, policy: &Policy) -> bool {
-        policy.strategy != Strategy::WeightedRoundRobin || weight(c) > 0
+        policy.admits_weight(weight(c))
     }
 
     /// [`Self::record_picked`] for an attempt picked just now.
@@ -1348,9 +1561,8 @@ impl Scheduler {
         self.record_picked(c, model, outcome, policy, self.generation, now);
     }
 
-    /// Applies one attempt's outcome (Go `MarkResult`). `picked` is the generation its
-    /// lease was picked at ([`Self::reserve_probe`]): a bounded window or probe
-    /// reservation newer than that is not answered by it.
+    /// [`Self::record_with`], parsing the credential's own error rules.
+    #[cfg(test)]
     pub fn record_picked(
         &mut self,
         c: &Credential,
@@ -1360,12 +1572,30 @@ impl Scheduler {
         picked: u32,
         now: Instant,
     ) {
+        self.record_with(c, file_rules(c).as_deref(), model, outcome, policy, picked, now);
+    }
+
+    /// Applies one attempt's outcome (Go `MarkResult`), with the credential's own error
+    /// rules already parsed. `picked` is the generation its lease was picked at
+    /// ([`Self::reserve_probe`]): a bounded window or probe reservation newer than that
+    /// is not answered by it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_with(
+        &mut self,
+        c: &Credential,
+        rules: Option<&[ErrorRule]>,
+        model: &str,
+        outcome: &Outcome,
+        policy: &Policy,
+        picked: u32,
+        now: Instant,
+    ) {
         let model = canonical_model(model);
-        let key = (c.id.clone(), model.to_owned());
+        let id = c.id.as_str();
         // Any answer ends a probe reservation on the keys it touches, except one taken
         // after its lease was picked (a later probe's, once this one's hold lapsed).
         for m in [model, ""] {
-            if let Some(s) = self.cooldowns.get_mut(&(c.id.clone(), m.to_owned()))
+            if let Some(s) = self.cooldown_mut(id, m)
                 && !s.newer_than(picked)
             {
                 s.trust.probe = None;
@@ -1373,57 +1603,54 @@ impl Scheduler {
         }
         let error = match outcome {
             Outcome::Success => {
+                let Some(entry) = self.cooldowns.get_mut(id) else {
+                    return;
+                };
                 // Active credential quota survives success on an in-flight sibling.
-                let global = (c.id.clone(), String::new());
-                if self.cooldowns.get(&global).is_some_and(|s| s.quota && s.deadline > now) {
+                if entry.own.as_ref().is_some_and(|s| s.quota && s.deadline > now) {
                     return;
                 }
                 // A request that started before a bounded window opened leaves it for the
                 // window's own probe.
-                if let Some(ended) = self
-                    .cooldowns
-                    .get(&global)
+                if let Some(ended) = entry
+                    .own
+                    .as_ref()
                     .filter(|s| s.deadline <= now && !s.newer_than(picked))
                     .map(|s| s.deadline)
                 {
-                    self.cooldowns.remove(&global);
+                    entry.own = None;
                     // The credential recovered: model keys that a credential-wide window
                     // escalated forget it too (their Go state is left as Go keeps it). A
                     // model's own ended bounded window still waits for its probe, and one
                     // a newer probe reserved or answered keeps its state.
-                    for ((id, _), s) in &mut self.cooldowns {
-                        if *id == c.id
-                            && s.deadline <= now
-                            && (!s.trust.bounded || s.deadline == ended)
-                            && !s.newer_than(picked)
-                        {
+                    for s in entry.models.values_mut() {
+                        if s.deadline <= now && (!s.trust.bounded || s.deadline == ended) && !s.newer_than(picked) {
                             s.trust = Trust::default();
                         }
                     }
                 }
-                if !self.cooldowns.get(&key).is_some_and(|s| s.newer_than(picked)) {
-                    self.cooldowns.remove(&key);
+                if !entry.get(model).is_some_and(|s| s.newer_than(picked)) {
+                    entry.remove(model);
+                }
+                if entry.is_empty() {
+                    self.cooldowns.remove(id);
                 }
                 return;
             }
             Outcome::Cancelled | Outcome::Neutral(_) => return,
             Outcome::Failure(error) => error,
         };
-        let action = policy.error_action(c, error);
+        let action = policy.error_action_with(rules, c, error);
         if !action.cooldown {
             return;
         }
         let credential_quota = crate::classify::credential_scoped(error);
-        let key = if credential_quota {
-            (c.id.clone(), String::new())
-        } else {
-            key
-        };
+        let key = if credential_quota { "" } else { model };
         // A forced cooldown applies the normal policy even when cooling is disabled.
         let disabled = policy.cooling_disabled(c) && !action.force_cooldown;
         let status = crate::classify::go_status(error);
         let text = crate::classify::error_text(error);
-        let prev = self.cooldowns.get(&key);
+        let prev = self.cooldowns.get(id).and_then(|e| e.get(key));
         // An ended bounded window that a newer probe took over, or that opened after this
         // attempt was picked, waits for its own probe: this older answer neither renews
         // nor replaces it. Inside a live window the handling below applies.
@@ -1478,7 +1705,7 @@ impl Scheduler {
                             let old = window.deadline;
                             let deadline = reset.map_or(old, |r| old.min(r));
                             let mut window_trust = window.trust;
-                            if let Some(slot) = self.cooldowns.get_mut(&key) {
+                            if let Some(slot) = self.cooldowns.get_mut(id).and_then(|e| e.get_mut(key)) {
                                 slot.deadline = deadline;
                                 slot.error = text;
                                 slot.trust.stated = reset.or(slot.trust.stated);
@@ -1488,8 +1715,13 @@ impl Scheduler {
                                 // Model keys that inherited this credential window (same
                                 // deadline, bounded) follow it when it moves up; longer
                                 // independent cooldowns stand.
-                                for ((id, m), state) in &mut self.cooldowns {
-                                    if *id == c.id && !m.is_empty() && state.trust.bounded && state.deadline == old {
+                                for state in self
+                                    .cooldowns
+                                    .get_mut(id)
+                                    .into_iter()
+                                    .flat_map(|e| e.models.values_mut())
+                                {
+                                    if state.trust.bounded && state.deadline == old {
                                         state.deadline = deadline;
                                         state.trust.stated = window_trust.stated;
                                         state.trust.window = state.trust.window.max(window_trust.window);
@@ -1518,7 +1750,7 @@ impl Scheduler {
                         // Go `quotaCooldownAfterFailure`: an active quota deadline is
                         // reused, not extended.
                         let deadline = prev.deadline;
-                        if let Some(slot) = self.cooldowns.get_mut(&key) {
+                        if let Some(slot) = self.cooldowns.get_mut(id).and_then(|e| e.get_mut(key)) {
                             slot.error = text;
                         }
                         if credential_quota {
@@ -1542,7 +1774,7 @@ impl Scheduler {
             d => d,
         };
         let Some(next) = duration.and_then(|d| now.checked_add(d)) else {
-            self.cooldowns.remove(&key);
+            self.remove_cooldown(id, key);
             return;
         };
         let deadline = prev_live.map_or(next, |p| p.max(next));
@@ -1551,7 +1783,11 @@ impl Scheduler {
         // its saved record keeps the stated reset and count. Only bounded windows; Go's
         // own cooldowns merge as Go does.
         if prev_live == Some(deadline)
-            && let Some(slot) = self.cooldowns.get_mut(&key).filter(|s| s.quota && s.trust.bounded)
+            && let Some(slot) = self
+                .cooldowns
+                .get_mut(id)
+                .and_then(|e| e.get_mut(key))
+                .filter(|s| s.quota && s.trust.bounded)
         {
             slot.error = text;
             // Go's level still counts a Cloudflare challenge (unchanged for other causes).
@@ -1585,21 +1821,17 @@ impl Scheduler {
             credential: false,
             trust: provenance(deadline),
         };
-        self.cooldowns.insert(key, state(deadline));
+        self.set_cooldown(id, key, state(deadline));
         if credential_quota {
             self.extend_siblings(c, deadline, prev_deadline, now);
             // Go also records the failing model's own quota state (reason `quota`).
             if !model.is_empty() {
-                let own = (c.id.clone(), model.to_owned());
                 // `extend_siblings` above already took a live own key to the credential's
                 // deadline, unless it is longer, the model's own bounded window, or the
                 // credential's window is bounded: then the own deadline stands.
-                let own_deadline = self
-                    .cooldowns
-                    .get(&own)
-                    .filter(|s| s.deadline > now)
-                    .map_or(deadline, |s| s.deadline);
-                let own_trust = self.cooldowns.get(&own).map(|s| s.trust).unwrap_or_default();
+                let own = self.cooldown(id, model);
+                let own_deadline = own.filter(|s| s.deadline > now).map_or(deadline, |s| s.deadline);
+                let own_trust = own.map(|s| s.trust).unwrap_or_default();
                 let own_window = own_trust.window;
                 let mut own_state = state(own_deadline);
                 if own_deadline != deadline {
@@ -1613,7 +1845,7 @@ impl Scheduler {
                     own_state.trust = provenance(deadline);
                 }
                 own_state.trust.window = own_state.trust.window.max(own_window);
-                self.cooldowns.insert(own, own_state);
+                self.set_cooldown(id, model, own_state);
             }
         }
     }
@@ -1628,14 +1860,11 @@ impl Scheduler {
     /// window this one `renews` (the credential's previous deadline) move onto it even
     /// when they ended, so no copy outlives the account's recovery.
     fn extend_siblings(&mut self, c: &Credential, deadline: Instant, renews: Option<Instant>, now: Instant) {
-        let (level, trust) = self
-            .cooldowns
-            .get(&(c.id.clone(), String::new()))
-            .map_or((0, Trust::default()), |s| (s.level, s.trust));
-        for ((id, model), state) in &mut self.cooldowns {
-            if *id != c.id || model.is_empty() {
-                continue;
-            }
+        let Some(entry) = self.cooldowns.get_mut(c.id.as_str()) else {
+            return;
+        };
+        let (level, trust) = entry.own.as_ref().map_or((0, Trust::default()), |s| (s.level, s.trust));
+        for state in entry.models.values_mut() {
             let copy = state.trust.bounded && (state.deadline == deadline || Some(state.deadline) == renews);
             if state.deadline > now || copy {
                 let window = state.trust.window.max(trust.window);
@@ -1659,11 +1888,10 @@ impl Scheduler {
     pub fn reset(&mut self, id: &str) -> Vec<String> {
         let mut models: Vec<String> = self
             .cooldowns
-            .keys()
-            .filter(|(cid, _)| cid == id)
-            .map(|(_, m)| m.clone())
+            .remove(id)
+            .iter()
+            .flat_map(|e| e.iter().map(|(m, _)| m.to_owned()))
             .collect();
-        self.cooldowns.retain(|(cid, _), _| cid != id);
         self.affinity.invalidate(id);
         self.lcp.invalidate(id);
         self.probes.remove(id);
@@ -1677,9 +1905,11 @@ impl Scheduler {
         use crate::cooldown_store::{LastError, Quota, Record};
         let mut out: Vec<Record> = self
             .cooldowns
-            .iter()
-            .filter(|((id, _), state)| *id == c.id && state.deadline > now)
-            .map(|((_, model), state)| {
+            .get(c.id.as_str())
+            .into_iter()
+            .flat_map(Cooldowns::iter)
+            .filter(|(_, state)| state.deadline > now)
+            .map(|(model, state)| {
                 let at = wall + (state.deadline - now);
                 // Go's recovery time is the stated reset; the probe time is the retry.
                 let recover = state
@@ -1696,7 +1926,7 @@ impl Scheduler {
                 Record {
                     provider: c.provider.trim().to_owned(),
                     auth_id: c.id.clone(),
-                    model: model.clone(),
+                    model: model.to_owned(),
                     status: "cooling".into(),
                     next_retry_after: Some(at),
                     quota: if state.quota {
@@ -1801,8 +2031,8 @@ impl Scheduler {
             0 if record.quota.exceeded => 429,
             s => u16::try_from(s).unwrap_or(0),
         };
-        let key = (c.id.clone(), canonical_model(model).to_owned());
-        let prev = self.cooldowns.get(&key).filter(|prev| prev.deadline > now);
+        let key = canonical_model(model);
+        let prev = self.cooldown(&c.id, key).filter(|prev| prev.deadline > now);
         let prev_wins = prev.is_some_and(|p| p.deadline > deadline);
         let deadline = prev.map_or(deadline, |prev| prev.deadline.max(deadline));
         let mut quota = (
@@ -1833,7 +2063,8 @@ impl Scheduler {
             trust.generation = self.generation;
         }
         let (quota, status, credential) = quota;
-        self.cooldowns.insert(
+        self.set_cooldown(
+            &c.id,
             key,
             Cooldown {
                 deadline,
@@ -1857,7 +2088,7 @@ impl Scheduler {
     /// or whose cooling the policy disables. Returns whether anything was cleared.
     pub fn clear_disabled(&mut self, credentials: &[std::sync::Arc<Credential>], policy: &Policy) -> bool {
         let before = self.cooldowns.len();
-        self.cooldowns.retain(|(id, _), _| {
+        self.cooldowns.retain(|id, _| {
             credentials
                 .iter()
                 .find(|c| c.id == *id)
@@ -1867,11 +2098,11 @@ impl Scheduler {
     }
 
     pub fn reconcile(&mut self, credentials: &[std::sync::Arc<Credential>]) {
-        self.cooldowns
-            .retain(|(id, _), _| credentials.iter().any(|c| c.id == *id));
-        self.affinity.retain(|id| credentials.iter().any(|c| c.id == id));
-        self.lcp.retain(|id| credentials.iter().any(|c| c.id == id));
-        self.probes.retain(|id, _| credentials.iter().any(|c| c.id == *id));
+        let live: std::collections::HashSet<&str> = credentials.iter().map(|c| c.id.as_str()).collect();
+        self.cooldowns.retain(|id, _| live.contains(id.as_str()));
+        self.affinity.retain(|id| live.contains(id));
+        self.lcp.retain(|id| live.contains(id));
+        self.probes.retain(|id, _| live.contains(id.as_str()));
     }
 }
 
@@ -1904,10 +2135,12 @@ impl Scheduler {
     pub(crate) fn cooldowns_of(&self, id: &str, now: Instant) -> Vec<CooldownState> {
         let mut out: Vec<CooldownState> = self
             .cooldowns
-            .iter()
-            .filter(|((cid, _), s)| cid == id && (s.deadline > now || recover_after(s, now).is_some()))
-            .map(|((_, model), s)| CooldownState {
-                model: model.clone(),
+            .get(id)
+            .into_iter()
+            .flat_map(Cooldowns::iter)
+            .filter(|(_, s)| s.deadline > now || recover_after(s, now).is_some())
+            .map(|(model, s)| CooldownState {
+                model: model.to_owned(),
                 remaining: s.deadline.saturating_duration_since(now),
                 recover_in: recover_after(s, now),
                 level: s.level,
@@ -1923,12 +2156,10 @@ impl Scheduler {
     pub(crate) fn reset_cooldowns(&mut self, id: &str) -> Vec<String> {
         let mut models: Vec<String> = self
             .cooldowns
-            .keys()
-            .filter(|(cid, model)| cid == id && !model.is_empty())
-            .map(|(_, model)| model.clone())
-            .collect();
+            .remove(id)
+            .map(|e| e.models.into_keys().collect())
+            .unwrap_or_default();
         models.sort();
-        self.cooldowns.retain(|(cid, _), _| cid != id);
         // A reset credential is probed again under `soonest-reset`; affinity is kept.
         self.probes.remove(id);
         models
@@ -2218,7 +2449,7 @@ mod tests {
     }
 
     fn entry<'a>(s: &'a Scheduler, c: &Credential, model: &str) -> &'a Cooldown {
-        &s.cooldowns[&(c.id.clone(), model.to_owned())]
+        s.cooldown(&c.id, model).unwrap()
     }
 
     /// A stated reset six days away is trusted for one hour, then for doubling windows
@@ -2539,10 +2770,7 @@ mod tests {
         s.record_picked(&c, "m", &hinted(FailureScope::Model, days), &p, first, done);
         assert_eq!(s.wait(&c, "m", done), None, "no window from the superseded probe");
         s.record_picked(&c, "m", &Outcome::Success, &p, second, done + secs(1));
-        assert!(
-            !s.cooldowns.contains_key(&(c.id.clone(), "m".to_owned())),
-            "m recovered"
-        );
+        assert!(s.cooldown(&c.id, "m").is_none(), "m recovered");
     }
 
     /// A probe whose hold lapsed was taken over by a later probe: its late 429 neither

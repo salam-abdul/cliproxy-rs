@@ -332,6 +332,15 @@ impl Observations {
         self.0.snapshot(credential_id)
     }
 
+    /// `f` of the credential's latest snapshot, read in place without a copy.
+    pub fn with_snapshot<R>(
+        &self,
+        credential_id: &str,
+        f: impl FnOnce(&crate::codex_quota::Snapshot) -> R,
+    ) -> Option<R> {
+        self.0.with_snapshot(credential_id, f)
+    }
+
     /// The latest snapshot per model (Go `model_quotas`), empty when none was observed.
     pub fn model_snapshots(
         &self,

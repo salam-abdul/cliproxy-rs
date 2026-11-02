@@ -889,16 +889,11 @@ async fn run_routed(
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
     // A remote dispatcher receives the pinned ID itself.
-    let mut pinned_exclusion: Vec<String> = match call.pinned() {
-        Some(pinned) if !pinned.is_empty() && rt.remote_dispatch().is_none() => rt
-            .store()
-            .snapshot()
-            .iter()
-            .filter(|c| c.id != pinned)
-            .map(|c| c.id.clone())
-            .collect(),
-        _ => Vec::new(),
-    };
+    let pinned = call
+        .pinned()
+        .filter(|pinned| !pinned.is_empty() && rt.remote_dispatch().is_none())
+        .map(str::to_owned);
+    let mut always_excluded: Vec<String> = Vec::new();
     // `WithDisallowFreeAuth`: free-plan Codex credentials are ineligible in every round.
     // ponytail: Home mode selects remotely and does not see this flag.
     if call.media.as_ref().is_some_and(|m| m.disallow_free) {
@@ -908,8 +903,8 @@ async fn run_routed(
                     .attributes
                     .get("plan_type")
                     .is_some_and(|plan| plan.trim().eq_ignore_ascii_case("free"));
-            if free && !pinned_exclusion.contains(&credential.id) {
-                pinned_exclusion.push(credential.id.clone());
+            if free && !always_excluded.contains(&credential.id) {
+                always_excluded.push(credential.id.clone());
             }
         }
     }
@@ -919,7 +914,8 @@ async fn run_routed(
         session: session.id.clone(),
         session_parent: session.parent,
         session_fork: session.fork,
-        exclude: pinned_exclusion.clone(),
+        pinned,
+        exclude: always_excluded.clone(),
         ..Selection::default()
     };
     let request = ExecRequest {
@@ -1055,7 +1051,7 @@ async fn run_routed(
                 Attempt::Next(fault) => {
                     if fault.broke_silently() {
                         broke = true;
-                        pinned_exclusion.push(id);
+                        always_excluded.push(id);
                     }
                     if classify::upstream_attempted(&fault.error) {
                         upstream = Some(fault.clone());
@@ -1138,7 +1134,7 @@ async fn run_routed(
             tokio::time::sleep(jitter(wait, policy.max_retry_interval)).await;
         }
         selection.retry_round += 1;
-        selection.exclude.clone_from(&pinned_exclusion);
+        selection.exclude.clone_from(&always_excluded);
     }
 }
 
@@ -2140,7 +2136,7 @@ async fn attempt(
                 &classify::error_text(error),
             );
         }
-        let action = policy.error_action(&lease.credential, error);
+        let action = rt.store().error_action(policy, &lease.credential, error);
         let neutral = (target.compact && classify::is_compact_neutral(error) && !action.force_cooldown)
             || (call.operation == Operation::CountTokens
                 && classify::is_count_endpoint_missing(error, upstream)
