@@ -480,6 +480,7 @@ impl Duplex {
             return;
         }
         // ponytail: invalid UTF-8 inside JSON strings is replaced; Go forwards the bytes.
+        // Parse the frame as bytes to forward them unchanged.
         let payload = String::from_utf8_lossy(&frame).into_owned();
         let kind = gjson::get(&payload, "type").str().to_owned();
         match kind.as_str() {
@@ -575,7 +576,8 @@ impl Duplex {
         };
         let (body, replay) = Replay::apply(&self.initial.replay.cache, &next, body).await;
         // ponytail: Go starts a usage record per response; this stream reports every
-        // response's events to the bootstrap attempt's record and keeps its request.
+        // response's events to the bootstrap attempt's record and keeps its request. Open a
+        // record per response once `UsageSink` can.
         let (body, _) = request::prompt_cache(&next, body, Some(&self.exec_session), true);
         // Go also fails when the URL differs from the bootstrap's; it cannot here, since
         // both come from the same credential.

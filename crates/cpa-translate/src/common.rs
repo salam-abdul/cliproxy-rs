@@ -291,7 +291,7 @@ pub fn map_tool_name(map: Option<&HashMap<Vec<u8>, Vec<u8>>>, name: &[u8]) -> Ve
 
 /// thinking.GetThinkingText on bytes: `text`, then `thinking` as a string or an object
 /// holding `text` or `thinking`.
-// ponytail: cpa_common::thinking::get_thinking_text takes a UTF-8 gjson value; this keeps
+// `cpa_common::thinking::get_thinking_text` takes a UTF-8 gjson value; this keeps
 // Go's byte handling for translator inputs.
 pub fn thinking_text(part: &Res<'_>) -> Vec<u8> {
     let text = part.get("text");
@@ -431,7 +431,8 @@ pub fn restore_sanitized_tool_name(map: Option<&HashMap<Vec<u8>, Vec<u8>>>, name
 
 /// `time.Unix(secs, 0).Format(time.RFC3339Nano)` in UTC: `YYYY-MM-DDThh:mm:ssZ`.
 // ponytail: Go formats in the process's local zone; this assumes UTC, as Go runs in its
-// container image. Years beyond four digits print in full, as Go does.
+// container image. Years beyond four digits print in full, as Go does. Format in the
+// local zone if a server runs outside UTC.
 pub fn format_rfc3339_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);

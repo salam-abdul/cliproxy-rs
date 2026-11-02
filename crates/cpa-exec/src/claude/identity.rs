@@ -51,7 +51,7 @@ pub(crate) fn wire_identity(credential: &Credential, seed: &str, synthesize: boo
     let device = if synthesize && !canonical {
         cpa_core::hex::encode(Sha256::digest(format!("cpa-claude-code-cli-device|{seed}").as_bytes()))
     } else {
-        // ponytail: an OAuth credential reaching execute without a pool (prepare not yet
+        // An OAuth credential reaching execute without a pool (prepare not yet
         // committed) gets a request-local random device, as Go's in-memory ensure does.
         first_device(raw).unwrap_or_else(|| {
             let mut bytes = [0u8; 32];

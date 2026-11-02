@@ -744,7 +744,7 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
 /// ConvertAntigravityResponseToGemini as the Antigravity executor runs it (`alt` is
 /// always empty there): each chunk is the unwrapped `response`, and `[DONE]` closes a
 /// stream that produced output but no finish reason with a synthetic terminal chunk.
-// ponytail: the non-empty `alt` branch (JSON-array chunks) is unreachable from the
+// The non-empty `alt` branch (JSON-array chunks) is unreachable from the
 // Antigravity executor, which sets `alt` to "" for streams; it is not ported.
 #[derive(Default)]
 struct Stream {

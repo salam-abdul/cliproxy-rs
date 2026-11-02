@@ -169,7 +169,8 @@ impl Drop for TrackedBody {
 
 /// `http.DetectContentType` for what a live upstream returns.
 // ponytail: HTML, XML, UTF BOMs and text-versus-binary only; Go also recognises images,
-// audio, archives and fonts. SDP and JSON are text/plain in Go too.
+// audio, archives and fonts. SDP and JSON are text/plain in Go too. Port the rest of
+// `http.DetectContentType` if other bodies reach this.
 fn sniff(body: &[u8]) -> &'static str {
     let data = &body[..body.len().min(512)];
     if data.starts_with(b"\xFE\xFF") {

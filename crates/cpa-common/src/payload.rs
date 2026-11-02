@@ -1208,7 +1208,8 @@ fn query_matches(item: &Res<'_>, query: &str) -> bool {
                 }
                 let wrapped = format!("[{}]", String::from_utf8_lossy(item.raw()));
                 // ponytail: gjson queries come from the `gjson` crate (tidwall's own Rust
-                // port); `crate::json` does not implement `#(...)`.
+                // port) because `crate::json` does not implement `#(...)`; implementing
+                // queries there would leave one JSON path engine.
                 gjson::get(&wrapped, &format!("#({term})")).exists()
             })
     })

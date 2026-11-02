@@ -3,7 +3,7 @@
 //! including the apply_patch bridge: a declared `apply_patch` custom tool streams its
 //! decoded patch input, and invalid or conflicting input fails the response.
 //
-// ponytail: Go finalizes pending tool items in map order, which is random when several
+// Go finalizes pending tool items in map order, which is random when several
 // are open at once; this port uses ascending block index.
 
 use crate::apply_patch::CallState;
@@ -1464,7 +1464,7 @@ fn set_value(out: &mut Vec<u8>, path: &str, v: &Res<'_>) {
             gj::set_raw(out, path, "null");
         }
         // ponytail: Go's sjson leaves the document nil when Marshal fails (NaN inside);
-        // that case keeps the previous document here.
+        // that case keeps the previous document here. Clear it if a client relies on Go's result.
         Kind::Json => {
             if let Some(json) = v.value_json() {
                 gj::set_raw(out, path, json);

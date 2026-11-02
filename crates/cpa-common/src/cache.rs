@@ -10,8 +10,9 @@
 //! background purge runs lazily at the nominal tick times on the next cache access
 //! (`Caches::sweep`).
 // ponytail: Go's Home KV backends of both caches are not ported (Rust Home mode keeps
-// these stores in process). Branch identifiers come from a process counter instead of
-// crypto/rand: they are only compared within this process.
+// these stores in process); port them if several instances must share the caches.
+// Branch identifiers come from a process counter instead of crypto/rand because they
+// are only compared within this process.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

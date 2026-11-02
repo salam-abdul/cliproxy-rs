@@ -445,7 +445,8 @@ impl Runtime {
                 cancel: grant.cancel,
             }),
             // ponytail: Go's Home dispatch keys its own session aliases on LCP matches
-            // (home_session_alias.go); remote picks here carry no LCP binding.
+            // (home_session_alias.go); remote picks here carry no LCP binding. Bind them in
+            // `lcp` if Home sessions need those aliases.
             lcp: None,
         };
         Ok((lease, grant.request_retry, grant.user_api_key))
@@ -523,6 +524,7 @@ impl Runtime {
     /// committed replacement to retry with.
     // ponytail: refresh goes through `Executors::prepare`; a provider whose prepare only
     // refreshes inside its lead (Claude) cannot recover a revoked but unexpired token.
+    // Force a refresh past the lead here to recover it.
     pub async fn refresh_after_unauthorized(&self, credential: &Credential, cfg: &Config) -> Option<Arc<Credential>> {
         if !self.executors.has_refresh_credential(credential) {
             return None;

@@ -451,7 +451,8 @@ fn load_config(path: &Path, optional: bool) -> anyhow::Result<Config> {
             if !missing {
                 // ponytail: Go stays fatal for its post-decode validations (trusted
                 // proxies, weights, in-flight); cpa-core reports both kinds alike, so
-                // cloud mode stands by on every load error and logs it.
+                // cloud mode stands by on every load error and logs it. Split cpa-core's
+                // load error into decode and validation kinds to stay fatal on the latter.
                 tracing::error!("{e:#}");
             }
             Config::parse("")
@@ -924,7 +925,7 @@ impl Drop for QuietStdio {
 
 /// ponytail: Windows keeps the console handles. Go swaps only its `os.Stdout`
 /// variable there too; the log lines already go to the hook, so only a stray direct
-/// print could reach the screen.
+/// print could reach the screen. Redirect the handles with `SetStdHandle` if one does.
 #[cfg(not(unix))]
 struct QuietStdio;
 

@@ -184,6 +184,7 @@ fn duration_nanos(v: &Yaml) -> Value {
 /// sorted at every level, and a float with no fraction printed as an integer.
 /// ponytail: other floats use serde's shortest form, which differs from Go's
 /// `strconv` form only for exponents (`1e21` vs `1e+21`, `1e16` vs `10000000000000000`).
+/// Format exponents as strconv does if a client compares the text.
 fn any_json(v: &Yaml) -> Value {
     fn go(v: Value) -> Value {
         match v {

@@ -158,7 +158,7 @@ fn open_browser(url: &str) -> bool {
 }
 
 /// `util.PrintSSHTunnelInstructions`.
-// ponytail: Go asks four public IP services for the address first; this prints the
+// Go asks four public IP services for the address first; this prints the
 // outbound interface address (no packet is sent), Go's second choice, without
 // announcing the login to third parties.
 pub(crate) fn print_ssh_tunnel_instructions(port: u16) {

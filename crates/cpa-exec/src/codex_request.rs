@@ -98,6 +98,7 @@ impl Settings {
         };
         // ponytail: Go's executor-side resolveCodexKeyConfig skips the prefix/proxy
         // tie-break of the shared resolver; they differ only for duplicate key+URL entries.
+        // Skip the tie-break here too if such duplicates must resolve as Go's executor does.
         settings.key_models = cpa_core::config::credentials::resolve_api_key_entry(cfg, "codex", view.credential)
             .map(|entry| entry.models)
             .unwrap_or_default();
@@ -347,12 +348,13 @@ pub(crate) fn is_native(req: &ExecRequest) -> bool {
 /// thinking pipeline for `codex` (`openai-response` for compact). Also returns the
 /// translated original request, which payload default rules consult.
 // ponytail: the translator's configuration-update intent is not surfaced, so
-// `updates_changed` stays false.
+// `updates_changed` stays false. Return the intent from cpa-translate and pass it here
+// if thinking must see a translated update.
 fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(String, Vec<u8>), ExecError> {
     let target = call.target();
     let registered = cpa_translate::pair(req.source_format, target).is_some();
     if !registered && !matches!(req.source_format, Format::Codex | Format::OpenAIResponse) {
-        // ponytail: Go forwards an untranslatable body as-is; refusing locally is clearer.
+        // Go forwards an untranslatable body as-is; refusing locally is clearer.
         return Err(ExecError::local(
             501,
             FailureScope::Request,
@@ -458,7 +460,8 @@ pub(crate) struct Shaped {
 }
 
 /// Applies the Codex body rules for `call`.
-// ponytail: the Claude-source reasoning replay cache is not applied here yet.
+// The executors apply the Claude-source reasoning replay after these rules
+// (`codex_replay::apply`); compact requests skip it.
 // ponytail: each rule that edits the body returns a new copy while the previous one is
 // still alive, so a streamed 1.9 MB /v1/responses request peaks at 16.8 MB of live heap
 // (8.8x the body; alloc.codex.* in crates/cpa-server/tests/fixtures/allocation_limits.txt). At that peak, heaptrack counted
@@ -684,7 +687,8 @@ fn sanitize_reasoning(body: String, is_compat: bool) -> String {
 /// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): only the Codex executors
 /// call it, so it lives here rather than in `cpa_common::payload`.
 // ponytail: the companion stripIncompatiblePatterns pass (drops `\p{..}` regex patterns by
-// re-encoding the schema) is not ported; such schemas pass through unchanged.
+// re-encoding the schema) is not ported; such schemas pass through unchanged. Port the
+// pass if Codex starts rejecting them.
 fn normalize_tool_schemas(body: String) -> String {
     let tools = gjson::get(&body, "tools");
     match normalize_tool_list(&tools) {

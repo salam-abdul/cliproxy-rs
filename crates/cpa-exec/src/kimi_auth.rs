@@ -382,7 +382,7 @@ impl DeviceFlow {
             ));
         }
         if status != 200 {
-            // ponytail: Go appends the response body; it is withheld here because token
+            // Go appends the response body; it is withheld here because token
             // endpoints may echo credentials and this message can reach clients.
             return Err(auth_error(status, format!("kimi: refresh failed with status {status}")));
         }

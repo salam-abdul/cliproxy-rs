@@ -46,7 +46,8 @@ pub async fn unified(State(rt): State<Arc<Runtime>>, OriginalUri(uri): OriginalU
         };
         let grok_shell = header("user-agent").is_some_and(|ua| ua.to_lowercase().contains("grok-shell"));
         // ponytail: Go builds the Codex client catalog (`client_version`) from Home's
-        // model IDs with its template metadata; here such clients get the OpenAI list.
+        // model IDs with its template metadata; here such clients get the OpenAI list. Build
+        // the Codex catalog from Home's IDs if Codex clients use Home mode.
         let body = if grok_shell {
             crate::home_models::grok(&entries)
         } else if anthropic && query_value(&uri, "client_version").is_none() {

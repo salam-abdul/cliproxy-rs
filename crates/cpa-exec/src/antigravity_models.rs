@@ -9,7 +9,7 @@
 // ponytail: Go probes on each registration, which also resets the flags until the probe
 // lands; here a credential is probed when the registry first sees a new revision of it,
 // and its previous hints stay until the new probe finishes. Config reloads alone do not
-// re-probe.
+// re-probe; probe on reload too if a config change must refresh the flags.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};

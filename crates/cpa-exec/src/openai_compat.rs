@@ -105,8 +105,9 @@ fn not_registered(what: &str, from: Format, to: Format) -> ExecError {
 
 /// `helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent` for this executor
 /// (no target executor): Codex-client rewrites, then the pair or its compat variant.
-// ponytail: the configuration-update intent is not exposed by crate::codex_client
-// (owner: Codex), so thinking always sees `updates_changed: false`.
+// ponytail: crate::codex_client does not expose the configuration-update intent, so
+// thinking always sees `updates_changed: false`. Expose it there if thinking must see
+// a translated update.
 fn translate_body(
     req: &ExecRequest,
     cfg: &Config,

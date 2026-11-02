@@ -5,10 +5,9 @@
 //! response (streams are emulated from the finished result), OpenAI-compatible image
 //! models are forwarded with the model set (responses normalized, streams raw), and
 //! gpt-image models are routed to whichever provider serves them and returned raw.
-// ponytail: Go's Responses image_generation tool path after the three families is
-// unreachable (rejectUnsupportedImagesModel admits only those families) and is not
-// ported. Pre-result stream keep-alives and the non-streaming keep-alive are not ported
-// either; both are off by default. Routed calls run with WithDisallowFreeAuth.
+// Go's Responses image_generation tool path after the three families is unreachable
+// (rejectUnsupportedImagesModel admits only those families), so it is not ported.
+// Routed calls run with WithDisallowFreeAuth.
 
 use std::sync::Arc;
 

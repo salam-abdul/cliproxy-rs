@@ -23,7 +23,7 @@
 //!
 //! ponytail: usage logging of live exchanges is not ported. Go also records a failed
 //! downstream write of the call's answer; the text is the socket's own error, which
-//! `TrackedBody` cannot see.
+//! `TrackedBody` cannot see. Port both if realtime calls need usage records.
 
 mod calls;
 #[cfg(test)]

@@ -147,7 +147,7 @@ pub(super) fn decode(shape: &Shape, raw: &[u8], into: Value) -> Option<Value> {
         ("int", _) => int_token(raw).map(Value::from),
         ("string", b'"') => go_unquote(raw).map(Value::String),
         // ponytail: generic values go through serde (recursion limit 128, where Go
-        // allows 10000); no v0 write shape holds one.
+        // allows 10000); no v0 write shape holds one. Use an iterative decoder if one does.
         ("any", _) => serde_json::from_slice(raw).ok(),
         ("slice", b'[') => {
             let elem = shape.elem.as_deref()?;
@@ -157,7 +157,8 @@ pub(super) fn decode(shape: &Shape, raw: &[u8], into: Value) -> Option<Value> {
             };
             // ponytail: Go reuses the backing array, so a third repeat of a member can
             // resurrect elements a shorter second repeat truncated; here elements past
-            // the earlier length start from zero.
+            // the earlier length start from zero. Keep the earlier elements if a client relies
+            // on Go's result.
             children(raw)
                 .into_iter()
                 .enumerate()

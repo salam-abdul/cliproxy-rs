@@ -75,6 +75,7 @@ impl Client {
     /// password in the URL shown as `***`.
     // ponytail: the transport cause is the OS error text ("Connection refused (os error
     // 111)") where Go prints its dialer's ("dial tcp ...: connect: connection refused").
+    // Format the dial error as Go does if a script parses this output.
     async fn request(&self, method: wreq::Method, path: &str, body: Option<String>) -> Result<(u16, Vec<u8>), String> {
         let url = format!("{}{path}", self.base_url);
         let mut op = method.as_str().to_lowercase();
@@ -444,7 +445,8 @@ fn eof_error(value: &[u8]) -> Option<String> {
 }
 
 /// encoding/json's syntax error text for the common cases.
-// ponytail: an error inside a document keeps serde's wording.
+// ponytail: an error inside a document keeps serde's wording; port encoding/json's
+// messages if a script parses them.
 fn json_error(data: &[u8], e: &serde_json::Error) -> String {
     let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
     let start = data.iter().position(|b| !space(b)).unwrap_or(data.len());

@@ -263,7 +263,8 @@ async fn write(state: Arc<Management>, v8: String, value: Value) -> Response {
 
 /// Saves one v8 path unchanged, as Go saves after a handler that changed nothing.
 /// ponytail: a path absent from the document is not saved at all; Go would still
-/// rewrite the file (and fail on a read-only disk).
+/// rewrite the file (and fail on a read-only disk). Save unconditionally if a caller
+/// depends on that rewrite.
 async fn touch(state: Arc<Management>, v8: String) -> Response {
     let cfg = state.rt.config();
     let current = v8
@@ -583,7 +584,8 @@ fn weight_error_in(items: &serde_yaml_ng::Value, path: &str) -> Option<WeightErr
 /// key lists and OpenAI-compatible `api-key-entries` of the merge-expanded document, in
 /// document order, skipping lists a v8 family replaces. A weight that is neither a
 /// number nor null fails Go's decode into `*int` before that: 400.
-// ponytail: that 400 message names the value where yaml.v3 also names the line.
+// ponytail: that 400 message names the value where yaml.v3 also names the line; add
+// the line if a client depends on it.
 fn legacy_weight_error(root: &serde_yaml_ng::Value) -> Option<Response> {
     let v8 = root.get("api-keys").and_then(serde_yaml_ng::Value::as_mapping);
     // Go's flattenV8 replaces a legacy list with the v8 family when that is present.
@@ -643,7 +645,8 @@ fn legacy_weight_error(root: &serde_yaml_ng::Value) -> Option<Response> {
 /// Go answers 400 for what fails while decoding (syntax, shape, v8 key groups) and 422
 /// for `LoadConfig` validation. ponytail: a type mismatch (`port: abc`) is also a decode
 /// error in Go but only `Config::parse` finds it here, so it is 422; and syntax messages
-/// are this parser's, not yaml.v3's.
+/// are this parser's, not yaml.v3's. Decoding into the typed config in the first pass
+/// would answer 400 as Go does.
 pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, headers: HeaderMap, body: Bytes) -> Response {
     let if_match = super::if_match_values(&headers);
     let fail = |status: StatusCode, error: &str, message: String| {

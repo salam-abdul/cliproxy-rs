@@ -11,6 +11,7 @@
 //! ponytail: drives the `git` executable instead of an embedded git library; the
 //! container needs `git` installed. Any failure to read HEAD's objects counts as
 //! corruption; go-git tells a missing object from other read errors, the CLI does not.
+//! An embedded git library would remove both limits.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};

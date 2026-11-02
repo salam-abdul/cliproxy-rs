@@ -745,7 +745,7 @@ pub(crate) fn track_first_byte(
 /// `Content-Length` dropped from chunked responses (Content-Length kept for statuses
 /// without a body); identical duplicate `Content-Length` values collapsed; and
 /// `Cache-Control: no-cache` added for `Pragma: no-cache`.
-// ponytail: the capture's view only; proxy::Upstream keeps the transport's headers for
+// The capture's view only; proxy::Upstream keeps the transport's headers for
 // every other use.
 pub(crate) fn go_response_headers(status: u16, headers: &http::HeaderMap) -> Vec<(String, String)> {
     use http::header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, PRAGMA, TRAILER, TRANSFER_ENCODING};
@@ -834,7 +834,7 @@ pub(crate) fn capture_error(capture: &cpa_core::exec::CaptureSink, error: &ExecE
 /// it records after the loop.
 // ponytail: the scan error is recorded when the line reader reports it; Go skips the
 // record when an apply_patch end check already failed the stream (both failures in one
-// stream).
+// stream). Skip the record after a failed end check if logs must match.
 pub(crate) fn capture_lines(
     lines: cpa_core::exec::ExecStream,
     capture: &cpa_core::exec::CaptureSink,

@@ -86,7 +86,8 @@ impl Inner {
     /// `purgeExpiredClaudeThinkingReplayCache`, run when Go's ten-minute cleanup would
     /// have: expired entries are removed, so their old generations stop accepting writes.
     // ponytail: swept lazily on cache access instead of by a background ticker; an idle
-    // cache keeps expired content in memory until the next request.
+    // cache keeps expired content in memory until the next request. Add a sweep ticker if
+    // idle memory matters.
     fn sweep(&mut self, now: Instant) {
         if self.swept.is_some_and(|at| now.duration_since(at) < SWEEP_INTERVAL) {
             return;

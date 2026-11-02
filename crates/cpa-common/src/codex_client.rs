@@ -738,7 +738,7 @@ pub fn spawn_agent_models(available: &[AvailableModel], lookup: &dyn Fn(&str) ->
 /// [`spawn_agent_models`] for the models the installed registry serves now.
 // ponytail: Go caches the list per catalog revision and registry generation; it is
 // rebuilt per request here, only when the optimization is on and a spawn_agent tool is
-// present.
+// present. Cache it on the catalog revision if profiling shows the rebuild.
 pub fn served_spawn_agent_models() -> String {
     let available: Vec<AvailableModel> = cpa_core::registry::available_models()
         .into_iter()

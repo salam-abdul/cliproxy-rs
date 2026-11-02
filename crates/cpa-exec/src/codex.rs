@@ -266,7 +266,8 @@ impl CodexExecutor {
             Ok(upstream) => upstream,
             Err(error) => {
                 // ponytail: the text is this executor's transport message, not net/http's
-                // `Post "<url>": ...`.
+                // `Post "<url>": ...`; keep the client error text on ExecError if callers
+                // need Go's.
                 wire.exec_error(&error);
                 return Err(error);
             }

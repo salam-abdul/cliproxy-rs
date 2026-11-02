@@ -530,7 +530,8 @@ fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Va
         .and_then(|m| m.as_ref().ok())
         .and_then(|m| m.modified().ok());
     // ponytail: Go stamps created/updated at synthesis; the store keeps no
-    // timestamps, so both report the file's modification time.
+    // timestamps, so both report the file's modification time. Store timestamps fix
+    // this too (see `runtime_times` above).
     if let Some(t) = modified {
         e.insert("created_at", local(t).into());
         e.insert("updated_at", local(t).into());

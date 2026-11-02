@@ -62,7 +62,8 @@ fn compat_translator(from: Format, to: Format) -> Option<cpa_translate::RequestF
 /// 3. An is-compat model uses its pair's `...WithCompat` translator between summary
 ///    extraction and application; anything else goes through `translate_request`.
 // ponytail: plugin NormalizeRequest hooks after a compat translator are not ported
-// (cpa_translate has none either).
+// because the fork has no plugin host (cpa_translate has none either); a plugin host
+// would run them here.
 pub(crate) fn translate_request(
     from: Format,
     to: Format,

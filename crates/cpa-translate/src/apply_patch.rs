@@ -271,7 +271,7 @@ impl InputDecoder {
         if fresh.phase != Phase::Complete {
             // applypatch.UnwrapInput's json.Decoder.Token error for truncated arguments:
             // `EOF` at a token boundary, `unexpected EOF` inside a token.
-            // ponytail: other malformed arguments fail with this decoder's own messages,
+            // Other malformed arguments fail with this decoder's own messages,
             // not encoding/json's syntax-error wording. The text is internal: executors
             // answer with the fixed APPLY_PATCH_UPSTREAM_ERROR.
             let message = match fresh.phase {

@@ -134,8 +134,8 @@ async fn alpha_search(
         accept: Some(|c| c.provider != "codex" || allowed(c)),
         ..Selection::default()
     };
-    // ponytail: one selection, no failover or outcome recording, as in Go; plugin model
-    // routing is not ported.
+    // One selection, with no failover or outcome recording, as in Go. Plugin model routing
+    // is not ported because the fork has no plugin host.
     if let Some(remote) = rt.remote_dispatch() {
         let lease = match home_lease(&rt, remote.as_ref(), selection, &headers).await {
             Ok(lease) => lease,

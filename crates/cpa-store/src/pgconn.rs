@@ -39,7 +39,8 @@ const NATIVE_KEYS: &[&str] = &[
 
 /// pgx `notRuntimeParams` (and pgx.ParseConfig's own keys) tokio-postgres cannot
 /// express; dropped with a warning.
-// ponytail: no .pgpass, service files, Kerberos, encrypted keys or protocol bounds.
+// ponytail: no .pgpass, service files, Kerberos, encrypted keys or protocol bounds;
+// port the ones a deployment needs.
 const UNSUPPORTED_KEYS: &[&str] = &[
     "passfile",
     "sslpassword",
@@ -182,7 +183,7 @@ impl Dsn {
     /// pgx `ParseConfig`: URL or keyword/value form, `PG*` environment defaults, and
     /// `sslmode` defaulting to `prefer`.
     // ponytail: no .pgpass, PGSERVICE or multi-host fallback configs; keys pgx turns
-    // into runtime parameters are dropped with a warning.
+    // into runtime parameters are dropped with a warning. Port them if a deployment needs one.
     pub(crate) fn parse(raw: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Dsn> {
         let raw = raw.trim();
         let mut tls = TlsFiles::default();
@@ -345,7 +346,8 @@ impl Dsn {
         config.ssl_mode(match mode {
             _ if unix_only => SslMode::Disable,
             TlsMode::Disable => SslMode::Disable,
-            // ponytail: `allow` tries TLS first, as `prefer` does.
+            // ponytail: `allow` tries TLS first, as `prefer` does; libpq tries plaintext first.
+            // Try plaintext first if a server rejects the TLS attempt.
             TlsMode::Allow | TlsMode::Prefer => SslMode::Prefer,
             TlsMode::Require | TlsMode::VerifyCa | TlsMode::VerifyFull => SslMode::Require,
         });
@@ -481,6 +483,7 @@ impl AsyncWrite for TlsStream {
 impl tokio_postgres::tls::TlsStream for TlsStream {
     fn channel_binding(&self) -> ChannelBinding {
         // ponytail: no tls-server-end-point binding, so SCRAM-SHA-256-PLUS is not offered.
+        // Add channel binding once the TLS stack exposes the server certificate hash.
         ChannelBinding::none()
     }
 }

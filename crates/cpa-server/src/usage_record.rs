@@ -1667,7 +1667,8 @@ pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
 /// Go executor identity for a credential's provider: `Identifier()` and the
 /// executor's type name (both reach the record and pick the token semantics).
 // ponytail: Codex attempts over the upstream WebSocket report `CodexExecutor`; Go
-// names them `CodexWebsocketsExecutor`.
+// names them `CodexWebsocketsExecutor`. Report the WebSocket name if usage views
+// need Go's split.
 fn executor_identity(c: &cpa_core::credential::Credential) -> (String, &'static str) {
     let provider = c.provider.trim().to_lowercase();
     let executor = match provider.as_str() {

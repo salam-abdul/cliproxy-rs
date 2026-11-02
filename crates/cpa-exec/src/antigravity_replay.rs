@@ -10,7 +10,8 @@
 //! Claude-facing provenance ID, or its name and arguments.
 // ponytail: Go applies items through a batch splicer that falls back to this sequential
 // path; Go's differential tests assert both give identical payloads, so only the
-// sequential path is ported. Go's debug-level replay logs are not reproduced.
+// sequential path is ported (its cost is the ceiling on `apply_items`). Go's
+// debug-level replay logs are not reproduced.
 
 use std::borrow::Cow;
 use std::cell::RefCell;

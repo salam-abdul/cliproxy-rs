@@ -778,6 +778,7 @@ pub(crate) fn config_sync(
     // a YAML 1.1 spelling) as `!!str <bool>` and fails to decode its own output; the
     // file is left unchanged. ponytail: YAML uploads are not checked, since quoted
     // and plain scalars are indistinguishable here and Go only fails on quoted ones.
+    // Check them with a YAML parser that keeps scalar styles to match Go.
     if !yaml
         && let Some(value) = written
             .as_ref()

@@ -509,7 +509,8 @@ impl cpa_core::store::cooldown::Backend for PgCooldown {
     }
 
     // ponytail: queued without waiting (Go blocks the caller on the transaction);
-    // order is kept and a failure is logged by the worker.
+    // order is kept and a failure is logged by the worker. Await the worker if a caller
+    // needs the write committed.
     fn save(&self, records: Vec<Record>, now: SystemTime) -> Result<(), String> {
         let now = micros(now);
         let mut current = HashMap::with_capacity(records.len());

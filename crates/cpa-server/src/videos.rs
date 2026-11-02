@@ -4,8 +4,6 @@
 //! A created video is bound to the credential that created it (and its routing model) for
 //! `multimedia.video-result-auth-cache-ttl`, so polling and downloads reach the same xAI
 //! account.
-// ponytail: the non-streaming keep-alive (`requests.nonstream-keepalive-interval`) and
-// upstream header passthrough are not applied, like the other Rust routes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};

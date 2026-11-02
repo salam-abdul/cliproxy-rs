@@ -320,7 +320,8 @@ pub fn is_transport(e: &ExecError) -> bool {
         return true;
     }
     let lower = error_text(e).trim().to_lowercase();
-    // ponytail: compatibility for executors that report transport faults untyped.
+    // ponytail: compatibility for executors that report transport faults untyped. Remove
+    // it once every executor sets `FailureScope::Transport`.
     e.headers.is_empty() && lower.starts_with("upstream request failed")
 }
 

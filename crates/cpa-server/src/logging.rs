@@ -316,7 +316,8 @@ fn start_cleaner(dir: &Path, max_total_mb: i64, protected: Option<PathBuf>) {
         return;
     };
     let dir = dir.to_owned();
-    // ponytail: a stopped cleaner notices on its next wake-up, up to a minute later.
+    // ponytail: a stopped cleaner notices on its next wake-up, up to a minute later. Wake
+    // it on stop if that delay matters.
     let spawned = std::thread::Builder::new()
         .name("log-dir-cleaner".into())
         .spawn(move || {
@@ -699,7 +700,7 @@ where
         event.record(&mut fields);
         let now = chrono::Local::now();
         // ponytail: Go's hook drops a non-string request_id; Rust records every
-        // request_id value as text.
+        // request_id value as text. Drop non-string values if logs must match Go's.
         let request_id = fields.request_id.clone();
         let level = event.metadata().level();
         let line = format_line(
@@ -775,13 +776,14 @@ fn format_line(now: chrono::NaiveDateTime, level: &Level, caller: Option<(&str, 
     }
     line.push_str(fields.message.trim_end_matches(['\r', '\n']));
     let mut rest = fields.rest;
-    // ponytail: Go prints only the known fields; Rust call sites also log structured
+    // Go prints only the known fields; Rust call sites also log structured
     // context Go writes into the message, so the other fields follow in call order.
     rest.sort_by_key(|(name, _, _)| FIELD_ORDER.iter().position(|k| k == name).unwrap_or(FIELD_ORDER.len()));
     for (name, value, is_str) in rest {
         if is_str && QUOTED_FIELDS.contains(&name) {
             // ponytail: Rust's string escaping stands in for strconv.Quote; they agree
-            // on printable ASCII, quotes, backslashes and \n \r \t.
+            // on printable ASCII, quotes, backslashes and \n \r \t. Port strconv.Quote if other
+            // characters must match.
             line.push_str(&format!(" {name}={value:?}"));
         } else {
             line.push_str(&format!(" {name}={value}"));

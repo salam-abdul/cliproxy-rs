@@ -510,7 +510,7 @@ struct Accumulator {
 #[derive(Default)]
 struct State {
     /// Tool calls by index.
-    // ponytail: Go keeps these in a map and emits them in map order (random for two or
+    // Go keeps these in a map and emits them in map order (random for two or
     // more calls); this emits them by tool index.
     calls: BTreeMap<i64, Accumulator>,
 }

@@ -477,7 +477,7 @@ impl VertexExecutor {
         if !req.stream {
             // Go logs the raw body, before any Imagen conversion.
             let mut data = g::read_captured(capture, upstream, usize::MAX).await?.to_vec();
-            // ponytail: Go observes the response model on the raw body but parses usage
+            // Go observes the response model on the raw body but parses usage
             // after the Imagen conversion, whose usageMetadata is all zeros; Imagen
             // predict responses carry no usageMetadata, so the raw body gives the same.
             req.usage.response_body(Format::Gemini, &data);

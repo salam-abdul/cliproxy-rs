@@ -4,8 +4,9 @@
 //!
 //! ponytail: quoted-printable parts are not decoded (Go's `NextPart` does) and ReadForm's
 //! part, header and memory limits are not enforced beyond the route's body cap; image
-//! clients send binary parts. Field and file order follow first appearance, one of the
-//! orders Go's map iteration can produce.
+//! clients send binary parts. Sharing the `codex_live` reader would add the decoding and
+//! header limits. Field and file order follow first appearance, one of the orders Go's
+//! map iteration can produce.
 
 use std::collections::BTreeMap;
 
@@ -191,7 +192,8 @@ pub fn parse_media_type(v: &str) -> MediaType {
         v = rest;
     }
     // ponytail: Go keeps parameter bytes as they are; values that are not UTF-8 after
-    // RFC 2231 decoding are stored lossily here.
+    // RFC 2231 decoding are stored lossily here. Keep them as bytes if a client sends such
+    // names.
     for (key, pieces) in continuation {
         if let Some(v) = pieces.get(&format!("{key}*")) {
             if let Some(decoded) = decode_2231(v) {

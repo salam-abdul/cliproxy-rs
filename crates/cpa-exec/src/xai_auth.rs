@@ -96,7 +96,7 @@ impl Decoded {
 /// field errors (empty for anonymous structs).
 // ponytail: syntax errors report a fixed text instead of Go's scanner message (for
 // example "invalid character 'o' in literal null"); only CLI login output and refresh
-// error messages differ.
+// error messages differ. Port the scanner messages if those must match.
 fn go_unmarshal(
     body: &[u8],
     fields: &[(&'static str, Field)],
@@ -150,7 +150,7 @@ fn go_unmarshal(
                 Some(n) => {
                     out.ints.insert(name, n);
                 }
-                // ponytail: Go quotes the number ("number 1.5 into ..."); the value is
+                // Go quotes the number ("number 1.5 into ..."); the value is
                 // response data that reaches logs and returned errors, so the message
                 // names only its kind.
                 None => {
@@ -321,7 +321,8 @@ impl XaiAuth {
     /// Where a request for `url` goes. Fails closed when the HTTP client would contact a
     /// different host than Go's `net/url` reads from the same string.
     // ponytail: the request target is the WHATWG form of the URL, so dot segments and
-    // backslashes in an accepted path are normalized where Go sends them as given.
+    // backslashes in an accepted path are normalized where Go sends them as given. Send the
+    // raw path if an accepted endpoint ever relies on them.
     fn target(&self, url: &str) -> Result<String, ()> {
         if !crate::xai_url::same_authority(url) {
             return Err(());
@@ -612,7 +613,7 @@ impl XaiAuth {
             .await
             .map_err(|_| auth_error(502, "xai token request failed"))?;
         if status != 200 {
-            // ponytail: Go appends the response body; it is withheld because token
+            // Go appends the response body; it is withheld because token
             // endpoints may echo credentials and the message reaches management clients
             // (same choice as the Kimi refresh).
             return Err(auth_error(

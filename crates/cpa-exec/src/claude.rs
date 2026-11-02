@@ -477,7 +477,8 @@ impl ClaudeExecutor {
     /// before decoding and for any status.
     // ponytail: Go's http.Client drains up to 2 KiB of a redirect response's body
     // through the tracked transport, so a redirect with a body marks the first byte at
-    // that hop; this marks it on the final response only.
+    // that hop; this marks it on the final response only. Mark it per hop in the
+    // exchange if redirect timing matters.
     async fn send(
         &self,
         ctx: &Ctx<'_>,
@@ -565,7 +566,8 @@ impl ClaudeExecutor {
         // from a Claude credential, whatever its status or body (Go records them before
         // reading the body); count_tokens results skip observation in Go's conductor.
         // ponytail: Go keys the model state by the conductor's state model; the executor
-        // sees the upstream base model, as Codex's observation does.
+        // sees the upstream base model, as Codex's observation does. Carry the state model on
+        // ExecRequest if aliases mapped to another upstream name need separate state.
         if path == "/v1/messages" && ctx.credential.provider.trim().eq_ignore_ascii_case("claude") {
             self.quota
                 .observe_model(&ctx.credential.id, &ctx.base_model, &upstream.headers);
@@ -628,7 +630,8 @@ async fn finish(
         }
         Ok(mut body) => {
             // ponytail: Go reads error bodies without a bound; this keeps the
-            // [`crate::proxy::MAX_ERROR_BODY`] prefix.
+            // [`crate::proxy::MAX_ERROR_BODY`] prefix. Raise that bound if a provider's
+            // error needs more.
             let limit = crate::proxy::MAX_ERROR_BODY;
             let mut data = BytesMut::new();
             loop {
@@ -797,7 +800,8 @@ struct Ctx<'a> {
     bearer: bool,
     /// Local date for the currentDate reminder, unless the session pinned one.
     // ponytail: only UTC and the process zone are resolvable without a tz database;
-    // other IANA names fall back to local time, as Go does for unknown zones.
+    // other IANA names fall back to local time, as Go does for unknown zones. Bundle a
+    // tz database if other zones must resolve.
     today: String,
     /// The thread continuation aliases of the executor serving the request.
     thread_aliases: Arc<thread::Aliases>,
@@ -848,7 +852,7 @@ fn kimi_upstream(provider: &str, base_url: &str) -> bool {
 }
 
 /// `helps.ClaudeCLIAuthIdentitySeed`.
-// ponytail: Go falls back to the auth index and file name when the ID is empty; every
+// Go falls back to the auth index and file name when the ID is empty; every
 // loaded or synthesized credential here has an ID.
 fn identity_seed(credential: &Credential) -> String {
     let id = credential.id.trim();

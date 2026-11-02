@@ -33,7 +33,8 @@ pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(35);
 const RECONNECT_FAILOVER_THRESHOLD: u32 = 3;
 // ponytail: a small idle pool with an age cap instead of go-redis's health-checked pool;
-// a stale idle connection costs one failed command, as with MaxRetries -1 in Go.
+// a stale idle connection costs one failed command, as with MaxRetries -1 in Go. Add
+// health checks if those failures become visible.
 const MAX_IDLE: usize = 4;
 const MAX_IDLE_AGE: Duration = Duration::from_secs(60);
 

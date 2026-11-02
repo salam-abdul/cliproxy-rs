@@ -994,7 +994,8 @@ pub fn models_for(cfg: &Config, aliases: &HashMap<String, Vec<OAuthAlias>>, c: &
     };
     let models = apply_excluded(models, &excluded);
     let models = apply_aliases(&oauth_aliases_for(aliases, c), models);
-    // ponytail: oauth.settings max-context-length overrides are not applied yet.
+    // ponytail: oauth.settings max-context-length overrides are not applied; apply them
+    // here, after the aliases, if a deployment sets one.
     apply_prefix(models, credential_prefix(c), cfg.routing.force_model_prefix)
 }
 
@@ -1229,7 +1230,7 @@ impl Registry {
 
     /// Registered models a client may list or `auto` may pick (Go
     /// `modelRegistrationAvailability`), given each credential's state per model.
-    // ponytail: Go recomputes projections only when a result or refresh is recorded, so
+    // Go recomputes projections only when a result or refresh is recorded, so
     // a model can stay hidden after its cooldown lapses; this reads live state instead.
     pub fn available_with<'a>(
         &'a self,

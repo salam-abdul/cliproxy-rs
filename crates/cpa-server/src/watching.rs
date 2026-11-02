@@ -70,7 +70,8 @@ impl Stat {
 
     /// ponytail: Windows exposes no stable file identity or change time here, so a
     /// same-size replacement with an unchanged modification time older than two
-    /// seconds goes unnoticed until its next change.
+    /// seconds goes unnoticed until its next change. Hash small files on Windows if
+    /// such replacements must be seen.
     #[cfg(not(unix))]
     fn of(meta: &std::fs::Metadata) -> Self {
         let mtime = meta
@@ -385,7 +386,8 @@ fn targets(state: &Management, current: Option<&Snapshot>) -> Targets {
 /// events). An auth write goes as "Sync auth <name>" unless the file is empty or not a
 /// JSON object; a removal goes as "Remove auth <name>".
 // ponytail: Go also skips files whose JSON does not decode into its `Auth` struct or
-// whose weight is invalid; here any JSON object is pushed.
+// whose weight is invalid; here any JSON object is pushed. Decode into the credential
+// type first if invalid files must be skipped.
 fn persist_changes(state: &Management, before: &Snapshot, after: &Snapshot, config_accepted: bool) {
     let Some(store) = state.store.clone() else {
         return;

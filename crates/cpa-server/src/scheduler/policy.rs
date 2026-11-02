@@ -387,7 +387,8 @@ impl Policy {
             provider_key = &provider;
         }
         let candidates = [compat_name, provider_key, provider.as_str()];
-        // ponytail: ASCII case folding; Go's EqualFold also folds non-ASCII names.
+        // ponytail: ASCII case folding; Go's EqualFold also folds non-ASCII names. Use Unicode
+        // folding if names stop being ASCII.
         self.compat_disable_cooling
             .iter()
             .find(|(name, _)| candidates.iter().any(|c| !c.is_empty() && c.eq_ignore_ascii_case(name)))

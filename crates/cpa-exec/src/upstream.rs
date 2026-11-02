@@ -292,7 +292,8 @@ where
 }
 
 /// Go's text for a body read failure: a truncated or reset body is `unexpected EOF`.
-// ponytail: decoder failures keep the Rust decoder's wording, not compress/*'s.
+// ponytail: decoder failures keep the Rust decoder's wording, not compress/*'s; port
+// Go's wording if a client depends on it.
 pub(crate) fn io_text(error: &std::io::Error) -> String {
     match error.get_ref() {
         Some(inner) if inner.is::<wreq::Error>() || inner.is::<ExecError>() => "unexpected EOF".into(),
@@ -381,8 +382,9 @@ where
     .boxed()
 }
 
-// ponytail: status-only classification. The scheduler port (sdk/cliproxy/auth, custom
-// request-error rules) replaces this with per-provider and per-credential rules.
+// ponytail: status-only classification; Go's per-provider and per-credential
+// request-error rules (sdk/cliproxy/auth) are not ported. Classify here by provider
+// and credential if a provider's status needs another scope.
 pub(crate) fn scope_for(status: u16) -> FailureScope {
     match status {
         401 | 402 | 403 | 408 | 429 | 500.. => FailureScope::Credential,

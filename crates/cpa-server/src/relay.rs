@@ -137,7 +137,8 @@ fn close_error(frame: Option<&CloseFrame>) -> String {
 
 /// One connection: frames out from the session, frames in to it, the heartbeat and the
 /// read deadline, until either side ends.
-// ponytail: transport failures carry this module's wording, not Go's net errors.
+// ponytail: transport failures carry this module's wording, not Go's net errors; port
+// Go's wording if a client depends on it.
 async fn serve(relay: Arc<Relay>, socket: WebSocket) {
     let (session, mut frames) = relay.connect();
     let (mut sink, mut stream) = socket.split();

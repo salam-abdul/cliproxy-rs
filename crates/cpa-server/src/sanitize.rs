@@ -136,7 +136,8 @@ fn no_truncate(s: &str) -> String {
     }
 
     // A path before the error delimiter: the first known error, else the first ": ".
-    // ponytail: ASCII lowercasing keeps byte offsets aligned; Go lowers Unicode too.
+    // ponytail: ASCII lowercasing keeps byte offsets aligned; Go lowers Unicode too. Map
+    // offsets through a Unicode lowering if non-ASCII matching matters.
     let lower = s.to_ascii_lowercase();
     let colon = KNOWN_ERRORS
         .iter()

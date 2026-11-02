@@ -74,7 +74,7 @@ pub fn load(data: &[u8]) -> Result<bool, String> {
 
 /// `ValidateCodexClientModelsJSON`: the fields a complete Codex client catalog needs.
 // ponytail: decode failures carry serde_json's wording, not encoding/json's; the text
-// is only logged.
+// is only logged, so port Go's wording only if logs must match.
 pub fn validate(data: &[u8]) -> Result<(), String> {
     let root: serde_json::Value =
         serde_json::from_slice(data).map_err(|e| format!("decode Codex client model catalog: {e}"))?;

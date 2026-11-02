@@ -126,6 +126,7 @@ impl Transport {
             builder.pool_max_idle_per_host(0)
         };
         // ponytail: HTTP/2 framing (SETTINGS, window sizes) is wreq's, not Go's x/net/http2.
+        // Set Go's values on the wreq builder if chatgpt.com starts fingerprinting them.
         proxy.apply(self.hooks.apply(builder), false)?.build()
     }
 }

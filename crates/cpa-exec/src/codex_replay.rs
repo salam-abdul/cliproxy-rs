@@ -49,7 +49,7 @@ struct Entry {
 
 /// The in-process replay store (Go's non-Home mode).
 // ponytail: expired entries are dropped when read and evicted at capacity; Go also purges
-// them on a timer.
+// them on a timer. Add a purge ticker if idle memory matters.
 #[derive(Default)]
 pub(crate) struct Cache {
     entries: Mutex<HashMap<String, Entry>>,

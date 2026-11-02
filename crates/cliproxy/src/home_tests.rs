@@ -4298,7 +4298,7 @@ struct LifetimeHome {
 }
 
 impl LifetimeHome {
-    // ponytail: Go's heartbeat is 100ms; 300ms leaves the 50ms pongs room on a loaded
+    // Go's heartbeat is 100ms; 300ms leaves the 50ms pongs room on a loaded
     // test machine without changing what is asserted.
     const CONFIG: &str = "credential-concurrency:\n  lifecycle-config-revision: 1\n  cpa-heartbeat-timeout: 300ms\n  cpa-cancel-bound: 100ms\n";
 

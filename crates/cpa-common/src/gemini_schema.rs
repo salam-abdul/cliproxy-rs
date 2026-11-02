@@ -186,7 +186,8 @@ fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
             return None;
         }
         // ponytail: raw-formatting preservation is limited to 128 schema fields and
-        // independent local rules. Other valid schemas use the literal-key arena passes.
+        // independent local rules. Other valid schemas use the literal-key arena passes, which
+        // do not keep the client's formatting; extend the raw pass if a client needs it there.
         if nodes[node].children.len() > 128 {
             return None;
         }

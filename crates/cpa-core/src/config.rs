@@ -251,7 +251,8 @@ const V8_PARENTS: &[&str] = &[
 /// Writes `hash` over the plaintext `secret-key`: in place when the key is written
 /// literally, else (inherited through a merge) the merge-expanded tree, as Go's
 /// `SaveConfigPreserveCommentsUpdateNestedScalar` does. ponytail: that fallback
-/// re-emits without comments; Go keeps the node comments.
+/// re-emits without comments; Go keeps the node comments. A comment-preserving YAML
+/// editor would keep them.
 fn persist_secret_hash(path: &Path, text: &str, hash: &str) -> anyhow::Result<()> {
     let mut root: Value = serde_yaml_ng::from_str(text)?;
     expand_merges(&mut root)?;

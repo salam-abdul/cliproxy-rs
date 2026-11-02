@@ -233,7 +233,8 @@ impl CodexExecutor {
         let upstream = events(res.body);
         // ponytail: usage lands on the images main model's record; Go also publishes the
         // completion's `tool_usage.image_gen` under the tool model, which `UsageSink`
-        // cannot express yet (see `Processor::reporting`).
+        // cannot express yet (see `Processor::reporting`). A per-model record on `UsageSink`
+        // would let this publish it.
         if req.stream {
             return Ok(ExecResponse {
                 status: res.status,
@@ -483,7 +484,7 @@ fn direct_edit_payload(
 }
 
 /// `codexRewriteOpenAIImageEditMultipartToJSON`.
-// ponytail: Go ranges over its form map, so field order varies per run; this keeps the
+// Go ranges over its form map, so field order varies per run; this keeps the
 // order fields arrived in, one of Go's orders.
 fn edit_form_to_json(form: &Form, model: &str, stream: bool) -> String {
     let mut out = set_str("{}", "model", model);
@@ -572,6 +573,7 @@ fn data_url(part: &Part) -> String {
 /// `http.DetectContentType` for uploaded images.
 // ponytail: Go's image, BOM and text-versus-binary rules only; its HTML, XML, PDF, audio,
 // video, archive and font signatures are not ported (image uploads do not carry them).
+// Port the rest of `http.DetectContentType` if other uploads are accepted.
 fn detect_content_type(data: &[u8]) -> &'static str {
     let data = &data[..data.len().min(512)];
     const EXACT: [(&[u8], &str); 8] = [

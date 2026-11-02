@@ -10,7 +10,7 @@
 //!
 //! ponytail: the `models_hash`/`excluded_models_hash` change-detection attributes,
 //! plugin auth parsers and Kimi domain resolution are not reproduced; nothing in the
-//! management API exposes them. Port them with the registry/Kimi executors.
+//! management API or the scheduler reads them. Port them when something does.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
