@@ -125,14 +125,6 @@ fn get_line(data: &[u8]) -> (&[u8], &[u8], usize) {
     (line, &data[j..], j)
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|w| w == needle)
-}
-
 /// Go 1.26 `pem.Decode`: the first END line, the last BEGIN line before it, headers,
 /// and the base64 body; `None` when no block parses.
 pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
@@ -146,9 +138,9 @@ pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
             return None;
         }
         rest = &rest[end_trailer_index as usize..];
-        let mut end_index = find(rest, END)? as isize;
+        let mut end_index = cpa_common::gostr::index(rest, END)? as isize;
         end_trailer_index = end_index + END.len() as isize;
-        let Some(begin) = rfind(&rest[..end_index as usize], &START[1..]) else {
+        let Some(begin) = cpa_common::gostr::last_index(&rest[..end_index as usize], &START[1..]) else {
             continue;
         };
         if begin > 0 && rest[begin - 1] != b'\n' {

@@ -775,7 +775,7 @@ fn rewrite_alpha_search_model(body: Vec<u8>, model: &str) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(&body) else {
         return body;
     };
-    let quoted = crate::codex_json::go_quote(model, true);
+    let quoted = cpa_common::json::marshal_string(model, true);
     crate::codex_json::go_remarshal_object(text, |members| match members.get_mut("model") {
         Some(current) if *current != quoted => {
             *current = quoted.clone();

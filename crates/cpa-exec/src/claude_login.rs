@@ -486,7 +486,7 @@ pub(crate) fn credential_file_name(email: &str, organization: &str, account: &st
         return format!("claude-{email}.json");
     }
     let digest = Sha256::digest(identity.as_bytes());
-    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = cpa_core::hex::encode(&digest[..4]);
     format!("claude-{hash}-{email}.json")
 }
 

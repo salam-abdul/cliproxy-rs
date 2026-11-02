@@ -145,7 +145,7 @@ pub(crate) fn filter_sse_usage_metadata_at(payload: &[u8], now: Instant) -> Vec<
             continue;
         }
         found_data = true;
-        let Some(data_index) = find(line, b"data:") else {
+        let Some(data_index) = cpa_common::gostr::index(line, b"data:") else {
             continue;
         };
         let raw = go_trim_space(&line[data_index + 5..]).to_vec();
@@ -178,10 +178,6 @@ pub(crate) fn filter_sse_usage_metadata_at(payload: &[u8], now: Instant) -> Vec<
         return payload.to_vec();
     }
     lines.join(&b'\n')
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// `helps.JSONPayload`: the JSON object of a line, without its `data:` prefix; `None`

@@ -24,8 +24,8 @@ pub(crate) const MAX_BYTES_PER_ENTRY: usize = 8 << 20;
 /// Most content blocks one turn may hold.
 pub(crate) const MAX_BLOCKS_PER_ENTRY: usize = 512;
 
-/// `strings.TrimSpace(r.String())`, decoded for use in a session key.
-fn text(r: &Res<'_>) -> String {
+/// `strings.TrimSpace(r.String())`, decoded lossily.
+pub(crate) fn text(r: &Res<'_>) -> String {
     String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
 }
 
@@ -138,7 +138,7 @@ pub(crate) fn session_key(req: &ExecRequest, payload: &[u8]) -> String {
         return String::new();
     }
     let digest = Sha256::digest(api_key.as_bytes());
-    let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let prefix: String = cpa_core::hex::encode(&digest[..8]);
     format!("caller:{prefix}:{key}")
 }
 

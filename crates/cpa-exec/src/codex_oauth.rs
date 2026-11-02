@@ -655,10 +655,7 @@ pub fn login_record(tokens: &Tokens, last_refresh: &str) -> Result<(String, Map<
         }
         let account = claims.account_id.trim();
         if !account.is_empty() {
-            hash = Sha256::digest(account.as_bytes())[..4]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            hash = cpa_core::hex::encode(&Sha256::digest(account.as_bytes())[..4]);
         }
     }
     let name = credential_file_name(&tokens.email, &plan, &hash);
@@ -719,7 +716,7 @@ pub fn encode_go_json(value: &Value) -> String {
                     if i > 0 {
                         out.push(',');
                     }
-                    out.push_str(&crate::codex_json::go_quote(k, true));
+                    out.push_str(&cpa_common::json::marshal_string(k, true));
                     out.push(':');
                     write(out, v);
                 }
@@ -735,7 +732,7 @@ pub fn encode_go_json(value: &Value) -> String {
                 }
                 out.push(']');
             }
-            Value::String(s) => out.push_str(&crate::codex_json::go_quote(s, true)),
+            Value::String(s) => out.push_str(&cpa_common::json::marshal_string(s, true)),
             other => out.push_str(&other.to_string()),
         }
     }
@@ -777,10 +774,7 @@ fn publish(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     builder.create(dir)?;
     let mut nonce = [0u8; 8];
     getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
-    let temp = dir.join(format!(
-        ".codex-{}.tmp",
-        nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ));
+    let temp = dir.join(format!(".codex-{}.tmp", cpa_core::hex::encode(&nonce)));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -805,7 +799,7 @@ fn publish(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn random_state() -> Result<String, ExecError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| oauth_error(500, "secure random source unavailable"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(cpa_core::hex::encode(&bytes))
 }
 
 /// `GenerateAuthURL`. Go's `url.Values.Encode` sorts parameters.

@@ -59,7 +59,7 @@ pub fn bound_session_identity(id: &str) -> String {
     if id.len() <= 256 {
         return id.to_owned();
     }
-    let hash = hex(&Sha256::digest(id.as_bytes()));
+    let hash = cpa_core::hex::encode(&Sha256::digest(id.as_bytes()));
     let mut end = (255 - 1 - hash.len()).min(id.len());
     while !id.is_char_boundary(end) {
         end -= 1;
@@ -132,7 +132,7 @@ pub fn normalize_to_canonical_uuid(raw: &str) -> String {
     let mut u: [u8; 16] = hasher.finalize()[..16].try_into().expect("16 bytes");
     u[6] = (u[6] & 0x0f) | 0x80;
     u[8] = (u[8] & 0x3f) | 0x80;
-    let h = hex(&u);
+    let h = cpa_core::hex::encode(&u);
     format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
 }
 
@@ -145,11 +145,7 @@ pub fn caller_scope(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"cli-proxy-api:caller-scope:v1\0");
     hasher.update(value.as_bytes());
-    hex(&hasher.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&hasher.finalize())
 }
 
 /// A request body viewed the way Go's session extractors read it: gjson paths on the
@@ -1376,7 +1372,7 @@ pub fn derive_id(format: Format, payload: &[u8], caller_scope: &str) -> String {
         string(&mut out, &resource);
     }
     out.push(b'}');
-    format!("ctx:v1:{}", hex(&Sha256::digest(&out)))
+    format!("ctx:v1:{}", cpa_core::hex::encode(&Sha256::digest(&out)))
 }
 
 type Object = BTreeMap<String, GoValue>;

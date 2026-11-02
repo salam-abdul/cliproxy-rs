@@ -488,7 +488,7 @@ pub fn model_group(model: &str) -> &str {
 
 fn text_hash(text: &[u8]) -> String {
     let sum = Sha256::digest(text);
-    sum[..8].iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&sum[..8])
 }
 
 /// `CacheSignatureBestEffort`.

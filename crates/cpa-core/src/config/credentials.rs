@@ -23,10 +23,6 @@ use crate::credential::{Credential, Source};
 
 const WEIGHT_MAX: i64 = 1_000_000;
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Go `StableIDGenerator`: `kind:sha256(kind, \0part...)[:12]`, `-N` on collisions.
 #[derive(Default)]
 struct Ids(HashMap<String, usize>);
@@ -39,7 +35,7 @@ impl Ids {
             hasher.update([0]);
             hasher.update(part.trim().as_bytes());
         }
-        let mut short = hex(&hasher.finalize())[..12].to_owned();
+        let mut short = crate::hex::encode(&hasher.finalize())[..12].to_owned();
         let index = self.0.entry(format!("{kind}:{short}")).or_insert(0);
         if *index > 0 {
             short = format!("{short}-{index}");
@@ -1400,12 +1396,7 @@ pub fn access_token_sha256(c: &Credential) -> String {
             .iter()
             .find_map(|k| c.metadata.get(*k).and_then(Json::as_object).and_then(pick))
     });
-    token.map_or_else(String::new, |t| {
-        Sha256::digest(t.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    })
+    token.map_or_else(String::new, |t| crate::hex::encode(Sha256::digest(t.as_bytes())))
 }
 
 /// Go `Auth.EnsureIndex`: an assigned index (Home's, for dispatched credentials), else
@@ -1465,7 +1456,7 @@ pub fn auth_index(c: &Credential) -> String {
             }
         }
     };
-    hex(&Sha256::digest(seed.as_bytes())[..8])
+    crate::hex::encode(&Sha256::digest(seed.as_bytes())[..8])
 }
 
 /// Go `filepath.Clean` for absolute Unix paths.

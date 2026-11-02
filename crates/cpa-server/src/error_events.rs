@@ -19,9 +19,10 @@ use crate::cooldown_store::Record;
 use cpa_common::json::Object;
 
 fn time(t: SystemTime) -> String {
-    crate::gojson::string(&cpa_core::gotime::rfc3339_nano(
-        &chrono::DateTime::<chrono::Local>::from(t),
-    ))
+    cpa_common::json::marshal_string(
+        &cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Local>::from(t)),
+        true,
+    )
 }
 
 /// Go `errorEventQuotaStatus`, omitted when nothing is set.
@@ -50,7 +51,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
     // that on the auth itself).
     let model_record = records.iter().find(|r| r.model == key);
     let credential_record = records.iter().find(|r| r.model.is_empty());
-    let status_code = match crate::classify::go_status(error) {
+    let status_code = match error.go_status() {
         0 => 500,
         s => s,
     };
@@ -116,7 +117,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
     }
     let mut event = Object::new().raw(
         "timestamp",
-        &crate::gojson::string(&cpa_core::gotime::rfc3339_nano(&chrono::Local::now())),
+        &cpa_common::json::marshal_string(&cpa_core::gotime::rfc3339_nano(&chrono::Local::now()), true),
     );
     let provider = c.provider.trim();
     if !provider.is_empty() {

@@ -433,7 +433,7 @@ fn model_family(credential: &Credential, api_key: &str, base_url: &str, base_mod
         return format!("claude:{base}");
     }
     let digest = Sha256::digest(identity.as_bytes());
-    let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let prefix: String = cpa_core::hex::encode(&digest[..8]);
     format!("claude:{prefix}:{base}")
 }
 
@@ -658,7 +658,7 @@ mod tests {
         )
         .unwrap();
         let digest = Sha256::digest(credential.id.as_bytes());
-        let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let prefix: String = cpa_core::hex::encode(&digest[..8]);
         assert_eq!(
             model_family(&credential, "k", "", "claude-x"),
             format!("claude:{prefix}:claude-x")

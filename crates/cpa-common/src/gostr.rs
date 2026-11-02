@@ -161,8 +161,35 @@ pub fn quote(s: impl AsRef<[u8]>) -> String {
     out
 }
 
+/// Go `bytes.Index`: the first `sep` in `s`; an empty `sep` is at 0.
+pub fn index(s: &[u8], sep: &[u8]) -> Option<usize> {
+    memchr::memmem::find(s, sep)
+}
+
+/// Go `bytes.LastIndex`: the last `sep` in `s`; an empty `sep` is at `s.len()`.
+pub fn last_index(s: &[u8], sep: &[u8]) -> Option<usize> {
+    memchr::memmem::rfind(s, sep)
+}
+
+/// Go `bytes.Contains`.
+pub fn contains(s: &[u8], sep: &[u8]) -> bool {
+    index(s, sep).is_some()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn byte_search_follows_go_for_empty_and_missing_needles() {
+        use super::{contains, index, last_index};
+        assert_eq!(
+            (index(b"abcab", b"ab"), last_index(b"abcab", b"ab")),
+            (Some(0), Some(3))
+        );
+        assert_eq!((index(b"abc", b""), last_index(b"abc", b"")), (Some(0), Some(3)));
+        assert_eq!((index(b"", b"a"), last_index(b"ab", b"abc")), (None, None));
+        assert!(contains(b"", b"") && !contains(b"a", b"b"));
+    }
+
     use super::*;
 
     // Expected values from Go 1.26 (strings.ToLower, strings.EqualFold, strconv.Quote).

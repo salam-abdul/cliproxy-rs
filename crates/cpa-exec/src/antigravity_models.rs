@@ -107,10 +107,7 @@ impl Capabilities {
         let failure_key = format!(
             "{}#{}",
             credential.id,
-            Sha256::digest(token.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            cpa_core::hex::encode(Sha256::digest(token.as_bytes()))
         );
         loop {
             let now = self.now();

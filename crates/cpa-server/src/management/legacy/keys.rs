@@ -440,7 +440,7 @@ impl Ids {
             h.update([0]);
             h.update(part.trim().as_bytes());
         }
-        let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let digest: String = cpa_core::hex::encode(h.finalize());
         let base = format!("{kind}:{}", &digest[..12]);
         let n = self.0.entry(base.clone()).or_insert(0);
         let id = if *n > 0 { format!("{base}-{n}") } else { base };

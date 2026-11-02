@@ -415,7 +415,7 @@ impl VertexExecutor {
         body = payload::fix_image_aspect_ratio(base_model, body);
         let rules = cpa_common::payload::Rules::of(cfg);
         body = g::apply_payload_rules(&rules, base_model, to.as_str(), body, &original, req);
-        body = payload::set_str_if_different(body, "model", base_model);
+        gj::set_str_if_different(&mut body, "model", base_model);
         body = strip_tool_call_ids(body, from);
         Ok(cpa_common::signature::sanitize_gemini_request_thought_signatures(
             &body, "contents",

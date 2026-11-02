@@ -894,10 +894,7 @@ pub(crate) fn sanitize_input_ids(body: String) -> String {
             input.push_str(&attempt.to_string());
         }
         let digest = Sha256::digest(input.as_bytes());
-        let suffix = format!(
-            "_{}",
-            digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        let suffix = format!("_{}", cpa_core::hex::encode(&digest[..8]));
         let keep = (LIMIT - suffix.len()).min(id.chars().count());
         format!("{}{suffix}", id.chars().take(keep).collect::<String>())
     };

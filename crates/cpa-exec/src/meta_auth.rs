@@ -557,7 +557,7 @@ pub fn credential_file_name(email: &str, sub: &str) -> String {
 }
 
 fn hex8(digest: &[u8]) -> String {
-    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&digest[..8])
 }
 
 /// Fields the custom writer owns. They are never restored from disk or metadata.

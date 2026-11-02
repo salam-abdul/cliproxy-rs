@@ -627,7 +627,7 @@ async fn retry_bootstrap(
             Err(RunError {
                 failure: Failure::Exec(e),
                 bootstrap: true,
-            }) if bootstrap_eligible(classify::go_status(e)) => e.clone(),
+            }) if bootstrap_eligible(e.go_status()) => e.clone(),
             _ => break,
         };
         result = match run_routed(rt, call.clone(), trace, resolved.clone()).await {
@@ -1079,7 +1079,7 @@ async fn run_routed(
         // Go `shouldRetryAfterErrorWithAttempted` / `isRequestRetryRoundError`.
         let (status, retry_round) = match &round_error.failure {
             Failure::Exec(e) => (
-                classify::go_status(e),
+                e.go_status(),
                 classify::is_retry_round(e) && !classify::is_request_invalid(e) && !last_broke,
             ),
             Failure::Cooldown { .. } => (429, true),
@@ -1251,7 +1251,7 @@ impl RemoteFault {
     /// Go's status for retry decisions: transport faults have none.
     fn status(&self) -> u16 {
         match &self.failure {
-            Failure::Exec(e) | Failure::Remote { error: e, .. } => classify::go_status(e),
+            Failure::Exec(e) | Failure::Remote { error: e, .. } => e.go_status(),
             other => other.status(),
         }
     }
@@ -1787,7 +1787,7 @@ async fn remote_round(
 
 /// Go `isConnectionLifecycleError` for a statusless error's text.
 fn lifecycle(e: &ExecError) -> bool {
-    if classify::go_status(e) != 0 {
+    if e.go_status() != 0 {
         return false;
     }
     let lower = classify::error_text(e).trim().to_lowercase();
@@ -1883,7 +1883,7 @@ impl Credits<'_> {
             .any(|p| p.trim().eq_ignore_ascii_case("antigravity"))
             && cpa_exec::antigravity_credits::enabled(cfg)
             && match &error.failure {
-                Failure::Exec(e) => matches!(classify::go_status(e), 429 | 503),
+                Failure::Exec(e) => matches!(e.go_status(), 429 | 503),
                 Failure::Cooldown { .. } => true,
                 Failure::Unavailable { code, .. } => matches!(*code, "auth_not_found" | "auth_unavailable"),
                 _ => false,

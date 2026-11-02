@@ -273,7 +273,7 @@ fn disambiguate(base: &[u8], original: &[u8], used: &HashMap<Vec<u8>, Vec<u8>>) 
         hasher.update(original);
         hasher.update(format!("\x00{attempt}"));
         let digest = hasher.finalize();
-        let suffix = format!("_{}", crate::common::hex(&digest[..6]));
+        let suffix = format!("_{}", cpa_core::hex::encode(&digest[..6]));
         let prefix = &base[..base.len().min(64 - suffix.len())];
         let candidate = [prefix, suffix.as_bytes()].concat();
         if !used.contains_key(&candidate) {
@@ -458,7 +458,7 @@ mod tests {
         assert_eq!(out[&b"a.b".to_vec()], b"a.b");
         let expect = |name: &[u8]| {
             let digest = Sha256::digest([name, b"\x000"].concat());
-            format!("a_b_{}", crate::common::hex(&digest[..6])).into_bytes()
+            format!("a_b_{}", cpa_core::hex::encode(&digest[..6])).into_bytes()
         };
         assert_eq!(out[&b"a b".to_vec()], expect(b"a b"));
         assert_eq!(out[&b"a_b".to_vec()], expect(b"a_b"));

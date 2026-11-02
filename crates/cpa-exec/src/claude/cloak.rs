@@ -5,7 +5,7 @@
 use sha2::{Digest, Sha256};
 
 use super::signals;
-use crate::rawjson::{self, js_string};
+use crate::rawjson;
 
 pub(crate) const CLI_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub(crate) const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
@@ -66,15 +66,18 @@ pub(crate) fn text_block(text: &str, cache: Option<&str>) -> String {
         Some(ttl) if !ttl.is_empty() => {
             format!(
                 r#"{{"type":"text","text":{},"cache_control":{{"type":"ephemeral","ttl":{}}}}}"#,
-                js_string(text),
-                js_string(ttl)
+                cpa_common::json::marshal_string(text, false),
+                cpa_common::json::marshal_string(ttl, false)
             )
         }
         Some(_) => format!(
             r#"{{"type":"text","text":{},"cache_control":{{"type":"ephemeral"}}}}"#,
-            js_string(text)
+            cpa_common::json::marshal_string(text, false)
         ),
-        None => format!(r#"{{"type":"text","text":{}}}"#, js_string(text)),
+        None => format!(
+            r#"{{"type":"text","text":{}}}"#,
+            cpa_common::json::marshal_string(text, false)
+        ),
     }
 }
 const EPHEMERAL: Option<&str> = Some("");
@@ -89,7 +92,7 @@ fn fingerprint(message: &str, version: &str) -> String {
         .collect();
     let sampled = String::from_utf16_lossy(&sampled);
     let digest = Sha256::digest(format!("{FINGERPRINT_SALT}{sampled}{version}").as_bytes());
-    super::session::hex(&digest)[..3].to_owned()
+    cpa_core::hex::encode(&digest)[..3].to_owned()
 }
 
 pub(crate) struct Billing<'a> {
@@ -223,7 +226,10 @@ pub(crate) fn forwarded_system_blocks(body: &str) -> Vec<Forwarded> {
 /// explicit cache mode exactly the breakpoint the caller put on the block (or none).
 fn forwarded_block(text: &str, block: &Forwarded, explicit: bool) -> String {
     match (&block.cache, explicit) {
-        (Some(cc), true) => format!(r#"{{"type":"text","text":{},"cache_control":{cc}}}"#, js_string(text)),
+        (Some(cc), true) => format!(
+            r#"{{"type":"text","text":{},"cache_control":{cc}}}"#,
+            cpa_common::json::marshal_string(text, false)
+        ),
         (None, true) => text_block(text, None),
         (_, false) => text_block(text, EPHEMERAL),
     }
@@ -241,7 +247,7 @@ pub(crate) fn invalid_system_block(body: &str) -> Option<String> {
             let kind = if kind.is_empty() { "unknown".to_owned() } else { kind };
             format!(
                 "invalid_request_error: system.{i}.type: Input should be 'text'. System instructions support text only, but this block has type {}. Move non-text content into a user message.",
-                rawjson::go_string(&kind).replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+                cpa_common::json::marshal_string(&kind, true).replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
             )
         })
     })
@@ -270,7 +276,7 @@ pub(crate) fn prepend_reminders(body: &str, blocks: &[Forwarded], explicit: bool
     let reminder_block = |i: usize| match (&blocks[i].cache, explicit) {
         (Some(cc), true) => format!(
             r#"{{"type":"text","text":{},"cache_control":{cc}}}"#,
-            js_string(&reminders[i])
+            cpa_common::json::marshal_string(&reminders[i], false)
         ),
         _ => text_block(&reminders[i], None),
     };
@@ -633,8 +639,8 @@ pub(crate) fn upgrade_ttl(body: String, ttl: &str) -> String {
         }
         let mut upgraded = format!(
             r#"{{"type":{},"ttl":{}"#,
-            js_string(parsed.get("type").str()),
-            js_string(ttl)
+            cpa_common::json::marshal_string(parsed.get("type").str(), false),
+            cpa_common::json::marshal_string(ttl, false)
         );
         let scope = parsed.get("scope");
         if scope.exists() {
@@ -896,8 +902,8 @@ pub(crate) fn fake_user_id(session_id: &str) -> String {
     let _ = getrandom::fill(&mut bytes);
     format!(
         r#"{{"device_id":"{}","account_uuid":"","session_id":{}}}"#,
-        super::session::hex(&bytes),
-        rawjson::go_string(&session)
+        cpa_core::hex::encode(&bytes),
+        cpa_common::json::marshal_string(&session, true)
     )
 }
 

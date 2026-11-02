@@ -31,6 +31,7 @@ use http::HeaderMap;
 use sha2::{Digest, Sha256};
 
 use crate::antigravity_request as ag;
+use crate::replay::text;
 
 const BYPASS: &[u8] = b"skip_thought_signature_validator";
 const SIGNATURE_FIELDS: [&str; 3] = [
@@ -42,14 +43,6 @@ const SIGNATURE_FIELDS: [&str; 3] = [
 /// `strings.TrimSpace(r.Get(path).String())`.
 fn field(r: &Res<'_>, path: &str) -> Vec<u8> {
     go_trim_space(&r.get(path).bytes()).to_vec()
-}
-
-fn text(r: &Res<'_>) -> String {
-    String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn is_model(content: &Res<'_>) -> bool {
@@ -118,7 +111,7 @@ fn call_key(name: &[u8], args: &[u8], call_id: &[u8]) -> Vec<u8> {
         canonical(args)
     };
     let sum = Sha256::digest([name, b"\x00", &args, b"\x00", call_id].concat());
-    format!("fc:{}", hex(&sum[..8])).into_bytes()
+    format!("fc:{}", cpa_core::hex::encode(&sum[..8])).into_bytes()
 }
 
 /// `antigravityReplayToolCallKeysFromPart`: the call's key with its own ID, if named.
@@ -141,7 +134,7 @@ fn tool_use_id(call_id: &[u8], name: &[u8], args: &[u8]) -> Vec<u8> {
 }
 
 fn text_hash(kind: &str, text: &[u8]) -> String {
-    hex(&Sha256::digest([kind.as_bytes(), b"\x00", text].concat()))
+    cpa_core::hex::encode(&Sha256::digest([kind.as_bytes(), b"\x00", text].concat()))
 }
 
 /// `antigravityReplayPartFingerprint`: the kind and hash of a text part, else empty.
@@ -269,7 +262,7 @@ fn system_lane(payload: &[u8]) -> String {
             map.retain(|key, _| !key.trim().go_eq_fold("cache_control"));
         }
     });
-    hex(&Sha256::digest(value.marshal())[..16])
+    cpa_core::hex::encode(&Sha256::digest(value.marshal())[..16])
 }
 
 /// `antigravityReasoningReplayClientSessionKey`: an explicit downstream session, which
@@ -568,7 +561,7 @@ impl Fingerprints {
     /// The empty fingerprint until a byte was hashed.
     fn sum(&self) -> String {
         if self.wrote {
-            hex(&self.hasher.clone().finalize())
+            cpa_core::hex::encode(&self.hasher.clone().finalize())
         } else {
             String::new()
         }

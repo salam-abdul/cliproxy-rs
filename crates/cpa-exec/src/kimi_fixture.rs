@@ -326,14 +326,10 @@ pub(crate) struct Downstream {
 }
 
 /// The failure status and body the server records for an executor error when the
-/// executor publishes nothing itself (cpa_server::classify `go_status`, `error_text`):
-/// transport faults carry no status, as Go's plain errors.
+/// executor publishes nothing itself (`ExecError::go_status`, cpa_server::classify
+/// `error_text`).
 pub(crate) fn go_failure(e: &cpa_core::exec::ExecError) -> (u16, String) {
-    let status = if e.scope == cpa_core::exec::FailureScope::Transport {
-        0
-    } else {
-        e.status
-    };
+    let status = e.go_status();
     let text = if e.body.is_empty() {
         format!("status {}", e.status)
     } else {

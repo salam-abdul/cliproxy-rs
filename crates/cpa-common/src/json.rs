@@ -2231,6 +2231,14 @@ pub fn quote(s: impl AsRef<[u8]>) -> Vec<u8> {
     out
 }
 
+/// `json.Marshal(string)` as text, or with `escape_html` false a `json.Encoder` with
+/// `SetEscapeHTML(false)` (JavaScript's `JSON.stringify` for valid UTF-8).
+pub fn marshal_string(s: impl AsRef<[u8]>, escape_html: bool) -> String {
+    let mut out = Vec::with_capacity(s.as_ref().len() + 2);
+    marshal_str(&mut out, s.as_ref(), escape_html);
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 /// `json.Marshal([]string)`; an empty slice is `[]` (Go's nil slice would be `null`).
 pub fn quote_all<S: AsRef<[u8]>>(items: &[S]) -> Vec<u8> {
     let mut out = vec![b'['];
@@ -2693,6 +2701,24 @@ pub fn set_str(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: impl A
 pub fn set_raw(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), raw: impl AsRef<[u8]>) -> bool {
     let path = path.as_path();
     apply(out, path, raw.as_ref(), false, false)
+}
+
+/// `helps.SetStringIfDifferent`: sets a string unless the value there is already that
+/// string; an sjson error leaves the document unchanged.
+pub fn set_str_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: &str) {
+    let current = get(out, path);
+    if current.kind == Kind::String && *current.bytes() == *value.as_bytes() {
+        return;
+    }
+    set_str(out, path, value);
+}
+
+/// `helps.SetBoolIfDifferent`.
+pub fn set_bool_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: bool) {
+    if get(out, path).kind == if value { Kind::True } else { Kind::False } {
+        return;
+    }
+    set_bool(out, path, value);
 }
 
 /// `sjson.SetBytes` with any Go integer type.
@@ -3456,6 +3482,17 @@ pub fn canonical(text: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marshal_string_escapes_like_go() {
+        assert_eq!(marshal_string("a\u{2028}<\u{1}", false), "\"a\\u2028<\\u0001\"");
+        assert_eq!(marshal_string("\u{1}\u{8}\u{c}", false), r#""\u0001\b\f""#);
+        assert_eq!(
+            marshal_string("a<b>&\"\u{2028}\u{1}", true),
+            r#""a\u003cb\u003e\u0026\"\u2028\u0001""#
+        );
+        assert_eq!(marshal_string(b"\xff", true), r#""\ufffd""#);
+    }
 
     fn s(b: Vec<u8>) -> String {
         String::from_utf8(b).unwrap()

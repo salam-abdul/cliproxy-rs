@@ -876,7 +876,7 @@ impl StreamUsage {
     /// Go `ObserveOpenAIStream`.
     fn observe_openai(&mut self, line: &[u8]) {
         let Some(payload) = json_payload(line) else { return };
-        let contains = |needle: &[u8]| payload.windows(needle.len()).any(|w| w == needle);
+        let contains = |needle: &[u8]| cpa_common::gostr::contains(payload, needle);
         let usage_candidate = contains(b"\"usage\"");
         let need_tier = self.detail.response_service_tier.is_empty() || usage_candidate;
         let tier_candidate = need_tier && contains(b"\"service_tier\"");
@@ -2143,7 +2143,7 @@ impl Tracker {
                 Ending::Done => usage.unwrap_or_default(),
                 Ending::Failed(error) => {
                     record.failed = true;
-                    record.fail_status = i64::from(crate::classify::go_status(error));
+                    record.fail_status = i64::from(error.go_status());
                     record.fail_body = crate::classify::error_text(error);
                     if record.response_headers.is_empty() {
                         record.response_headers = go_headers(&error.headers);

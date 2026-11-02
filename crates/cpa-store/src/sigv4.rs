@@ -6,11 +6,7 @@ use sha2::{Digest, Sha256};
 pub(crate) const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&Sha256::digest(bytes))
 }
 
 fn hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
@@ -127,7 +123,7 @@ pub(crate) fn sign(
         hmac(format!("AWS4{secret_key}").as_bytes(), day.as_bytes()),
         |key, part| hmac(&key, part),
     );
-    let signature = hex(&hmac(&key, to_sign.as_bytes()));
+    let signature = cpa_core::hex::encode(&hmac(&key, to_sign.as_bytes()));
     let authorization = format!(
         "AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
     );
@@ -142,7 +138,7 @@ mod tests {
     #[test]
     fn hmac_matches_rfc_4231_case_2() {
         assert_eq!(
-            hex(&hmac(b"Jefe", b"what do ya want for nothing?")),
+            cpa_core::hex::encode(&hmac(b"Jefe", b"what do ya want for nothing?")),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }

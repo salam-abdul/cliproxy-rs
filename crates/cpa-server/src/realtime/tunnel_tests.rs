@@ -23,10 +23,6 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The Go-built frame for `remote:local` signed with `remote-password`.
 fn valid_frame() -> Vec<u8> {
     let frames = golden()["frames"].as_array().unwrap().clone();
@@ -185,7 +181,7 @@ async fn binding_frames_are_validated_like_go() {
         let got = read_validated_frame(&mut reader, user, password).await;
         match case["error"].as_str() {
             None => assert_eq!(
-                hex(&got.unwrap_or_else(|e| panic!("{name}: {e}"))),
+                cpa_core::hex::encode(&got.unwrap_or_else(|e| panic!("{name}: {e}"))),
                 case["returned"].as_str().unwrap(),
                 "{name}"
             ),
@@ -343,7 +339,7 @@ async fn proxy_dialers_speak_like_go() {
         }
         let sent = server.await.unwrap();
         let sent = if case["kind"] == "socks" {
-            hex(&sent)
+            cpa_core::hex::encode(&sent)
         } else {
             String::from_utf8(sent).unwrap()
         };

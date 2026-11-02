@@ -138,7 +138,7 @@ fn deterministic_id(kind: &str, msg: i64, part: i64, name: &[u8], payload: &[u8]
     hasher.update(name);
     hasher.update(b"|");
     hasher.update(payload);
-    format!("call_{}", crate::common::hex(&hasher.finalize()[..12])).into_bytes()
+    format!("call_{}", cpa_core::hex::encode(&hasher.finalize()[..12])).into_bytes()
 }
 
 /// explicitGeminiToolID.

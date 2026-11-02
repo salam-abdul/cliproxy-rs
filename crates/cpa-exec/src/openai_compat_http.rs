@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use cpa_core::config::Config;
 use cpa_core::credential::Credential;
-use cpa_core::exec::{CaptureEvent, CaptureSink, ExecError, ExecRequest, FailureScope, UpstreamRequest, UsageSink};
+use cpa_core::exec::{CaptureEvent, CaptureSink, ExecError, ExecRequest, UpstreamRequest, UsageSink};
 use futures_util::StreamExt;
 use http::HeaderMap;
 
@@ -69,11 +69,7 @@ pub(crate) fn lines(
 /// client-facing writer may stop at that frame and never take the error): Go's status
 /// (none for a transport fault) and the error text, as the server records a failure.
 pub(crate) fn publish_failure(usage: &UsageSink, error: &ExecError) {
-    let status = if error.scope == FailureScope::Transport {
-        0
-    } else {
-        error.status
-    };
+    let status = error.go_status();
     let body = if error.body.is_empty() {
         format!("status {}", error.status)
     } else {
@@ -83,25 +79,6 @@ pub(crate) fn publish_failure(usage: &UsageSink, error: &ExecError) {
 }
 
 // --- upstream request capture (helps/logging_helpers.go) --------------------------------
-
-/// Go `Auth.AccountInfo`: `("oauth", email)` or `("api_key", key)` by auth kind.
-pub(crate) fn account_info(credential: &Credential) -> (&'static str, String) {
-    match cpa_core::registry::dynamic::auth_kind(credential) {
-        Some("oauth") => (
-            "oauth",
-            credential.str("email").map(|e| e.trim().to_owned()).unwrap_or_default(),
-        ),
-        Some("apikey") => (
-            "api_key",
-            credential
-                .attributes
-                .get("api_key")
-                .map(|k| k.trim().to_owned())
-                .unwrap_or_default(),
-        ),
-        _ => ("", String::new()),
-    }
-}
 
 /// Response headers as Go's `http.Header`: canonical names, every value in order.
 pub(crate) fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -136,7 +113,7 @@ impl Capture {
     ) -> Self {
         let sink = req.capture().clone();
         if sink.enabled() {
-            let (auth_type, auth_value) = account_info(credential);
+            let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
             sink.record(CaptureEvent::Request(UpstreamRequest {
                 url,
                 method,
@@ -204,5 +181,52 @@ impl Capture {
                 Err(error) => capture.error(error),
             })
             .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use cpa_core::exec::{AfterAccept, ExecError, FailureScope, UsageObserver, UsageSink};
+    use cpa_core::format::Format;
+
+    #[derive(Default)]
+    struct Failures(Mutex<Vec<(u16, String)>>);
+
+    impl UsageObserver for Failures {
+        fn response_body(&self, _: Format, _: &[u8]) {}
+        fn response_line(&self, _: Format, _: &[u8]) {}
+        fn request(&self, _: Format, _: &[u8]) {}
+        fn publish_failure(&self, status: u16, body: &str) {
+            self.0.lock().unwrap().push((status, body.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_published_failure_carries_the_go_status() {
+        let failures = Arc::new(Failures::default());
+        let cases = [
+            (ExecError::local(502, FailureScope::Request, "broke"), 502),
+            (ExecError::local(502, FailureScope::Transport, "reset"), 0),
+            (
+                ExecError::local(502, FailureScope::Request, "cut").accepted(AfterAccept::Interrupted),
+                0,
+            ),
+            (
+                ExecError::local(500, FailureScope::Request, "bad").accepted(AfterAccept::Unprocessed),
+                0,
+            ),
+            (
+                ExecError::local(502, FailureScope::Request, "short").accepted(AfterAccept::Truncated),
+                502,
+            ),
+        ];
+        for (error, want) in cases {
+            let usage = UsageSink::new(failures.clone());
+            super::publish_failure(&usage, &error);
+            let (status, body) = failures.0.lock().unwrap().pop().unwrap();
+            assert_eq!((status, body.as_str()), (want, &*String::from_utf8_lossy(&error.body)));
+        }
     }
 }

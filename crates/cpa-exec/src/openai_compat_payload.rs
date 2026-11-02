@@ -428,7 +428,7 @@ pub(crate) fn normalize_tool_results_text_only(mut payload: Vec<u8>) -> Vec<u8> 
                             && *gj::get(last, "role").bytes() == *b"tool"
                         {
                             let previous = gj::get(last, "content").bytes().into_owned();
-                            if !contains(&previous, IMAGE_OMITTED.as_bytes()) {
+                            if !cpa_common::gostr::contains(&previous, IMAGE_OMITTED.as_bytes()) {
                                 let next = if previous.is_empty() {
                                     IMAGE_OMITTED.as_bytes().to_vec()
                                 } else {
@@ -454,28 +454,6 @@ pub(crate) fn normalize_tool_results_text_only(mut payload: Vec<u8>) -> Vec<u8> 
     }
     gj::set_raw(&mut payload, "messages", gj::join(&out));
     payload
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-/// `helps.SetStringIfDifferent`.
-pub(crate) fn set_str_if_different(body: &mut Vec<u8>, path: &str, value: &str) {
-    let current = gj::get(body, path);
-    if current.kind == Kind::String && *current.bytes() == *value.as_bytes() {
-        return;
-    }
-    gj::set_str(body, path, value);
-}
-
-/// `helps.SetBoolIfDifferent`.
-pub(crate) fn set_bool_if_different(body: &mut Vec<u8>, path: &str, value: bool) {
-    let current = gj::get(body, path).kind;
-    if current == if value { Kind::True } else { Kind::False } {
-        return;
-    }
-    gj::set_bool(body, path, value);
 }
 
 /// `uuid.NewSHA1(uuid.NameSpaceOID, identity)`.
@@ -525,9 +503,14 @@ pub(crate) fn claude_code_prompt_cache(model: &str, payload: &[u8], headers: &He
 
 /// `EnsureResponsesUsageDetails`.
 pub fn ensure_responses_usage_details(payload: &[u8]) -> Vec<u8> {
+    usage_details_patched(payload).unwrap_or_else(|| payload.to_vec())
+}
+
+/// [`ensure_responses_usage_details`], `None` when the payload needs no change.
+pub(crate) fn usage_details_patched(payload: &[u8]) -> Option<Vec<u8>> {
     let trimmed = cpa_core::config::go_trim_space(payload);
     if trimmed.is_empty() {
-        return payload.to_vec();
+        return None;
     }
     let patch = |body: &[u8]| -> Option<Vec<u8>> {
         if *gj::get(body, "object").bytes() == *b"response.compaction" {
@@ -537,10 +520,10 @@ pub fn ensure_responses_usage_details(payload: &[u8]) -> Vec<u8> {
         (updated != body).then_some(updated)
     };
     if trimmed[0] == b'{' {
-        return patch(trimmed).unwrap_or_else(|| payload.to_vec());
+        return patch(trimmed);
     }
-    if !contains(payload, b"data:") {
-        return payload.to_vec();
+    if !cpa_common::gostr::contains(payload, b"data:") {
+        return None;
     }
     let mut modified = false;
     let lines: Vec<Vec<u8>> = payload
@@ -565,7 +548,7 @@ pub fn ensure_responses_usage_details(payload: &[u8]) -> Vec<u8> {
             }
         })
         .collect();
-    if modified { lines.join(&b'\n') } else { payload.to_vec() }
+    modified.then(|| lines.join(&b'\n'))
 }
 
 /// `ensureUsageDetailsAt`.

@@ -31,12 +31,13 @@ use tokio::sync::{OwnedMutexGuard, mpsc};
 
 use crate::codex_ws::{self, Pool, Read, Session, Target, Upstream};
 use crate::openai_compat_payload::ensure_responses_usage_details;
+use crate::replay::text;
 use crate::upstream::{apply_patch_error, model_status_error};
 use crate::xai::{XaiExecutor, compaction_frames, compaction_item, compaction_response_id, creds};
 use crate::xai_auth::DEFAULT_API_BASE_URL;
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request as request;
-use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter, text};
+use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter};
 use cpa_translate::apply_patch_responses as apply_patch;
 
 /// The terminal events whose usage Go's WebSocket turn observes (completed and done).
@@ -721,7 +722,7 @@ impl WsCapture {
                 auth_value: String::new(),
             };
         }
-        let (auth_type, auth_value) = crate::openai_compat_http::account_info(credential);
+        let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
         Self {
             headers: crate::openai_compat_http::header_pairs(headers),
             sink,

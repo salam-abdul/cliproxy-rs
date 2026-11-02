@@ -761,7 +761,7 @@ fn rolling_prefix_keys(fingerprints: &[String]) -> Vec<String> {
             hash.update(b"\0");
             hash.update(fp.as_bytes());
             previous = hash.finalize().into();
-            let hex: String = previous.iter().map(|b| format!("{b:02x}")).collect();
+            let hex: String = cpa_core::hex::encode(&previous);
             format!("{}:{hex}", i + 1)
         })
         .collect()

@@ -321,7 +321,7 @@ fn normalize_carriers<'a>(items: &[Res<'a>]) -> (Vec<Res<'a>>, bool) {
 // Trailing text signatures (trailing_signature.go)
 
 fn sha256_hex(text: &[u8]) -> String {
-    crate::common::hex(&Sha256::digest(text))
+    cpa_core::hex::encode(&Sha256::digest(text))
 }
 
 fn replay_model(model: &str) -> String {
@@ -540,7 +540,7 @@ fn pair_reasoning_with_function_calls<'a>(items: &[Res<'a>]) -> Vec<Res<'a>> {
         if item_type(item) == b"reasoning"
             && !post_call_carrier.contains(&index)
             && can_bind_following
-            && !contains(&field(item, "id"), b"_detached_after_")
+            && !cpa_common::gostr::contains(&field(item, "id"), b"_detached_after_")
             && index + 1 < items.len()
             && is_tool_call(&items[index + 1])
         {
@@ -563,10 +563,6 @@ fn pair_reasoning_with_function_calls<'a>(items: &[Res<'a>]) -> Vec<Res<'a>> {
     paired
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
 fn message_kind(item: &Res<'_>) -> Vec<u8> {
     let kind = item_type(item);
     if kind.is_empty() && !item.get("role").bytes().is_empty() {
@@ -582,7 +578,7 @@ fn reorder_detached_reasoning<'a>(items: &[Res<'a>]) -> Vec<Res<'a>> {
     let mut reordered: Vec<Res<'a>> = Vec::with_capacity(items.len());
     for (item_index, item) in items.iter().enumerate() {
         let is_carrier = is_detached_carrier(item);
-        let marked_detached = contains(&field(item, "id"), b"_detached_after_");
+        let marked_detached = cpa_common::gostr::contains(&field(item, "id"), b"_detached_after_");
         if is_carrier && let Some(previous) = reordered.last().cloned() {
             let previous_type = message_kind(&previous);
             let mut is_assistant_message = previous_type == b"message" && assistant_visible_text(&previous).is_some();
@@ -618,7 +614,7 @@ fn reorder_detached_reasoning<'a>(items: &[Res<'a>]) -> Vec<Res<'a>> {
             }
             let already_paired = reordered.len() > 1 && {
                 let prior = &reordered[reordered.len() - 2];
-                is_detached_carrier(prior) && contains(&field(prior, "id"), b"_detached_after_")
+                is_detached_carrier(prior) && cpa_common::gostr::contains(&field(prior, "id"), b"_detached_after_")
             };
             if !already_paired
                 && (is_assistant_message
@@ -2031,7 +2027,7 @@ fn convert_items(
                 if go_trim_space(&raw_signature).is_empty() && i + 1 < normalized.len() {
                     let next = &normalized[i + 1];
                     if item_type(next) == b"reasoning"
-                        && contains(&field(next, "id"), b"_detached_after_")
+                        && cpa_common::gostr::contains(&field(next, "id"), b"_detached_after_")
                         && trimmed(next, "summary.0.text").is_empty()
                         && !trimmed(next, "encrypted_content").is_empty()
                     {

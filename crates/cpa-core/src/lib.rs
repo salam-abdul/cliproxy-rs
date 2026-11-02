@@ -8,12 +8,14 @@
 //! - [`store`]: the contracts between the server and remote config, auth and cooldown stores.
 //! - [`private_fs`]: owner-only files and directories.
 //! - [`gotime`]: Go `time.Time` text.
+//! - [`hex`]: lowercase hex text.
 
 pub mod config;
 pub mod credential;
 pub mod exec;
 pub mod format;
 pub mod gotime;
+pub mod hex;
 pub mod private_fs;
 pub mod registry;
 pub mod store;

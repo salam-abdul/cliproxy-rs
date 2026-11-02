@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::antigravity_claude::{
     ANY, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, encode_carrier, has_typed_web_search_tool,
 };
-use crate::common::{go_runes, hex, now_nanos, restore_sanitized_tool_name, sanitize_claude_tool_id};
+use crate::common::{go_runes, now_nanos, restore_sanitized_tool_name, sanitize_claude_tool_id};
 use crate::replay_cache::{cache_signature, model_group};
 use crate::responses_tools::disambiguated_tool_name_map;
 use crate::stream::GoStream;
@@ -93,7 +93,7 @@ pub(crate) fn gemini_claude_tool_use_id(call_id: &[u8], name: &[u8], args: &[u8]
         };
     }
     let sum = Sha256::digest([call_id, b"\x00", name, b"\x00", &args].concat());
-    format!("cpa_gemini_{}", hex(&sum[..16])).into_bytes()
+    format!("cpa_gemini_{}", cpa_core::hex::encode(&sum[..16])).into_bytes()
 }
 
 /// antigravityClaudeToolUseID.

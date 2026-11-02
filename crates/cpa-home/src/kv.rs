@@ -17,10 +17,7 @@ use crate::error::{Error, Result, redacted_decode_error, redacted_decode_text};
 
 /// Go `HashKeyPart`: hex SHA-256, so keys never carry raw identifiers.
 pub fn hash_key_part(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    cpa_core::hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 /// Go `CurrentKVClient`: `Ok(None)` outside Home mode.

@@ -69,7 +69,7 @@ pub fn generate_pkce() -> Result<Pkce, String> {
 pub fn random_state() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| format!("failed to generate random bytes: {e}"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(cpa_core::hex::encode(&bytes))
 }
 
 /// `DevinUserStatus`: plan, quota and account metadata from `GetUserStatus`.
@@ -592,7 +592,7 @@ fn lossy(b: &[u8]) -> String {
 
 /// `fmt.Sprintf("%x", sha256(b)[:8])`.
 fn hex8(b: &[u8]) -> String {
-    Sha256::digest(b)[..8].iter().map(|x| format!("{x:02x}")).collect()
+    cpa_core::hex::encode(&Sha256::digest(b)[..8])
 }
 
 /// The credential a Devin login produces (Go's `*coreauth.Auth` from `CreateAuthRecord`).

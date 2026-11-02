@@ -684,7 +684,7 @@ impl Policy {
         });
         if let Some(rules) = rules {
             let body = crate::classify::rule_text(error);
-            let status = i64::from(crate::classify::go_status(error));
+            let status = i64::from(error.go_status());
             if let Some(rule) = rules.iter().find(|r| r.matches(status, &body)) {
                 let (stop, cooldown) = match rule.action {
                     RuleAction::Stop => (true, false),
@@ -1666,7 +1666,7 @@ impl Scheduler {
         let key = if credential_quota { "" } else { model };
         // A forced cooldown applies the normal policy even when cooling is disabled.
         let disabled = policy.cooling_disabled(c) && !action.force_cooldown;
-        let status = crate::classify::go_status(error);
+        let status = error.go_status();
         let text = crate::classify::error_text(error);
         let prev = self.cooldowns.get(id).and_then(|e| e.get(key));
         // An ended bounded window that a newer probe took over, or that opened after this

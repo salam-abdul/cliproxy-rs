@@ -104,7 +104,7 @@ pub(crate) fn shorten_call_id(id: &[u8]) -> Vec<u8> {
         return id.to_vec();
     }
     let sum = Sha256::digest(id);
-    let suffix = format!("_{}", common::hex(&sum[..8]));
+    let suffix = format!("_{}", cpa_core::hex::encode(&sum[..8]));
     [&id[..NAME_LIMIT - suffix.len()], suffix.as_bytes()].concat()
 }
 

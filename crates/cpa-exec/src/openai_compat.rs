@@ -266,7 +266,7 @@ impl OpenAICompatExecutor {
             body = payload::sanitize_reasoning_encrypted_content(body);
         }
         if req.stream {
-            payload::set_bool_if_different(&mut body, "stream_options.include_usage", true);
+            gj::set_bool_if_different(&mut body, "stream_options.include_usage", true);
         }
         if req.usage.enabled() {
             req.usage.request(target, &body);
@@ -463,10 +463,10 @@ pub(crate) fn prepare_images_payload(
     if go::json_valid(body) {
         let mut body = body.to_vec();
         if !model.is_empty() {
-            payload::set_str_if_different(&mut body, "model", model);
+            gj::set_str_if_different(&mut body, "model", model);
         }
         if stream {
-            payload::set_bool_if_different(&mut body, "stream", true);
+            gj::set_bool_if_different(&mut body, "stream", true);
         } else {
             gj::delete(&mut body, "stream");
         }
@@ -508,7 +508,7 @@ fn prompt_cache_key(
         .map(|source| gj::get(source, "prompt_cache_key").str().trim().to_owned())
         .find(|key| !key.is_empty());
     if let Some(key) = explicit {
-        payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+        gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
         return body;
     }
     let model = gj::get(&body, "model").str().trim().to_owned();
@@ -516,7 +516,7 @@ fn prompt_cache_key(
     if req.source_format == Format::Claude
         && let Some(key) = payload::claude_code_prompt_cache(&model, &req.body, &req.headers)
     {
-        payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+        gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
         return body;
     }
     let Some(session) = provider_session_uuid(provider, req) else {
@@ -529,7 +529,7 @@ fn prompt_cache_key(
         req.source_format.as_str().trim().go_lower()
     );
     let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes()).to_string();
-    payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+    gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
     body
 }
 

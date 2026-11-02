@@ -11,6 +11,7 @@ use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::exec::ExecError;
 
 use crate::openai_compat_payload::ensure_responses_usage_details;
+use crate::replay::text;
 
 pub(crate) const FUNCTION: &str = "function";
 pub(crate) const CUSTOM: &str = "custom";
@@ -34,11 +35,6 @@ pub(crate) struct ClientToolKey {
     pub namespace: String,
     pub name: String,
     pub tool_type: String,
-}
-
-/// gjson `Result.String()` trimmed like Go's `strings.TrimSpace`.
-pub(crate) fn text(r: &Res<'_>) -> String {
-    r.str().trim().to_owned()
 }
 
 /// `json.Marshal([]json.RawMessage)`: each item compacted with HTML escaping.

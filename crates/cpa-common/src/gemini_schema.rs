@@ -9,9 +9,7 @@ use crate::schema_path::{
     delete as schema_delete, get as schema_get, set_bool as schema_set_bool, set_raw as schema_set_raw,
     set_str as schema_set_str, set_strs as schema_set_strs,
 };
-use crate::schema_support::{
-    contains_seq, decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, ref_name,
-};
+use crate::schema_support::{decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, ref_name};
 use std::collections::{BTreeMap, HashMap};
 
 #[path = "schema_indexed.rs"]
@@ -173,7 +171,7 @@ fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
         Child(usize),
     }
     // The inliner can re-marshal the whole document even for a literal "$ref" value.
-    if contains_seq(raw, br#""$ref""#) {
+    if crate::gostr::contains(raw, br#""$ref""#) {
         return None;
     }
     let document = Document::parse(raw)?;

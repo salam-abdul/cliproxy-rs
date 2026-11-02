@@ -250,12 +250,7 @@ async fn capture_response(sink: RequestLog, head: bool, mut response: Response) 
             || (content_type.trim().is_empty()
                 && [b"\"stream\":true".as_slice(), b"\"stream\": true".as_slice()]
                     .iter()
-                    .any(|needle| {
-                        record
-                            .request_body
-                            .windows(needle.len())
-                            .any(|window| window == *needle)
-                    })));
+                    .any(|needle| cpa_common::gostr::contains(&record.request_body, needle))));
     let chunks = if record.streaming && !head {
         match Spool::new(&record.state.dir, "response-body") {
             Ok(spool) => match spool.file.try_clone() {

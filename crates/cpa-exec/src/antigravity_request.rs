@@ -152,8 +152,9 @@ pub(crate) fn derived_session_id(derived: Option<&str>) -> String {
 /// `toolConfig` moved into the request.
 pub(crate) fn gemini_to_antigravity(model: &str, body: Vec<u8>, project: &str, derived_session: &str) -> Vec<u8> {
     let original = body.clone();
-    let mut out = payload::set_str_if_different(body, "model", model);
-    out = payload::set_str_if_different(out, "userAgent", "antigravity");
+    let mut out = body;
+    gj::set_str_if_different(&mut out, "model", model);
+    gj::set_str_if_different(&mut out, "userAgent", "antigravity");
     let image = model.contains("image");
     let mut kind = String::from_utf8_lossy(go_trim_space(&gj::get(&out, "requestType").bytes())).into_owned();
     if kind.is_empty() {
@@ -163,7 +164,7 @@ pub(crate) fn gemini_to_antigravity(model: &str, body: Vec<u8>, project: &str, d
     if project.is_empty() {
         gj::delete(&mut out, "project");
     } else {
-        out = payload::set_str_if_different(out, "project", project);
+        gj::set_str_if_different(&mut out, "project", project);
     }
     if image {
         gj::set_str(&mut out, "requestId", image_request_id());
@@ -680,7 +681,7 @@ fn has_provenance_id(body: &[u8]) -> bool {
 /// `antigravitySyntheticToolCallID`.
 fn synthetic_call_id(reserved: &[u8]) -> String {
     let sum = Sha256::digest([&b"antigravity-degraded-tool-call\x00"[..], reserved].concat());
-    let hex: String = sum[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = cpa_core::hex::encode(&sum[..6]);
     format!("call_{hex}")
 }
 

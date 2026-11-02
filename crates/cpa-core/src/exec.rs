@@ -593,6 +593,20 @@ pub struct ExecError {
 }
 
 impl ExecError {
+    /// The Go status of the error: transport faults and statusless failures after the
+    /// response started (`Interrupted`, `Unprocessed`) have none, as Go's plain errors.
+    pub fn go_status(&self) -> u16 {
+        let statusless = matches!(
+            self.after_accept,
+            Some(AfterAccept::Interrupted | AfterAccept::Unprocessed)
+        );
+        if self.scope == FailureScope::Transport || statusless {
+            0
+        } else {
+            self.status
+        }
+    }
+
     pub fn local(status: u16, scope: FailureScope, message: impl Into<String>) -> Self {
         Self {
             status,

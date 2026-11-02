@@ -644,7 +644,7 @@ pub(crate) fn defer_usage(
             let kind = cpa_common::json::get(payload, "type").bytes().into_owned();
             match rule {
                 UsageRule::OpenAIStream => {
-                    let has = |n: &[u8]| payload.windows(n.len()).any(|w| w == n);
+                    let has = |n: &[u8]| cpa_common::gostr::contains(payload, n);
                     if has(b"\"usage\"") || has(b"\"service_tier\"") {
                         let payload = if cpa_common::json::valid(payload) {
                             strip_paths(payload, &MODEL_PATHS)
@@ -737,23 +737,6 @@ pub(crate) fn track_first_byte(
         }
     })
     .boxed()
-}
-
-/// Go `Auth.AccountInfo()`: the credential kind and its loggable value, the email for
-/// OAuth and the API key for API-key credentials (masked by the capture sink).
-pub(crate) fn account_info(credential: &Credential) -> (&'static str, String) {
-    match cpa_core::registry::dynamic::auth_kind(credential) {
-        Some("oauth") => ("oauth", credential.str("email").unwrap_or_default().trim().to_owned()),
-        Some("apikey") => (
-            "api_key",
-            credential
-                .attributes
-                .get("api_key")
-                .map(|k| k.trim().to_owned())
-                .unwrap_or_default(),
-        ),
-        _ => ("", String::new()),
-    }
 }
 
 /// Go `http.Response.Header` for an HTTP/1.1 upstream response (net/http

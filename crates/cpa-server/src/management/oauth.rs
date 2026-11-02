@@ -265,7 +265,7 @@ fn unix_nanos() -> u128 {
 fn random_state() -> Option<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).ok()?;
-    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Some(cpa_core::hex::encode(&bytes))
 }
 
 /// `requests.proxy-url`, which Go's auth services use.

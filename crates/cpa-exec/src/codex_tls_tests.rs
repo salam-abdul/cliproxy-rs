@@ -18,7 +18,7 @@ fn u16_name(v: u16) -> String {
 }
 
 fn hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&data)
 }
 
 fn be(data: &[u8], at: usize) -> u16 {

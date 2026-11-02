@@ -305,10 +305,6 @@ fn gunzip(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
     Ok(out)
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// `GenerateDevinDeviceFingerprint` (also `devin.GenerateDeviceFingerprint`): 732 hex
 /// characters, random without a seed, else SHA-256 blocks of `<seed>-<counter>`.
 pub(crate) fn device_fingerprint(seed: &str) -> String {
@@ -316,14 +312,16 @@ pub(crate) fn device_fingerprint(seed: &str) -> String {
     if seed.is_empty() {
         let mut b = [0u8; FINGERPRINT_HEX_LEN / 2];
         if getrandom::fill(&mut b).is_ok() {
-            return hex(&b);
+            return cpa_core::hex::encode(&b);
         }
         seed = uuid::Uuid::new_v4().to_string();
     }
     let mut out = String::with_capacity(FINGERPRINT_HEX_LEN + 64);
     let mut counter = 0;
     while out.len() < FINGERPRINT_HEX_LEN {
-        out.push_str(&hex(&Sha256::digest(format!("{seed}-{counter}").as_bytes())));
+        out.push_str(&cpa_core::hex::encode(&Sha256::digest(
+            format!("{seed}-{counter}").as_bytes(),
+        )));
         counter += 1;
     }
     out.truncate(FINGERPRINT_HEX_LEN);
@@ -338,7 +336,11 @@ pub(crate) fn sentry_trace() -> String {
         let c = uuid::Uuid::new_v4().simple().to_string();
         return format!("{a}-{}-1", &c[..16]);
     }
-    format!("{}-{}-1", hex(&b[..16]), hex(&b[16..]))
+    format!(
+        "{}-{}-1",
+        cpa_core::hex::encode(&b[..16]),
+        cpa_core::hex::encode(&b[16..])
+    )
 }
 
 /// The process-wide per-session request counter (`sessionTurnLRU`, 5000 sessions).
@@ -570,15 +572,8 @@ fn tool_description(name: &[u8], description: &[u8]) -> Vec<u8> {
     sanitize_tool_description(name, &desc)
 }
 
-pub(crate) fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
 pub(crate) fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    find(hay, needle).is_some()
+    cpa_common::gostr::index(hay, needle).is_some()
 }
 
 pub(crate) fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
@@ -587,7 +582,7 @@ pub(crate) fn replace_all(hay: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     }
     let mut out = Vec::with_capacity(hay.len());
     let mut rest = hay;
-    while let Some(i) = find(rest, from) {
+    while let Some(i) = cpa_common::gostr::index(rest, from) {
         out.extend_from_slice(&rest[..i]);
         out.extend_from_slice(to);
         rest = &rest[i + from.len()..];

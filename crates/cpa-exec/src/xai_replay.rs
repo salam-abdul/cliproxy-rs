@@ -22,6 +22,7 @@ use cpa_core::exec::ExecRequest;
 use cpa_core::format::Format;
 use sha2::{Digest, Sha256};
 
+use crate::replay::text;
 use crate::replay::{claude_code_session, header_session, payload_session};
 
 /// `XAIReasoningReplayCacheTTL`.
@@ -189,11 +190,6 @@ async fn home_delete(client: &cpa_home::Client, scope: &ReplayScope) -> Result<(
         .map_err(|e| e.to_string())
 }
 
-/// `strings.TrimSpace(r.String())`.
-fn text(r: &Res<'_>) -> String {
-    String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
-}
-
 /// `xaiReasoningReplayScopeFromRequest`: Claude and OpenAI Responses clients only, and
 /// not for a downstream WebSocket turn that continues upstream state.
 pub(crate) fn scope(req: &ExecRequest, body: &[u8], downstream_websocket: bool) -> ReplayScope {
@@ -243,7 +239,7 @@ fn isolate(req: &ExecRequest, key: &str) -> String {
         return String::new();
     }
     let digest = Sha256::digest(api_key.as_bytes());
-    let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let prefix: String = cpa_core::hex::encode(&digest[..8]);
     format!("caller:{prefix}:{key}")
 }
 

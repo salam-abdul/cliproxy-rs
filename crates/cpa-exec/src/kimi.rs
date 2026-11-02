@@ -357,9 +357,9 @@ async fn post(
     headers: GoHeaders,
     body: Vec<u8>,
 ) -> Result<Upstream, ExecError> {
-    use crate::kimi_http::{account_info, capture_chunk, capture_error, capture_metadata, capture_request};
+    use crate::kimi_http::{capture_chunk, capture_error, capture_metadata, capture_request};
     let capture = req.capture();
-    let (auth_type, auth_value) = account_info(credential);
+    let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
     capture_request(
         capture,
         credential,
@@ -723,16 +723,6 @@ fn native_usage_body(data: &[u8]) -> Option<Vec<u8>> {
     usage_has_tokens(&gj::get(data, "usage")).then(|| data.to_vec())
 }
 
-/// `SetBoolIfDifferent`.
-fn set_bool_if_different(mut body: Vec<u8>, path: &str, value: bool) -> Vec<u8> {
-    let kind = gj::get(&body, path).kind;
-    if (value && kind == Kind::True) || (!value && kind == Kind::False) {
-        return body;
-    }
-    gj::set_bool(&mut body, path, value);
-    body
-}
-
 /// Native Responses path (executeResponses / executeResponsesStream).
 async fn execute_responses(
     client: &wreq::Client,
@@ -759,7 +749,7 @@ async fn execute_responses(
     let upstream_model = normalize_upstream_model(&base_model);
     let mut body = gj::try_set_str(&req.body, "model", &upstream_model)
         .map_err(|e| internal_error(format!("kimi executor: failed to set model in payload: {e}")))?;
-    body = set_bool_if_different(body, "stream", req.stream);
+    gj::set_bool_if_different(&mut body, "stream", req.stream);
     body = thinking(&body, &req, "codex")?;
     // Go passes req.Payload as the original here, not OriginalRequest.
     body = payload_rules(cfg, &req, &base_model, "openai-response", body, &req.body);

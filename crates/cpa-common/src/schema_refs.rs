@@ -1,6 +1,6 @@
 use crate::json::GoValue;
 use crate::schema_support::{
-    contains_seq, decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, pointer_unescape, ref_name,
+    decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, pointer_unescape, ref_name,
 };
 use std::collections::{BTreeMap, HashMap};
 // ---------------------------------------------------------------------------------------
@@ -50,7 +50,7 @@ fn is_definitions(key: &str) -> bool {
 /// inlineLocalRefs: every reference gets its own copy while the budget lasts, sibling
 /// keywords override the target, and cycles end as a typed hint.
 pub(super) fn inline_refs(json: Vec<u8>) -> Vec<u8> {
-    if !contains_seq(&json, br#""$ref""#) {
+    if !crate::gostr::contains(&json, br#""$ref""#) {
         return json;
     }
     let Some(root) = decode_first(&json) else {
@@ -63,7 +63,7 @@ pub(super) fn inline_refs(json: Vec<u8>) -> Vec<u8> {
 /// inlineLocalRefsForClean: inside the single-key `{"schema": ...}` carrier, references
 /// resolve against the inner schema.
 pub(super) fn inline_refs_for_clean(json: Vec<u8>) -> Vec<u8> {
-    if !contains_seq(&json, br#""$ref""#) {
+    if !crate::gostr::contains(&json, br#""$ref""#) {
         return json;
     }
     let Some(root) = decode_first(&json) else {

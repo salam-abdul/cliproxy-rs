@@ -83,10 +83,6 @@ static STDIN_REGEX: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
     .expect("valid")
 });
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
 fn replace_all(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(haystack.len());
     let mut rest = haystack;
@@ -107,9 +103,9 @@ fn obfuscate(
     regex: &regex::bytes::Regex,
     replacement: &[u8],
 ) -> Vec<u8> {
-    if contains(desc, obfuscated) {
+    if cpa_common::gostr::contains(desc, obfuscated) {
         desc.to_vec()
-    } else if contains(desc, target) {
+    } else if cpa_common::gostr::contains(desc, target) {
         replace_all(desc, target, obfuscated)
     } else {
         regex.replace_all(desc, replacement).into_owned()

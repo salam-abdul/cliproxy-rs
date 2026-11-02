@@ -28,10 +28,7 @@ fn boolean(v: &Value) -> bool {
     v.as_bool().unwrap_or_default()
 }
 fn hash(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    cpa_core::hex::encode(Sha256::digest(s.as_bytes()))
 }
 
 fn url(v: &Value) -> String {
@@ -61,7 +58,7 @@ fn scalar(v: &Value, kind: char) -> String {
         'i' => number(v).to_string(),
         't' => trim(v).to_owned(),
         'u' => url(v),
-        'q' => crate::gojson::string(text(v)),
+        'q' => cpa_common::json::marshal_string(text(v), true),
         'o' if v.is_null() => "inherit".into(),
         'p' if v.is_null() => "<unset>".into(),
         'n' if v.is_null() => "<nil>".into(),

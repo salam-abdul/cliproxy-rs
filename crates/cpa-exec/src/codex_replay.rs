@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::replay::text;
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecRequest;
@@ -27,11 +28,6 @@ const MAX_ENTRIES: usize = 10240;
 const MAX_TURNS_PER_ENTRY: usize = 256;
 const MAX_BYTES_PER_ENTRY: usize = 16 << 20;
 const EVICT_BATCH: usize = 128;
-
-/// `strings.TrimSpace(r.String())`.
-fn text(r: &Res<'_>) -> String {
-    String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
-}
 
 fn field(item: &Res<'_>, key: &str) -> String {
     text(&item.get(key))
@@ -447,7 +443,7 @@ pub(crate) fn cache_completed(cache: &Cache, scope: &Scope, completed: &[u8]) {
         hasher.update(item);
     }
     let mut marker = format!(r#"{{"type":"{TURN_TYPE}"}}"#).into_bytes();
-    gj::set_str(&mut marker, "id", hex(&hasher.finalize()));
+    gj::set_str(&mut marker, "id", cpa_core::hex::encode(&hasher.finalize()));
     if !assistant.is_empty() {
         gj::set_str(&mut marker, "assistant_fingerprint", &assistant);
     }
@@ -499,10 +495,6 @@ pub(crate) fn clear_on_invalid_signature(cache: &Cache, scope: &Scope, status: u
 
 // --------------------------------------------------------------------------- insertion
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// `codexReplayInputPrefixFingerprint`.
 fn prefix_fingerprint(items: &[Res<'_>], end: usize) -> String {
     let mut hasher = Sha256::new();
@@ -510,7 +502,7 @@ fn prefix_fingerprint(items: &[Res<'_>], end: usize) -> String {
         hasher.update(b"\0item\0");
         hasher.update(item.raw());
     }
-    hex(&hasher.finalize())
+    cpa_core::hex::encode(&hasher.finalize())
 }
 
 /// `codexReplayPrefixFingerprints`: every prefix fingerprint from one hashing pass,
@@ -524,7 +516,7 @@ struct Prefixes<'r, 'a> {
 impl<'r, 'a> Prefixes<'r, 'a> {
     fn new(items: &'r [Res<'a>]) -> Self {
         let hasher = Sha256::new();
-        let first = hex(&hasher.clone().finalize());
+        let first = cpa_core::hex::encode(&hasher.clone().finalize());
         Self {
             items,
             hasher,
@@ -537,7 +529,7 @@ impl<'r, 'a> Prefixes<'r, 'a> {
             let next = self.sums.len() - 1;
             self.hasher.update(b"\0item\0");
             self.hasher.update(self.items[next].raw());
-            self.sums.push(hex(&self.hasher.clone().finalize()));
+            self.sums.push(cpa_core::hex::encode(&self.hasher.clone().finalize()));
         }
         &self.sums[end]
     }
@@ -817,7 +809,7 @@ fn assistant_fingerprint(item: &Res<'_>) -> String {
     if text_bytes.is_empty() {
         return String::new();
     }
-    hex(&Sha256::digest(&text_bytes))
+    cpa_core::hex::encode(&Sha256::digest(&text_bytes))
 }
 
 /// `codexReasoningReplayInsertIndex`: before the output answering a replayed call, else
@@ -941,7 +933,7 @@ fn shorten(id: String) -> String {
         return id;
     }
     let sum = Sha256::digest(id.as_bytes());
-    let suffix = format!("_{}", hex(&sum[..8]));
+    let suffix = format!("_{}", cpa_core::hex::encode(&sum[..8]));
     format!("{}{suffix}", &id[..LIMIT - suffix.len()])
 }
 
