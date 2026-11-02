@@ -17,6 +17,7 @@ use cpa_home::registry::{Registry, ScopeSpec};
 use cpa_home::release::ReleaseFlusher;
 use cpa_home::{Client, CredentialConcurrency, DispatchRequest, HomeConfig};
 use cpa_server::Runtime;
+use cpa_server::management::Management;
 use cpa_server::remote::{
     EndLease, ModelsError, RemoteDispatch, RemoteError, RemoteErrorKind, RemoteGrant, RemoteRequest,
 };
@@ -721,6 +722,7 @@ async fn forward_usage(rt: Arc<Runtime>, client: Client, stop: CancellationToken
 pub fn spawn_subscriber(
     home: HomeConfig,
     rt: Arc<Runtime>,
+    management: Arc<Management>,
     dispatcher: Arc<Dispatcher>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -732,7 +734,7 @@ pub fn spawn_subscriber(
             let app_log = app_log.clone();
             Arc::new(move |e: &cpa_server::logging::Entry<'_>| app_log.fire(e.line, e.level, e.time, e.request_id))
         });
-        run_lifetimes(home, rt, dispatcher, shutdown, app_log.clone()).await;
+        run_lifetimes(home, rt, management, dispatcher, shutdown, app_log.clone()).await;
         cpa_server::logging::remove_hook(hook);
         app_log.stop().await;
     })
@@ -741,6 +743,7 @@ pub fn spawn_subscriber(
 async fn run_lifetimes(
     home: HomeConfig,
     rt: Arc<Runtime>,
+    management: Arc<Management>,
     dispatcher: Arc<Dispatcher>,
     shutdown: CancellationToken,
     app_log: Arc<cpa_home::applog::Forwarder>,
@@ -770,8 +773,9 @@ async fn run_lifetimes(
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
         let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker = tokio::spawn({
-            let (rt, dispatcher, client, registry, app_log) = (
+            let (rt, management, dispatcher, client, registry, app_log) = (
                 rt.clone(),
+                management.clone(),
                 dispatcher.clone(),
                 client.clone(),
                 registry.clone(),
@@ -792,9 +796,7 @@ async fn run_lifetimes(
                         let base = rt.config();
                         match overlay(&raw, Some(base.as_ref())) {
                             Ok(cfg) => {
-                                // Go `redisqueue.SetEnabled(... || cfg.Home.Enabled)`.
-                                rt.usage_queue().configure(true, &cfg);
-                                rt.publish_config(cfg);
+                                management.publish_home(cfg);
                                 if !published.swap(true, std::sync::atomic::Ordering::SeqCst) {
                                     // The KV client goes first: an attempt that
                                     // receives a Home credential must also see
@@ -1125,6 +1127,14 @@ mod tests {
         node_full(home, executors, vec![]).await
     }
 
+    /// main.rs's management state; Home mode never writes its config file.
+    fn management(rt: &Arc<Runtime>) -> Arc<Management> {
+        Management::new(
+            rt.clone(),
+            std::env::temp_dir().join("cpa-home-test-unused-config.yaml"),
+        )
+    }
+
     /// The published Home client is process-global (Go `home.SetCurrent`): one node at a
     /// time, held until its subscriber ends or the test's runtime drops it.
     static ONE_NODE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1141,7 +1151,7 @@ mod tests {
         let dispatcher = Arc::new(Dispatcher::new(&rt));
         rt.set_remote_dispatch(Some(dispatcher.clone()));
         let shutdown = CancellationToken::new();
-        let subscriber = spawn_subscriber(home.config(), rt.clone(), dispatcher, shutdown.clone());
+        let subscriber = spawn_subscriber(home.config(), rt.clone(), management(&rt), dispatcher, shutdown.clone());
         let task = tokio::spawn(async move {
             let _guard = guard;
             subscriber.await.unwrap();
@@ -5286,7 +5296,13 @@ mod tests {
             let rt = test_runtime();
             let dispatcher = Arc::new(Dispatcher::new(&rt));
             let shutdown = CancellationToken::new();
-            let task = spawn_subscriber(home.config(), rt.clone(), dispatcher.clone(), shutdown.clone());
+            let task = spawn_subscriber(
+                home.config(),
+                rt.clone(),
+                management(&rt),
+                dispatcher.clone(),
+                shutdown.clone(),
+            );
             Self {
                 _rt: rt,
                 dispatcher,
