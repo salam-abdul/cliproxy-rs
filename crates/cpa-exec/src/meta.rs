@@ -504,6 +504,7 @@ fn upstream_error(status: u16, body: &[u8]) -> ExecError {
         direct: false,
         addon: None,
         after_accept: None,
+        held: None,
     }
 }
 

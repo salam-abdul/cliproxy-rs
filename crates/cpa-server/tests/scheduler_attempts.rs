@@ -27,6 +27,22 @@ enum Mode {
     EmptyStream,
     /// fake-a sends an empty stream, every other account answers 503.
     EmptyThenUnavailable,
+    /// fake-a's stream, or every account's with `every`, starts with an error event of
+    /// this `error.type`; the others send [`COMPLETE`].
+    FirstEventError {
+        kind: &'static str,
+        every: bool,
+    },
+    /// fake-a sends `message_start`, then an overload error event.
+    ErrorAfterContent,
+}
+
+const COMPLETE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_b\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+fn error_event(kind: &str) -> String {
+    format!(
+        "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"synthetic {kind}\"}}}}\n\n"
+    )
 }
 
 struct Mock {
@@ -80,6 +96,17 @@ async fn upstream(State(mock): State<Arc<Mock>>, req: Request) -> Response {
                 Err(std::io::Error::other("mock postcommit reset"))
             }));
             ([("content-type", "text/event-stream")], Body::from_stream(broken)).into_response()
+        }
+        Mode::FirstEventError { kind, every } if every || token == "Bearer fake-a" => {
+            ([("content-type", "text/event-stream")], error_event(kind)).into_response()
+        }
+        Mode::ErrorAfterContent if token == "Bearer fake-a" => {
+            let start = COMPLETE.split_inclusive("\n\n").next().unwrap();
+            let body = format!("{start}{}", error_event("overloaded_error"));
+            ([("content-type", "text/event-stream")], body).into_response()
+        }
+        Mode::FirstEventError { .. } | Mode::ErrorAfterContent => {
+            ([("content-type", "text/event-stream")], COMPLETE).into_response()
         }
         Mode::BeforeCommit | Mode::AfterCommit => {
             ([("content-type", "text/event-stream")], "data: recovered\n\n").into_response()
@@ -594,4 +621,150 @@ async fn a_retry_round_skips_an_account_whose_stream_broke_off() {
     let body = response.text().await.unwrap();
     assert_eq!(status, 503, "{body}");
     assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b", "Bearer fake-b"]);
+}
+
+impl Fixture {
+    /// Two accounts with `account`'s settings, request-retry and bootstrap reruns on: any
+    /// second try of an account would show in [`Fixture::seen`].
+    async fn retrying(mode: Mode, account: Value) -> Self {
+        let fixture = Fixture::new(mode, &[account.clone(), account], Policy::default()).await;
+        let mut config = Config::parse(
+            "routing:\n  retry:\n    request-retry: 2\nrequests:\n  streaming:\n    bootstrap-retries: 2\n",
+        )
+        .unwrap();
+        config.auth_dir = fixture.rt.config().auth_dir.clone();
+        fixture.rt.publish_config(config);
+        fixture
+    }
+
+    async fn post(&self, path: &str, body: &str) -> (u16, String) {
+        let response = wreq::Client::new()
+            .post(format!("{}{path}", self.url))
+            .body(body.to_owned())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, response.text().await.unwrap())
+    }
+}
+
+const NATIVE: (&str, &str) = ("/v1/messages", r#"{"model":"claude-sonnet-5","stream":true}"#);
+const TRANSLATED: (&str, &str) = (
+    "/v1/chat/completions",
+    r#"{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"fixture"}]}"#,
+);
+
+/// An overload error as a stream's first event fails over before the client saw it: the
+/// next account's stream reaches the client unchanged, and the first account cools down
+/// as it would for an HTTP 529.
+#[tokio::test]
+async fn a_first_event_overload_fails_over_to_the_next_account() {
+    let fixture = Fixture::retrying(
+        Mode::FirstEventError {
+            kind: "overloaded_error",
+            every: false,
+        },
+        serde_json::json!({}),
+    )
+    .await;
+    let (status, body) = fixture.post(NATIVE.0, NATIVE.1).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, COMPLETE);
+    assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b"]);
+    assert!(
+        !fixture.rt.store().cooldowns("a").is_empty(),
+        "the overloaded account cools down"
+    );
+    assert!(fixture.rt.store().cooldowns("b").is_empty());
+    assert_eq!(
+        fixture.rt.store().stats(),
+        AttemptStats {
+            success: 1,
+            failure: 1,
+            cancelled: 0
+        }
+    );
+}
+
+/// When every account's stream starts with an overload error, each account is tried
+/// once and the last one's stream reaches the client as it did before first-event errors
+/// were held: HTTP 200, the upstream error event byte for byte, then the proxy's error
+/// event, which repeats it. A translated client gets the same events translated.
+#[tokio::test]
+async fn the_last_first_event_overload_reaches_the_client_as_a_stream() {
+    let overload = error_event("overloaded_error");
+    let native = format!("{overload}{overload}");
+    for ((path, request), expected) in [(NATIVE, native.as_str()), (TRANSLATED, TRANSLATED_OVERLOAD)] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError {
+                kind: "overloaded_error",
+                every: true,
+            },
+            serde_json::json!({}),
+        )
+        .await;
+        let (status, body) = fixture.post(path, request).await;
+        assert_eq!(status, 200, "{path}: {body}");
+        assert_eq!(body, expected, "{path}");
+        assert_eq!(
+            fixture.seen(),
+            ["Bearer fake-a", "Bearer fake-b"],
+            "{path}: each account once"
+        );
+    }
+}
+
+/// A first-event error whose status starts retry rounds or bootstrap reruns still tries
+/// each account once, then streams the last one's error.
+#[tokio::test]
+async fn a_retryable_first_event_error_tries_each_account_once() {
+    for kind in ["api_error", "rate_limit_error"] {
+        // Without cooldowns a retry round could pick an account again.
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError { kind, every: true },
+            serde_json::json!({"disable_cooling": true}),
+        )
+        .await;
+        let (status, body) = fixture.post(NATIVE.0, NATIVE.1).await;
+        assert_eq!(status, 200, "{kind}: {body}");
+        assert!(body.starts_with(&error_event(kind)), "{kind}: {body}");
+        assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b"], "{kind}");
+    }
+}
+
+/// A Chat Completions client's events for the overload stream, as the proxy sent them
+/// before first-event errors were held: the translated event, then the proxy's error.
+const TRANSLATED_OVERLOAD: &str = "data: {\"error\":{\"message\":\"synthetic overloaded_error\",\"type\":\"overloaded_error\"}}\n\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic overloaded_error\"}}\n\n";
+
+/// An invalid-request error event is the request's fault: no other account is tried.
+#[tokio::test]
+async fn a_first_event_invalid_request_is_terminal() {
+    let fixture = Fixture::retrying(
+        Mode::FirstEventError {
+            kind: "invalid_request_error",
+            every: false,
+        },
+        serde_json::json!({}),
+    )
+    .await;
+    let (status, body) = fixture.post(NATIVE.0, NATIVE.1).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.starts_with(&error_event("invalid_request_error")), "{body}");
+    assert_eq!(fixture.seen(), ["Bearer fake-a"]);
+}
+
+/// An error event after the stream's first event ends the request: the upstream
+/// already worked on it, so it is never sent to another account.
+#[tokio::test]
+async fn an_error_event_after_content_is_terminal() {
+    let fixture = Fixture::retrying(Mode::ErrorAfterContent, serde_json::json!({})).await;
+    let (status, body) = fixture.post(NATIVE.0, NATIVE.1).await;
+    assert_eq!(status, 200, "{body}");
+    let start = COMPLETE.split_inclusive("\n\n").next().unwrap();
+    assert!(
+        body.starts_with(&format!("{start}{}", error_event("overloaded_error"))),
+        "{body}"
+    );
+    assert_eq!(fixture.seen(), ["Bearer fake-a"]);
 }

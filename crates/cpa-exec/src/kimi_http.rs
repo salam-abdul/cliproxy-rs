@@ -163,6 +163,7 @@ pub(crate) async fn status_error(upstream: crate::proxy::Upstream) -> ExecError 
         direct: false,
         addon: None,
         after_accept: None,
+        held: None,
     }
 }
 

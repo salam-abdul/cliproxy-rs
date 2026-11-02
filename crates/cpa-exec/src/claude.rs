@@ -337,6 +337,7 @@ impl ClaudeExecutor {
         let fast = ctx.first_party && prepared.fast;
         let wrap = |e| fast_request_error(fast, e);
         let raw = response.body;
+        let first_error = stream::FirstError::default();
         let body = if upstream_stream && req.stream && req.operation == Operation::Generate {
             let done: stream::OnComplete = Box::new(move |message_id| {
                 completion.complete(&message_id, &request_id);
@@ -345,7 +346,7 @@ impl ClaudeExecutor {
             // EnsurePublished): a stream that never carried usage records nothing.
             req.usage.usage_required();
             let (usage, capture) = (req.usage.clone(), req.capture().clone());
-            let relayed = stream::relay(raw, reverse, done, usage, capture);
+            let relayed = stream::relay(raw, reverse, done, usage, capture, first_error.clone());
             ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
         } else {
             let capture = req.capture();
@@ -420,16 +421,31 @@ impl ClaudeExecutor {
                 ResponseBody::Buffered(restored)
             }
         };
+        // A fast request's errors already stop at the caller, so it is never held.
+        let hold = matches!(body, ResponseBody::Stream(_)) && !fast;
+        let declared = hold.then(|| (response.headers.clone(), ctx.settings.model_level_cooling));
         let response = ExecResponse {
             status: response.status,
             headers: response.headers,
             body,
         };
-        if req.response_format == Format::Claude {
-            return Ok(response);
+        let mut response = if req.response_format == Format::Claude {
+            response
+        } else {
+            // Translated clients: framed events through the registered stream translator.
+            translate::response(req, translated, response).await?
+        };
+        // Held after translation, so a held stream is what the client would have seen.
+        if let Some((headers, model_level_cooling)) = declared {
+            let declare = move |status, data| upstream_error(status, headers, data, false, model_level_cooling);
+            response.body = match response.body {
+                ResponseBody::Stream(events) => {
+                    ResponseBody::Stream(stream::hold_first_error(events, first_error, declare))
+                }
+                body => body,
+            };
         }
-        // Translated clients: framed events through the registered stream translator.
-        translate::response(req, translated, response).await
+        Ok(response)
     }
 
     async fn count_tokens(&self, ctx: Ctx<'_>, req: ExecRequest, upstream: bool) -> Result<ExecResponse, ExecError> {
@@ -723,6 +739,7 @@ fn upstream_error(
             direct: true,
             addon: None,
             after_accept: None,
+            held: None,
         };
     }
     let error = ExecError {
@@ -738,6 +755,7 @@ fn upstream_error(
         direct: false,
         addon: None,
         after_accept: None,
+        held: None,
     };
     quota::classify(error, model_level_cooling)
 }

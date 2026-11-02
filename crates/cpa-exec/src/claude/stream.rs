@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use cpa_core::exec::{AfterAccept, ExecError, ExecStream, FailureScope};
+use cpa_core::exec::{AfterAccept, ExecError, ExecStream, FailureScope, HeldStream};
 use futures_util::StreamExt;
 
 use super::alias::{self, Reverse};
@@ -73,6 +73,37 @@ fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &
     }
 }
 
+/// The HTTP status Anthropic answers with for an error of this `error.type`, so an
+/// error event declares the status its request failed with. Unknown types declare none.
+fn declared_status(payload: &[u8]) -> Option<u16> {
+    let payload = std::str::from_utf8(payload).ok()?;
+    Some(match rawjson::string(payload, "error.type").trim() {
+        "invalid_request_error" => 400,
+        "authentication_error" => 401,
+        "billing_error" => 402,
+        "permission_error" => 403,
+        "not_found_error" => 404,
+        "request_too_large" => 413,
+        "rate_limit_error" => 429,
+        "api_error" => 500,
+        "timeout_error" => 504,
+        "overloaded_error" => 529,
+        _ => return None,
+    })
+}
+
+/// Set by the relay when the first event it relays is an error with a
+/// [`declared_status`]: the status and the event's data. Never set once another event
+/// went first.
+#[derive(Clone, Default)]
+pub(crate) struct FirstError(Arc<std::sync::OnceLock<(u16, Bytes)>>);
+
+impl FirstError {
+    pub(crate) fn get(&self) -> Option<&(u16, Bytes)> {
+        self.0.get()
+    }
+}
+
 /// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line; borrowed when no name
 /// changes.
 pub(crate) fn restore_line<'a>(line: &'a [u8], reverse: &Reverse) -> Result<Cow<'a, [u8]>, String> {
@@ -117,6 +148,7 @@ struct Relay {
     /// Whether any event went out: a body that ends without one is an empty stream.
     relayed: bool,
     upstream_error: Option<ExecError>,
+    first_error: FirstError,
     done: Option<OnComplete>,
     /// Go's usage reporter: every upstream line, before alias restore.
     usage: cpa_core::exec::UsageSink,
@@ -152,6 +184,12 @@ impl Relay {
                 &mut self.completed,
                 &mut self.upstream_error,
             );
+            if !self.relayed
+                && let Some(error) = &self.upstream_error
+                && let Some(status) = declared_status(&error.body)
+            {
+                let _ = self.first_error.0.set((status, error.body.clone()));
+            }
             self.flush();
             if self.completed {
                 self.finish();
@@ -277,13 +315,15 @@ impl Relay {
 }
 
 /// Relays decoded upstream bytes as whole native SSE events; `done` is an [`OnComplete`].
-/// Every upstream line is reported to `usage` and `capture` before alias restore.
+/// Every upstream line is reported to `usage` and `capture` before alias restore, and
+/// `first_error` is set when the first event is a declared error.
 pub(crate) fn relay(
     body: ExecStream,
     reverse: Arc<Reverse>,
     done: OnComplete,
     usage: cpa_core::exec::UsageSink,
     capture: cpa_core::exec::CaptureSink,
+    first_error: FirstError,
 ) -> ExecStream {
     let relay = Relay {
         usage,
@@ -299,6 +339,7 @@ pub(crate) fn relay(
         finished: false,
         relayed: false,
         upstream_error: None,
+        first_error,
         done: Some(done),
     };
     futures_util::stream::unfold(relay, |mut st| async move {
@@ -313,6 +354,78 @@ pub(crate) fn relay(
                 Some(Ok(chunk)) => st.chunk(&chunk),
                 Some(Err(error)) => st.end(Some(error)),
                 None => st.end(None),
+            }
+        }
+    })
+    .boxed()
+}
+
+/// Holds a client stream back while its first event is a declared upstream error
+/// ([`FirstError`]). When the stream then ends with an error, nothing has reached the
+/// client, so the attempt fails with `declare(status, data)` instead, carrying the held
+/// events and that ending error as a [`HeldStream`] for dispatch to fail over or send.
+/// A request-scoped declaration, or a held stream that ends without an error or without
+/// a client event, goes out as it came.
+pub(crate) fn hold_first_error(
+    stream: ExecStream,
+    first: FirstError,
+    declare: impl FnOnce(u16, Bytes) -> ExecError + Send + 'static,
+) -> ExecStream {
+    struct State<F> {
+        stream: ExecStream,
+        first: FirstError,
+        /// Taken once an event went out: the stream is then never held.
+        declare: Option<F>,
+        held: Vec<Bytes>,
+        ready: VecDeque<Result<Bytes, ExecError>>,
+        done: bool,
+    }
+    let state = State {
+        stream,
+        first,
+        declare: Some(declare),
+        held: Vec::new(),
+        ready: VecDeque::new(),
+        done: false,
+    };
+    futures_util::stream::unfold(state, |mut st| async move {
+        loop {
+            if let Some(item) = st.ready.pop_front() {
+                return Some((item, st));
+            }
+            if st.done {
+                return None;
+            }
+            match st.stream.next().await {
+                Some(Ok(event)) if st.declare.is_some() && st.first.get().is_some() => {
+                    if !event.is_empty() {
+                        st.held.push(event);
+                    }
+                }
+                Some(Ok(event)) => {
+                    if !event.is_empty() {
+                        st.declare = None;
+                    }
+                    return Some((Ok(event), st));
+                }
+                Some(Err(end)) => {
+                    st.done = true;
+                    let declared = st.declare.take().zip(st.first.get().cloned());
+                    if let Some((declare, (status, data))) = declared.filter(|_| !st.held.is_empty()) {
+                        let mut error = declare(status, data);
+                        if error.scope != FailureScope::Request {
+                            let events = std::mem::take(&mut st.held);
+                            error.held = Some(Arc::new(HeldStream { events, end }));
+                            return Some((Err(error), st));
+                        }
+                    }
+                    st.ready.extend(st.held.drain(..).map(Ok));
+                    st.ready.push_back(Err(end));
+                }
+                None => {
+                    st.done = true;
+                    st.ready.extend(st.held.drain(..).map(Ok));
+                }
             }
         }
     })
@@ -430,6 +543,7 @@ mod tests {
                 Box::new(|_| {}),
                 Default::default(),
                 cpa_core::exec::CaptureSink::new(captured.clone()),
+                Default::default(),
             )
             .collect()
             .await;
@@ -478,6 +592,7 @@ mod tests {
             Box::new(|_| {}),
             Default::default(),
             Default::default(),
+            Default::default(),
         );
         assert!(stream.next().await.is_some());
         assert!(
@@ -499,6 +614,7 @@ mod tests {
             body,
             Arc::default(),
             Box::new(move |id| *seen.lock().unwrap() = Some(id)),
+            Default::default(),
             Default::default(),
             Default::default(),
         )
@@ -530,6 +646,7 @@ mod tests {
             Box::new(|_| panic!("not completed")),
             Default::default(),
             Default::default(),
+            Default::default(),
         )
         .collect()
         .await;
@@ -553,6 +670,7 @@ mod tests {
             Arc::new(reverse),
             Box::new(|_| {}),
             cpa_core::exec::UsageSink::new(usage.clone()),
+            Default::default(),
             Default::default(),
         )
         .map(Result::unwrap)
@@ -586,6 +704,7 @@ mod tests {
                 body,
                 Arc::default(),
                 Box::new(|_| panic!("incomplete")),
+                Default::default(),
                 Default::default(),
                 Default::default(),
             )
@@ -623,6 +742,7 @@ mod tests {
             Box::new(move |id| *callback.lock().unwrap() = Some(id)),
             Default::default(),
             Default::default(),
+            Default::default(),
         )
         .collect()
         .await;
@@ -635,6 +755,7 @@ mod tests {
             chunks(vec![Ok(bytes)]),
             Arc::default(),
             Box::new(|_| panic!("not complete")),
+            Default::default(),
             Default::default(),
             Default::default(),
         )
@@ -658,6 +779,7 @@ mod tests {
             Box::new(move |id| *callback.lock().unwrap() = Some(id)),
             Default::default(),
             Default::default(),
+            Default::default(),
         )
         .collect()
         .await;
@@ -672,6 +794,7 @@ mod tests {
             Box::new(|_| panic!("SSE still needs message_stop")),
             Default::default(),
             Default::default(),
+            Default::default(),
         )
         .collect()
         .await;
@@ -682,6 +805,7 @@ mod tests {
             chunks(vec![Ok(bytes)]),
             Arc::default(),
             Box::new(|_| panic!("error is not completion")),
+            Default::default(),
             Default::default(),
             Default::default(),
         )
@@ -706,6 +830,7 @@ mod tests {
             body,
             Arc::default(),
             Box::new(|_| panic!("not complete")),
+            Default::default(),
             Default::default(),
             Default::default(),
         )
@@ -739,6 +864,7 @@ mod tests {
             Box::new(|_| panic!("not complete")),
             Default::default(),
             Default::default(),
+            Default::default(),
         )
         .collect::<Vec<_>>()
         .await;
@@ -756,6 +882,7 @@ mod tests {
                 body,
                 reverse,
                 Box::new(|_| panic!("not complete")),
+                Default::default(),
                 Default::default(),
                 Default::default(),
             )

@@ -838,6 +838,13 @@ impl Fault {
         self.reached == Reached::NoOutput && self.broke_off()
     }
 
+    /// The account is not tried again for this request: its response broke off before
+    /// any output, or its stream was held back on a first-event error
+    /// ([`ExecError::held`]).
+    fn spends_account(&self) -> bool {
+        self.broke_silently() || self.error.held.is_some()
+    }
+
     fn into_run_error(self) -> RunError {
         RunError {
             failure: Failure::Exec(self.error),
@@ -853,8 +860,34 @@ pub async fn run(rt: &Arc<Runtime>, call: Call, trace: &Trace) -> Result<Done, R
     run_routed(rt, call, trace, resolved).await
 }
 
-/// [`run`] for resolved providers and model.
+/// [`run`] for resolved providers and model. A held stream that ends the request goes
+/// to the client as the stream it was ([`send_held`]).
 async fn run_routed(
+    rt: &Arc<Runtime>,
+    call: Call,
+    trace: &Trace,
+    resolved: (Vec<String>, String),
+) -> Result<Done, RunError> {
+    run_attempts(rt, call, trace, resolved).await.or_else(send_held)
+}
+
+/// The stream an attempt held back on a first-event error ([`ExecError::held`]), once
+/// no other account remains: started like any stream, with the response headers.
+fn send_held(error: RunError) -> Result<Done, RunError> {
+    let (Failure::Exec(failed) | Failure::Remote { error: failed, .. }) = &error.failure else {
+        return Err(error);
+    };
+    let Some(held) = failed.held.clone() else {
+        return Err(error);
+    };
+    let headers = (*failed.headers).clone();
+    let mut events = held.events.clone().into_iter();
+    let first = events.next();
+    let rest = futures_util::stream::iter(events.map(Ok).chain([Err(held.end.clone())])).boxed();
+    Ok(Done::Stream { headers, first, rest })
+}
+
+async fn run_attempts(
     rt: &Arc<Runtime>,
     call: Call,
     trace: &Trace,
@@ -964,8 +997,9 @@ async fn run_routed(
     // Go `preferredExecutionAttemptError`: the latest failure that reached upstream wins
     // over later selection failures.
     let mut upstream: Option<Fault> = None;
-    // A response that broke off before any output fails over once per account: its
-    // account is never picked again, and it reruns neither the request nor a round.
+    // A response that broke off before any output, or a stream held back on a
+    // first-event error, fails over once per account: its account is never picked
+    // again, and it reruns neither the request nor a round.
     let mut broke = false;
     loop {
         let mut last: Option<Fault> = None;
@@ -1050,7 +1084,7 @@ async fn run_routed(
                 Attempt::Done(done) => return Ok(done),
                 Attempt::Stop(fault) => return Err(fault.into_run_error()),
                 Attempt::Next(fault) => {
-                    if fault.broke_silently() {
+                    if fault.spends_account() {
                         broke = true;
                         always_excluded.push(id);
                     }
@@ -1064,7 +1098,7 @@ async fn run_routed(
         // The round's error decides retries: an attempt error when there was one, else
         // the selection failure. The response reports the latest upstream attempt when
         // there was one (Go executeMixedOnce, preferredExecutionAttemptError).
-        let last_broke = last.as_ref().is_some_and(Fault::broke_silently);
+        let last_broke = last.as_ref().is_some_and(Fault::spends_account);
         let round_error: RunError = match (last, pick_failure) {
             (Some(fault), _) => fault.into_run_error(),
             (None, Some(failure)) => failure.into(),
@@ -1155,7 +1189,8 @@ struct RemoteContext<'a> {
     /// The client key Home authenticated on the latest pick that sent one (Go
     /// `setHomeUserAPIKeyOnGinContext`, which keeps it for the rest of the request).
     user_key: std::sync::Mutex<String>,
-    /// Credentials whose response broke off before any output: never picked again.
+    /// Credentials whose response broke off before any output, or whose stream was held
+    /// back on a first-event error: never picked again.
     broke: std::sync::Mutex<Vec<String>>,
 }
 
@@ -1184,7 +1219,7 @@ struct RemoteFault {
 impl RemoteFault {
     fn from_pick(error: crate::remote::RemoteError) -> Self {
         Self {
-            failure: Failure::Exec(error.error),
+            failure: Failure::Exec(*error.error),
             bootstrap: false,
             upstream: false,
             stop: false,
@@ -1341,6 +1376,11 @@ async fn run_remote(
         if error.upstream {
             preferred_upstream = Some(error.clone());
         }
+        // The held stream answers now: its account is never picked again, and a round
+        // without another account would answer with the pick failure instead.
+        if matches!(&error.failure, Failure::Exec(e) if e.held.is_some()) {
+            return Err(error.into_run_error());
+        }
         if pending {
             // Go `pendingHomeRetryRoundDelay`: one wait for a round Home put on cooldown.
             if error.exhausted.is_none()
@@ -1472,8 +1512,9 @@ async fn remote_round(
         // may come back once. Buffered calls exclude everything tried.
         let stream = cx.call.stream;
         let websocket = cx.call.turn.is_some();
-        // A credential whose response broke off before any output is tried once per
-        // request: it is excluded, and refused if Home hands it out again.
+        // A credential whose response broke off before any output, or whose stream was
+        // held, is tried once per request: it is excluded, and refused if Home hands it
+        // out again.
         let mut tried = cx
             .broke
             .lock()
@@ -1747,7 +1788,7 @@ async fn remote_round(
                     return Err(RemoteFault::from_attempt(fault, true));
                 }
                 Attempt::Next(fault) => {
-                    let broke = fault.broke_silently();
+                    let broke = fault.spends_account();
                     if broke {
                         cx.broke
                             .lock()
@@ -1756,7 +1797,7 @@ async fn remote_round(
                     }
                     if stream {
                         // Go `shouldExcludeHomeAuthAfterStreamError`, except that a response
-                        // that broke off is never resent to the same credential.
+                        // that broke off or was held is never resent to the same credential.
                         let error = &fault.error;
                         let exclude = broke
                             || !(lifecycle(error) || (websocket && error.status == 426))
@@ -2160,8 +2201,20 @@ async fn attempt(
                     || (!silent && classify::is_request_invalid(error))
             };
         // Go returns stopping bootstrap failures directly, outside handler bootstrap retries.
-        let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
+        let last_here =
+            stop || i + 1 == target.models.len() || classify::credential_scoped(error) || error.held.is_some();
         let mut fault = fault;
+        if let Some(held) = fault.error.held.as_mut()
+            && target.alias.force_mapping
+            && !target.alias.original_alias.is_empty()
+        {
+            let alias = &target.alias.original_alias;
+            let events = held.events.iter().map(|event| rewrite_event(event, alias)).collect();
+            *held = Arc::new(cpa_core::exec::HeldStream {
+                events,
+                end: held.end.clone(),
+            });
+        }
         if stop || silent {
             fault.bootstrap = None;
         } else if let Some(headers) = &fault.bootstrap {
@@ -2823,11 +2876,11 @@ mod tests {
     /// A Home `model_cooldown` pick failure.
     fn home_cooldown(retry_after: Duration, request_retry: Option<i64>) -> RemoteFault {
         RemoteFault::from_pick(crate::remote::RemoteError {
-            error: ExecError::local(
+            error: Box::new(ExecError::local(
                 429,
                 cpa_core::exec::FailureScope::Credential,
                 "model_cooldown: all Home credentials are cooling down",
-            ),
+            )),
             code: "model_cooldown".into(),
             kind: crate::remote::RemoteErrorKind::Cooldown {
                 retry_after: Some(retry_after),
@@ -3227,5 +3280,82 @@ mod tests {
         );
         drop(listener);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Home dispatch holds a stream whose first event is an upstream error like local
+    /// dispatch: the next pick answers, and a request whose only account sent the error
+    /// gets that stream, even when the status would start another Home round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_home_first_event_error_fails_over_and_the_last_one_streams() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const ERROR: &str = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"synthetic failure\"}}\n\n";
+        const COMPLETE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let serve = |body: &'static str, calls: Arc<AtomicUsize>| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let app = axum::Router::new().fallback(move || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                ([("content-type", "text/event-stream")], body)
+            });
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            url
+        };
+        let (failing_calls, good_calls) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let failing = serve(ERROR, failing_calls.clone()).await;
+        let good = serve(COMPLETE, good_calls.clone()).await;
+        for (grants, expected) in [
+            (vec![("failing", &failing), ("good", &good)], COMPLETE),
+            (vec![("failing", &failing)], ERROR),
+        ] {
+            failing_calls.store(0, Ordering::SeqCst);
+            let home = Arc::new(Grants {
+                grants: std::sync::Mutex::new(
+                    grants
+                        .into_iter()
+                        .map(|(id, url)| (home_credential(id, url), None))
+                        .collect(),
+                ),
+                picks: AtomicUsize::new(0),
+                released: Default::default(),
+                unacknowledged: None,
+            });
+            let dir = std::env::temp_dir().join(format!("cpa-home-first-event-{}", uuid::Uuid::new_v4()));
+            let cfg = Config::parse(&format!("auth-dir: '{}'\nrequest-retry: 2\n", dir.display())).unwrap();
+            let executors = cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            };
+            let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
+            rt.set_remote_dispatch(Some(home.clone() as Arc<dyn crate::remote::RemoteDispatch>));
+            let app = crate::app(rt.clone(), axum::Router::new());
+            let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", proxy.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(proxy, app).await.unwrap() });
+            let response = wreq::Client::new()
+                .post(format!("{url}/v1/messages"))
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"model":"claude-x","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                )
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap();
+            assert_eq!(status, 200, "{text}");
+            assert!(text.starts_with(expected), "{text}");
+            assert_eq!(
+                failing_calls.load(Ordering::SeqCst),
+                1,
+                "the failing account is tried once"
+            );
+            // The second pick is the next account, or Home's answer that none is left.
+            assert_eq!(home.picks.load(Ordering::SeqCst), 2);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        assert_eq!(good_calls.load(Ordering::SeqCst), 1);
     }
 }

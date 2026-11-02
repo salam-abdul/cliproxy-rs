@@ -590,6 +590,19 @@ pub struct ExecError {
     pub addon: Option<Box<HeaderMap>>,
     /// Set when the failure came after the upstream accepted the request.
     pub after_accept: Option<AfterAccept>,
+    /// Set when a stream's first event was an error the upstream declared: the attempt
+    /// fails like the same status returned as an HTTP error, and when no other account
+    /// remains the client receives this stream instead, as if it had not been held.
+    pub held: Option<std::sync::Arc<HeldStream>>,
+}
+
+/// A stream held back because its first event declared an upstream error.
+#[derive(Debug, Clone)]
+pub struct HeldStream {
+    /// The client-format events, none of them empty.
+    pub events: Vec<Bytes>,
+    /// The error that ended the stream after them.
+    pub end: ExecError,
 }
 
 impl ExecError {
@@ -617,6 +630,7 @@ impl ExecError {
             direct: false,
             addon: None,
             after_accept: None,
+            held: None,
         }
     }
 
