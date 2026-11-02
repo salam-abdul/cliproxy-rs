@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use serde_yaml_ng::Value as Yaml;
 
-use super::{DEFAULT_SERVICE_TYPE, DiscoveredService, go_trim};
+use super::{DEFAULT_SERVICE_TYPE, DiscoveredService};
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -24,7 +24,7 @@ pub fn parse_interface_list<S: AsRef<str>>(values: &[S]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in values {
         for part in raw.as_ref().split(',') {
-            let part = go_trim(part);
+            let part = part.trim();
             if !part.is_empty() && !out.iter().any(|o| o == part) {
                 out.push(part.to_owned());
             }
@@ -46,7 +46,7 @@ pub fn resolve_filters(cli: (Vec<String>, Vec<String>), cfg: (Vec<String>, Vec<S
 /// only (Go's scan does not read `server.discovery`). Missing or undecodable files
 /// give no filters.
 pub fn load_scan_filters(path: &str) -> (Vec<String>, Vec<String>) {
-    let path = match go_trim(path) {
+    let path = match path.trim() {
         "" => std::env::current_dir()
             .map(|d| d.join("config.yaml"))
             .unwrap_or_else(|_| "config.yaml".into()),
@@ -160,7 +160,7 @@ pub fn sanitize_terminal(s: &str) -> String {
 
 /// Go `sanitizeDisplayHost`: a plain DNS host name or empty.
 pub fn sanitize_display_host(host: &str) -> String {
-    let host = sanitize_terminal(go_trim(host.strip_suffix('.').unwrap_or(host)));
+    let host = sanitize_terminal(host.strip_suffix('.').unwrap_or(host).trim());
     let valid = !host.is_empty()
         && !host.eq_ignore_ascii_case("localhost")
         && host
@@ -235,7 +235,7 @@ where
     } else {
         opts.timeout.min(Duration::from_secs(60))
     };
-    let service_type = match go_trim(&opts.service_type) {
+    let service_type = match opts.service_type.trim() {
         "" => DEFAULT_SERVICE_TYPE.to_owned(),
         st => st.to_owned(),
     };

@@ -532,7 +532,7 @@ fn codex_client(headers: &HeaderMap) -> bool {
 /// Go `responsesStreamErrorText`: sensitive values redacted, long text truncated, JSON
 /// errors reduced to their `error` object.
 pub(crate) fn sanitize_error_text(status: u16, text: &str) -> String {
-    let trimmed = gojson::trim(text);
+    let trimmed = text.trim();
     let trimmed = if trimmed.is_empty() {
         gojson::status_text(status)
     } else {
@@ -645,7 +645,7 @@ fn stream_error_class(status: u16) -> (&'static str, &'static str) {
 
 fn nested_error_code(mut detail: Value) -> Value {
     let existing = detail.get("code").filter(|v| !v.is_null());
-    if existing.is_some_and(|v| !gojson::trim(&gojson::gjson_string(Some(v))).is_empty()) {
+    if existing.is_some_and(|v| !gojson::gjson_string(Some(v)).trim().is_empty()) {
         return detail;
     }
     if detail["type"] == "invalid_request_error"
@@ -661,13 +661,11 @@ fn nested_error_code(mut detail: Value) -> Value {
 /// Go `openAIResponsesStreamErrorDetail`.
 fn stream_error_detail(status: u16, text: &str) -> Value {
     let (mut code, kind) = stream_error_class(status);
-    let mut message = gojson::trim(text).to_owned();
+    let mut message = text.trim().to_owned();
     if message.is_empty() {
         message = gojson::status_text(status).into();
     }
-    let payload = serde_json::from_str::<Value>(gojson::trim(text))
-        .ok()
-        .filter(Value::is_object);
+    let payload = serde_json::from_str::<Value>(text.trim()).ok().filter(Value::is_object);
     let code_owned;
     if let Some(p) = &payload {
         if let Some(e) = p.get("error").filter(|e| e.is_object()) {
@@ -684,7 +682,7 @@ fn stream_error_detail(status: u16, text: &str) -> Value {
             message = m.trim().to_owned();
         }
         if let Some(c) = p.get("code").filter(|c| !c.is_null()) {
-            code_owned = gojson::trim(&gojson::gjson_string(Some(c))).to_owned();
+            code_owned = gojson::gjson_string(Some(c)).trim().to_owned();
             code = &code_owned;
         }
     }

@@ -13,8 +13,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use cpa_common::gostr::{GoStr, lower_bytes, trim_space};
+use cpa_common::gostr::{GoStr, lower_bytes};
 use cpa_common::json::{self, GoValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
 const TURN_VERSION: &str = "cpa-session-turn-v1";
@@ -150,7 +151,7 @@ pub fn extract(format: &str, payload: &[u8]) -> Vec<Turn> {
 
 /// gjson `Result.String()`, trimmed and lowercased as Go's `strings.ToLower(strings.TrimSpace(..))`.
 fn lower_trim(value: &Res<'_>) -> String {
-    lower_bytes(trim_space(&value.bytes()))
+    lower_bytes(go_trim_space(&value.bytes()))
 }
 
 fn infer_format(root: &Res<'_>) -> &'static str {
@@ -581,7 +582,7 @@ fn gemini_tool_kind(value: &Res<'_>) -> Option<&'static str> {
 
 /// Go `canonicalRole`.
 fn canonical_role(role: &[u8]) -> String {
-    let role = lower_bytes(trim_space(role));
+    let role = lower_bytes(go_trim_space(role));
     match role.as_str() {
         "system" | "developer" => "system".into(),
         "assistant" | "model" | "ai" => "assistant".into(),
@@ -599,8 +600,8 @@ fn normalize_turn(turn: &Turn) -> Turn {
             continue;
         }
         let mut part = part.clone();
-        part.kind = lower_bytes(trim_space(part.kind.as_bytes()));
-        part.mime = lower_bytes(trim_space(part.mime.as_bytes()));
+        part.kind = lower_bytes(go_trim_space(part.kind.as_bytes()));
+        part.mime = lower_bytes(go_trim_space(part.mime.as_bytes()));
         if part.original_size <= 0 {
             part.original_size = part.value.len() as i64;
         }
@@ -663,7 +664,7 @@ fn normalize_text(value: &[u8], mask_system_dynamics: bool) -> Vec<u8> {
     } else {
         value.into_owned()
     };
-    trim_space(&value).to_vec()
+    go_trim_space(&value).to_vec()
 }
 
 /// Go `sparseSample`: head, middle and tail thirds of `limit` bytes.

@@ -863,7 +863,7 @@ fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
         return true;
     }
     let field = values.join(",");
-    let field = cpa_common::gostr::trim_space(field.as_bytes());
+    let field = cpa_core::config::go_trim_space(field.as_bytes());
     if field == b"*" {
         return true;
     }
@@ -873,7 +873,7 @@ fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
             quoted ^= byte == b'"';
             byte == b',' && !quoted
         })
-        .any(|tag| cpa_common::gostr::trim_space(tag) == etag.as_bytes())
+        .any(|tag| cpa_core::config::go_trim_space(tag) == etag.as_bytes())
 }
 
 fn config_precondition_failed(etag: HeaderValue) -> Response {

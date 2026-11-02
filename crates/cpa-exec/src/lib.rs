@@ -66,7 +66,6 @@ mod kimi_http;
 mod kimi_replay;
 pub mod meta;
 pub mod meta_auth;
-mod meta_codex;
 mod meta_wire;
 pub mod oauth;
 pub mod openai_compat;

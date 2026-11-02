@@ -3,10 +3,11 @@
 
 use crate::{
     Error, ResponseCtx,
-    common::{self, go_lower, go_upper, now_nanos, restore_sanitized_tool_name, trim_space},
+    common::{self, go_lower, go_upper, now_nanos, restore_sanitized_tool_name},
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Res};
+use cpa_core::config::go_trim_space;
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicU64, Ordering},
@@ -125,7 +126,7 @@ const CHUNK: &[u8] = br#"{"id":"","object":"chat.completion.chunk","created":123
 impl GoStream for State {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let raw = match line.strip_prefix(b"data:") {
-            Some(rest) => trim_space(rest),
+            Some(rest) => go_trim_space(rest),
             None => line,
         };
         if raw == b"[DONE]" {

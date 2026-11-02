@@ -9,12 +9,13 @@ use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::signature::{
     self as sig, BlockKind, ClaudeValidation, Provider, compatible_antigravity_claude_thinking_signature,
 };
+use cpa_core::config::go_trim_space;
 
 use crate::Registered;
 use crate::antigravity_claude_response as response;
 use crate::common::{
     align_claude_tool_results, claude_message_system_reminder_text, go_lower, is_claude_code_attribution_text,
-    thinking_text, trim_space,
+    thinking_text,
 };
 use crate::gemini::{
     attach_default_safety_settings, merge_adjacent_contents, set_function_response_raw, set_function_response_result,
@@ -49,7 +50,7 @@ pub(crate) const ANY: &str = "any";
 /// encodeGeminiClaudeCarrierSignature.
 pub(crate) fn encode_carrier(raw_signature: &[u8], direction: &str, target: &str) -> Vec<u8> {
     use base64::Engine;
-    let raw = trim_space(raw_signature);
+    let raw = go_trim_space(raw_signature);
     if raw.is_empty() {
         return vec![];
     }
@@ -85,7 +86,7 @@ fn block_kind(marked: bool, target: &[u8]) -> BlockKind {
 /// decodeGeminiClaudeCarrierSignature: a marked carrier is valid only with a known
 /// direction and target and a Gemini-compatible, non-bypass inner signature.
 fn decode_carrier(raw_signature: &[u8]) -> Carrier {
-    let raw = trim_space(raw_signature);
+    let raw = go_trim_space(raw_signature);
     let fail = Carrier {
         signature: vec![],
         direction: vec![],
@@ -142,7 +143,7 @@ fn semantic_kind(block: &Res<'_>) -> &'static str {
     match block.get("type").bytes().as_ref() {
         b"text" => TEXT,
         b"tool_use" => FUNCTION,
-        b"thinking" if !trim_space(&block.get("thinking").bytes()).is_empty() => TEXT,
+        b"thinking" if !go_trim_space(&block.get("thinking").bytes()).is_empty() => TEXT,
         _ => "",
     }
 }
@@ -158,7 +159,9 @@ fn carrier_matches_adjacent(blocks: &[Res<'_>], index: usize, direction: &[u8], 
         if !kind.is_empty() {
             return target == ANY.as_bytes() || target == kind.as_bytes();
         }
-        if block.get("type").bytes().as_ref() != b"thinking" || !trim_space(&block.get("thinking").bytes()).is_empty() {
+        if block.get("type").bytes().as_ref() != b"thinking"
+            || !go_trim_space(&block.get("thinking").bytes()).is_empty()
+        {
             return false;
         }
         adjacent += step;
@@ -208,8 +211,8 @@ fn carrier_context(blocks: &[Res<'_>]) -> (Vec<&'static str>, Vec<bool>) {
         next_kind[i] = current;
         match block.get("type").bytes().as_ref() {
             b"thinking" => {
-                let text = trim_space(&block.get("thinking").bytes()).to_vec();
-                let raw = trim_space(&block.get("signature").bytes()).to_vec();
+                let text = go_trim_space(&block.get("thinking").bytes()).to_vec();
+                let raw = go_trim_space(&block.get("signature").bytes()).to_vec();
                 if text.is_empty() {
                     let carrier = decode_carrier(&raw);
                     previous_target = (carrier.ok
@@ -299,8 +302,8 @@ pub(crate) fn strip_invalid_gemini_signature_thinking_blocks(payload: &[u8]) -> 
                 items.push(block.raw());
                 continue;
             }
-            let raw = trim_space(&block.get("signature").bytes()).to_vec();
-            let text = trim_space(&block.get("thinking").bytes()).to_vec();
+            let raw = go_trim_space(&block.get("signature").bytes()).to_vec();
+            let text = go_trim_space(&block.get("thinking").bytes()).to_vec();
             let pending = pending_target.as_slice();
             if assistant
                 && raw.is_empty()
@@ -548,7 +551,7 @@ pub(crate) fn web_search_request(model: &str, raw: &[u8]) -> Vec<u8> {
             d.array()
                 .iter()
                 .filter(|d| d.kind == Kind::String)
-                .map(|d| trim_space(&d.s).to_vec())
+                .map(|d| go_trim_space(&d.s).to_vec())
                 .filter(|d| !d.is_empty())
                 .collect()
         })
@@ -589,15 +592,15 @@ fn web_search_query(raw: &[u8]) -> Vec<u8> {
         }
         let content = message.get("content");
         let query = if content.kind == Kind::String {
-            trim_space(&content.s).to_vec()
+            go_trim_space(&content.s).to_vec()
         } else if content.is_array() {
             let texts: Vec<Vec<u8>> = content
                 .array()
                 .iter()
-                .map(|p| trim_space(&p.get("text").bytes()).to_vec())
+                .map(|p| go_trim_space(&p.get("text").bytes()).to_vec())
                 .filter(|t| !t.is_empty())
                 .collect();
-            trim_space(&texts.join(&b'\n')).to_vec()
+            go_trim_space(&texts.join(&b'\n')).to_vec()
         } else {
             vec![]
         };
@@ -743,7 +746,7 @@ fn thinking_block(model: &str, blocks: &[Res<'_>], j: usize, parts: &mut Parts, 
         if carrier.marked && target != ANY.as_bytes() && target != kind.as_bytes() {
             break;
         }
-        let part_signature = trim_space(&part.get("thoughtSignature").bytes()).to_vec();
+        let part_signature = go_trim_space(&part.get("thoughtSignature").bytes()).to_vec();
         let replace_fallback = backward && kind == FUNCTION && part_signature == SKIP.as_bytes();
         if part_signature.is_empty() || replace_fallback {
             gj::set_str(&mut parts.items[index], "thoughtSignature", &signature);
@@ -873,8 +876,9 @@ fn reorder_model_parts(content: &mut Vec<u8>, parts: &[Vec<u8>]) {
     for raw in parts {
         let part = gj::parse(raw);
         let text = part.get("text");
-        let carrier =
-            text.exists() && text.bytes().is_empty() && !trim_space(&part.get("thoughtSignature").bytes()).is_empty();
+        let carrier = text.exists()
+            && text.bytes().is_empty()
+            && !go_trim_space(&part.get("thoughtSignature").bytes()).is_empty();
         let call = part.get("functionCall").exists();
         let category = if part.get("thought").bool() {
             thinking.push(raw.clone());
@@ -1085,7 +1089,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     } else {
         (vec![], vec![])
     };
-    let choice_type = go_lower(trim_space(&choice_type));
+    let choice_type = go_lower(go_trim_space(&choice_type));
     let choice_none = choice_type == b"none";
 
     let thinking = gj::get(raw, "thinking");
@@ -1155,7 +1159,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
             b"adaptive" | b"auto" => {
                 let effort = gj::get(raw, "output_config.effort");
                 let effort = if effort.kind == Kind::String {
-                    go_lower(trim_space(&effort.s))
+                    go_lower(go_trim_space(&effort.s))
                 } else {
                     vec![]
                 };

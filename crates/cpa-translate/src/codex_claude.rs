@@ -5,9 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, GoValue, Kind, Res};
 use cpa_common::signature::{self as sig, BlockKind, Provider};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
-use crate::common::{self, go_lower, trim_space};
+use crate::common::{self, go_lower};
 use crate::{Error, Registered, RequestCtx, codex_claude_response as response, openai_claude};
 
 pub static PAIR: Registered = registered!(
@@ -112,7 +113,7 @@ fn service_tier(r: &Res<'_>) -> &'static str {
     if r.kind != Kind::String {
         return "";
     }
-    match go_lower(trim_space(&r.s)).as_slice() {
+    match go_lower(go_trim_space(&r.s)).as_slice() {
         b"fast" | b"priority" => "priority",
         _ => "",
     }
@@ -204,7 +205,7 @@ fn strip_dialect_keywords(value: &mut GoValue) {
 /// or unsupported regex escapes, re-encoded without HTML escaping.
 pub(crate) fn normalize_tool_parameters(raw: &[u8]) -> Vec<u8> {
     const DEFAULT: &[u8] = br#"{"type":"object","properties":{}}"#;
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     if raw.is_empty() || raw == b"null" || !gj::valid(raw) {
         return DEFAULT.to_vec();
     }
@@ -276,7 +277,9 @@ fn misses_required(schema: &Res<'_>) -> bool {
 /// codexClaudeTargetAcceptsGrokSignature.
 fn accepts_grok_signature(model: &str) -> bool {
     let base = cpa_common::thinking::parse_suffix(model).model_name;
-    go_lower(trim_space(base.as_bytes())).windows(4).any(|w| w == b"grok")
+    go_lower(go_trim_space(base.as_bytes()))
+        .windows(4)
+        .any(|w| w == b"grok")
 }
 
 fn data_url(media_type: &[u8], data: &[u8]) -> Vec<u8> {
@@ -399,7 +402,7 @@ impl Messages<'_> {
                         if source.get("type").bytes().as_ref() != b"base64" {
                             continue;
                         }
-                        let media = trim_space(&source.get("media_type").bytes()).to_vec();
+                        let media = go_trim_space(&source.get("media_type").bytes()).to_vec();
                         if !eq_fold(&media, "application/pdf") {
                             continue;
                         }
@@ -449,7 +452,7 @@ impl Messages<'_> {
         if let Some(signature) = sig::compatible_signature_for_provider(Provider::Gpt, &raw) {
             return Some(signature.into_bytes());
         }
-        let blank = trim_space(&raw).is_empty();
+        let blank = go_trim_space(&raw).is_empty();
         if self.preserve
             && part.get("signature").kind == Kind::String
             && !blank
@@ -630,7 +633,7 @@ fn convert(model: &str, raw: &[u8], preserve: bool) -> Vec<u8> {
                 // Claude 4.6 adaptive thinking may carry its effort in output_config.
                 let explicit = root.get("output_config.effort");
                 let explicit = if explicit.kind == Kind::String {
-                    go_lower(trim_space(&explicit.s))
+                    go_lower(go_trim_space(&explicit.s))
                 } else {
                     vec![]
                 };

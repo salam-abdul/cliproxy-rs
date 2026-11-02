@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use bytes::Bytes;
-use cpa_common::gostr::trim_space;
 use cpa_common::json::{self as gj, GoValue};
+use cpa_core::config::go_trim_space;
 use serde_json::{Map, Value};
 
 use crate::meta_wire::{self, Slot};
@@ -174,8 +174,8 @@ pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
             let Some(colon) = line.iter().position(|b| *b == b':') else {
                 break;
             };
-            let key = String::from_utf8_lossy(trim_space(&line[..colon])).into_owned();
-            let value = String::from_utf8_lossy(trim_space(&line[colon + 1..])).into_owned();
+            let key = String::from_utf8_lossy(go_trim_space(&line[..colon])).into_owned();
+            let value = String::from_utf8_lossy(go_trim_space(&line[colon + 1..])).into_owned();
             headers.insert(key, value);
             rest = next;
             end_index -= consumed as isize;
@@ -405,7 +405,7 @@ fn ensure_rsa(block: PemBlock) -> Result<PemBlock, String> {
 pub fn sanitize_private_key(raw: &str) -> Result<String, String> {
     let pk = raw.replace("\r\n", "\n").replace('\r', "\n");
     let pk = strip_ansi(&pk);
-    let pk = String::from_utf8_lossy(trim_space(pk.as_bytes())).into_owned();
+    let pk = String::from_utf8_lossy(go_trim_space(pk.as_bytes())).into_owned();
     let normalized = if pem_decode(pk.as_bytes()).is_some() {
         pk
     } else {

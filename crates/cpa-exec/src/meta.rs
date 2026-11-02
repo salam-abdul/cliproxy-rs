@@ -22,6 +22,7 @@ use bytes::Bytes;
 use cpa_common::json::{self as gj, Kind};
 use cpa_common::thinking::{ModelCaps, RequestThinking, apply_request_thinking, parse_suffix};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch, Source};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -36,7 +37,6 @@ use crate::kimi_http::{
     report_model, rfc3339_local_now,
 };
 use crate::meta_auth::{DEFAULT_API_BASE_URL, MetaAuth, MintedKey};
-use crate::meta_codex::go_trim_space;
 use crate::openai_compat_payload::{ensure_responses_usage_details, sanitize_reasoning_encrypted_content};
 use crate::proxy::{GoClients, GoHeaders, MAX_ERROR_BODY, Proxy, default_client, lines, read_all, send};
 use crate::tokenizer::Encoding;

@@ -5,10 +5,10 @@
 
 use crate::{
     claude_chat_request::{apply_effort, text_part},
-    common::{self, trim_space},
-    thinking,
+    common, thinking,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -80,7 +80,7 @@ pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking
                             append_system(&mut system, &part.get("text").bytes(), Some(&part))
                         }
                         _ => {
-                            let kind = trim_space(&part.get("type").bytes()).to_vec();
+                            let kind = go_trim_space(&part.get("type").bytes()).to_vec();
                             if !kind.is_empty() {
                                 let mut block = br#"{"type":""}"#.to_vec();
                                 gj::set_str(&mut block, "type", kind);
@@ -169,7 +169,7 @@ pub(crate) fn convert(model: &str, input: &[u8], stream: bool, preserve_thinking
                     emitted_uses.insert(raw_id);
                 }
                 let mut name = item.get("name").bytes().into_owned();
-                let namespace = trim_space(&item.get("namespace").bytes()).to_vec();
+                let namespace = go_trim_space(&item.get("namespace").bytes()).to_vec();
                 if !namespace.is_empty() {
                     name = qualify_namespace_name(&namespace, &name);
                 }
@@ -548,9 +548,9 @@ fn message_parts(item: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>) {
 
 fn reasoning_to_thinking(item: &Res<'_>, preserve: bool) -> Option<Vec<u8>> {
     let encrypted = item.get("encrypted_content").bytes().into_owned();
-    let trimmed = trim_space(&encrypted);
+    let trimmed = go_trim_space(&encrypted);
     if let Some(rest) = trimmed.strip_prefix(REDACTED_THINKING_PREFIX) {
-        let data = trim_space(rest);
+        let data = go_trim_space(rest);
         if data.is_empty() {
             return None;
         }
@@ -602,7 +602,7 @@ fn content_part(part: &Res<'_>) -> Option<Vec<u8>> {
 }
 
 fn visible(part: &[u8]) -> bool {
-    gj::get(part, "type").str() != "text" || !trim_space(&gj::get(part, "text").bytes()).is_empty()
+    gj::get(part, "type").str() != "text" || !go_trim_space(&gj::get(part, "text").bytes()).is_empty()
 }
 
 const EMPTY_RESULT: &[u8] = br#"{"type":"text","text":"Tool result was empty."}"#;
@@ -621,7 +621,7 @@ fn standalone_tool_output(output: &Res<'_>) -> Vec<Vec<u8>> {
         }
     }
     let text = output.bytes();
-    if output.is_array() || trim_space(&text).is_empty() {
+    if output.is_array() || go_trim_space(&text).is_empty() {
         return vec![EMPTY_RESULT.to_vec()];
     }
     vec![text_part(&text)]
@@ -670,7 +670,7 @@ fn strip_trailing_thinking(messages: &mut Vec<Vec<u8>>) {
     let mut end = parts.len();
     while end > 0
         && matches!(
-            trim_space(&parts[end - 1].get("type").bytes()),
+            go_trim_space(&parts[end - 1].get("type").bytes()),
             b"thinking" | b"redacted_thinking"
         )
     {
@@ -823,7 +823,7 @@ fn tool_result_text_parts(block: &Res<'_>) -> Vec<Vec<u8>> {
         return parts;
     }
     let text = content.bytes();
-    if trim_space(&text).is_empty() {
+    if go_trim_space(&text).is_empty() {
         return vec![];
     }
     vec![text_part(&text)]
@@ -835,12 +835,12 @@ fn tool_result_text_parts(block: &Res<'_>) -> Vec<Vec<u8>> {
 /// common.ExtractResponsesCallID.
 pub(crate) fn extract_call_id(node: &Res<'_>) -> Vec<u8> {
     for key in ["call_id", "tool_call_id", "callId"] {
-        let id = trim_space(&node.get(key).bytes()).to_vec();
+        let id = go_trim_space(&node.get(key).bytes()).to_vec();
         if !id.is_empty() {
             return id;
         }
     }
-    let id = trim_space(&node.get("id").bytes()).to_vec();
+    let id = go_trim_space(&node.get("id").bytes()).to_vec();
     if id.starts_with(b"fco_") { vec![] } else { id }
 }
 
@@ -896,7 +896,7 @@ pub(crate) fn normalize_tool_call_outputs<'a>(items: Vec<Res<'a>>) -> Vec<Res<'a
                         *explicit.entry(id.clone()).or_default() -= 1;
                     }
                 }
-                let unmatched_name = |o: &Res<'a>| trim_space(&o.get("name").bytes()).to_vec();
+                let unmatched_name = |o: &Res<'a>| go_trim_space(&o.get("name").bytes()).to_vec();
                 for (p, id) in pending.iter().enumerate() {
                     if matched[p].is_some() || explicit.get(id).copied().unwrap_or(0) > 0 {
                         continue;
@@ -960,14 +960,14 @@ fn normalize_codex_agent_messages(payload: &[u8]) -> Vec<u8> {
     let mut updated = payload.to_vec();
     let mut changed = false;
     for (index, item) in input.array().iter().enumerate() {
-        if trim_space(&item.get("type").bytes()) != b"agent_message" {
+        if go_trim_space(&item.get("type").bytes()) != b"agent_message" {
             continue;
         }
         let item_path = format!("input.{index}");
         let content = item.get("content");
         if content.is_array() {
             for (part_index, part) in content.array().iter().enumerate() {
-                if trim_space(&part.get("type").bytes()) != b"encrypted_content" {
+                if go_trim_space(&part.get("type").bytes()) != b"encrypted_content" {
                     continue;
                 }
                 let enc = part.get("encrypted_content");
@@ -998,8 +998,8 @@ fn normalize_codex_agent_messages(payload: &[u8]) -> Vec<u8> {
 
 /// util.QualifyResponsesNamespaceToolName.
 pub(crate) fn qualify_namespace_name(namespace: &[u8], child: &[u8]) -> Vec<u8> {
-    let child = trim_space(child);
-    let namespace = trim_space(namespace);
+    let child = go_trim_space(child);
+    let namespace = go_trim_space(namespace);
     if child.is_empty() || namespace.is_empty() || child.starts_with(b"mcp__") {
         return child.to_vec();
     }
@@ -1022,11 +1022,11 @@ fn unsupported_builtin(kind: &[u8]) -> bool {
 }
 
 pub(crate) fn tool_name(tool: &Res<'_>) -> Vec<u8> {
-    let name = trim_space(&tool.get("name").bytes()).to_vec();
+    let name = go_trim_space(&tool.get("name").bytes()).to_vec();
     if !name.is_empty() {
         return name;
     }
-    trim_space(&tool.get("function.name").bytes()).to_vec()
+    go_trim_space(&tool.get("function.name").bytes()).to_vec()
 }
 
 #[derive(Clone)]
@@ -1087,7 +1087,7 @@ pub(crate) fn tool_descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
     };
     for (tools, priority) in sources {
         tools.each(|_, tool| {
-            let kind = trim_space(&tool.get("type").bytes()).to_vec();
+            let kind = go_trim_space(&tool.get("type").bytes()).to_vec();
             match kind.as_slice() {
                 b"" | b"function" => add(
                     &mut out,
@@ -1110,7 +1110,7 @@ pub(crate) fn tool_descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
                     true,
                 ),
                 b"namespace" => {
-                    let namespace = trim_space(&tool.get("name").bytes()).to_vec();
+                    let namespace = go_trim_space(&tool.get("name").bytes()).to_vec();
                     let children = tool.get("tools");
                     if children.is_array() {
                         children.each(|_, child| {
@@ -1119,7 +1119,7 @@ pub(crate) fn tool_descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
                                 return true;
                             }
                             let qualified = qualify_namespace_name(&namespace, &child_name);
-                            let ckind = trim_space(&child.get("type").bytes()).to_vec();
+                            let ckind = go_trim_space(&child.get("type").bytes()).to_vec();
                             let ckind: &[u8] = match ckind.as_slice() {
                                 b"" | b"function" => b"function",
                                 b"custom" => b"custom",
@@ -1144,7 +1144,7 @@ pub(crate) fn tool_descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
                     if access.exists() && !access.bool() {
                         return true;
                     }
-                    let mut name = trim_space(&tool.get("name").bytes()).to_vec();
+                    let mut name = go_trim_space(&tool.get("name").bytes()).to_vec();
                     if name.is_empty() {
                         name = b"web_search".to_vec();
                     }
@@ -1161,7 +1161,7 @@ pub(crate) fn tool_descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
                 }
                 _ => {
                     if !unsupported_builtin(&kind) {
-                        let name = trim_space(&tool.get("name").bytes()).to_vec();
+                        let name = go_trim_space(&tool.get("name").bytes()).to_vec();
                         add(&mut out, tool.clone(), name, vec![], vec![], &kind, priority, true);
                     }
                 }
@@ -1244,7 +1244,7 @@ fn descriptor_to_claude(d: &Descriptor<'_>, claude_name: &[u8]) -> Option<Vec<u8
     if name.is_empty() && !d.direct {
         name = d.name.clone();
     }
-    let name = trim_space(&name).to_vec();
+    let name = go_trim_space(&name).to_vec();
     let fallback = || common::sanitize_claude_function_name(&tool_name(&d.tool));
     match d.kind.as_slice() {
         b"function" => {
@@ -1290,7 +1290,7 @@ fn descriptor_to_claude(d: &Descriptor<'_>, claude_name: &[u8]) -> Option<Vec<u8
             if access.exists() && !access.bool() {
                 return None;
             }
-            let mut name = trim_space(&tool.get("name").bytes()).to_vec();
+            let mut name = go_trim_space(&tool.get("name").bytes()).to_vec();
             if name.is_empty() {
                 name = b"web_search".to_vec();
             }
@@ -1433,7 +1433,7 @@ fn history_tool_identities(root: &Res<'_>) -> Vec<Vec<u8>> {
         input.each(|_, item| {
             if matches!(&*item.get("type").bytes(), b"function_call" | b"custom_tool_call") {
                 let mut name = item.get("name").bytes().into_owned();
-                let namespace = trim_space(&item.get("namespace").bytes()).to_vec();
+                let namespace = go_trim_space(&item.get("namespace").bytes()).to_vec();
                 if !namespace.is_empty() {
                     name = qualify_namespace_name(&namespace, &name);
                 }
@@ -1451,7 +1451,7 @@ fn history_tool_identities(root: &Res<'_>) -> Vec<Vec<u8>> {
 /// client's `(name, namespace)`.
 #[cfg(test)]
 pub(crate) fn split_qualified_call(request: &[u8], qualified: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let qualified = trim_space(qualified);
+    let qualified = go_trim_space(qualified);
     if qualified.is_empty() {
         return (vec![], vec![]);
     }
@@ -1473,7 +1473,7 @@ pub(crate) fn web_search_call_id(claude_tool_use_id: &[u8]) -> Vec<u8> {
 }
 
 fn web_search_tool_use_id(item_id: &[u8]) -> Vec<u8> {
-    let body = trim_space(item_id);
+    let body = go_trim_space(item_id);
     let body = body.strip_prefix(WEB_SEARCH_ID_PREFIX).unwrap_or(body);
     let body = body.strip_prefix(SERVER_TOOL_ID_PREFIX).unwrap_or(body);
     let mut sanitized = vec![];
@@ -1502,7 +1502,7 @@ fn web_search_call_to_claude(item: &Res<'_>) -> Vec<Vec<u8>> {
     gj::set_str(&mut tool_use, "name", "web_search");
     let query = ["action.query", "action.queries.0", "action.url"]
         .iter()
-        .map(|p| trim_space(&item.get(p).bytes()).to_vec())
+        .map(|p| go_trim_space(&item.get(p).bytes()).to_vec())
         .find(|q| !q.is_empty())
         .unwrap_or_default();
     if !query.is_empty() {
@@ -1518,7 +1518,7 @@ fn web_search_call_to_claude(item: &Res<'_>) -> Vec<Vec<u8>> {
         results.each(|_, entry| {
             if entry.get("type").str() == "web_search_tool_result_error" {
                 blocks.push(entry.raw.to_vec());
-            } else if !trim_space(&entry.get("encrypted_content").bytes()).is_empty() {
+            } else if !go_trim_space(&entry.get("encrypted_content").bytes()).is_empty() {
                 let mut block = entry.raw.to_vec();
                 gj::set_str(&mut block, "type", "web_search_result");
                 blocks.push(block);
@@ -1541,7 +1541,7 @@ fn attach_citations(block: Vec<u8>, annotations: &Res<'_>) -> Vec<u8> {
     }
     let mut citations = vec![];
     annotations.each(|_, a| {
-        if !trim_space(&a.get("encrypted_index").bytes()).is_empty() {
+        if !go_trim_space(&a.get("encrypted_index").bytes()).is_empty() {
             citations.push(a.raw.to_vec());
         }
         true

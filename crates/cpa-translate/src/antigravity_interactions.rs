@@ -5,11 +5,10 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::antigravity_gemini::rewrite_function_names;
-use crate::common::{
-    format_rfc3339_utc, go_lower, now_nanos, now_unix, restore_sanitized_tool_name, sse_event, trim_space,
-};
+use crate::common::{format_rfc3339_utc, go_lower, now_nanos, now_unix, restore_sanitized_tool_name, sse_event};
 use crate::gemini::attach_default_safety_settings;
 use crate::gemini_interactions::{
     copy_generation_config, copy_response_modalities, copy_system_instruction, first_existing, input_contents,
@@ -72,7 +71,7 @@ fn summary_includes_thoughts(summary: &Res<'_>) -> Option<bool> {
     if summary.kind != Kind::String {
         return None;
     }
-    match go_lower(trim_space(&summary.s)).as_slice() {
+    match go_lower(go_trim_space(&summary.s)).as_slice() {
         b"auto" => Some(true),
         b"none" => Some(false),
         _ => None,
@@ -86,9 +85,9 @@ fn copy_reasoning(req: &mut Vec<u8>, root: &Res<'_>) {
     if !reasoning.exists() {
         return;
     }
-    let mut effort = go_lower(trim_space(&reasoning.get("effort").bytes()));
+    let mut effort = go_lower(go_trim_space(&reasoning.get("effort").bytes()));
     if effort.is_empty() {
-        effort = go_lower(trim_space(&reasoning.get("thinking_level").bytes()));
+        effort = go_lower(go_trim_space(&reasoning.get("thinking_level").bytes()));
     }
     if effort == b"auto" {
         gj::set_int(req, "generationConfig.thinkingConfig.thinkingBudget", -1);
@@ -118,7 +117,7 @@ fn copy_tool_choice(req: &mut Vec<u8>, root: &Res<'_>) {
     }
     let mut allowed: Vec<Vec<u8>> = vec![];
     let mode = if choice.kind == Kind::String {
-        match go_lower(trim_space(&choice.bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.bytes())).as_slice() {
             b"none" => "NONE",
             b"auto" => "AUTO",
             b"required" | b"any" => "ANY",
@@ -127,11 +126,11 @@ fn copy_tool_choice(req: &mut Vec<u8>, root: &Res<'_>) {
     } else if choice.is_object() {
         let mut name_at = |path: &str| {
             let name = choice.get(path).bytes().into_owned();
-            if !trim_space(&name).is_empty() {
+            if !go_trim_space(&name).is_empty() {
                 allowed.push(name);
             }
         };
-        match go_lower(trim_space(&choice.get("type").bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.get("type").bytes())).as_slice() {
             b"none" => "NONE",
             b"auto" => "AUTO",
             b"required" | b"any" => "ANY",
@@ -163,7 +162,7 @@ fn function_declaration(decl: &Res<'_>, names: &HashMap<Vec<u8>, Vec<u8>>) -> Op
     let nested = decl.get("function");
     let f = if nested.is_object() { nested } else { decl.clone() };
     let name = f.get("name").bytes();
-    if trim_space(&name).is_empty() {
+    if go_trim_space(&name).is_empty() {
         return None;
     }
     let mut out = br#"{"name":"","parametersJsonSchema":{"type":"object","properties":{}}}"#.to_vec();
@@ -329,9 +328,9 @@ fn restore_names(root: Res<'static>, names: &HashMap<Vec<u8>, Vec<u8>>) -> Res<'
 /// antigravityStreamPayloads: a `data:` line's payload, the `response` (or item) of each
 /// element of a JSON array, else the trimmed line.
 fn stream_payloads(raw: &[u8]) -> Vec<Vec<u8>> {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if let Some(data) = trimmed.strip_prefix(b"data:") {
-        return vec![trim_space(data).to_vec()];
+        return vec![go_trim_space(data).to_vec()];
     }
     let root = gj::parse(trimmed);
     if root.is_array() {
@@ -748,7 +747,7 @@ impl Stream {
     }
 
     fn payload(&mut self, payload: &[u8], out: &mut Vec<Vec<u8>>) {
-        if trim_space(payload) == b"[DONE]" {
+        if go_trim_space(payload) == b"[DONE]" {
             if !self.completed {
                 self.stop_step(out);
                 self.complete(None, out);

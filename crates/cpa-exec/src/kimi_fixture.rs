@@ -1114,7 +1114,7 @@ impl CaptureLog {
                     response_set = true;
                 }
                 CaptureRecord::Chunk(chunk) => {
-                    let data = cpa_common::gostr::trim_space(chunk);
+                    let data = cpa_core::config::go_trim_space(chunk);
                     if data.is_empty() {
                         continue;
                     }

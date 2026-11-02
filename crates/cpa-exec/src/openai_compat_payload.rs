@@ -525,7 +525,7 @@ pub(crate) fn claude_code_prompt_cache(model: &str, payload: &[u8], headers: &He
 
 /// `EnsureResponsesUsageDetails`.
 pub fn ensure_responses_usage_details(payload: &[u8]) -> Vec<u8> {
-    let trimmed = go::trim_space(payload);
+    let trimmed = cpa_core::config::go_trim_space(payload);
     if trimmed.is_empty() {
         return payload.to_vec();
     }
@@ -546,13 +546,13 @@ pub fn ensure_responses_usage_details(payload: &[u8]) -> Vec<u8> {
     let lines: Vec<Vec<u8>> = payload
         .split(|&b| b == b'\n')
         .map(|line| {
-            if !go::trim_space(line).starts_with(b"data:") {
+            if !cpa_core::config::go_trim_space(line).starts_with(b"data:") {
                 return line.to_vec();
             }
             // Go keeps the 5-byte prefix for an indented `data:` line, which then never
             // yields a `{` payload.
             let prefix = if line.starts_with(b"data: ") { 6 } else { 5 };
-            let data = go::trim_space(&line[prefix..]);
+            let data = cpa_core::config::go_trim_space(&line[prefix..]);
             if data.first() != Some(&b'{') {
                 return line.to_vec();
             }

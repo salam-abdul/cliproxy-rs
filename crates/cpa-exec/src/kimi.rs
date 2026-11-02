@@ -24,6 +24,7 @@ use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::thinking::{ModelCaps, RequestThinking, apply_request_thinking, parse_suffix};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -38,7 +39,6 @@ use crate::kimi_http::{
 };
 use crate::kimi_http::{DeferredUsage, UsageRule, apply_patch_requested, defer_usage, report_model};
 use crate::kimi_replay::{self, ReplayCache};
-use crate::meta_codex::go_trim_space;
 use crate::openai_compat_payload::ensure_responses_usage_details;
 use crate::proxy::{GoClients, GoHeaders, Proxy, Upstream, default_client, lines, read_all, send};
 

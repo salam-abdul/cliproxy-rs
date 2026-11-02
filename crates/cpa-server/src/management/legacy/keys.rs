@@ -8,7 +8,6 @@ use cpa_common::gostr::GoStr;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::go_trim;
 use super::view::{self, Shape};
 
 pub(super) fn lower(s: &str) -> String {
@@ -21,7 +20,7 @@ fn text(o: &Map<String, Value>, k: &str) -> String {
 
 /// Go `normalizeModelPrefix`.
 pub(super) fn normalize_prefix(prefix: &str) -> String {
-    let p = go_trim(prefix).trim_matches('/');
+    let p = prefix.trim().trim_matches('/');
     if p.contains('/') { String::new() } else { p.to_owned() }
 }
 
@@ -31,7 +30,7 @@ pub(super) fn normalize_headers(v: &Value) -> Value {
     let clean: BTreeMap<String, Value> = map
         .iter()
         .filter_map(|(k, v)| {
-            let (k, v) = (go_trim(k), go_trim(v.as_str().unwrap_or_default()));
+            let (k, v) = (k.trim(), v.as_str().unwrap_or_default().trim());
             (!k.is_empty() && !v.is_empty()).then(|| (k.to_owned(), Value::from(v)))
         })
         .collect();
@@ -50,7 +49,7 @@ pub(super) fn normalize_excluded(v: &Value) -> Value {
         .into_iter()
         .flatten()
         .filter_map(|m| {
-            let m = lower(go_trim(m.as_str().unwrap_or_default()));
+            let m = lower(m.as_str().unwrap_or_default().trim());
             (!m.is_empty() && seen.insert(m.clone())).then(|| Value::from(m))
         })
         .collect();
@@ -102,14 +101,10 @@ fn fix(o: &mut Map<String, Value>, k: &str, f: impl FnOnce(&str) -> String) {
     set_str(o, k, v);
 }
 
-fn trim(v: &str) -> String {
-    go_trim(v).to_owned()
-}
-
 /// One sanitized entry, or `None` when Go drops it. `family` is the legacy list name.
 fn entry(family: &str, e: &Value) -> Option<Value> {
     let mut o = e.as_object()?.clone();
-    let trimmed = |o: &Map<String, Value>, k: &str| go_trim(&text(o, k)).to_owned();
+    let trimmed = |o: &Map<String, Value>, k: &str| (text(o, k)).trim().to_owned();
     let (key, base) = (trimmed(&o, "api-key"), trimmed(&o, "base-url"));
     match family {
         "gemini-api-key" | "interactions-api-key" => {
@@ -119,7 +114,7 @@ fn entry(family: &str, e: &Value) -> Option<Value> {
             set_str(&mut o, "api-key", key);
             set_str(&mut o, "base-url", base);
             fix(&mut o, "prefix", normalize_prefix);
-            fix(&mut o, "proxy-url", trim);
+            fix(&mut o, "proxy-url", |v| v.trim().to_owned());
         }
         "codex-api-key" | "xai-api-key" => {
             if base.is_empty() {
@@ -148,14 +143,19 @@ fn entry(family: &str, e: &Value) -> Option<Value> {
         "claude-api-key" => {
             fix(&mut o, "prefix", normalize_prefix);
             if let Some(cloak) = o.get_mut("cloak").and_then(Value::as_object_mut) {
-                let mode = go_trim(cloak.get("mode").and_then(Value::as_str).unwrap_or_default()).to_owned();
+                let mode = cloak
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
                 cloak.insert("mode".into(), mode.into());
                 let words: Vec<Value> = cloak
                     .get("sensitive-words")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(|w| Some(go_trim(w.as_str()?)).filter(|w| !w.is_empty()).map(Value::from))
+                    .filter_map(|w| Some((w.as_str()?).trim()).filter(|w| !w.is_empty()).map(Value::from))
                     .collect();
                 if words.is_empty() {
                     cloak.shift_remove("sensitive-words");
@@ -167,10 +167,10 @@ fn entry(family: &str, e: &Value) -> Option<Value> {
                 prune(shape, cloak);
             }
             let profile = text(&o, "fingerprint-profile");
-            let normalized = match lower(go_trim(&profile)).as_str() {
+            let normalized = match lower(profile.trim()).as_str() {
                 "claude-code-cli" | "oauth-cli" => "claude-code-cli".to_owned(),
                 "default" => "default".to_owned(),
-                _ => go_trim(&profile).to_owned(),
+                _ => profile.trim().to_owned(),
             };
             set_str(&mut o, "fingerprint-profile", normalized);
         }
@@ -181,7 +181,7 @@ fn entry(family: &str, e: &Value) -> Option<Value> {
             set_str(&mut o, "api-key", key);
             fix(&mut o, "prefix", normalize_prefix);
             set_str(&mut o, "base-url", base);
-            fix(&mut o, "proxy-url", trim);
+            fix(&mut o, "proxy-url", |v| v.trim().to_owned());
             let models: Vec<Value> = o
                 .get("models")
                 .and_then(Value::as_array)
@@ -204,7 +204,7 @@ fn entry(family: &str, e: &Value) -> Option<Value> {
             if base.is_empty() {
                 return None;
             }
-            fix(&mut o, "name", trim);
+            fix(&mut o, "name", |v| v.trim().to_owned());
             fix(&mut o, "prefix", normalize_prefix);
             set_str(&mut o, "base-url", base);
         }
@@ -261,7 +261,7 @@ pub(super) fn sanitize(family: &str, list: &Value) -> Value {
 fn channel_map(v: &Value, mut clean: impl FnMut(&[Value]) -> Vec<Value>) -> Map<String, Value> {
     let mut out = BTreeMap::new();
     for (channel, list) in v.as_object().into_iter().flatten() {
-        let channel = lower(go_trim(channel));
+        let channel = lower(channel.trim());
         let list = list.as_array().map(Vec::as_slice).unwrap_or_default();
         if channel.is_empty() || list.is_empty() {
             continue;
@@ -308,8 +308,8 @@ pub(super) fn oauth_alias(v: &Value) -> Value {
             .filter_map(|e| {
                 let e = e.as_object()?;
                 let (name, alias) = (
-                    go_trim(&text(e, "name")).to_owned(),
-                    go_trim(&text(e, "alias")).to_owned(),
+                    (text(e, "name")).trim().to_owned(),
+                    (text(e, "alias")).trim().to_owned(),
                 );
                 if name.is_empty() || alias.is_empty() || name.go_eq_fold(&alias) || !seen.insert(lower(&alias)) {
                     return None;
@@ -320,7 +320,7 @@ pub(super) fn oauth_alias(v: &Value) -> Value {
                 if let Some(d) = o
                     .get("display-name")
                     .and_then(Value::as_str)
-                    .map(|d| go_trim(d).to_owned())
+                    .map(|d| d.trim().to_owned())
                 {
                     o.insert("display-name".into(), d.into());
                 }
@@ -344,8 +344,8 @@ pub(super) fn oauth_settings(v: &Value) -> Value {
             .rev()
             .filter_map(|e| {
                 let e = e.as_object()?;
-                let name = go_trim(&text(e, "name")).to_owned();
-                let alias = go_trim(&text(e, "alias")).to_owned();
+                let name = (text(e, "name")).trim().to_owned();
+                let alias = (text(e, "alias")).trim().to_owned();
                 if name.is_empty() || !seen.insert(format!("{}->{}", lower(&name), lower(&alias))) {
                     return None;
                 }
@@ -376,11 +376,11 @@ pub(super) fn oauth_scoped_errors(v: &Value) -> Value {
                         .and_then(Value::as_array)
                         .into_iter()
                         .flatten()
-                        .filter_map(|w| Some(go_trim(w.as_str()?)).filter(|w| !w.is_empty()).map(Value::from))
+                        .filter_map(|w| Some((w.as_str()?).trim()).filter(|w| !w.is_empty()).map(Value::from))
                         .collect()
                 };
                 let (matches, regexes) = (words("match"), words("match-regexr"));
-                let action = lower(go_trim(&text(r, "action")));
+                let action = lower((text(r, "action")).trim());
                 let status = r.get("status").and_then(Value::as_i64).unwrap_or(0);
                 if status <= 0 || (matches.is_empty() && regexes.is_empty()) || action.is_empty() {
                     return None;
@@ -438,7 +438,7 @@ impl Ids {
         h.update(kind.as_bytes());
         for part in parts {
             h.update([0]);
-            h.update(go_trim(part).as_bytes());
+            h.update(part.trim().as_bytes());
         }
         let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         let base = format!("{kind}:{}", &digest[..12]);
@@ -469,7 +469,7 @@ pub(super) fn with_auth_index(family: &str, list: &Value, live: &HashMap<String,
         .into_iter()
         .map(|e| {
             let Value::Object(mut o) = e else { return e };
-            let t = |k: &str| go_trim(&text(&o, k)).to_owned();
+            let t = |k: &str| (text(&o, k)).trim().to_owned();
             let index = match family {
                 "openai-compatibility" => {
                     return openai_with_auth_index(o, &mut index_of);
@@ -502,12 +502,12 @@ pub(super) fn with_auth_index(family: &str, list: &Value, live: &HashMap<String,
 /// Go `openAICompatibilityWithAuthIndex` for one provider: its own field set, with
 /// `disabled` always present and the index on each key (or on the provider).
 fn openai_with_auth_index(o: Map<String, Value>, index_of: &mut impl FnMut(&str, &[&str]) -> Option<String>) -> Value {
-    let name = lower(go_trim(&text(&o, "name")));
+    let name = lower((text(&o, "name")).trim());
     let kind = format!(
         "openai-compatibility:{}",
         if name.is_empty() { "openai-compatibility" } else { &name }
     );
-    let base = go_trim(&text(&o, "base-url")).to_owned();
+    let base = (text(&o, "base-url")).trim().to_owned();
     let mut out = Map::new();
     out.insert("name".into(), o.get("name").cloned().unwrap_or_else(|| "".into()));
     for (k, keep) in [("priority", true), ("disabled", false), ("prefix", true)] {
@@ -538,7 +538,7 @@ fn openai_with_auth_index(o: Map<String, Value>, index_of: &mut impl FnMut(&str,
             .into_iter()
             .map(|k| {
                 let Value::Object(mut k) = k else { return k };
-                let key = go_trim(&text(&k, "api-key")).to_owned();
+                let key = (text(&k, "api-key")).trim().to_owned();
                 k.insert("api-key".into(), key.clone().into());
                 if let Some(i) = index_of(&kind, &[&key, &base, &text(&k, "proxy-url")]).filter(|i| !i.is_empty()) {
                     k.insert("auth-index".into(), i.into());

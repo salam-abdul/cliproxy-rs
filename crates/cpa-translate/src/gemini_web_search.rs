@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use cpa_core::registry::{self, ModelInfo};
 
-use crate::common::{go_lower, go_runes, trim_space};
+use crate::common::{go_lower, go_runes};
 
 fn native_web_search(info: &Option<ModelInfo>) -> Option<bool> {
     info.as_ref()?
@@ -29,7 +30,7 @@ fn normalize_antigravity_model(id: &str) -> String {
     if let Some(open) = id.iter().rposition(|&c| c == b'(')
         && id.ends_with(b")")
     {
-        id = trim_space(&id[..open]).to_vec();
+        id = go_trim_space(&id[..open]).to_vec();
     }
     String::from_utf8_lossy(&id).into_owned()
 }
@@ -126,7 +127,7 @@ pub(crate) fn allows_web_search_tool_choice(root: &Res<'_>) -> bool {
 pub(crate) fn extract_query(root: &Res<'_>) -> Vec<u8> {
     let input = root.get("input");
     if input.kind == Kind::String {
-        return trim_space(&input.s).to_vec();
+        return go_trim_space(&input.s).to_vec();
     }
     if input.is_array() {
         let items = input.array();
@@ -134,7 +135,7 @@ pub(crate) fn extract_query(root: &Res<'_>) -> Vec<u8> {
         let mut is_flat = true;
         for item in &items {
             if item.get("type").bytes().as_ref() == b"input_text" {
-                let text = trim_space(&item.get("text").bytes()).to_vec();
+                let text = go_trim_space(&item.get("text").bytes()).to_vec();
                 if !text.is_empty() {
                     flat.push(text);
                 }
@@ -152,27 +153,27 @@ pub(crate) fn extract_query(root: &Res<'_>) -> Vec<u8> {
                 continue;
             }
             let content = item.get("content");
-            if content.kind == Kind::String && !trim_space(&content.s).is_empty() {
-                return trim_space(&content.s).to_vec();
+            if content.kind == Kind::String && !go_trim_space(&content.s).is_empty() {
+                return go_trim_space(&content.s).to_vec();
             }
             if content.is_array() {
                 let texts: Vec<Vec<u8>> = content
                     .array()
                     .iter()
-                    .map(|p| trim_space(&p.get("text").bytes()).to_vec())
+                    .map(|p| go_trim_space(&p.get("text").bytes()).to_vec())
                     .filter(|t| !t.is_empty())
                     .collect();
                 if !texts.is_empty() {
                     return texts.join(&b'\n');
                 }
             }
-            let text = trim_space(&item.get("text").bytes()).to_vec();
+            let text = go_trim_space(&item.get("text").bytes()).to_vec();
             if !text.is_empty() {
                 return text;
             }
         }
     }
-    trim_space(&root.get("instructions").bytes()).to_vec()
+    go_trim_space(&root.get("instructions").bytes()).to_vec()
 }
 
 /// ExtractResponsesWebSearchAllowedDomains: the first web search tool with a
@@ -193,7 +194,7 @@ pub(crate) fn allowed_domains(root: &Res<'_>) -> Vec<Vec<u8>> {
         return domains
             .array()
             .iter()
-            .map(|d| trim_space(&d.bytes()).to_vec())
+            .map(|d| go_trim_space(&d.bytes()).to_vec())
             .filter(|d| !d.is_empty())
             .collect();
     }
@@ -222,7 +223,7 @@ pub(crate) fn grounding_queries(gm: &Res<'_>) -> Vec<Vec<u8>> {
     queries
         .array()
         .iter()
-        .map(|q| trim_space(&q.bytes()).to_vec())
+        .map(|q| go_trim_space(&q.bytes()).to_vec())
         .filter(|q| !q.is_empty())
         .collect()
 }
@@ -232,7 +233,7 @@ pub(crate) fn grounding_sources(gm: &Res<'_>) -> Vec<Vec<u8>> {
     let mut seen = HashSet::new();
     let mut sources = vec![];
     for chunk in gm.get("groundingChunks").array() {
-        let uri = trim_space(&chunk.get("web.uri").bytes()).to_vec();
+        let uri = go_trim_space(&chunk.get("web.uri").bytes()).to_vec();
         if uri.is_empty() || !seen.insert(uri.clone()) {
             continue;
         }
@@ -264,7 +265,7 @@ pub(crate) fn has_valid_web_grounding(gm: &Res<'_>) -> bool {
         return false;
     }
     let queries = gm.get("webSearchQueries");
-    if queries.is_array() && queries.array().iter().any(|q| !trim_space(&q.bytes()).is_empty()) {
+    if queries.is_array() && queries.array().iter().any(|q| !go_trim_space(&q.bytes()).is_empty()) {
         return true;
     }
     let chunks = gm.get("groundingChunks");
@@ -272,11 +273,11 @@ pub(crate) fn has_valid_web_grounding(gm: &Res<'_>) -> bool {
         && chunks
             .array()
             .iter()
-            .any(|c| !trim_space(&c.get("web.uri").bytes()).is_empty())
+            .any(|c| !go_trim_space(&c.get("web.uri").bytes()).is_empty())
 }
 
 fn blank(r: &Res<'_>) -> bool {
-    !r.exists() || trim_space(&r.raw).is_empty()
+    !r.exists() || go_trim_space(&r.raw).is_empty()
 }
 
 /// MergeGroundingMetadata: merges one frame's grounding into the accumulated metadata,
@@ -338,7 +339,7 @@ pub(crate) fn merge_grounding_metadata(existing: Option<&[u8]>, new: &Res<'_>) -
     let mut by_raw: HashMap<Vec<u8>, i64> = HashMap::new();
     for (i, chunk) in existing_chunks.iter().enumerate() {
         chunks_raw.push(chunk.raw.to_vec());
-        let uri = trim_space(&chunk.get("web.uri").bytes()).to_vec();
+        let uri = go_trim_space(&chunk.get("web.uri").bytes()).to_vec();
         if !uri.is_empty() {
             by_uri.entry(uri).or_insert(i as i64);
         }
@@ -346,8 +347,8 @@ pub(crate) fn merge_grounding_metadata(existing: Option<&[u8]>, new: &Res<'_>) -
     }
     for (i, chunk) in new_chunks.iter().enumerate() {
         let i = i as i64;
-        let uri = trim_space(&chunk.get("web.uri").bytes()).to_vec();
-        let title = trim_space(&chunk.get("web.title").bytes()).to_vec();
+        let uri = go_trim_space(&chunk.get("web.uri").bytes()).to_vec();
+        let title = go_trim_space(&chunk.get("web.title").bytes()).to_vec();
         let new_raw_idx = prev_raw_count + i;
         let known = if !uri.is_empty() {
             by_uri.get(&uri).copied()
@@ -361,7 +362,7 @@ pub(crate) fn merge_grounding_metadata(existing: Option<&[u8]>, new: &Res<'_>) -
             }
             if !uri.is_empty() && !title.is_empty() {
                 let slot = &mut chunks_raw[idx as usize];
-                if trim_space(&gj::get(slot, "web.title").bytes()).is_empty() {
+                if go_trim_space(&gj::get(slot, "web.title").bytes()).is_empty() {
                     gj::set_str(slot, "web.title", &title);
                 }
             }
@@ -625,8 +626,8 @@ pub(crate) fn url_citations(
                 continue;
             }
             let chunk = &chunks[idx as usize];
-            let uri = trim_space(&chunk.get("web.uri").bytes()).to_vec();
-            let title = trim_space(&chunk.get("web.title").bytes()).to_vec();
+            let uri = go_trim_space(&chunk.get("web.uri").bytes()).to_vec();
+            let title = go_trim_space(&chunk.get("web.title").bytes()).to_vec();
             if uri.is_empty() {
                 continue;
             }

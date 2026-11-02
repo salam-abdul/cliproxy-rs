@@ -6,6 +6,8 @@
 //! when the shared executor helpers land. TLS is wreq's default profile, not Go
 //! crypto/tls; these upstreams are not known to fingerprint ClientHello.
 
+use cpa_core::config::go_trim_space;
+
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{ExecError, FailureScope};
@@ -458,9 +460,8 @@ impl DeferredUsage {
 /// Go `jsonPayload`: the JSON payload of a `data:` line (or a bare JSON line), trimmed
 /// with `bytes.TrimSpace`.
 fn line_payload(line: &[u8]) -> Option<&[u8]> {
-    use cpa_common::gostr::trim_space;
-    let trimmed = trim_space(line);
-    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, trim_space);
+    let trimmed = go_trim_space(line);
+    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, go_trim_space);
     (payload.first() == Some(&b'{')).then_some(payload)
 }
 
@@ -577,7 +578,7 @@ pub(crate) fn response_tier(payload: &[u8]) -> String {
     ["response.service_tier", "service_tier", "interaction.service_tier"]
         .iter()
         .map(|p| cpa_common::json::get(payload, p).str().into_owned())
-        .map(|t| String::from_utf8_lossy(cpa_common::gostr::trim_space(t.as_bytes())).into_owned())
+        .map(|t| String::from_utf8_lossy(cpa_core::config::go_trim_space(t.as_bytes())).into_owned())
         .find(|t| !t.is_empty())
         .unwrap_or_default()
 }

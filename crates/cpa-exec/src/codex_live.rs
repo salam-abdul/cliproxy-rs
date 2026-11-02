@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, quote as go_quote, trim_space};
+use cpa_common::gostr::{GoStr, quote as go_quote};
 use cpa_common::json::{self as gj, GoValue, Kind};
+use cpa_core::config::go_trim_space;
 use cpa_core::config::{Config, go_url};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{CaptureEvent, CaptureSink, ExecError, UpstreamRequest};
@@ -96,11 +97,6 @@ fn invalid(message: impl Into<String>) -> ShapeError {
     ShapeError::Invalid(message.into())
 }
 
-/// `strings.TrimSpace` on a Go string.
-fn trim(s: &str) -> &str {
-    std::str::from_utf8(trim_space(s.as_bytes())).unwrap_or(s)
-}
-
 /// The media type when `mime.ParseMediaType` succeeds.
 fn media(content_type: &str) -> Option<String> {
     match parse_media_type(content_type) {
@@ -119,14 +115,14 @@ pub fn prepare(body: &[u8], content_type: &str) -> Result<Call, ShapeError> {
     if let MediaType::Ok(media, params) = parse_media_type(content_type)
         && media == "multipart/form-data"
     {
-        let boundary = params.get("boundary").map(|b| trim(b)).unwrap_or_default();
+        let boundary = params.get("boundary").map(|b| b.trim()).unwrap_or_default();
         return multipart_call(body, boundary);
     }
     let mut model = model_from_json(body);
     if model.is_empty() {
         model = DEFAULT_MODEL.into();
     }
-    let content_type = if trim(content_type).is_empty() {
+    let content_type = if content_type.trim().is_empty() {
         "application/json"
     } else {
         content_type
@@ -170,7 +166,7 @@ pub fn rewrite_model(call: Call) -> Result<Call, ShapeError> {
         model: upstream.clone(),
         ..call
     };
-    if media(&call.content_type).as_deref() != Some("application/json") || trim_space(&call.body).is_empty() {
+    if media(&call.content_type).as_deref() != Some("application/json") || go_trim_space(&call.body).is_empty() {
         return Ok(unchanged(call));
     }
     let Some(mut payload) =
@@ -201,7 +197,7 @@ pub fn rewrite_model(call: Call) -> Result<Call, ShapeError> {
 pub fn request_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
     let media = media(content_type);
     if is_sdp(media.as_deref()) {
-        if trim_space(body).is_empty() {
+        if go_trim_space(body).is_empty() {
             return Err("Codex live call request requires an SDP offer".into());
         }
         return Ok(String::from_utf8_lossy(body).into_owned());
@@ -210,7 +206,7 @@ pub fn request_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
         return Err("Codex live media relay requires an SDP or JSON call request".into());
     }
     let sdp = unmarshal_sdp(body).map_err(|e| format!("failed to decode Codex live call request: {e}"))?;
-    if trim(&sdp).is_empty() {
+    if sdp.trim().is_empty() {
         return Err("Codex live call request requires an SDP offer".into());
     }
     Ok(sdp)
@@ -236,12 +232,12 @@ pub fn replace_sdp(body: &[u8], content_type: &str, sdp: &str) -> Result<(Vec<u8
 pub fn response_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
     if media(content_type).as_deref() == Some("application/json") {
         let sdp = unmarshal_sdp(body).map_err(|e| format!("failed to decode Codex live response: {e}"))?;
-        if trim(&sdp).is_empty() {
+        if sdp.trim().is_empty() {
             return Err("Codex live response requires an SDP answer".into());
         }
         return Ok(sdp);
     }
-    if trim_space(body).is_empty() {
+    if go_trim_space(body).is_empty() {
         return Err("Codex live response requires an SDP answer".into());
     }
     Ok(String::from_utf8_lossy(body).into_owned())
@@ -355,8 +351,8 @@ pub fn model_from_json(body: &[u8]) -> String {
     if failed {
         return String::new();
     }
-    match trim(&session_model) {
-        "" => trim(&model).to_owned(),
+    match session_model.trim() {
+        "" => model.trim().to_owned(),
         session => session.to_owned(),
     }
 }
@@ -495,7 +491,7 @@ fn multipart_call(body: &[u8], boundary: &str) -> Result<Call, ShapeError> {
 
 /// `codexRealtimeModel`: OpenAI Realtime model names map to the Codex live model.
 pub fn codex_model(model: &str) -> String {
-    let trimmed = trim(model);
+    let trimmed = model.trim();
     let lower = trimmed.go_lower();
     if lower.is_empty()
         || lower == "gpt-realtime"
@@ -515,14 +511,14 @@ pub fn valid_call_id(id: &str) -> bool {
 /// `callIDFromLocation`: a bare ID, `?call_id=`, or the last segment after `live` or
 /// `calls`.
 pub fn call_id_from_location(location: &str) -> String {
-    let location = trim(location);
+    let location = location.trim();
     if valid_call_id(location) {
         return location.into();
     }
     let Some((path, query)) = go_url_path_query(location) else {
         return String::new();
     };
-    if let Some(id) = go_url::query_get(&query, "call_id").map(|id| trim(&String::from_utf8_lossy(&id)).to_owned())
+    if let Some(id) = go_url::query_get(&query, "call_id").map(|id| String::from_utf8_lossy(&id).trim().to_owned())
         && valid_call_id(&id)
     {
         return id;
@@ -606,7 +602,7 @@ pub fn direct_url(base: &str, model: &str) -> String {
     format!(
         "{}/realtime?model={}",
         base.trim_end_matches('/'),
-        go_url::query_escape(trim(model))
+        go_url::query_escape(model.trim())
     )
 }
 
@@ -629,9 +625,9 @@ pub fn http_base(api_base: &str) -> String {
 
 /// `bearerToken`: the trimmed token after a case-insensitive `Bearer `.
 pub fn bearer_token(authorization: &str) -> &str {
-    let value = trim(authorization);
+    let value = authorization.trim();
     match value.get(..7) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => trim(&value[7..]),
+        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => value[7..].trim(),
         _ => "",
     }
 }
@@ -648,7 +644,7 @@ pub enum SessionError {
 /// `normalizeClientSecretSession`: the session shown to the client and the one sent
 /// upstream (Codex model), both as Go's `map[string]any` marshals them.
 pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SessionError> {
-    let trimmed = trim_space(session);
+    let trimmed = go_trim_space(session);
     let session = if trimmed.is_empty() || trimmed == b"null" {
         br#"{"type":"realtime","model":"gpt-realtime"}"#.as_slice()
     } else {
@@ -662,7 +658,7 @@ pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u
         _ => String::new(),
     };
     let mut kind = string(&map, "type");
-    if trim(&kind).is_empty() {
+    if kind.trim().is_empty() {
         kind = "realtime".into();
         map.insert("type".into(), GoValue::String(kind.clone()));
     }
@@ -673,7 +669,7 @@ pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u
         )));
     }
     let mut model = string(&map, "model");
-    if trim(&model).is_empty() {
+    if model.trim().is_empty() {
         model = DEFAULT_STANDARD_MODEL.into();
         map.insert("model".into(), GoValue::String(model.clone()));
     }
@@ -693,7 +689,7 @@ pub struct SecretRequest {
 
 pub fn decode_secret_request(body: &[u8]) -> Option<SecretRequest> {
     let mut request = SecretRequest::default();
-    if trim_space(body).is_empty() {
+    if go_trim_space(body).is_empty() {
         return Some(request);
     }
     check_valid(body).ok()?;
@@ -1000,10 +996,10 @@ impl CodexExecutor {
             headers.retain(|(n, _)| *n != name);
             headers.push((name, value));
         }
-        if let Some(account) = view.credential.str("account_id").filter(|a| !trim(a).is_empty()) {
+        if let Some(account) = view.credential.str("account_id").filter(|a| !a.trim().is_empty()) {
             set(&mut headers, "Chatgpt-Account-Id", account.to_owned());
         }
-        if trim(view.token).is_empty() {
+        if view.token.trim().is_empty() {
             headers.retain(|(n, _)| n != "Authorization");
         } else {
             set(&mut headers, "Authorization", format!("Bearer {}", view.token));

@@ -110,7 +110,7 @@ fn eligible(request: &Request, path: &str) -> bool {
             && request
                 .headers()
                 .get("upgrade")
-                .is_some_and(|v| trim(v.as_bytes()).eq_ignore_ascii_case(b"websocket")))
+                .is_some_and(|v| cpa_core::config::go_trim_space(v.as_bytes()).eq_ignore_ascii_case(b"websocket")))
 }
 
 async fn capture(State(state): State<CaptureState>, mut request: Request, next: Next) -> Response {
@@ -121,7 +121,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
     let config = state.rt.config();
     let enabled = setting(&config, "request-log").and_then(serde_yaml_ng::Value::as_bool) == Some(true);
     let multipart = request.headers().get("content-type").is_some_and(|v| {
-        String::from_utf8_lossy(trim(v.as_bytes()))
+        String::from_utf8_lossy(cpa_core::config::go_trim_space(v.as_bytes()))
             .to_lowercase()
             .starts_with("multipart/form-data")
     });
@@ -589,7 +589,7 @@ impl RequestLog {
                 record.upstream.error = true;
             }
             ResponseChunk(chunk) => {
-                let chunk = trim(chunk);
+                let chunk = cpa_core::config::go_trim_space(chunk);
                 if chunk.is_empty() {
                     return;
                 }
@@ -637,7 +637,7 @@ impl RequestLog {
                 upstream_timeline(&mut record.api_timeline, &record.state.dir, &part);
             }
             WebsocketResponse(payload) => {
-                let payload = trim(payload);
+                let payload = cpa_core::config::go_trim_space(payload);
                 if payload.is_empty() {
                     return;
                 }
@@ -649,7 +649,7 @@ impl RequestLog {
             WebsocketError { stage, error } => {
                 record.api_timestamp.get_or_insert_with(Local::now);
                 let mut part = websocket_event("api.websocket.error");
-                let stage = crate::gojson::trim(stage);
+                let stage = stage.trim();
                 if !stage.is_empty() {
                     writeln!(part, "Stage: {stage}").unwrap();
                 }
@@ -706,13 +706,13 @@ fn upstream_auth(out: &mut Vec<u8>, info: &cpa_core::exec::UpstreamRequest<'_>) 
         ("auth_id", info.auth_id),
         ("label", info.auth_label),
     ] {
-        let value = crate::gojson::trim(value);
+        let value = value.trim();
         if !value.is_empty() {
             parts.push(format!("{label}={value}"));
         }
     }
-    let kind = cpa_common::gostr::lower_bytes(crate::gojson::trim(info.auth_type).as_bytes());
-    let value = crate::gojson::trim(info.auth_value);
+    let kind = cpa_common::gostr::lower_bytes(info.auth_type.trim().as_bytes());
+    let value = info.auth_value.trim();
     if !kind.is_empty() {
         let mut text = format!("type={kind}");
         if kind != "oauth" && !value.is_empty() {
@@ -738,7 +738,7 @@ fn upstream_timeline(out: &mut Section, dir: &Path, part: &[u8]) {
     if !out.is_empty() {
         out.append(dir, b"\n\n");
     }
-    out.append(dir, trim(part));
+    out.append(dir, cpa_core::config::go_trim_space(part));
 }
 
 /// Connection-owned timeline sink. Explicit `close().await` waits for the durable
@@ -747,7 +747,7 @@ pub struct WebsocketLog(Option<RequestLog>);
 
 impl WebsocketLog {
     pub fn append_part(&self, part: &[u8]) -> io::Result<()> {
-        if trim(part).is_empty() {
+        if cpa_core::config::go_trim_space(part).is_empty() {
             return Ok(());
         }
         if let Some(sink) = &self.0 {
@@ -1058,7 +1058,7 @@ impl Section {
         } else {
             newlines
         };
-        self.blank &= trim(bytes).is_empty();
+        self.blank &= cpa_core::config::go_trim_space(bytes).is_empty();
     }
 
     fn append(&mut self, dir: &Path, bytes: &[u8]) {
@@ -1250,7 +1250,7 @@ impl Record {
             || self
                 .headers
                 .get("upgrade")
-                .is_some_and(|v| trim(v.as_bytes()).eq_ignore_ascii_case(b"websocket"))
+                .is_some_and(|v| cpa_core::config::go_trim_space(v.as_bytes()).eq_ignore_ascii_case(b"websocket"))
         {
             "websocket"
         } else {
@@ -1350,9 +1350,6 @@ impl Record {
     }
 }
 
-fn trim(bytes: &[u8]) -> &[u8] {
-    cpa_core::config::go_trim_space(bytes)
-}
 pub(crate) fn timestamp(at: DateTime<Local>) -> String {
     let text = at.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let zone = &text[29..];
@@ -1431,7 +1428,7 @@ fn masked_header(name: &str, value: &[u8]) -> Vec<u8> {
         return REDACTED.as_bytes().to_vec();
     }
     if name.contains("authorization") {
-        let trimmed = trim(value);
+        let trimmed = cpa_core::config::go_trim_space(value);
         if let Some(i) = trimmed.iter().position(|b| *b == b' ') {
             return [&trimmed[..i + 1], &hide_key(&trimmed[i + 1..])].concat();
         }

@@ -374,7 +374,7 @@ impl OAuth {
                 status,
                 format!(
                     "request failed with status {status}: {}",
-                    String::from_utf8_lossy(cpa_common::gostr::trim_space(&data))
+                    String::from_utf8_lossy(cpa_core::config::go_trim_space(&data))
                 ),
             ));
         }
@@ -451,7 +451,7 @@ impl OAuth {
                 continue;
             }
             // Go cuts the body to 500 bytes for its preview, then to 200 for the error.
-            let preview = cpa_common::gostr::trim_space(&data);
+            let preview = cpa_core::config::go_trim_space(&data);
             let preview = &preview[..preview.len().min(500)];
             let preview = &preview[..preview.len().min(200)];
             return Err(AuthError::http(
@@ -526,7 +526,7 @@ fn token_error_code(body: &[u8]) -> Vec<u8> {
 
 /// `HTTPStatusError` texts of the token exchange and user info calls.
 fn status_message(step: &str, status: u16, body: &[u8]) -> String {
-    let body = String::from_utf8_lossy(cpa_common::gostr::trim_space(body)).into_owned();
+    let body = String::from_utf8_lossy(cpa_core::config::go_trim_space(body)).into_owned();
     if body.is_empty() {
         format!("{step}: request failed: status {status}")
     } else {

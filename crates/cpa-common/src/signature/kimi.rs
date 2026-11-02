@@ -1,5 +1,7 @@
 //! Kimi thinking signatures, identified by fixed length only (kimi_validation.go).
 
+use cpa_core::config::go_trim_space;
+
 use super::grok::byte_entropy_ratio;
 use super::wire::RAW_STD;
 use super::{
@@ -7,7 +9,6 @@ use super::{
     is_valid_claude_thinking_signature, is_valid_gemini_thought_signature, maybe_self_describing_envelope,
     split_provider_prefix,
 };
-use crate::gostr::trim_space;
 
 pub const KIMI_THINKING_SIGNATURE_NON_STREAMING_LEN: usize = 12946;
 pub const KIMI_THINKING_SIGNATURE_STREAMING_LEN: usize = 4340;
@@ -39,7 +40,7 @@ pub struct KimiSignatureInfo {
 /// `InspectKimiThinkingSignature`.
 pub fn inspect_kimi_thinking_signature(raw: impl AsRef<[u8]>) -> Result<KimiSignatureInfo, Error> {
     let raw = raw.as_ref();
-    let sig = trim_space(raw);
+    let sig = go_trim_space(raw);
     if sig.is_empty() {
         return err("empty Kimi thinking signature");
     }

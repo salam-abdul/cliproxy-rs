@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
 use crate::claude_responses::{qualify_namespace_name, tool_name};
-use crate::common::{sanitize_function_name, trim_space};
+use crate::common::sanitize_function_name;
 
 /// util.ResponsesToolIdentity: the client-side identity behind an upstream function name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -100,13 +101,13 @@ pub(crate) fn descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
     };
     for (tools, priority) in sources {
         tools.each(|_, tool| {
-            match trim_space(&tool.get("type").bytes()) {
+            match go_trim_space(&tool.get("type").bytes()) {
                 kind @ (b"" | b"function" | b"custom") => {
                     let name = tool_name(&tool);
                     add(&tool, name.clone(), name, vec![], kind == b"custom", priority, true);
                 }
                 b"namespace" => {
-                    let namespace = trim_space(&tool.get("name").bytes()).to_vec();
+                    let namespace = go_trim_space(&tool.get("name").bytes()).to_vec();
                     let mut children = tool.get("tools");
                     if !children.is_array() {
                         children = tool.get("children");
@@ -118,7 +119,7 @@ pub(crate) fn descriptors<'a>(root: &Res<'a>) -> Vec<Descriptor<'a>> {
                                 return true;
                             }
                             let qualified = qualify_namespace_name(&namespace, &child_name);
-                            if let kind @ (b"" | b"function" | b"custom") = trim_space(&child.get("type").bytes()) {
+                            if let kind @ (b"" | b"function" | b"custom") = go_trim_space(&child.get("type").bytes()) {
                                 add(
                                     &child,
                                     qualified,
@@ -376,7 +377,7 @@ pub(crate) fn tool_choice_to_gemini(choice: &Res<'_>, forward: &HashMap<Vec<u8>,
         return None;
     }
     let mode_of = |s: &[u8]| -> Option<&'static str> {
-        match crate::common::go_lower(trim_space(s)).as_slice() {
+        match crate::common::go_lower(go_trim_space(s)).as_slice() {
             b"none" => Some("NONE"),
             b"auto" => Some("AUTO"),
             b"required" | b"any" => Some("ANY"),
@@ -388,14 +389,14 @@ pub(crate) fn tool_choice_to_gemini(choice: &Res<'_>, forward: &HashMap<Vec<u8>,
     if choice.kind == Kind::String {
         mode = mode_of(&choice.s);
     } else if choice.is_object() {
-        let kind = crate::common::go_lower(trim_space(&choice.get("type").bytes()));
+        let kind = crate::common::go_lower(go_trim_space(&choice.get("type").bytes()));
         match kind.as_slice() {
             b"function" | b"custom" | b"tool" | b"" => {
                 mode = Some("ANY");
                 let first = |paths: [&str; 3]| -> Vec<u8> {
                     paths
                         .iter()
-                        .map(|p| trim_space(&choice.get(*p).bytes()).to_vec())
+                        .map(|p| go_trim_space(&choice.get(*p).bytes()).to_vec())
                         .find(|v| !v.is_empty())
                         .unwrap_or_default()
                 };
@@ -423,7 +424,7 @@ pub(crate) fn tool_choice_to_gemini(choice: &Res<'_>, forward: &HashMap<Vec<u8>,
 /// util.UnwrapResponsesCustomToolInput: the `input` of `{"input": ...}` arguments, a bare
 /// JSON string's value, or the trimmed arguments.
 pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
-    let arguments = trim_space(arguments);
+    let arguments = go_trim_space(arguments);
     if arguments.is_empty() || arguments == b"{}" {
         return vec![];
     }

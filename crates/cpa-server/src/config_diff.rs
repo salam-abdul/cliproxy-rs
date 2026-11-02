@@ -13,7 +13,7 @@ fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_default()
 }
 fn trim(v: &Value) -> &str {
-    crate::gojson::trim(text(v))
+    text(v).trim()
 }
 fn lower(s: &str) -> String {
     cpa_common::gostr::lower_bytes(s.as_bytes())
@@ -141,7 +141,7 @@ fn model_summary(v: &Value, family: &str) -> Vec<String> {
 fn map_summary(v: &Value, section: &str) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
     for (channel, entries) in v.as_object().into_iter().flatten() {
-        let channel = lower(crate::gojson::trim(channel));
+        let channel = lower(channel.trim());
         if channel.is_empty() {
             continue;
         }
@@ -271,7 +271,7 @@ fn compat_keys(entries: &Value) -> BTreeMap<String, (String, &Value)> {
                 .as_object()
                 .into_iter()
                 .flatten()
-                .map(|(k, _)| lower(crate::gojson::trim(k)))
+                .map(|(k, _)| lower(k.trim()))
                 .filter(|s| !s.is_empty())
                 .collect();
             headers.sort();
@@ -379,7 +379,7 @@ pub(crate) fn details(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
             "allow-remote": m.allow_remote,
             "disable-control-panel": m.disable_control_panel,
             "disable-auto-update-panel": m.disable_auto_update_panel,
-            "panel-github-repository": if crate::gojson::trim(&m.panel_github_repository).is_empty() { "https://github.com/router-for-me/Cli-Proxy-API-Management-Center" } else { crate::gojson::trim(&m.panel_github_repository) },
+            "panel-github-repository": if m.panel_github_repository.trim().is_empty() { "https://github.com/router-for-me/Cli-Proxy-API-Management-Center" } else { m.panel_github_repository.trim() },
             "base-url": cfg.document.get("management").and_then(|m| m.get("base-url")).and_then(serde_yaml_ng::Value::as_str).unwrap_or_default(),
         });
         view

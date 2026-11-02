@@ -1017,9 +1017,9 @@ pub(crate) fn gemini_stream_has_finish_signal(line: &[u8]) -> bool {
             value
                 .array()
                 .iter()
-                .any(|item| !cpa_common::gostr::trim_space(&item.bytes()).is_empty())
+                .any(|item| !cpa_core::config::go_trim_space(&item.bytes()).is_empty())
         } else {
-            value.exists() && !cpa_common::gostr::trim_space(&value.bytes()).is_empty()
+            value.exists() && !cpa_core::config::go_trim_space(&value.bytes()).is_empty()
         }
     })
 }
@@ -1059,9 +1059,9 @@ pub(crate) fn antigravity_payloads(lines: ExecStream) -> ExecStream {
                     _ => Some(Bytes::from(filtered)),
                 }
             } else {
-                let mut piece = cpa_common::gostr::trim_space(&filtered);
+                let mut piece = cpa_core::config::go_trim_space(&filtered);
                 if let Some(rest) = piece.strip_prefix(b"data:") {
-                    piece = cpa_common::gostr::trim_space(rest);
+                    piece = cpa_core::config::go_trim_space(rest);
                 }
                 if !piece.is_empty() {
                     pending.push(b'\n');

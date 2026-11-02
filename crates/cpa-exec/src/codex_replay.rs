@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use cpa_common::gostr::trim_space;
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecRequest;
 use cpa_core::format::Format;
 use sha2::{Digest, Sha256};
@@ -30,7 +30,7 @@ const EVICT_BATCH: usize = 128;
 
 /// `strings.TrimSpace(r.String())`.
 fn text(r: &Res<'_>) -> String {
-    String::from_utf8_lossy(trim_space(&r.bytes())).into_owned()
+    String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
 }
 
 fn field(item: &Res<'_>, key: &str) -> String {
@@ -283,7 +283,8 @@ fn normalize(item: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
             let value = encrypted.bytes();
-            if trim_space(&value) != &value[..] || !cpa_common::signature::is_valid_gpt_reasoning_signature(&value[..])
+            if go_trim_space(&value) != &value[..]
+                || !cpa_common::signature::is_valid_gpt_reasoning_signature(&value[..])
             {
                 return None;
             }

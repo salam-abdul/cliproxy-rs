@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use bytes::{Bytes, BytesMut};
+use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecError;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
@@ -495,13 +496,13 @@ pub(crate) fn build_chat_request(r: &ChatRequest<'_>) -> Vec<u8> {
             pb::bytes(&mut m, 7, &p.tool_call_id);
         }
         for img in &p.images {
-            let data = cpa_common::gostr::trim_space(&img.base64);
+            let data = cpa_core::config::go_trim_space(&img.base64);
             if data.is_empty() {
                 continue;
             }
             let mut i = Vec::with_capacity(data.len() + 32);
             pb::bytes(&mut i, 1, data);
-            let mime = cpa_common::gostr::trim_space(&img.mime);
+            let mime = cpa_core::config::go_trim_space(&img.mime);
             pb::bytes(&mut i, 2, if mime.is_empty() { b"image/png" } else { mime });
             pb::bytes(&mut m, 10, &i);
         }
@@ -601,8 +602,7 @@ fn eq_fold(a: &[u8], b: &str) -> bool {
 
 /// `IsDevinCodexAppAutomationUpdate`.
 pub(crate) fn is_codex_app_automation_update(namespace: &[u8], tool: &[u8]) -> bool {
-    use cpa_common::gostr::trim_space;
-    let (namespace, tool) = (trim_space(namespace), trim_space(tool));
+    let (namespace, tool) = (go_trim_space(namespace), go_trim_space(tool));
     (eq_fold(namespace, "mcp__codex_app") && eq_fold(tool, "automation_update"))
         || eq_fold(tool, "mcp__codex_app__automation_update")
 }
@@ -627,7 +627,7 @@ pub(crate) fn sanitize_tool_description(name: &[u8], description: &[u8]) -> Vec<
     if description.is_empty() {
         return Vec::new();
     }
-    let lower = String::from_utf8_lossy(cpa_common::gostr::trim_space(name)).to_lowercase();
+    let lower = String::from_utf8_lossy(cpa_core::config::go_trim_space(name)).to_lowercase();
     let mut desc = description.to_vec();
     if lower == "exec_command" || lower.ends_with("__exec_command") {
         desc = if contains(&desc, EXEC_OBFUSCATED) {
@@ -709,14 +709,13 @@ impl SensitiveWords {
 /// `SanitizeDevinSystemPrompt`: drops Claude Code and Codex identity lines and lines with
 /// sensitive words, then obfuscates what remains.
 pub(crate) fn sanitize_system_prompt(prompt: &[u8], matcher: Option<&SensitiveWords>) -> Vec<u8> {
-    use cpa_common::gostr::trim_space;
     if prompt.is_empty() {
         return Vec::new();
     }
     let normalized = replace_all(prompt, b"\r\n", b"\n");
     let mut kept: Vec<&[u8]> = Vec::new();
     for line in normalized.split(|b| *b == b'\n') {
-        let trimmed = trim_space(line);
+        let trimmed = go_trim_space(line);
         let drop = trimmed.starts_with(b"x-anthropic-billing-header:")
             || trimmed.starts_with(b"You are Claude Code")
             || contains(trimmed, b"authorized security testing")
@@ -734,7 +733,7 @@ pub(crate) fn sanitize_system_prompt(prompt: &[u8], matcher: Option<&SensitiveWo
         }
     }
     let joined = kept.join(&b'\n');
-    let res = trim_space(&joined).to_vec();
+    let res = go_trim_space(&joined).to_vec();
     match matcher {
         Some(m) if !res.is_empty() => m.obfuscate(&res),
         _ => res,
@@ -1212,7 +1211,7 @@ fn decode_trailer(payload: &[u8]) -> Option<(String, String)> {
 /// `None` for a clean end.
 pub(crate) fn parse_trailer_error(payload: &[u8]) -> Option<(u16, String)> {
     use cpa_common::gostr::GoStr;
-    let trimmed = cpa_common::gostr::trim_space(payload);
+    let trimmed = cpa_core::config::go_trim_space(payload);
     if trimmed.is_empty() || trimmed == b"{}" {
         return None;
     }

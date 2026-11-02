@@ -2,6 +2,7 @@
 //! of internal/util. Strings are bytes, as in Go.
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,31 +10,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
-
-/// strings.TrimSpace on bytes: Unicode whitespace from both ends; invalid UTF-8 is not
-/// whitespace.
-pub fn trim_space(s: &[u8]) -> &[u8] {
-    let mut start = 0;
-    while start < s.len() {
-        match gj::decode_rune(&s[start..]) {
-            (Some(c), n) if c.is_whitespace() => start += n,
-            _ => break,
-        }
-    }
-    let mut end = s.len();
-    while end > start {
-        let tail = &s[start..end];
-        let from = tail.len().saturating_sub(4);
-        let Some(i) = (from..tail.len()).rev().find(|&i| tail[i] & 0xC0 != 0x80) else {
-            break;
-        };
-        match gj::decode_rune(&tail[i..]) {
-            (Some(c), n) if i + n == tail.len() && c.is_whitespace() => end = start + i,
-            _ => break,
-        }
-    }
-    &s[start..end]
-}
 
 /// Trimmed, lowercased text for comparisons (strings.ToLower(strings.TrimSpace(x))).
 pub fn norm(r: &Res<'_>) -> String {
@@ -57,7 +33,7 @@ pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {
     let root = gj::parse(raw);
     for path in ["metadata.user_id", "user"] {
         let v = root.get(path);
-        if v.kind == Kind::String && !trim_space(&v.s).is_empty() {
+        if v.kind == Kind::String && !go_trim_space(&v.s).is_empty() {
             return v.s.to_vec();
         }
     }
@@ -67,14 +43,14 @@ pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {
         seed.extend_from_slice(value);
     };
     let v = root.get("prompt_cache_key");
-    if v.exists() && !trim_space(&v.bytes()).is_empty() {
-        write(&mut seed, "prompt_cache_key:", trim_space(&v.bytes()));
+    if v.exists() && !go_trim_space(&v.bytes()).is_empty() {
+        write(&mut seed, "prompt_cache_key:", go_trim_space(&v.bytes()));
     }
     if seed.is_empty() {
         for path in ["session_id", "sessionId"] {
             let v = root.get(path);
-            if v.exists() && !trim_space(&v.bytes()).is_empty() {
-                write(&mut seed, "session_id:", trim_space(&v.bytes()));
+            if v.exists() && !go_trim_space(&v.bytes()).is_empty() {
+                write(&mut seed, "session_id:", go_trim_space(&v.bytes()));
                 break;
             }
         }
@@ -82,17 +58,17 @@ pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {
     if seed.is_empty() {
         let conversation = root.get("conversation");
         let id = conversation.get("id").bytes();
-        if !trim_space(&id).is_empty() {
-            write(&mut seed, "conversation_id:", trim_space(&id));
+        if !go_trim_space(&id).is_empty() {
+            write(&mut seed, "conversation_id:", go_trim_space(&id));
         } else if conversation.kind == Kind::String {
             let text = conversation.bytes();
-            if !trim_space(&text).is_empty() {
-                write(&mut seed, "conversation_id:", trim_space(&text));
+            if !go_trim_space(&text).is_empty() {
+                write(&mut seed, "conversation_id:", go_trim_space(&text));
             }
         } else {
             let v = root.get("conversation_id");
-            if v.exists() && !trim_space(&v.bytes()).is_empty() {
-                write(&mut seed, "conversation_id:", trim_space(&v.bytes()));
+            if v.exists() && !go_trim_space(&v.bytes()).is_empty() {
+                write(&mut seed, "conversation_id:", go_trim_space(&v.bytes()));
             }
         }
     }
@@ -104,8 +80,8 @@ pub fn derive_claude_user_id(raw: &[u8]) -> Vec<u8> {
     }
     if seed.is_empty() {
         let v = root.get("model");
-        if v.exists() && !trim_space(&v.bytes()).is_empty() {
-            write(&mut seed, "model:", trim_space(&v.bytes()));
+        if v.exists() && !go_trim_space(&v.bytes()).is_empty() {
+            write(&mut seed, "model:", go_trim_space(&v.bytes()));
         }
         for path in ["instructions", "system", "systemInstruction", "system_instruction"] {
             let v = root.get(path);
@@ -126,7 +102,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 fn joined_texts(content: &Res<'_>, accept: impl Fn(&Res<'_>) -> bool) -> Vec<u8> {
     if content.kind == Kind::String {
-        return trim_space(&content.bytes()).to_vec();
+        return go_trim_space(&content.bytes()).to_vec();
     }
     if !content.is_array() {
         return vec![];
@@ -136,7 +112,7 @@ fn joined_texts(content: &Res<'_>, accept: impl Fn(&Res<'_>) -> bool) -> Vec<u8>
         if accept(&part) {
             let text = part.get("text");
             if text.exists() {
-                let value = trim_space(&text.bytes()).to_vec();
+                let value = go_trim_space(&text.bytes()).to_vec();
                 if !value.is_empty() {
                     texts.push(value);
                 }
@@ -144,7 +120,7 @@ fn joined_texts(content: &Res<'_>, accept: impl Fn(&Res<'_>) -> bool) -> Vec<u8>
         }
         true
     });
-    trim_space(&texts.join(&b'\n')).to_vec()
+    go_trim_space(&texts.join(&b'\n')).to_vec()
 }
 
 fn first_stable_request_content(root: &Res<'_>) -> Vec<u8> {
@@ -167,7 +143,7 @@ fn first_stable_request_content(root: &Res<'_>) -> Vec<u8> {
     let input = root.get("input");
     if input.exists() {
         if input.kind == Kind::String {
-            let text = trim_space(&input.bytes()).to_vec();
+            let text = go_trim_space(&input.bytes()).to_vec();
             if !text.is_empty() {
                 return text;
             }
@@ -204,7 +180,7 @@ fn first_stable_request_content(root: &Res<'_>) -> Vec<u8> {
                         }
                         let text = part.get("text");
                         if text.exists() {
-                            let value = trim_space(&text.bytes()).to_vec();
+                            let value = go_trim_space(&text.bytes()).to_vec();
                             if !value.is_empty() {
                                 texts.push(value);
                             }
@@ -630,9 +606,9 @@ pub fn claude_structured_output_instruction(format: &Res<'_>) -> Vec<u8> {
             }
             let mut out = b"You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n".to_vec();
             for (key, label) in [("name", "Schema Name: "), ("description", "Schema Description: ")] {
-                let mut value = trim_space(&json_schema.get(key).bytes()).to_vec();
+                let mut value = go_trim_space(&json_schema.get(key).bytes()).to_vec();
                 if value.is_empty() {
-                    value = trim_space(&format.get(key).bytes()).to_vec();
+                    value = go_trim_space(&format.get(key).bytes()).to_vec();
                 }
                 if !value.is_empty() {
                     out.extend_from_slice(label.as_bytes());
@@ -672,7 +648,7 @@ pub fn request_model_name(original: &[u8], request: &[u8]) -> Vec<u8> {
         let root = gj::parse(raw);
         for path in ["model", "request.model"] {
             let model = root.get(path);
-            if model.kind == Kind::String && !trim_space(&model.s).is_empty() {
+            if model.kind == Kind::String && !go_trim_space(&model.s).is_empty() {
                 return model.s.to_vec();
             }
         }
@@ -855,7 +831,7 @@ pub fn fix_json(input: &[u8]) -> Vec<u8> {
 
 /// util.CanonicalToolName: trimmed, leading underscores dropped, lowercased.
 pub(crate) fn canonical_tool_name(name: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(name);
+    let trimmed = go_trim_space(name);
     let start = trimmed.iter().position(|&c| c != b'_').unwrap_or(trimmed.len());
     go_lower(&trimmed[start..])
 }
@@ -872,9 +848,9 @@ pub fn tool_name_map_from_claude_request(raw: &[u8]) -> Option<HashMap<Vec<u8>, 
     }
     let mut out = HashMap::new();
     tools.each(|_, tool| {
-        let mut name = trim_space(&tool.get("name").bytes()).to_vec();
+        let mut name = go_trim_space(&tool.get("name").bytes()).to_vec();
         if name.is_empty() {
-            name = trim_space(&tool.get("function.name").bytes()).to_vec();
+            name = go_trim_space(&tool.get("function.name").bytes()).to_vec();
         }
         let key = canonical_tool_name(&name);
         if !name.is_empty() && !key.is_empty() {
@@ -948,7 +924,7 @@ pub fn claude_message_system_reminder_text(content: &Res<'_>) -> Option<Vec<u8>>
         });
     }
     let text = parts.join(&b'\n');
-    (!parts.is_empty() && !trim_space(&text).is_empty()).then(|| system_reminder_text(&text))
+    (!parts.is_empty() && !go_trim_space(&text).is_empty()).then(|| system_reminder_text(&text))
 }
 
 /// common.AlignClaudeToolResults: when a user turn answers exactly the pending tool uses,
@@ -1004,7 +980,7 @@ pub fn align_openai_tool_call_messages_with(messages: Vec<Vec<u8>>, extra_ambigu
     let mut assistant_by_call: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut ambiguous: HashSet<Vec<u8>> = extra_ambiguous
         .iter()
-        .map(|id| trim_space(id).to_vec())
+        .map(|id| go_trim_space(id).to_vec())
         .filter(|id| !id.is_empty())
         .collect();
     let mut tools_by_call: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
@@ -1154,13 +1130,13 @@ pub fn normalize_openai_file_data(filename: &[u8], fallback: &[u8], data: &[u8])
         return None;
     }
     let mut fields = metadata.split(|&c| c == b';');
-    let mime = trim_space(fields.next().unwrap_or_default());
+    let mime = go_trim_space(fields.next().unwrap_or_default());
     if mime.is_empty() {
         return None;
     }
     use cpa_common::gostr::GoStr;
     fields
-        .any(|f| String::from_utf8_lossy(trim_space(f)).go_eq_fold("base64"))
+        .any(|f| String::from_utf8_lossy(go_trim_space(f)).go_eq_fold("base64"))
         .then(|| (mime.to_vec(), payload.to_vec()))
 }
 
@@ -1190,7 +1166,7 @@ pub fn sanitized_tool_name_map(raw: &[u8]) -> Option<HashMap<Vec<u8>, Vec<u8>>> 
     }
     let mut out = HashMap::new();
     tools.each(|_, tool| {
-        let name = trim_space(&tool.get("name").bytes()).to_vec();
+        let name = go_trim_space(&tool.get("name").bytes()).to_vec();
         if !name.is_empty() {
             let sanitized = sanitize_function_name(&name);
             if sanitized != name {
@@ -1341,14 +1317,6 @@ mod tests {
         assert_eq!(parse_rfc3339_unix(b"2025-01-01T1:02:03,5-00:00"), Some(1735693323));
         assert_eq!(parse_rfc3339_unix(b"2025-01-01 00:00:00Z"), None);
         assert_eq!(parse_rfc3339_unix(b"2025-01-01T00:00:00"), None);
-    }
-
-    #[test]
-    fn trim_space_follows_go_unicode_rules() {
-        assert_eq!(trim_space(" \u{a0}x\u{2003}\n".as_bytes()), b"x");
-        // Invalid bytes are not whitespace and stop trimming.
-        assert_eq!(trim_space(b" \xff "), b"\xff");
-        assert_eq!(trim_space(b"   "), b"");
     }
 
     #[test]

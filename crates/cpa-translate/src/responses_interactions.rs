@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::claude_responses::qualify_namespace_name;
-use crate::common::{go_lower, trim_space};
+use crate::common::go_lower;
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::{
     antigravity_name_to_client, antigravity_name_to_upstream, first_nonblank, is_antigravity, json_string_value,
@@ -42,7 +43,7 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 
 /// requestModel: the requested model unless blank, else the body's.
 fn request_model(model: &str, root: &Res<'_>) -> Vec<u8> {
-    if trim_space(model.as_bytes()).is_empty() {
+    if go_trim_space(model.as_bytes()).is_empty() {
         string(&root.get("model"))
     } else {
         model.as_bytes().to_vec()
@@ -51,7 +52,7 @@ fn request_model(model: &str, root: &Res<'_>) -> Vec<u8> {
 
 /// isDevinModel.
 fn is_devin(model: &[u8]) -> bool {
-    go_lower(trim_space(model)).windows(5).any(|w| w == b"devin")
+    go_lower(go_trim_space(model)).windows(5).any(|w| w == b"devin")
 }
 
 /// strings.EqualFold, on Go's Unicode folding.
@@ -62,7 +63,7 @@ fn eq_fold(a: &[u8], b: &str) -> bool {
 
 /// common.IsDevinCodexAppAutomationUpdate.
 pub(crate) fn is_devin_automation_update(namespace: &[u8], tool: &[u8]) -> bool {
-    let (namespace, tool) = (trim_space(namespace), trim_space(tool));
+    let (namespace, tool) = (go_trim_space(namespace), go_trim_space(tool));
     (eq_fold(namespace, "mcp__codex_app") && eq_fold(tool, "automation_update"))
         || eq_fold(tool, "mcp__codex_app__automation_update")
 }
@@ -120,7 +121,7 @@ pub(crate) fn sanitize_devin_description(tool: &[u8], desc: Vec<u8>) -> Vec<u8> 
     if desc.is_empty() {
         return desc;
     }
-    let tool = go_lower(trim_space(tool));
+    let tool = go_lower(go_trim_space(tool));
     let mut desc = desc;
     if tool == b"exec_command" || tool.ends_with(b"__exec_command") {
         desc = obfuscate_exec_command_description(&desc);
@@ -225,7 +226,7 @@ pub(crate) fn responses_to_interactions(model: &str, raw: &[u8], stream: bool) -
         gj::set_str(
             &mut out,
             "generation_config.thinking_level",
-            go_lower(trim_space(&effort.bytes())),
+            go_lower(go_trim_space(&effort.bytes())),
         );
     }
     let summary = root.get("reasoning.summary");
@@ -670,7 +671,7 @@ pub(crate) fn interactions_to_responses(model: &str, raw: &[u8], stream: bool) -
     .iter()
     .map(|p| root.get(*p))
     .find(|v| v.kind == Kind::String)
-    .map(|v| go_lower(trim_space(&v.bytes())))
+    .map(|v| go_lower(go_trim_space(&v.bytes())))
     .unwrap_or_default();
     if !effort.is_empty() {
         gj::set_str(&mut out, "reasoning.effort", &effort);

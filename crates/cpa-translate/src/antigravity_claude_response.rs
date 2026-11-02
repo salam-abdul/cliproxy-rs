@@ -2,6 +2,8 @@
 //! response half of web_search.go): ConvertAntigravityResponseToClaude, its NonStream and
 //! the web-search grounding blocks.
 
+use cpa_core::config::go_trim_space;
+
 use crate::claude_tool_args::{OpenTool, clean_claude_tool_arguments_with_translated};
 
 use std::collections::{HashMap, HashSet};
@@ -15,7 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::antigravity_claude::{
     ANY, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, encode_carrier, has_typed_web_search_tool,
 };
-use crate::common::{go_runes, hex, now_nanos, restore_sanitized_tool_name, sanitize_claude_tool_id, trim_space};
+use crate::common::{go_runes, hex, now_nanos, restore_sanitized_tool_name, sanitize_claude_tool_id};
 use crate::replay_cache::{cache_signature, model_group};
 use crate::responses_tools::disambiguated_tool_name_map;
 use crate::stream::GoStream;
@@ -79,15 +81,15 @@ fn carrier_value(model: &str, signature: &[u8], direction: &str, target: &str) -
 
 /// util.GeminiClaudeToolUseID: a stable ID from the call ID, name and canonical args.
 pub(crate) fn gemini_claude_tool_use_id(call_id: &[u8], name: &[u8], args: &[u8]) -> Vec<u8> {
-    let (call_id, name) = (trim_space(call_id), trim_space(name));
+    let (call_id, name) = (go_trim_space(call_id), go_trim_space(name));
     if call_id.is_empty() || name.is_empty() {
         return vec![];
     }
     let mut args = args.to_vec();
-    if !trim_space(&args).is_empty() {
+    if !go_trim_space(&args).is_empty() {
         args = match GoValue::parse_f64(&args) {
             Some(value) => value.marshal(),
-            None => trim_space(&args).to_vec(),
+            None => go_trim_space(&args).to_vec(),
         };
     }
     let sum = Sha256::digest([call_id, b"\x00", name, b"\x00", &args].concat());
@@ -172,7 +174,7 @@ fn search_results(gm: &Res<'_>) -> Vec<u8> {
         if !web.exists() {
             continue;
         }
-        let uri = trim_space(&web.get("uri").bytes()).to_vec();
+        let uri = go_trim_space(&web.get("uri").bytes()).to_vec();
         if uri.is_empty() || !seen.insert(uri.clone()) {
             continue;
         }

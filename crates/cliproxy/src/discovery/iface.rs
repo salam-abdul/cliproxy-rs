@@ -75,7 +75,7 @@ pub fn is_likely_physical_lan(name: &str) -> bool {
 /// Go `matchesAny`: case-insensitive names, `prefix*` wildcards.
 pub fn matches_any(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| {
-        let p = cpa_common::gostr::lower_bytes(super::go_trim(p).as_bytes());
+        let p = cpa_common::gostr::lower_bytes(p.trim().as_bytes());
         match p.strip_suffix('*') {
             _ if p.is_empty() => false,
             Some(prefix) => name.starts_with(prefix),

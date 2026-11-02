@@ -58,7 +58,7 @@ fn header_map(headers: &std::collections::BTreeMap<String, Vec<String>>) -> http
 /// (keys sorted, float64 numbers), then with every line break and the indentation after
 /// it removed outside strings, so `": "` keeps its space. Anything else is unchanged.
 pub(crate) fn ensure_colon_spaced_json(payload: &[u8]) -> Vec<u8> {
-    let trimmed = cpa_common::gostr::trim_space(payload);
+    let trimmed = cpa_core::config::go_trim_space(payload);
     if trimmed.is_empty() || !gj::std_valid(trimmed) {
         return payload.to_vec();
     }

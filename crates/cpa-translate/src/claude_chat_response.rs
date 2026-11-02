@@ -67,7 +67,7 @@ fn finish_reason(reason: &[u8]) -> &'static str {
 
 /// The payload of a `data:` line, as Go slices and trims it.
 pub(crate) fn data_payload(line: &[u8]) -> Option<&[u8]> {
-    line.strip_prefix(b"data:").map(crate::common::trim_space)
+    line.strip_prefix(b"data:").map(cpa_core::config::go_trim_space)
 }
 
 pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {

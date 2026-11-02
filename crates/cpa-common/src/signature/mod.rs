@@ -5,7 +5,9 @@
 //! cryptography. Detection order and envelope rules follow Go exactly because a wrong
 //! claim either drops valid history or replays a foreign signature upstream (400).
 
-use crate::gostr::{GoStr, lower_bytes, trim_space};
+use cpa_core::config::go_trim_space;
+
+use crate::gostr::{GoStr, lower_bytes};
 mod claude;
 mod claude_messages;
 mod gemini;
@@ -187,7 +189,7 @@ pub fn detect_provider(raw: impl AsRef<[u8]>) -> Provider {
 /// `DetectSignatureProviderForBlock`. UUID-shaped payloads are never claimed as
 /// replay-safe; Gemini targets replace them with the bypass sentinel.
 pub fn detect_provider_for_block(raw: impl AsRef<[u8]>, block_kind: BlockKind) -> Provider {
-    let sig = trim_space(raw.as_ref());
+    let sig = go_trim_space(raw.as_ref());
     if sig.is_empty() {
         return Provider::Unknown;
     }
@@ -335,17 +337,17 @@ pub fn decide_compatibility_for_model(
 /// `SplitSignatureProviderPrefix`: `Some((provider, rest))` for this proxy's
 /// `provider#signature` cache envelope.
 pub fn split_provider_prefix(raw: &[u8]) -> Option<(Provider, &[u8])> {
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     let hash = raw.iter().position(|b| *b == b'#')?;
     match provider_from_cache_prefix(&raw[..hash]) {
         Provider::Unknown => None,
-        provider => Some((provider, trim_space(&raw[hash + 1..]))),
+        provider => Some((provider, go_trim_space(&raw[hash + 1..]))),
     }
 }
 
 /// `SignatureProviderFromCachePrefix`.
 pub fn provider_from_cache_prefix(prefix: &[u8]) -> Provider {
-    match lower_bytes(trim_space(prefix)).as_str() {
+    match lower_bytes(go_trim_space(prefix)).as_str() {
         "claude" | "anthropic" | "cais" | "claude-cais" | "claude_cais" | "ccmax" | "claude-code-max"
         | "claude_code_max" => Provider::Claude,
         "gemini" | "google" => Provider::Gemini,
@@ -359,7 +361,7 @@ pub fn provider_from_cache_prefix(prefix: &[u8]) -> Provider {
 pub fn payload_without_provider_prefix(raw: &[u8]) -> &[u8] {
     match split_provider_prefix(raw) {
         Some((_, rest)) => rest,
-        None => trim_space(raw),
+        None => go_trim_space(raw),
     }
 }
 
@@ -469,7 +471,7 @@ pub(crate) fn is_recognized_gemini_signature(raw: &[u8], _block_kind: BlockKind)
 
 /// `IsRecognizedReasoningSignature`: structurally valid for any known provider.
 pub fn is_recognized_reasoning_signature(raw: impl AsRef<[u8]>) -> bool {
-    let sig = trim_space(raw.as_ref());
+    let sig = go_trim_space(raw.as_ref());
     if sig.is_empty() {
         return false;
     }

@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::thinking::parse_suffix;
+use cpa_core::config::go_trim_space;
 use cpa_core::exec::ExecRequest;
 use cpa_core::format::Format;
 use sha2::{Digest, Sha256};
 
-use crate::meta_codex::go_trim_space;
 use crate::replay::{claude_code_session, header_session, payload_session};
 
 /// `XAIReasoningReplayCacheTTL`.

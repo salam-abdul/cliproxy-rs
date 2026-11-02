@@ -7,7 +7,8 @@
 //! client's original request (`supplementSignaturesFromOriginal`,
 //! `supplementImagesFromOriginal`).
 
-use cpa_common::gostr::trim_space;
+use cpa_core::config::go_trim_space;
+
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::signature::{Provider, detect_provider};
 
@@ -34,7 +35,7 @@ pub(crate) struct Parsed {
 }
 
 fn lower(b: &[u8]) -> String {
-    String::from_utf8_lossy(trim_space(b)).to_lowercase()
+    String::from_utf8_lossy(go_trim_space(b)).to_lowercase()
 }
 
 fn s(r: &Res<'_>) -> Vec<u8> {
@@ -45,7 +46,7 @@ fn s(r: &Res<'_>) -> Vec<u8> {
 fn first_non_empty(values: &[Vec<u8>]) -> Vec<u8> {
     values
         .iter()
-        .find(|v| !trim_space(v).is_empty())
+        .find(|v| !go_trim_space(v).is_empty())
         .cloned()
         .unwrap_or_default()
 }
@@ -59,11 +60,11 @@ pub(crate) fn parse_interactions(payload: &[u8], original: &[u8]) -> Parsed {
     let root = gj::parse(payload);
     let orig = gj::parse(original);
     let mut p = Parsed {
-        system: trim_space(&root.get("system_instruction").bytes()).to_vec(),
+        system: go_trim_space(&root.get("system_instruction").bytes()).to_vec(),
         ..Parsed::default()
     };
     if p.system.is_empty() {
-        p.system = trim_space(&root.get("systemInstruction").bytes()).to_vec();
+        p.system = go_trim_space(&root.get("systemInstruction").bytes()).to_vec();
     }
     let mut gen_cfg = root.get("generation_config");
     if !gen_cfg.exists() {
@@ -96,9 +97,9 @@ pub(crate) fn parse_interactions(payload: &[u8], original: &[u8]) -> Parsed {
             s(&r.get("previous_interaction_id")),
         ])
     };
-    p.session_id = trim_space(&session(&root)).to_vec();
+    p.session_id = go_trim_space(&session(&root)).to_vec();
     if p.session_id.is_empty() && !original.is_empty() {
-        p.session_id = trim_space(&session(&orig)).to_vec();
+        p.session_id = go_trim_space(&session(&orig)).to_vec();
     }
     p.cascade_id.clone_from(&p.session_id);
 
@@ -369,7 +370,7 @@ fn tools(list: &Res<'_>) -> Vec<Tool> {
 
 /// `parseDataURL`.
 fn parse_data_url(raw: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     if !raw.starts_with(b"data:") {
         return None;
     }
@@ -377,7 +378,7 @@ fn parse_data_url(raw: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let header = &raw[5..comma];
     let data = raw[comma + 1..].to_vec();
     let first = header.split(|b| *b == b';').next().unwrap_or_default();
-    let mut mime = trim_space(first).to_vec();
+    let mut mime = go_trim_space(first).to_vec();
     if mime.is_empty() {
         mime = b"image/png".to_vec();
     }
@@ -402,12 +403,12 @@ fn image(part: &Res<'_>) -> Option<Image> {
     ) {
         return None;
     }
-    let mut data = trim_space(&part.get("data").bytes()).to_vec();
-    let mut mime = trim_space(&part.get("mime_type").bytes()).to_vec();
+    let mut data = go_trim_space(&part.get("data").bytes()).to_vec();
+    let mut mime = go_trim_space(&part.get("mime_type").bytes()).to_vec();
     if data.is_empty() {
-        data = trim_space(&part.get("source.data").bytes()).to_vec();
+        data = go_trim_space(&part.get("source.data").bytes()).to_vec();
         if mime.is_empty() {
-            mime = trim_space(&part.get("source.media_type").bytes()).to_vec();
+            mime = go_trim_space(&part.get("source.media_type").bytes()).to_vec();
         }
     }
     if data.is_empty() {
@@ -424,9 +425,9 @@ fn image(part: &Res<'_>) -> Option<Image> {
         }
     }
     if data.is_empty() {
-        data = trim_space(&part.get("inline_data.data").bytes()).to_vec();
+        data = go_trim_space(&part.get("inline_data.data").bytes()).to_vec();
         if mime.is_empty() {
-            mime = trim_space(&part.get("inline_data.mime_type").bytes()).to_vec();
+            mime = go_trim_space(&part.get("inline_data.mime_type").bytes()).to_vec();
         }
     }
     if data.is_empty() {
@@ -565,7 +566,7 @@ fn result_target(target: &Res<'_>) -> (Vec<u8>, Vec<Image>) {
                             texts.push(text);
                         }
                     } else {
-                        let raw = trim_space(item.raw());
+                        let raw = go_trim_space(item.raw());
                         if !raw.is_empty() {
                             texts.push(raw.to_vec());
                         }
@@ -573,7 +574,7 @@ fn result_target(target: &Res<'_>) -> (Vec<u8>, Vec<Image>) {
                     continue;
                 }
             }
-            let raw = trim_space(item.raw());
+            let raw = go_trim_space(item.raw());
             if !raw.is_empty() {
                 texts.push(raw.to_vec());
             }
@@ -600,7 +601,7 @@ fn function_result_content(step: &Res<'_>) -> (Vec<u8>, Vec<Image>) {
     }
     let (text, images) = result_target(&target);
     let mut text = with_image_headers(text, &images);
-    if trim_space(&text).is_empty() && images.is_empty() {
+    if go_trim_space(&text).is_empty() && images.is_empty() {
         text = EMPTY_TOOL_RESULT.to_vec();
     }
     (text, images)
@@ -667,7 +668,7 @@ fn std_base64(s: &[u8]) -> Option<Vec<u8>> {
 /// `parseSignatureBytes`: the signature bytes Devin expects and their type
 /// (`sealed`, `anthropic`, `openai`, `gemini`).
 pub(crate) fn parse_signature(raw: &[u8]) -> (Vec<u8>, &'static str) {
-    let sig = trim_space(raw);
+    let sig = go_trim_space(raw);
     if sig.is_empty() {
         return (Vec::new(), "");
     }
@@ -717,7 +718,7 @@ pub(crate) fn parse_signature(raw: &[u8]) -> (Vec<u8>, &'static str) {
 
 /// `detectSignatureType`.
 fn signature_type(sig: &[u8]) -> &'static str {
-    let sig = trim_space(sig);
+    let sig = go_trim_space(sig);
     if sig.starts_with(b"sealed.v1.") {
         return "sealed";
     }

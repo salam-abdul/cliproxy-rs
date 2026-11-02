@@ -1261,7 +1261,7 @@ fn custom_tool_call_arguments(input: &Res<'_>) -> Vec<u8> {
     }
     if input.kind == Kind::String {
         let value = input.bytes();
-        let trimmed = crate::meta_codex::go_trim_space(&value);
+        let trimmed = cpa_core::config::go_trim_space(&value);
         if gj::valid(trimmed) {
             let parsed = gj::parse(trimmed);
             if parsed.is_object() {

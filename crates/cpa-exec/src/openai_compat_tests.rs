@@ -574,7 +574,10 @@ fn go_primitive_vectors() {
         );
     }
     for case in v["trim_space"].as_array().unwrap() {
-        assert_eq!(go::trim_space(&b64(&case[0])), b64(&case[1]).as_slice());
+        assert_eq!(
+            cpa_core::config::go_trim_space(&b64(&case[0])),
+            b64(&case[1]).as_slice()
+        );
     }
     for case in v["media_type"].as_array().unwrap() {
         let input = case["input"].as_str().unwrap();

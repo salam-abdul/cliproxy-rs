@@ -4,13 +4,15 @@
 //! web-search request), and the Gemini Responses response converters on the unwrapped
 //! envelope.
 
+use cpa_core::config::go_trim_space;
+
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, GoValue, Kind};
 use cpa_common::signature::{Provider, compatible_antigravity_claude_thinking_signature, provider_from_model_name};
 use cpa_common::thinking::{SummaryConfig, SummaryMode, parse_suffix};
 use cpa_core::registry::{self, ModelInfo};
 
-use crate::common::{go_lower, trim_space};
+use crate::common::go_lower;
 use crate::gemini_web_search as ws;
 use crate::stream::GoStream;
 use crate::{Error, Registered, RequestCtx, ResponseCtx, thinking};
@@ -181,7 +183,7 @@ fn enable_thinking_summary(raw: &[u8], out: Vec<u8>) -> Vec<u8> {
     if effort.kind != Kind::String {
         return out;
     }
-    let effort = go_lower(trim_space(&effort.s));
+    let effort = go_lower(go_trim_space(&effort.s));
     if effort.is_empty() || effort == b"none" {
         return out;
     }
@@ -275,7 +277,7 @@ fn rewrite_claude_reasoning(model: &str, raw: &[u8], gemini: Vec<u8>) -> Vec<u8>
                 Some(GoValue::String(t)) => t.clone(),
                 _ => String::new(),
             };
-            if trim_space(text.as_bytes()).is_empty() {
+            if go_trim_space(text.as_bytes()).is_empty() {
                 changed = true;
                 continue;
             }

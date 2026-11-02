@@ -1,9 +1,11 @@
 //! Gemini Interactions request -> Codex (OpenAI Responses) request, and Codex events back
 //! to Interactions responses (internal/translator/codex/interactions).
 
+use cpa_core::config::go_trim_space;
+
 use cpa_common::json::{self as gj, Kind, Res};
 
-use crate::common::{format_rfc3339_utc, go_lower, now_nanos, now_unix, sse_event, trim_space};
+use crate::common::{format_rfc3339_utc, go_lower, now_nanos, now_unix, sse_event};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx};
 
@@ -52,7 +54,7 @@ fn first_existing<'a>(value: &Res<'a>, paths: &[&str]) -> Res<'a> {
 }
 
 fn audio_format(mime: &[u8]) -> &'static str {
-    match go_lower(trim_space(mime)).as_slice() {
+    match go_lower(go_trim_space(mime)).as_slice() {
         b"audio/wav" | b"audio/wave" | b"audio/x-wav" => "wav",
         b"audio/flac" => "flac",
         b"audio/opus" | b"audio/ogg" => "opus",
@@ -62,7 +64,7 @@ fn audio_format(mime: &[u8]) -> &'static str {
 }
 
 fn file_name(mime: &[u8]) -> &'static str {
-    let lower = go_lower(trim_space(mime));
+    let lower = go_lower(go_trim_space(mime));
     match lower.as_slice() {
         b"application/pdf" => "document.pdf",
         b"text/plain" => "document.txt",
@@ -76,7 +78,7 @@ fn file_name(mime: &[u8]) -> &'static str {
 
 /// interactionsCodexDefaultRole.
 fn default_role(role: &[u8], fallback: &'static str) -> &'static str {
-    match go_lower(trim_space(role)).as_slice() {
+    match go_lower(go_trim_space(role)).as_slice() {
         b"model" | b"assistant" => "assistant",
         b"developer" | b"system" => "developer",
         b"user" => "user",
@@ -211,7 +213,7 @@ fn message_part(part: &Res<'_>, role: &str) -> Option<Vec<u8>> {
     if text.exists() {
         return Some(text_part(role, &text.bytes()));
     }
-    match go_lower(trim_space(&part.get("type").bytes())).as_slice() {
+    match go_lower(go_trim_space(&part.get("type").bytes())).as_slice() {
         b"text" | b"" => None,
         b"image" => image_part(part),
         b"image_url" => Some(input_image(&part.get("image_url.url").bytes())),
@@ -265,11 +267,11 @@ fn content_text(content: &Res<'_>) -> Vec<u8> {
 
 /// interactionsCodexCallID.
 fn call_id(step: &Res<'_>) -> Vec<u8> {
-    let id = trim_space(&step.get("call_id").bytes()).to_vec();
+    let id = go_trim_space(&step.get("call_id").bytes()).to_vec();
     if !id.is_empty() {
         return id;
     }
-    trim_space(&step.get("id").bytes()).to_vec()
+    go_trim_space(&step.get("id").bytes()).to_vec()
 }
 
 /// interactionsCodexJSONString / interactionsCodexOutputString for existing values.
@@ -324,7 +326,7 @@ impl Input {
             });
             return;
         }
-        match go_lower(trim_space(&step.get("type").bytes())).as_slice() {
+        match go_lower(go_trim_space(&step.get("type").bytes())).as_slice() {
             b"function_call" => {
                 let mut item = br#"{"type":"function_call"}"#.to_vec();
                 let name = step.get("name");
@@ -396,7 +398,7 @@ fn reasoning_effort(cfg: &Res<'_>) -> Option<Vec<u8>> {
     ] {
         let value = cfg.get(path);
         if value.exists() {
-            let effort = go_lower(trim_space(&value.bytes()));
+            let effort = go_lower(go_trim_space(&value.bytes()));
             if !effort.is_empty() {
                 return Some(effort);
             }
@@ -425,7 +427,7 @@ fn reasoning_summary(cfg: &Res<'_>) -> Option<&'static str> {
     for path in ["thinking_summaries", "thinkingSummaries", "reasoning.summary"] {
         let value = cfg.get(path);
         if value.kind == Kind::String {
-            match go_lower(trim_space(&value.s)).as_slice() {
+            match go_lower(go_trim_space(&value.s)).as_slice() {
                 b"auto" => return Some("auto"),
                 b"none" => return Some("none"),
                 _ => {}
@@ -634,7 +636,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     }
 
     let tier = root.get("service_tier");
-    if tier.kind == Kind::String && matches!(go_lower(trim_space(&tier.s)).as_slice(), b"priority" | b"fast") {
+    if tier.kind == Kind::String && matches!(go_lower(go_trim_space(&tier.s)).as_slice(), b"priority" | b"fast") {
         let current = gj::get(&out, "service_tier");
         if current.kind != Kind::String || current.s.as_ref() != b"priority" {
             gj::set_str(&mut out, "service_tier", "priority");
@@ -984,9 +986,9 @@ impl State {
 
 impl GoStream for State {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
-        let mut payload = trim_space(line);
+        let mut payload = go_trim_space(line);
         if let Some(rest) = payload.strip_prefix(b"data:") {
-            payload = trim_space(rest);
+            payload = go_trim_space(rest);
         }
         let mut out = vec![];
         if payload == b"[DONE]" {

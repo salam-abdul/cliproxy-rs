@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use cpa_common::gostr::trim_space;
+use cpa_core::config::go_trim_space;
 
 const DATA: &[u8] = b"data:";
 
@@ -82,7 +82,7 @@ impl DataLines {
             return;
         }
         if self.count == 0 {
-            if !incomplete_json(trim_space(&line[DATA.len()..])) {
+            if !incomplete_json(go_trim_space(&line[DATA.len()..])) {
                 out.push(Scanned::read(line));
                 return;
             }
@@ -141,7 +141,11 @@ impl DataLines {
             line.extend_from_slice(&cpa_common::json::compact(&joined, false));
             return line;
         }
-        let data = if lines == 1 { trim_space(&joined) } else { &joined[..] };
+        let data = if lines == 1 {
+            go_trim_space(&joined)
+        } else {
+            &joined[..]
+        };
         self.diagnose(&held, lines, data);
         held
     }
@@ -158,7 +162,7 @@ impl DataLines {
         let shown = lines.min(DIAGNOSTIC_LINES);
         let (mut lengths, mut valid) = (Vec::with_capacity(shown), Vec::with_capacity(shown));
         for line in held.split(|b| *b == b'\n').take(shown) {
-            let value = trim_space(&line[DATA.len()..]);
+            let value = go_trim_space(&line[DATA.len()..]);
             lengths.push(value.len().to_string());
             valid.push(cpa_common::json::std_valid(value).to_string());
         }

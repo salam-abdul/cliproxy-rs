@@ -68,11 +68,6 @@ pub fn gjson_string(v: Option<&Value>) -> String {
     }
 }
 
-/// Go `strings.TrimSpace`.
-pub fn trim(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace())
-}
-
 /// Go `http.StatusText`.
 pub fn status_text(status: u16) -> &'static str {
     match status {

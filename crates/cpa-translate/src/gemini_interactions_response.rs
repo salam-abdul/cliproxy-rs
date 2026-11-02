@@ -5,8 +5,9 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::common::{format_rfc3339_utc, now_nanos, now_unix, sse_event, trim_space};
+use crate::common::{format_rfc3339_utc, now_nanos, now_unix, sse_event};
 use crate::gemini::{set_function_response_raw, set_function_response_result};
 use crate::gemini_interactions::{content_part_to_gemini, first_existing, inline_to_interactions_content, text_part};
 use crate::stream::GoStream;
@@ -16,7 +17,7 @@ use crate::{Error, ResponseCtx};
 fn first_nonblank(values: &[&[u8]]) -> Vec<u8> {
     values
         .iter()
-        .find(|v| !trim_space(v).is_empty())
+        .find(|v| !go_trim_space(v).is_empty())
         .map(|v| v.to_vec())
         .unwrap_or_default()
 }
@@ -29,7 +30,7 @@ pub(crate) fn thought_signature(part: &Res<'_>) -> Vec<u8> {
         "extra_content.google.thought_signature",
     ]
     .iter()
-    .map(|p| trim_space(&part.get(*p).bytes()).to_vec())
+    .map(|p| go_trim_space(&part.get(*p).bytes()).to_vec())
     .find(|s| !s.is_empty())
     .unwrap_or_default()
 }
@@ -379,7 +380,7 @@ impl ToInteractions {
 impl GoStream for ToInteractions {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let mut out = vec![];
-        if trim_space(line) == b"[DONE]" {
+        if go_trim_space(line) == b"[DONE]" {
             if !self.completed {
                 self.stop_step(&mut out);
                 self.complete(None, &mut out);
@@ -477,7 +478,7 @@ fn interactions_usage<'a>(root: &Res<'a>) -> Res<'a> {
 
 /// interactionsGeminiSSEPayload: a JSON payload as is, else the `data:` lines joined.
 fn sse_payload(raw: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed.is_empty() || trimmed == b"[DONE]" {
         return vec![];
     }
@@ -486,10 +487,10 @@ fn sse_payload(raw: &[u8]) -> Vec<u8> {
     }
     let mut payload = vec![];
     for line in trimmed.split(|&c| c == b'\n') {
-        let Some(data) = trim_space(line).strip_prefix(b"data:") else {
+        let Some(data) = go_trim_space(line).strip_prefix(b"data:") else {
             continue;
         };
-        let data = trim_space(data);
+        let data = go_trim_space(data);
         if data.is_empty() || data == b"[DONE]" {
             continue;
         }
@@ -598,7 +599,7 @@ impl ToGemini {
                     gj::set_str(&mut part, "thoughtSignature", &signature);
                 }
                 let arguments = delta.get("arguments").bytes();
-                let arguments = trim_space(&arguments);
+                let arguments = go_trim_space(&arguments);
                 if !arguments.is_empty() && gj::valid(arguments) {
                     gj::set_raw(&mut part, "functionCall.args", arguments);
                 }
@@ -640,7 +641,7 @@ impl ToGemini {
 
 /// mapInteractionsErrorToGemini.
 fn gemini_error_status(code: &[u8]) -> (i64, &'static str) {
-    let code = trim_space(code);
+    let code = go_trim_space(code);
     match crate::common::go_lower(code).as_slice() {
         b"400" | b"invalid_argument" => (400, "INVALID_ARGUMENT"),
         b"401" | b"unauthenticated" => (401, "UNAUTHENTICATED"),
@@ -725,7 +726,7 @@ fn set_raw_object(out: &mut Vec<u8>, path: &str, value: &Res<'_>) {
     }
     if value.kind == Kind::String {
         let text = value.bytes();
-        let raw = trim_space(&text);
+        let raw = go_trim_space(&text);
         if !raw.is_empty() && gj::valid(raw) {
             gj::set_raw(out, path, raw);
             return;
@@ -744,7 +745,7 @@ fn set_response(out: &mut Vec<u8>, path: &str, value: &Res<'_>) {
     }
     if value.kind == Kind::String {
         let text = value.bytes();
-        let raw = trim_space(&text);
+        let raw = go_trim_space(&text);
         if !raw.is_empty() && gj::valid(raw) {
             set_function_response_raw(out, path, raw);
             return;

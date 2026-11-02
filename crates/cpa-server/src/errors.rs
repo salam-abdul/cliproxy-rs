@@ -10,7 +10,7 @@ use crate::gojson::{self, Obj};
 
 /// Go `WriteErrorResponse`'s text: the error text trimmed, else the status text.
 fn text_for(status: u16, text: &str) -> String {
-    let v = gojson::trim(text);
+    let v = text.trim();
     if v.is_empty() {
         gojson::status_text(status).to_owned()
     } else {
@@ -22,12 +22,12 @@ fn text_for(status: u16, text: &str) -> String {
 /// wrapped in an OpenAI error envelope typed by status.
 pub fn openai_body(status: u16, text: &str) -> String {
     let status = if status == 0 { 500 } else { status };
-    let text = if gojson::trim(text).is_empty() {
+    let text = if text.trim().is_empty() {
         gojson::status_text(status)
     } else {
         text
     };
-    let trimmed = gojson::trim(text);
+    let trimmed = text.trim();
     if !trimmed.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
         return trimmed.to_owned();
     }
@@ -75,7 +75,7 @@ pub fn claude_body(status: u16, text: &str) -> String {
         let field = |obj: &serde_json::Map<String, Value>, key: &str| {
             obj.get(key)
                 .and_then(Value::as_str)
-                .map(gojson::trim)
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
         };

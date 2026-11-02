@@ -137,7 +137,7 @@ fn normalize_empty_function_call_arguments(raw: Vec<u8>) -> Vec<u8> {
         if item.is_object()
             && item.get("type").str() == "function_call"
             && args.kind == Kind::String
-            && common::trim_space(&args.s).is_empty()
+            && cpa_core::config::go_trim_space(&args.s).is_empty()
         {
             return gj::set_str(item_raw, "arguments", "{}");
         }
@@ -277,7 +277,7 @@ struct Events {
 impl stream::GoStream for Events {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let (sse, payload) = match line.strip_prefix(b"data:") {
-            Some(rest) => (true, common::trim_space(rest)),
+            Some(rest) => (true, cpa_core::config::go_trim_space(rest)),
             None => (false, line),
         };
         let updated = with_model(payload, &self.model, &self.original, &self.translated);

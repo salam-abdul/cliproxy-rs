@@ -20,9 +20,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 use cpa_common::cache::{self, MAX_REPLAY_BYTES, MAX_REPLAY_ITEMS, ReplaySnapshot};
-use cpa_common::gostr::{GoStr, lower_bytes, trim_space};
+use cpa_common::gostr::{GoStr, lower_bytes};
 use cpa_common::json::{self as gj, AnyValue, GoValue, Kind, Res};
 use cpa_common::signature as sig;
+use cpa_core::config::go_trim_space;
 use cpa_core::exec::{ExecError, ExecRequest, ExecStream};
 use cpa_core::format::Format;
 use futures_util::StreamExt;
@@ -40,11 +41,11 @@ const SIGNATURE_FIELDS: [&str; 3] = [
 
 /// `strings.TrimSpace(r.Get(path).String())`.
 fn field(r: &Res<'_>, path: &str) -> Vec<u8> {
-    trim_space(&r.get(path).bytes()).to_vec()
+    go_trim_space(&r.get(path).bytes()).to_vec()
 }
 
 fn text(r: &Res<'_>) -> String {
-    String::from_utf8_lossy(trim_space(&r.bytes())).into_owned()
+    String::from_utf8_lossy(go_trim_space(&r.bytes())).into_owned()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -57,7 +58,7 @@ fn is_model(content: &Res<'_>) -> bool {
 
 /// `antigravityHasNativeThoughtSignature`.
 fn has_native_signature(signature: &[u8]) -> bool {
-    let signature = trim_space(signature);
+    let signature = go_trim_space(signature);
     !signature.is_empty() && signature != BYPASS
 }
 
@@ -101,17 +102,17 @@ fn object(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
 fn canonical(raw: &[u8]) -> Vec<u8> {
     match GoValue::parse_f64(raw) {
         Some(value) => value.marshal(),
-        None => trim_space(raw).to_vec(),
+        None => go_trim_space(raw).to_vec(),
     }
 }
 
 /// `antigravityFunctionCallKey`.
 fn call_key(name: &[u8], args: &[u8], call_id: &[u8]) -> Vec<u8> {
-    let name = trim_space(name);
+    let name = go_trim_space(name);
     if name.is_empty() {
         return vec![];
     }
-    let args = if trim_space(args).is_empty() {
+    let args = if go_trim_space(args).is_empty() {
         args.to_vec()
     } else {
         canonical(args)
@@ -248,7 +249,7 @@ fn header(headers: &HeaderMap, name: &str) -> String {
     headers
         .get_all(name)
         .iter()
-        .map(|v| String::from_utf8_lossy(trim_space(v.as_bytes())).into_owned())
+        .map(|v| String::from_utf8_lossy(go_trim_space(v.as_bytes())).into_owned())
         .find(|v| !v.is_empty())
         .unwrap_or_default()
 }
@@ -422,7 +423,7 @@ fn json_value(r: &Res<'_>) -> Option<GoValue> {
     } else {
         Cow::Borrowed(r.raw())
     };
-    if trim_space(&raw).is_empty() {
+    if go_trim_space(&raw).is_empty() {
         return None;
     }
     GoValue::parse_f64(&raw)
@@ -656,7 +657,7 @@ impl<'a> Index<'a> {
         let mut f = self.fingerprints.borrow_mut();
         while f.sums.len() <= before {
             let content = &self.contents[f.sums.len() - 1];
-            f.write(lower_bytes(trim_space(&content.content.get("role").bytes())).as_bytes());
+            f.write(lower_bytes(go_trim_space(&content.content.get("role").bytes())).as_bytes());
             f.write(b"\x00");
             for part in &content.parts {
                 let mut normalized = part.raw().to_vec();
@@ -678,7 +679,7 @@ impl<'a> Index<'a> {
     }
 
     fn call(&self, id: &[u8]) -> Option<&Located<'a>> {
-        self.calls.get(trim_space(id))
+        self.calls.get(go_trim_space(id))
     }
 
     /// `pendingModelContentIndex`: where the answer's parts go, and its first part index.
@@ -703,7 +704,7 @@ impl<'a> Index<'a> {
         }
         candidates
             .into_iter()
-            .find_map(|id| self.responses.get(trim_space(&id)).map(|&ci| (ci, id)))
+            .find_map(|id| self.responses.get(go_trim_space(&id)).map(|&ci| (ci, id)))
     }
 
     /// `functionCallPartLocationForReplayWithSchemas`.
@@ -1043,7 +1044,7 @@ impl<'a> Index<'a> {
 
 /// `antigravityRemoveThoughtSignatureFromOtherParts`: one signature belongs to one part.
 fn remove_signature_elsewhere(mut out: Vec<u8>, content: i64, signature: &[u8], keep: &str) -> Vec<u8> {
-    let signature = trim_space(signature);
+    let signature = go_trim_space(signature);
     let parts_path = format!("request.contents.{content}.parts");
     let parts = gj::get(&out, &parts_path);
     if signature.is_empty() || !parts.is_array() {
@@ -1172,7 +1173,7 @@ fn append_call(
     let parts_path = format!("{content_path}.parts");
     let role = gj::get(payload, &format!("{content_path}.role"));
     let parts = gj::get(payload, &parts_path);
-    if !String::from_utf8_lossy(trim_space(&role.bytes())).go_eq_fold("model") || !parts.is_array() {
+    if !String::from_utf8_lossy(go_trim_space(&role.bytes())).go_eq_fold("model") || !parts.is_array() {
         return None;
     }
     let mut members = vec![("functionCall", value_call(name, call_id, args)?)];
@@ -1220,7 +1221,11 @@ fn rewrite_response_ids(mut out: Vec<u8>, current: &[u8], native_id: &[u8], nati
 
 /// `restoreAntigravityFunctionResponseReplayIdentity`.
 fn restore_response_identity(payload: Vec<u8>, current: &[u8], native_id: &[u8], native_name: &[u8]) -> Vec<u8> {
-    let (current, native_id, native_name) = (trim_space(current), trim_space(native_id), trim_space(native_name));
+    let (current, native_id, native_name) = (
+        go_trim_space(current),
+        go_trim_space(native_id),
+        go_trim_space(native_name),
+    );
     if current.is_empty() || native_id.is_empty() || native_name.is_empty() || current == native_id {
         return payload;
     }
@@ -1570,7 +1575,7 @@ impl Accumulator {
 
     /// `observeResponsePayload`: one generate answer or stream payload.
     pub(crate) fn observe(&mut self, payload: &[u8]) {
-        if !trim_space(&gj::get(payload, "response.candidates.0.finishReason").bytes()).is_empty() {
+        if !go_trim_space(&gj::get(payload, "response.candidates.0.finishReason").bytes()).is_empty() {
             self.terminal = true;
         }
         let parts = gj::get(payload, "response.candidates.0.content.parts");

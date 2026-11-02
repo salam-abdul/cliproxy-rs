@@ -236,10 +236,10 @@ impl Failure {
                 } else {
                     providers.join(",")
                 };
-                let model = if gojson::trim(model).is_empty() {
+                let model = if model.trim().is_empty() {
                     "unknown"
                 } else {
-                    gojson::trim(model)
+                    model.trim()
                 };
                 let mut detail = match cause.as_deref().map(upstream_summary).filter(|s| !s.is_empty()) {
                     Some(summary) => format!(
@@ -324,7 +324,7 @@ pub fn upstream_summary(raw: &str) -> String {
         _ => raw,
     };
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
-        let s = |v: Option<&serde_json::Value>| gojson::trim(&gojson::gjson_string(v)).to_owned();
+        let s = |v: Option<&serde_json::Value>| gojson::gjson_string(v).trim().to_owned();
         let (mut code, mut message) = (String::new(), String::new());
         match v.get("error") {
             Some(e @ serde_json::Value::Object(_)) => {
@@ -376,7 +376,7 @@ const IMAGE_ONLY: [&str; 8] = [
 /// Go `getRequestDetails`: resolve `auto`, find the providers, keep the suffix.
 fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>, String), RunError> {
     if let Some(provider) = &call.forced_provider {
-        return Ok((vec![provider.clone()], gojson::trim(&call.model).to_owned()));
+        return Ok((vec![provider.clone()], call.model.trim().to_owned()));
     }
     let model = call.model.as_str();
     let base = match model.rfind('(') {
@@ -393,7 +393,7 @@ fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>,
     } else {
         model.to_owned()
     };
-    let base = gojson::trim(canonical_model_raw(&resolved)).to_owned();
+    let base = canonical_model_raw(&resolved).trim().to_owned();
     let image = base
         .rsplit('/')
         .next()

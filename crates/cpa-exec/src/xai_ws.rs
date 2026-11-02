@@ -187,7 +187,7 @@ impl IdState {
     fn replace(&self, items: &[&[u8]]) {
         let next: Vec<Vec<u8>> = items
             .iter()
-            .map(|item| cpa_common::gostr::trim_space(item))
+            .map(|item| cpa_core::config::go_trim_space(item))
             .filter(|item| !item.is_empty() && gj::std_valid(item))
             .map(<[u8]>::to_vec)
             .collect();
@@ -214,7 +214,7 @@ fn raw_items(value: &gj::Res<'_>) -> Vec<Vec<u8>> {
     value
         .array()
         .iter()
-        .map(|item| cpa_common::gostr::trim_space(item.raw()).to_vec())
+        .map(|item| cpa_core::config::go_trim_space(item.raw()).to_vec())
         .filter(|raw| !raw.is_empty() && gj::std_valid(raw))
         .collect()
 }
@@ -226,7 +226,7 @@ fn raw_array(items: &[Vec<u8>]) -> Vec<u8> {
         if i > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(cpa_common::gostr::trim_space(item));
+        out.extend_from_slice(cpa_core::config::go_trim_space(item));
     }
     out.push(b']');
     out
@@ -898,7 +898,7 @@ impl Turn {
 
     /// One upstream text message.
     fn message(&mut self, message: &str) {
-        let payload = cpa_common::gostr::trim_space(message.as_bytes());
+        let payload = cpa_core::config::go_trim_space(message.as_bytes());
         if payload.is_empty() {
             return;
         }

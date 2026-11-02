@@ -11,7 +11,7 @@ use crate::Runtime;
 fn examples(keys: &[String]) -> Vec<&str> {
     let mut found = Vec::new();
     for key in keys {
-        let key = crate::gojson::trim(key);
+        let key = key.trim();
         if matches!(key, "your-api-key-1" | "your-api-key-2" | "your-api-key-3") && !found.contains(&key) {
             found.push(key);
         }

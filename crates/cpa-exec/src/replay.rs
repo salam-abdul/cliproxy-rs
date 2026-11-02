@@ -13,12 +13,11 @@ use std::collections::BTreeMap;
 
 use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Res, canonical};
+use cpa_core::config::go_trim_space;
 use cpa_core::exec::{ExecRequest, ExecStream};
 use futures_util::StreamExt;
 use http::HeaderMap;
 use sha2::{Digest, Sha256};
-
-use crate::meta_codex::go_trim_space;
 
 /// Largest content one turn may cache, and the accumulator's budget.
 pub(crate) const MAX_BYTES_PER_ENTRY: usize = 8 << 20;

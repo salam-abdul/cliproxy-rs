@@ -202,7 +202,7 @@ fn apply_patch_tool_names(original: &[u8]) -> Vec<Vec<u8>> {
         .iter()
         .filter(|t| {
             *t.get("type").bytes() == *b"custom"
-                && cpa_common::gostr::trim_space(&t.get("name").bytes()) == b"apply_patch"
+                && cpa_core::config::go_trim_space(&t.get("name").bytes()) == b"apply_patch"
         })
         .map(|_| b"apply_patch".to_vec())
         .collect()
@@ -1146,7 +1146,7 @@ impl DevinStream {
         if raw.is_empty() {
             return true;
         }
-        let trimmed = cpa_common::gostr::trim_space(&raw).to_vec();
+        let trimmed = cpa_core::config::go_trim_space(&raw).to_vec();
         let kind = gj::get(&trimmed, "event_type").bytes().into_owned();
         let failed = kind == b"response.failed" || kind == b"interaction.failed";
         // A failure before anything started is answered as an HTTP error instead.

@@ -3,9 +3,10 @@
 
 use crate::{
     Registered, apply_patch, codex_chat_response as response,
-    common::{go_lower, sanitize, trim_space},
+    common::{go_lower, sanitize},
 };
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -121,7 +122,7 @@ pub(crate) fn service_tier(r: &Res<'_>) -> &'static str {
     if r.kind != Kind::String {
         return "";
     }
-    match go_lower(trim_space(&r.s)).as_slice() {
+    match go_lower(go_trim_space(&r.s)).as_slice() {
         b"fast" | b"priority" => "priority",
         b"ultrafast" => "ultrafast",
         _ => "",
@@ -191,7 +192,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
                 let custom = custom_names.contains(&name);
                 let mut input = call.get("function.arguments").bytes().into_owned();
                 if custom
-                    && trim_space(&name) == b"apply_patch"
+                    && go_trim_space(&name) == b"apply_patch"
                     && let Some(unwrapped) = apply_patch::unwrap_input(&input)
                 {
                     input = unwrapped.into_bytes();

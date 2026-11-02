@@ -146,7 +146,7 @@ pub fn rewrite_orphan_delegation_input(headers: &HeaderMap, payload: &[u8], enab
     for item in &items {
         if *item.get("type").bytes() == *b"function_call" {
             let id = item.get("call_id").bytes().into_owned();
-            if !crate::gostr::trim_space(&id).is_empty() {
+            if !cpa_core::config::go_trim_space(&id).is_empty() {
                 *calls.entry(id).or_default() += 1;
             }
         }
@@ -157,7 +157,7 @@ pub fn rewrite_orphan_delegation_input(headers: &HeaderMap, payload: &[u8], enab
                 continue;
             }
             let id = item.get("call_id").bytes().into_owned();
-            if !crate::gostr::trim_space(&id).is_empty()
+            if !cpa_core::config::go_trim_space(&id).is_empty()
                 && let Some(count) = calls.get_mut(&id).filter(|c| **c > 0)
             {
                 // Paired with a call in the same request: consumed and kept.

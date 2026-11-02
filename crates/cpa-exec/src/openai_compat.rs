@@ -589,10 +589,6 @@ impl StreamTranslator for Identity {
     }
 }
 
-fn trim(bytes: &[u8]) -> &[u8] {
-    go::trim_space(bytes)
-}
-
 /// The ExecuteStream scan loop: SSE lines grouped into frames, Go's error detection on
 /// every frame, and the terminal rules for `[DONE]` and EOF.
 struct Frames {
@@ -661,11 +657,11 @@ impl Frames {
         if data.is_empty() {
             return payload::error_event(&event) && self.fail(502, "upstream error event ended without data");
         }
-        if data.len() > 1 && data.iter().any(|d| trim(d) == b"[DONE]") {
+        if data.len() > 1 && data.iter().any(|d| cpa_core::config::go_trim_space(d) == b"[DONE]") {
             return self.fail(502, "upstream stream ended with incomplete data before [DONE]");
         }
         let joined = data.join(&b"\n"[..]);
-        let payload_bytes = trim(&joined);
+        let payload_bytes = cpa_core::config::go_trim_space(&joined);
         let done = payload_bytes == b"[DONE]";
         if done && payload::error_event(&event) {
             return self.fail(502, "upstream error event ended before [DONE]");
@@ -680,7 +676,7 @@ impl Frames {
             self.saw_finish_reason |= gj::get(payload_bytes, "choices")
                 .array()
                 .iter()
-                .any(|choice| !trim(&choice.get("finish_reason").bytes()).is_empty());
+                .any(|choice| !cpa_core::config::go_trim_space(&choice.get("finish_reason").bytes()).is_empty());
         }
         let mut line = b"data: ".to_vec();
         line.extend_from_slice(payload_bytes);
@@ -699,14 +695,14 @@ impl Frames {
 
     /// One scanned line; true ends the scan.
     fn line(&mut self, line: &[u8]) -> bool {
-        let line = trim(line);
+        let line = cpa_core::config::go_trim_space(line);
         if line.is_empty() {
             return self.frame();
         }
         if let Some(rest) = line.strip_prefix(b"data:") {
-            self.data.push(trim(rest).to_vec());
+            self.data.push(cpa_core::config::go_trim_space(rest).to_vec());
         } else if let Some(rest) = line.strip_prefix(b"event:") {
-            self.event = String::from_utf8_lossy(trim(rest)).into_owned();
+            self.event = String::from_utf8_lossy(cpa_core::config::go_trim_space(rest)).into_owned();
         } else if line.starts_with(b":") || line.starts_with(b"id:") || line.starts_with(b"retry:") {
         } else if line.starts_with(b"{") || line.starts_with(b"[") {
             return self.fail_payload(502, String::from_utf8_lossy(line));

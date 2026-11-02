@@ -12,10 +12,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use base64::Engine as _;
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::signature::{self as sig, BlockKind, Provider};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
 use crate::claude_responses::{extract_call_id, normalize_tool_call_outputs, qualify_namespace_name};
-use crate::common::{file_ext, go_lower, normalize_openai_file_data, sanitize_function_name, trim_space};
+use crate::common::{file_ext, go_lower, normalize_openai_file_data, sanitize_function_name};
 use crate::gemini::{set_function_response_raw, set_function_response_result};
 use crate::gemini_chat_request::{content_node as content, text_part};
 use crate::gemini_web_search as ws;
@@ -63,7 +64,7 @@ pub(crate) fn go_base64_decode(input: &[u8], padded: bool) -> Option<Vec<u8>> {
 
 /// encodeGeminiResponsesCarrier.
 pub(crate) fn encode_carrier(raw_signature: &[u8], direction: &str, target: &str) -> Vec<u8> {
-    let raw = trim_space(raw_signature);
+    let raw = go_trim_space(raw_signature);
     if raw.is_empty() {
         return vec![];
     }
@@ -86,7 +87,7 @@ struct Decoded {
 
 /// decodeGeminiResponsesCarrier.
 fn decode_carrier(raw_signature: &[u8]) -> Decoded {
-    let raw = trim_space(raw_signature);
+    let raw = go_trim_space(raw_signature);
     let fail = Decoded {
         signature: vec![],
         direction: vec![],
@@ -146,7 +147,7 @@ fn field<'a>(item: &Res<'a>, path: &str) -> Cow<'a, [u8]> {
 }
 
 fn trimmed(item: &Res<'_>, path: &str) -> Vec<u8> {
-    trim_space(&field(item, path)).to_vec()
+    go_trim_space(&field(item, path)).to_vec()
 }
 
 fn item_type(item: &Res<'_>) -> Vec<u8> {
@@ -419,7 +420,8 @@ pub(crate) fn assistant_visible_text(item: &Res<'_>) -> Option<Vec<u8>> {
         return None;
     }
     if content.kind == Kind::String {
-        return matches!(go_lower(trim_space(&role)).as_slice(), b"assistant" | b"model").then(|| content.s.to_vec());
+        return matches!(go_lower(go_trim_space(&role)).as_slice(), b"assistant" | b"model")
+            .then(|| content.s.to_vec());
     }
     if !content.is_array() {
         return None;
@@ -439,7 +441,7 @@ pub(crate) fn assistant_visible_text(item: &Res<'_>) -> Option<Vec<u8>> {
 
 fn is_content_part_type(kind: &[u8]) -> bool {
     matches!(
-        go_lower(trim_space(kind)).as_slice(),
+        go_lower(go_trim_space(kind)).as_slice(),
         b"input_text"
             | b"output_text"
             | b"text"
@@ -691,7 +693,7 @@ fn first_non_empty(block: &Res<'_>, paths: &[&str]) -> Vec<u8> {
 }
 
 fn has_prefix_fold(s: &[u8], prefixes: &[&[u8]]) -> bool {
-    let s = trim_space(s);
+    let s = go_trim_space(s);
     prefixes
         .iter()
         .any(|p| s.len() >= p.len() && s[..p.len()].eq_ignore_ascii_case(p))
@@ -707,7 +709,7 @@ fn is_remote_url(raw: &[u8]) -> bool {
 
 fn is_generic_mime(mime: &[u8]) -> bool {
     matches!(
-        go_lower(trim_space(mime)).as_slice(),
+        go_lower(go_trim_space(mime)).as_slice(),
         b"" | b"application/octet-stream" | b"binary/octet-stream"
     )
 }
@@ -729,7 +731,7 @@ fn ext_lower(filename: &[u8]) -> Vec<u8> {
 /// parseOpenAIResponsesDataURL: MIME type and payload of a valid base64 data URL.
 fn parse_data_url(raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
     use cpa_common::gostr::GoStr;
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     if raw.len() < 5 || !raw[..5].eq_ignore_ascii_case(b"data:") {
         return (vec![], vec![]);
     }
@@ -737,13 +739,13 @@ fn parse_data_url(raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let Some(comma) = rest.iter().position(|&c| c == b',') else {
         return (vec![], vec![]);
     };
-    let (metadata, payload) = (&rest[..comma], trim_space(&rest[comma + 1..]));
+    let (metadata, payload) = (&rest[..comma], go_trim_space(&rest[comma + 1..]));
     if payload.is_empty() {
         return (vec![], vec![]);
     }
     let mut fields = metadata.split(|&c| c == b';');
-    let mime = trim_space(fields.next().unwrap_or_default()).to_vec();
-    if !fields.any(|f| String::from_utf8_lossy(trim_space(f)).go_eq_fold("base64")) {
+    let mime = go_trim_space(fields.next().unwrap_or_default()).to_vec();
+    if !fields.any(|f| String::from_utf8_lossy(go_trim_space(f)).go_eq_fold("base64")) {
         return (vec![], vec![]);
     }
     if go_base64_decode(payload, true).is_none() && go_base64_decode(payload, false).is_none() {
@@ -758,7 +760,7 @@ fn mapped_mime(lower: &[u8], prefix: &str) -> Option<&'static str> {
 
 /// openAIResponsesAudioMimeType.
 fn audio_mime(format: &[u8]) -> Vec<u8> {
-    let format = trim_space(format);
+    let format = go_trim_space(format);
     if is_generic_mime(format) {
         return b"audio/wav".to_vec();
     }
@@ -785,7 +787,7 @@ fn audio_mime(format: &[u8]) -> Vec<u8> {
 
 /// openAIResponsesVideoMimeType.
 fn video_mime(format: &[u8]) -> Vec<u8> {
-    let format = trim_space(format);
+    let format = go_trim_space(format);
     if is_generic_mime(format) {
         return b"video/mp4".to_vec();
     }
@@ -851,7 +853,7 @@ type Media = Option<(Vec<u8>, Vec<u8>)>;
 
 /// openAIResponsesAudioFromBlock.
 fn audio_from_block(block: &Res<'_>) -> Media {
-    let kind = go_lower(trim_space(&field(block, "type")));
+    let kind = go_lower(go_trim_space(&field(block, "type")));
     if kind != b"input_audio" && kind != b"audio" {
         return None;
     }
@@ -867,7 +869,7 @@ fn audio_from_block(block: &Res<'_>) -> Media {
         block.get("mime_type"),
     ]
     .iter()
-    .map(|v| trim_space(&v.bytes()).to_vec())
+    .map(|v| go_trim_space(&v.bytes()).to_vec())
     .find(|v| !v.is_empty() && !is_generic_mime(v))
     .unwrap_or_default();
     let mut data = audio.get("data").bytes().into_owned();
@@ -901,7 +903,7 @@ fn audio_from_block(block: &Res<'_>) -> Media {
 
 /// openAIResponsesVideoFromBlock.
 fn video_from_block(block: &Res<'_>) -> Media {
-    let kind = go_lower(trim_space(&field(block, "type")));
+    let kind = go_lower(go_trim_space(&field(block, "type")));
     if kind != b"input_video" && kind != b"video_url" && kind != b"video" {
         return None;
     }
@@ -917,7 +919,7 @@ fn video_from_block(block: &Res<'_>) -> Media {
         block.get("mime_type"),
     ]
     .iter()
-    .map(|v| trim_space(&v.bytes()).to_vec())
+    .map(|v| go_trim_space(&v.bytes()).to_vec())
     .find(|v| !v.is_empty() && !is_generic_mime(v))
     .unwrap_or_default();
     let url = first_non_empty(block, &["video_url.url", "video_url", "url"]);
@@ -949,7 +951,7 @@ fn video_from_block(block: &Res<'_>) -> Media {
 
 /// normalizeFormatToMIME.
 fn format_to_mime(format: &[u8]) -> Vec<u8> {
-    let format = trim_space(format);
+    let format = go_trim_space(format);
     if format.is_empty() || is_generic_mime(format) {
         return vec![];
     }
@@ -971,7 +973,7 @@ fn format_to_mime(format: &[u8]) -> Vec<u8> {
 
 /// openAIResponsesFileFromBlock.
 fn file_from_block(block: &Res<'_>) -> Media {
-    let kind = go_lower(trim_space(&field(block, "type")));
+    let kind = go_lower(go_trim_space(&field(block, "type")));
     if kind != b"input_file" && kind != b"file" {
         return None;
     }
@@ -1020,7 +1022,7 @@ fn file_from_block(block: &Res<'_>) -> Media {
 
 /// openAIResponsesImageMimeType.
 fn image_mime(format: &[u8], filename: &[u8]) -> Vec<u8> {
-    let format = trim_space(format);
+    let format = go_trim_space(format);
     if !format.is_empty() && !is_generic_mime(format) {
         if format.contains(&b'/') {
             return format.to_vec();
@@ -1059,7 +1061,7 @@ const IMAGE_FORMAT_PATHS: [&str; 6] = [
 
 /// openAIResponsesImageFromBlock.
 fn image_from_block(block: &Res<'_>) -> Media {
-    let kind = go_lower(trim_space(&field(block, "type")));
+    let kind = go_lower(go_trim_space(&field(block, "type")));
     if !matches!(kind.as_slice(), b"input_image" | b"image_url" | b"image") {
         return None;
     }
@@ -1191,7 +1193,7 @@ fn url_path_base(raw: &[u8]) -> Vec<u8> {
 /// openAIResponsesPartFromBlock: a `file_data` part for remote URLs, else an
 /// `inline_data` part.
 fn part_from_block(block: &Res<'_>) -> Option<Vec<u8>> {
-    let kind = go_lower(trim_space(&field(block, "type")));
+    let kind = go_lower(go_trim_space(&field(block, "type")));
     let url = first_non_empty(
         block,
         &[
@@ -1361,7 +1363,7 @@ fn standalone_output_text_parts(item: &Res<'_>) -> Vec<Vec<u8>> {
         let mut parts = vec![];
         output.each(|_, part| {
             let text = field(&part, "text");
-            if !trim_space(&text).is_empty() {
+            if !go_trim_space(&text).is_empty() {
                 parts.push(text_part(&text));
             }
             true
@@ -1369,7 +1371,7 @@ fn standalone_output_text_parts(item: &Res<'_>) -> Vec<Vec<u8>> {
         return parts;
     }
     let text = output.bytes();
-    if trim_space(&text).is_empty() {
+    if go_trim_space(&text).is_empty() {
         vec![]
     } else {
         vec![text_part(&text)]
@@ -1538,7 +1540,7 @@ fn gemini_thought_signature(raw: &[u8]) -> Vec<u8> {
 
 /// coalesceAdjacentOpenAIResponsesModelContents: consecutive model turns share one.
 fn coalesce_model_contents(contents: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    let is_model = |c: &[u8]| eq_fold(trim_space(&gj::get(c, "role").bytes()), "model");
+    let is_model = |c: &[u8]| eq_fold(go_trim_space(&gj::get(c, "role").bytes()), "model");
     let mut coalesced: Vec<Vec<u8>> = Vec::with_capacity(contents.len());
     for content in contents {
         let parts = gj::get(&content, "parts");
@@ -1631,7 +1633,7 @@ fn apply_text_format(out: &mut Vec<u8>, root: &Res<'_>) {
     if !format.exists() {
         return;
     }
-    match go_lower(trim_space(&format.get("type").bytes())).as_slice() {
+    match go_lower(go_trim_space(&format.get("type").bytes())).as_slice() {
         b"json_object" => {
             gj::set_str(out, "generationConfig.responseMimeType", "application/json");
         }
@@ -1759,7 +1761,7 @@ pub(crate) fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
 
     let effort = root.get("reasoning.effort");
     if effort.exists() {
-        let effort = go_lower(trim_space(&effort.bytes()));
+        let effort = go_lower(go_trim_space(&effort.bytes()));
         if effort == b"auto" {
             gj::set_int(&mut out, "generationConfig.thinkingConfig.thinkingBudget", -1);
         } else if !effort.is_empty() {
@@ -1849,10 +1851,10 @@ fn convert_items(
                             true
                         });
                         let joined = texts.join(&b'\n');
-                        if !texts.is_empty() && !trim_space(&joined).is_empty() {
+                        if !texts.is_empty() && !go_trim_space(&joined).is_empty() {
                             developer_parts.push(text_part(&crate::common::system_reminder_text(&joined)));
                         }
-                    } else if content_value.kind == Kind::String && !trim_space(&content_value.s).is_empty() {
+                    } else if content_value.kind == Kind::String && !go_trim_space(&content_value.s).is_empty() {
                         developer_parts.push(text_part(&crate::common::system_reminder_text(&content_value.s)));
                     }
                     if !developer_parts.is_empty() {
@@ -2026,7 +2028,7 @@ fn convert_items(
                 let thought_text = field(item, "summary.0.text").into_owned();
                 let mut raw_signature = field(item, "encrypted_content").into_owned();
                 let (dir, tgt) = (direction(item), target(item));
-                if trim_space(&raw_signature).is_empty() && i + 1 < normalized.len() {
+                if go_trim_space(&raw_signature).is_empty() && i + 1 < normalized.len() {
                     let next = &normalized[i + 1];
                     if item_type(next) == b"reasoning"
                         && contains(&field(next, "id"), b"_detached_after_")
@@ -2037,7 +2039,7 @@ fn convert_items(
                         i += 1;
                     }
                 }
-                let signature = if trim_space(&raw_signature).is_empty() {
+                let signature = if go_trim_space(&raw_signature).is_empty() {
                     vec![]
                 } else {
                     gemini_thought_signature(&raw_signature)

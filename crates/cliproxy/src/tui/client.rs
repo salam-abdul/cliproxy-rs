@@ -204,7 +204,7 @@ impl Client {
     async fn checked(&self, method: wreq::Method, path: &str, body: Option<String>) -> Result<Vec<u8>, String> {
         let (code, data) = self.request(method, path, body).await?;
         if code >= 400 {
-            let text = String::from_utf8_lossy(cpa_common::gostr::trim_space(&data)).into_owned();
+            let text = String::from_utf8_lossy(cpa_core::config::go_trim_space(&data)).into_owned();
             return Err(format!("HTTP {code}: {text}"));
         }
         Ok(data)

@@ -6,11 +6,12 @@ use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
 use cpa_common::signature::{BlockKind, gemini_replay_signature_or_bypass};
+use cpa_core::config::go_trim_space;
 
 use crate::claude_interactions::Accumulator;
 use crate::common::{
     derive_claude_user_id, format_rfc3339_utc, go_lower, is_gemini_thought_part, now_unix,
-    sanitize_claude_function_name, trim_space,
+    sanitize_claude_function_name,
 };
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx, thinking};
@@ -156,7 +157,7 @@ fn copy_generation_config(out: &mut Vec<u8>, config: &Res<'_>, model: &str) {
         level = thinking_config.get("thinking_level");
     }
     if level.exists() {
-        let level = go_lower(trim_space(&level.bytes()));
+        let level = go_lower(go_trim_space(&level.bytes()));
         match level.as_slice() {
             b"" => {}
             b"none" => disable(out),
@@ -213,11 +214,11 @@ struct ToolIds {
 
 /// getGeminiToolID: the trimmed `id`, else the trimmed `call_id`.
 fn gemini_tool_id(value: &Res<'_>) -> Vec<u8> {
-    let id = trim_space(&value.get("id").bytes()).to_vec();
+    let id = go_trim_space(&value.get("id").bytes()).to_vec();
     if !id.is_empty() {
         return id;
     }
-    trim_space(&value.get("call_id").bytes()).to_vec()
+    go_trim_space(&value.get("call_id").bytes()).to_vec()
 }
 
 impl ToolIds {
@@ -552,7 +553,7 @@ impl State {
         let args = self
             .tool_args
             .get(&index)
-            .map(|a| trim_space(a).to_vec())
+            .map(|a| go_trim_space(a).to_vec())
             .unwrap_or_default();
         let id = self.tool_ids.get(&index).cloned().unwrap_or_default();
         if name.is_empty() && args.is_empty() {
@@ -601,7 +602,7 @@ impl GoStream for State {
         let Some(payload) = line.strip_prefix(b"data:") else {
             return Ok(vec![]);
         };
-        let root = gj::parse(trim_space(payload));
+        let root = gj::parse(go_trim_space(payload));
         let mut template = br#"{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}"#.to_vec();
         if !self.model.is_empty() {
             gj::set_str(&mut template, "modelVersion", &self.model);
@@ -772,7 +773,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
         let Some(payload) = line.strip_prefix(b"data:") else {
             continue;
         };
-        let payload = trim_space(payload);
+        let payload = go_trim_space(payload);
         if payload.is_empty() {
             continue;
         }

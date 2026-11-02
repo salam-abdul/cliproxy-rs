@@ -24,7 +24,7 @@ Example input:
 
 /// applypatch.IsCustomTool.
 pub(crate) fn is_custom_tool(tool: &Res<'_>) -> bool {
-    tool.get("type").str() == "custom" && crate::common::trim_space(&tool.get("name").bytes()) == b"apply_patch"
+    tool.get("type").str() == "custom" && cpa_core::config::go_trim_space(&tool.get("name").bytes()) == b"apply_patch"
 }
 
 /// applypatch.Description: the original description (minus the freeform warning), the
@@ -40,7 +40,7 @@ pub(crate) fn description(tool: &Res<'_>) -> Vec<u8> {
     }
     stripped.extend_from_slice(rest);
     let mut out = vec![];
-    if !crate::common::trim_space(&stripped).is_empty() {
+    if !cpa_core::config::go_trim_space(&stripped).is_empty() {
         out.extend_from_slice(&stripped);
         out.extend_from_slice(b"\n\n");
     }

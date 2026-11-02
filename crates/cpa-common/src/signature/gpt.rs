@@ -1,8 +1,9 @@
 //! OpenAI reasoning `encrypted_content`: Fernet tokens (gpt_validation.go).
 
+use cpa_core::config::go_trim_space;
+
 use super::wire::{RAW_URL, URL};
 use super::{Error, err, first_invalid_char};
-use crate::gostr::trim_space;
 
 pub const MAX_GPT_REASONING_SIGNATURE_LEN: usize = 32 * 1024 * 1024;
 
@@ -21,7 +22,7 @@ pub fn is_valid_gpt_reasoning_signature(raw: impl AsRef<[u8]>) -> bool {
 /// `InspectGPTReasoningSignature`: version 0x80, 8-byte timestamp, 16-byte IV,
 /// AES-block ciphertext and a 32-byte HMAC.
 pub fn inspect_gpt_reasoning_signature(raw: impl AsRef<[u8]>) -> Result<GptSignatureInfo, Error> {
-    let sig = trim_space(raw.as_ref());
+    let sig = go_trim_space(raw.as_ref());
     if sig.is_empty() {
         return err("empty GPT reasoning signature");
     }
