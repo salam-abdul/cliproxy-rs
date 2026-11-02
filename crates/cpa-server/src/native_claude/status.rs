@@ -1,6 +1,9 @@
 use super::{Account, State, now, policy, quota};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, PoisonError},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -78,7 +81,7 @@ impl State {
         let mut ready = false;
         let mut states = Vec::new();
         {
-            let routing = self.routing.lock().unwrap();
+            let routing = self.routing.lock().unwrap_or_else(PoisonError::into_inner);
             for a in &accounts {
                 let included = self.included_available(a, &a.quota, model);
                 let cooldown = routing.cooldowns.until(&a.id, model);
@@ -125,7 +128,13 @@ impl State {
         let state = self.clone();
         let counts = tokio::task::spawn_blocking(move || {
             let mut counts = BTreeMap::new();
-            for id in state.routing.lock().unwrap().affinity.accounts() {
+            for id in state
+                .routing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .affinity
+                .accounts()
+            {
                 *counts.entry(id.clone()).or_insert(0) += 1;
             }
             counts

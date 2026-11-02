@@ -307,3 +307,34 @@ async fn native_accepted_broken_stream_is_never_replayed() {
     assert_eq!(received, SUCCESS);
     assert_eq!(fixture.seen.lock().unwrap().len(), 1);
 }
+
+/// A panic while the routing and session locks were held does not take the router
+/// down: later requests still route and status still answers.
+#[tokio::test]
+async fn native_routing_survives_a_panic_under_its_locks() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let state = fixture.state.clone();
+    std::thread::spawn(move || {
+        let _routing = state.routing.lock().unwrap();
+        let _sessions = state.sessions.lock().unwrap();
+        panic!("synthetic panic under the routing locks");
+    })
+    .join()
+    .unwrap_err();
+    assert!(fixture.state.routing.is_poisoned() && fixture.state.sessions.is_poisoned());
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap(), SUCCESS);
+    assert_eq!(
+        fixture.state.status().await.unwrap()["accounts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}

@@ -35,7 +35,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -251,7 +251,7 @@ impl State {
     pub(crate) async fn set_overage(self: &Arc<Self>, allow: bool) -> anyhow::Result<()> {
         let s = self.clone();
         tokio::task::spawn_blocking(move || {
-            let mut routing = s.routing.lock().unwrap();
+            let mut routing = s.routing.lock().unwrap_or_else(PoisonError::into_inner);
             let mut next = routing.clone();
             next.policy.allow_extra_usage = allow;
             next.persist(&s.config.database)?;
@@ -261,7 +261,11 @@ impl State {
         .await?
     }
     fn allow_extra_usage(&self) -> bool {
-        self.routing.lock().unwrap().policy.allow_extra_usage
+        self.routing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .policy
+            .allow_extra_usage
     }
     fn reset(&self, a: &Account, model: &str) -> Option<quota::Reset> {
         let at = now();
@@ -270,7 +274,7 @@ impl State {
             recovery = recovery.intersect(quota::header_recovery(&snapshot.signals, at));
         }
         recovery.reset().map(|mut reset| {
-            let routing = self.routing.lock().unwrap();
+            let routing = self.routing.lock().unwrap_or_else(PoisonError::into_inner);
             reset.at = reset.at.max(routing.cooldowns.until(&a.id, model));
             reset
         })
@@ -416,12 +420,12 @@ impl State {
             let active: HashSet<_> = s
                 .sessions
                 .lock()
-                .unwrap()
+                .unwrap_or_else(PoisonError::into_inner)
                 .iter()
                 .filter(|(_, lock)| Arc::strong_count(lock) > 1)
                 .map(|(sid, _)| sid.clone())
                 .collect();
-            let mut routing = s.routing.lock().unwrap();
+            let mut routing = s.routing.lock().unwrap_or_else(PoisonError::into_inner);
             let at = now();
             let mut next = routing.clone();
             let mut protected = active.clone();
@@ -527,7 +531,7 @@ impl State {
         let account = a.id.clone();
         let model = model.to_owned();
         tokio::task::spawn_blocking(move || {
-            let mut routing = s.routing.lock().unwrap();
+            let mut routing = s.routing.lock().unwrap_or_else(PoisonError::into_inner);
             let mut next = routing.clone();
             if model_only {
                 next.cooldowns.cool_model(&account, &model, delay, now());
@@ -632,7 +636,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
     };
     let model = model.to_owned();
     let lock = {
-        let mut sessions = s.sessions.lock().unwrap();
+        let mut sessions = s.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
         sessions.entry(sid.clone()).or_default().clone()
     };
@@ -1000,7 +1004,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
-    *s.rt.native_state.write().unwrap() = Arc::downgrade(&s);
+    *s.rt.native_state.write().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&s);
     let cert_state = s.clone();
     let certificate = tokio::spawn(async move {
         loop {
@@ -1012,7 +1016,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
                     Ok(None)
                 }
             }) {
-                Ok(Some(tls)) => *cert_state.tls.write().unwrap() = tls,
+                Ok(Some(tls)) => *cert_state.tls.write().unwrap_or_else(PoisonError::into_inner) = tls,
                 Ok(None) => {}
                 Err(_) => tracing::error!("Native Claude certificate renewal failed"),
             }
@@ -1130,7 +1134,7 @@ fn renew_certificate(c: &Config) -> anyhow::Result<bool> {
 }
 
 fn new_ssl(s: &State) -> Result<Ssl, btls::error::ErrorStack> {
-    Ssl::new(s.tls.read().unwrap().context())
+    Ssl::new(s.tls.read().unwrap_or_else(PoisonError::into_inner).context())
 }
 
 #[cfg(test)]
