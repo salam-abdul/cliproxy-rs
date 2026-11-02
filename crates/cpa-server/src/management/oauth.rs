@@ -1112,7 +1112,7 @@ fn handle_callback(state: &Management, req: CallbackRequest) -> Response {
 
 /// `url.Parse(raw).RawQuery`, or `None` where Go's parser fails.
 fn redirect_query(raw: &str) -> Option<String> {
-    cpa_core::config::go_url::parse(raw)?;
+    cpa_core::config::go_url::parse(raw).ok()?;
     let without_fragment = raw.split('#').next().unwrap_or_default();
     Some(
         without_fragment

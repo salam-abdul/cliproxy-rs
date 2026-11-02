@@ -23,6 +23,10 @@ The 2026-10-31 review screened `3078035..dbb7062` (89 Go commits), `0ccf7e4..b7a
 
 Out of scope: the plugin host, packaged releases, upstream CI, Go parity fixtures, benchmarks, discovery and unrelated dashboard branding. Omit plugin and distributed-product parts of mixed commits.
 
+## Recorded differences
+
+- `cpa_core::config::go_url` follows Go 1.27.3 `parseHost` (a `[` only at the host start, strict colons for http and https only, no empty zone), not the older Go behind `xai_auth_go.json`: that parser accepts `https://attacker.example\[::1%25.x.ai]/` as an x.ai host while the HTTP client would contact `attacker.example`, so it now fails closed as `invalid IP-literal`; `xai_url::same_authority` stays as the second guard.
+
 ## Next review
 
 1. Fetch separate review clones. Check each saved hash is an ancestor of its new head; investigate rewritten history first.

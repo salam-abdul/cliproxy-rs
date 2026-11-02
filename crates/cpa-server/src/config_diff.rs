@@ -36,19 +36,20 @@ fn url(v: &Value) -> String {
     if raw.is_empty() {
         return "<none>".into();
     }
-    let Some(parsed) = cpa_core::config::go_url::parse(raw) else {
+    let Ok(parsed) = cpa_core::config::go_url::parse(raw) else {
         return "<redacted>".into();
     };
-    if parsed.host().is_empty() {
+    if parsed.host.is_empty() {
         return cpa_core::config::go_url::parse(&format!("http://{raw}"))
-            .filter(|p| !p.host().is_empty())
-            .map(|p| p.host().to_owned())
+            .ok()
+            .filter(|p| !p.host.is_empty())
+            .map(|p| p.host)
             .unwrap_or_else(|| "<redacted>".into());
     }
     if parsed.scheme.is_empty() {
-        parsed.host().to_owned()
+        parsed.host.clone()
     } else {
-        format!("{}://{}", parsed.scheme, parsed.host())
+        format!("{}://{}", parsed.scheme, parsed.host)
     }
 }
 

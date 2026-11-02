@@ -515,62 +515,22 @@ pub fn call_id_from_location(location: &str) -> String {
     if valid_call_id(location) {
         return location.into();
     }
-    let Some((path, query)) = go_url_path_query(location) else {
+    let Ok(url) = go_url::parse(location) else {
         return String::new();
     };
-    if let Some(id) = go_url::query_get(&query, "call_id").map(|id| String::from_utf8_lossy(&id).trim().to_owned())
+    if let Some(id) =
+        go_url::query_get(&url.raw_query, "call_id").map(|id| String::from_utf8_lossy(&id).trim().to_owned())
         && valid_call_id(&id)
     {
         return id;
     }
+    let path = go_url::path_unescape(&url.raw_path).unwrap_or_default();
+    let path = String::from_utf8_lossy(&path);
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
         [.., previous, id] if valid_call_id(id) && matches!(*previous, "live" | "calls") => (*id).to_owned(),
         _ => String::new(),
     }
-}
-
-/// The unescaped path and raw query of `url.Parse(raw)`, `None` where Go errors.
-// ponytail: covers what an upstream `Location` can carry (scheme, authority, escapes,
-// query, fragment); Go's host and port validation is not ported.
-fn go_url_path_query(raw: &str) -> Option<(String, String)> {
-    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return None;
-    }
-    let (rest, fragment) = raw.split_once('#').unwrap_or((raw, ""));
-    go_url::path_unescape(fragment)?;
-    let scheme_end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
-    let (scheme, mut rest) = match scheme_end {
-        Some(0) if rest.starts_with(':') => return None,
-        Some(i) if rest[i..].starts_with(':') && rest.as_bytes()[0].is_ascii_alphabetic() => {
-            (&rest[..i], &rest[i + 1..])
-        }
-        _ => ("", rest),
-    };
-    let query;
-    if rest.ends_with('?') && rest.matches('?').count() == 1 {
-        query = "";
-        rest = &rest[..rest.len() - 1];
-    } else {
-        let (path, q) = rest.split_once('?').unwrap_or((rest, ""));
-        rest = path;
-        query = q;
-    }
-    if !rest.starts_with('/') {
-        if !scheme.is_empty() {
-            return Some((String::new(), query.into()));
-        }
-        if rest.split('/').next().is_some_and(|segment| segment.contains(':')) {
-            return None;
-        }
-    }
-    if (!scheme.is_empty() || !rest.starts_with("///")) && rest.starts_with("//") {
-        let after = &rest[2..];
-        let end = after.find('/').unwrap_or(after.len());
-        rest = &after[end..];
-    }
-    let path = go_url::path_unescape(rest)?;
-    Some((String::from_utf8_lossy(&path).into_owned(), query.into()))
 }
 
 /// The three sideband URL shapes (`sidebandStyle`).

@@ -1204,7 +1204,7 @@ fn kimi_domain(s: &str) -> Option<&'static str> {
 
 /// Go `isKimiAIHost` / `isKimiComHost`: a URL Go cannot parse classifies as neither.
 fn kimi_url_domain(raw: &str) -> Option<&'static str> {
-    let host = super::go_url::parse(raw.trim())?.hostname().trim().to_lowercase();
+    let host = super::go_url::parse(raw.trim()).ok()?.hostname.trim().to_lowercase();
     if host == KIMI_AI || host.ends_with(".kimi.ai") {
         Some(KIMI_AI)
     } else if host == KIMI_COM || host.ends_with(".kimi.com") {
