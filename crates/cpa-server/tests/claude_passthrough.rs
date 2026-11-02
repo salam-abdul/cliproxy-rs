@@ -49,7 +49,7 @@ async fn upstream(State(log): State<Log>, req: Request) -> Response {
         client_key_leaked: parts.headers.values().any(|v| v.as_bytes() == b"client-key-1"),
         body: body.clone(),
     });
-    let has = |marker: &[u8]| body.windows(marker.len()).any(|w| w == marker);
+    let has = |marker: &[u8]| cpa_common::gostr::contains(&body, marker);
     if has(b"MODE_429") {
         let err = r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
         return (
@@ -257,7 +257,7 @@ data: {"type":"error","error":{"type":"api_error","message":"unexpected EOF"#
             "caller-owned shape carries no managed betas: {}",
             s.beta
         );
-        let streaming = s.body.windows(13).any(|w| w == br#""stream":true"#);
+        let streaming = cpa_common::gostr::contains(&s.body, br#""stream":true"#);
         let expected = if streaming {
             "identity"
         } else {
@@ -503,7 +503,7 @@ async fn slow_upstream(seen: Arc<Mutex<Vec<(usize, bool)>>>) -> String {
                         USAGE_SSE.len()
                     );
                     conn.get_mut().write_all(head.as_bytes()).await.unwrap();
-                    if body.windows(8).any(|w| w == b"MODE_CUT") {
+                    if cpa_common::gostr::contains(&body, b"MODE_CUT") {
                         let _ = conn.get_mut().write_all(FIRST_EVENT.as_bytes()).await;
                         return;
                     }

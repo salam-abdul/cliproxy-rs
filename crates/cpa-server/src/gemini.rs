@@ -125,8 +125,8 @@ pub async fn interactions(
         }
         return invalid("invalid JSON body");
     };
-    let model = gojson::trim(&gojson::gjson_string(root.get("model"))).to_owned();
-    let agent = gojson::trim(&gojson::gjson_string(root.get("agent"))).to_owned();
+    let model = gojson::gjson_string(root.get("model")).trim().to_owned();
+    let agent = gojson::gjson_string(root.get("agent")).trim().to_owned();
     if model.is_empty() == agent.is_empty() {
         return invalid("request requires exactly one of model or agent");
     }

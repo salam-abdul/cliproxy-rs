@@ -326,14 +326,10 @@ pub(crate) struct Downstream {
 }
 
 /// The failure status and body the server records for an executor error when the
-/// executor publishes nothing itself (cpa_server::classify `go_status`, `error_text`):
-/// transport faults carry no status, as Go's plain errors.
+/// executor publishes nothing itself (`ExecError::go_status`, cpa_server::classify
+/// `error_text`).
 pub(crate) fn go_failure(e: &cpa_core::exec::ExecError) -> (u16, String) {
-    let status = if e.scope == cpa_core::exec::FailureScope::Transport {
-        0
-    } else {
-        e.status
-    };
+    let status = e.go_status();
     let text = if e.body.is_empty() {
         format!("status {}", e.status)
     } else {
@@ -749,7 +745,7 @@ pub(crate) fn assert_usage_like_go(name: &str, fx: &Value, log: &UsageLog, failu
                 "{name}: upstream model"
             ),
             (Some("devin"), Some(model)) => assert!(
-                !model.is_empty() && sent.windows(model.len()).any(|w| w == model.as_bytes()),
+                !model.is_empty() && cpa_common::gostr::contains(&sent, model.as_bytes()),
                 "{name}: upstream model {model:?} is not in Go's request"
             ),
             (Some("meta"), None) => {}
@@ -1114,7 +1110,7 @@ impl CaptureLog {
                     response_set = true;
                 }
                 CaptureRecord::Chunk(chunk) => {
-                    let data = cpa_common::gostr::trim_space(chunk);
+                    let data = cpa_core::config::go_trim_space(chunk);
                     if data.is_empty() {
                         continue;
                     }

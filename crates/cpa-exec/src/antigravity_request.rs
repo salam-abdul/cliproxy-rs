@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use cpa_common::gostr::trim_space;
 use cpa_common::json::{self as gj, GoValue, Kind, Res};
 use cpa_common::signature::{self as sig, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR};
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::Credential;
 use cpa_core::format::Format;
 use sha2::{Digest, Sha256};
@@ -152,10 +152,11 @@ pub(crate) fn derived_session_id(derived: Option<&str>) -> String {
 /// `toolConfig` moved into the request.
 pub(crate) fn gemini_to_antigravity(model: &str, body: Vec<u8>, project: &str, derived_session: &str) -> Vec<u8> {
     let original = body.clone();
-    let mut out = payload::set_str_if_different(body, "model", model);
-    out = payload::set_str_if_different(out, "userAgent", "antigravity");
+    let mut out = body;
+    gj::set_str_if_different(&mut out, "model", model);
+    gj::set_str_if_different(&mut out, "userAgent", "antigravity");
     let image = model.contains("image");
-    let mut kind = String::from_utf8_lossy(trim_space(&gj::get(&out, "requestType").bytes())).into_owned();
+    let mut kind = String::from_utf8_lossy(go_trim_space(&gj::get(&out, "requestType").bytes())).into_owned();
     if kind.is_empty() {
         kind = if image { "image_gen" } else { "agent" }.to_owned();
         gj::set_str(&mut out, "requestType", &kind);
@@ -163,13 +164,14 @@ pub(crate) fn gemini_to_antigravity(model: &str, body: Vec<u8>, project: &str, d
     if project.is_empty() {
         gj::delete(&mut out, "project");
     } else {
-        out = payload::set_str_if_different(out, "project", project);
+        gj::set_str_if_different(&mut out, "project", project);
     }
     if image {
         gj::set_str(&mut out, "requestId", image_request_id());
     } else if kind != "web_search" {
         gj::set_str(&mut out, "requestId", request_id());
-        let mut session = String::from_utf8_lossy(trim_space(&gj::get(&out, "request.sessionId").bytes())).into_owned();
+        let mut session =
+            String::from_utf8_lossy(go_trim_space(&gj::get(&out, "request.sessionId").bytes())).into_owned();
         if session.is_empty() {
             session = derived_session.trim().to_owned();
         }
@@ -603,8 +605,8 @@ fn repair_function_response_names(body: Vec<u8>) -> Vec<u8> {
             if !call.exists() {
                 continue;
             }
-            let id = trim_space(&call.get("id").bytes()).to_vec();
-            let name = trim_space(&call.get("name").bytes()).to_vec();
+            let id = go_trim_space(&call.get("id").bytes()).to_vec();
+            let name = go_trim_space(&call.get("name").bytes()).to_vec();
             if !id.is_empty() && !name.is_empty() && name != b"unknown" {
                 names.insert(id, name);
             }
@@ -624,8 +626,8 @@ fn repair_function_response_names(body: Vec<u8>) -> Vec<u8> {
             if !response.exists() {
                 continue;
             }
-            let id = trim_space(&response.get("id").bytes()).to_vec();
-            let name = trim_space(&response.get("name").bytes()).to_vec();
+            let id = go_trim_space(&response.get("id").bytes()).to_vec();
+            let name = go_trim_space(&response.get("name").bytes()).to_vec();
             if id.is_empty() || (!name.is_empty() && name != b"unknown") {
                 continue;
             }
@@ -649,7 +651,7 @@ fn repair_function_response_names(body: Vec<u8>) -> Vec<u8> {
 
 /// `util.IsGeminiClaudeToolUseID`: the reserved Claude-facing provenance namespace.
 pub(crate) fn is_claude_provenance_id(id: &[u8]) -> bool {
-    trim_space(id)
+    go_trim_space(id)
         .strip_prefix(b"cpa_gemini_")
         .is_some_and(|digest| digest.len() == 32 && digest.iter().all(u8::is_ascii_hexdigit))
 }
@@ -679,7 +681,7 @@ fn has_provenance_id(body: &[u8]) -> bool {
 /// `antigravitySyntheticToolCallID`.
 fn synthetic_call_id(reserved: &[u8]) -> String {
     let sum = Sha256::digest([&b"antigravity-degraded-tool-call\x00"[..], reserved].concat());
-    let hex: String = sum[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = cpa_core::hex::encode(&sum[..6]);
     format!("call_{hex}")
 }
 
@@ -703,7 +705,7 @@ fn degrade_provenance_ids(body: &[u8]) -> (Vec<u8>, usize) {
             if call.exists() {
                 let first = !seen_call;
                 seen_call = true;
-                let id = trim_space(&call.get("id").bytes()).to_vec();
+                let id = go_trim_space(&call.get("id").bytes()).to_vec();
                 if !is_claude_provenance_id(&id) {
                     continue;
                 }
@@ -731,7 +733,7 @@ fn degrade_provenance_ids(body: &[u8]) -> (Vec<u8>, usize) {
             }
             let response = part.get("functionResponse");
             if response.exists() {
-                let id = trim_space(&response.get("id").bytes()).to_vec();
+                let id = go_trim_space(&response.get("id").bytes()).to_vec();
                 if !is_claude_provenance_id(&id) {
                     continue;
                 }
@@ -758,7 +760,7 @@ pub(crate) fn native_part_signature(part: &Res<'_>) -> Vec<u8> {
         "extra_content.google.thought_signature",
     ]
     .iter()
-    .map(|path| trim_space(&part.get(path).bytes()).to_vec())
+    .map(|path| go_trim_space(&part.get(path).bytes()).to_vec())
     .find(|s| !s.is_empty())
     .unwrap_or_default()
 }
@@ -772,7 +774,7 @@ fn repair_unsigned_first_calls(body: Vec<u8>) -> Vec<u8> {
     }
     let mut edits = Vec::new();
     for (i, content) in contents.array().iter().enumerate() {
-        if !trim_space(&content.get("role").bytes()).eq_ignore_ascii_case(b"model") {
+        if !go_trim_space(&content.get("role").bytes()).eq_ignore_ascii_case(b"model") {
             continue;
         }
         let parts = content.get("parts");
@@ -955,27 +957,8 @@ pub(crate) fn is_search_redirect(raw: &str) -> bool {
     let (authority, path) = rest.split_at(end);
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     host == "vertexaisearch.cloud.google.com"
-        && unescape(fragment).is_some()
-        && unescape(path).is_some_and(|p| p.starts_with(b"/grounding-api-redirect/"))
-}
-
-/// Go `url.unescape`: `None` for a malformed `%` escape.
-fn unescape(s: &str) -> Option<Vec<u8>> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = bytes.get(i + 1..i + 3)?;
-            let value = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-            out.push(value);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Some(out)
+        && cpa_core::config::go_url::path_unescape(fragment).is_some()
+        && cpa_core::config::go_url::path_unescape(path).is_some_and(|p| p.starts_with(b"/grounding-api-redirect/"))
 }
 
 /// The grounding chunks of a response: their array path and each chunk's trimmed URI.
@@ -992,7 +975,7 @@ pub(crate) fn grounding_uris(body: &[u8]) -> Option<(&'static str, Vec<String>)>
     let uris = chunks
         .array()
         .iter()
-        .map(|c| String::from_utf8_lossy(trim_space(&c.get("web.uri").bytes())).into_owned())
+        .map(|c| String::from_utf8_lossy(go_trim_space(&c.get("web.uri").bytes())).into_owned())
         .collect();
     Some((base, uris))
 }
@@ -1016,7 +999,7 @@ impl Pending {
         };
         let text = std::mem::take(&mut self.text);
         let signature = std::mem::take(&mut self.signature);
-        let blank = trim_space(&text).is_empty();
+        let blank = go_trim_space(&text).is_empty();
         if !thought {
             if !blank {
                 let mut part = b"{\"text\":".to_vec();
@@ -1076,7 +1059,7 @@ pub(crate) fn merge_stream(stream: &[u8]) -> Vec<u8> {
     let mut parts: Vec<Vec<u8>> = Vec::new();
     let mut pending = Pending::default();
     for line in stream.split(|b| *b == b'\n') {
-        let line = trim_space(line);
+        let line = go_trim_space(line);
         if line.is_empty() || !gj::valid(line) {
             continue;
         }
@@ -1199,7 +1182,7 @@ pub(crate) fn decide_429(body: &[u8]) -> (RateLimit, Option<Duration>) {
     }
     let retry = crate::antigravity_auth::parse_retry_delay(body);
     let status = gj::get(body, "error.status").bytes().into_owned();
-    if !trim_space(&status).eq_ignore_ascii_case(b"RESOURCE_EXHAUSTED") {
+    if !go_trim_space(&status).eq_ignore_ascii_case(b"RESOURCE_EXHAUSTED") {
         return (RateLimit::SoftRetry, retry);
     }
     let details = gj::get(body, "error.details");
@@ -1208,7 +1191,7 @@ pub(crate) fn decide_429(body: &[u8]) -> (RateLimit, Option<Duration>) {
             if *detail.get("@type").bytes() != *b"type.googleapis.com/google.rpc.ErrorInfo" {
                 continue;
             }
-            let reason = trim_space(&detail.get("reason").bytes()).to_vec();
+            let reason = go_trim_space(&detail.get("reason").bytes()).to_vec();
             if reason.eq_ignore_ascii_case(b"QUOTA_EXHAUSTED") {
                 return (RateLimit::FullQuotaExhausted, retry);
             }

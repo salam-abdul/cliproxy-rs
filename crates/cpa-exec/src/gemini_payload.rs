@@ -11,24 +11,6 @@ use cpa_common::json::{self as gj, Kind};
 
 const EMPTY_USER_TURN: &[u8] = br#"{"role":"user","parts":[{"text":""}]}"#;
 
-/// `helps.SetStringIfDifferent`.
-pub(crate) fn set_str_if_different(body: Vec<u8>, path: &str, value: &str) -> Vec<u8> {
-    let current = gj::get(&body, path);
-    if current.kind == Kind::String && *current.bytes() == *value.as_bytes() {
-        return body;
-    }
-    gj::try_set_str(&body, path, value).unwrap_or(body)
-}
-
-/// `helps.SetBoolIfDifferent`.
-pub(crate) fn set_bool_if_different(body: Vec<u8>, path: &str, value: bool) -> Vec<u8> {
-    let current = gj::get(&body, path).kind;
-    if (value && current == Kind::True) || (!value && current == Kind::False) {
-        return body;
-    }
-    gj::try_set_raw(&body, path, if value { "true" } else { "false" }).unwrap_or(body)
-}
-
 /// `sjson.DeleteBytes` whose error Go discards. A failed delete leaves the body as is.
 pub(crate) fn delete(mut body: Vec<u8>, path: &str) -> Vec<u8> {
     gj::delete(&mut body, path);

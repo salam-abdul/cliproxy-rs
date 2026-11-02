@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Go `CooldownStateRecord`. An empty `model` is the credential-level record.
@@ -80,17 +80,9 @@ pub mod go_time {
 
     pub fn serialize<S: serde::Serializer>(t: &Option<SystemTime>, s: S) -> Result<S::Ok, S::Error> {
         match t {
-            Some(t) => s.serialize_str(&rfc3339_nano(*t)),
+            Some(t) => s.serialize_str(&crate::gotime::rfc3339_nano(&DateTime::<Utc>::from(*t))),
             None => s.serialize_str(ZERO),
         }
-    }
-
-    /// Go `time.RFC3339Nano`: nanoseconds with trailing zeros trimmed, no dot when zero.
-    pub fn rfc3339_nano(t: SystemTime) -> String {
-        let text = DateTime::<Utc>::from(t).to_rfc3339_opts(SecondsFormat::Nanos, true);
-        let (head, _) = text.split_once('Z').unwrap_or((&text, ""));
-        let head = head.trim_end_matches('0').trim_end_matches('.');
-        format!("{head}Z")
     }
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {

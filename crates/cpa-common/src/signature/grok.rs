@@ -1,13 +1,14 @@
 //! xAI `encrypted_content` (grok_validation.go). xAI ciphertext has no envelope, so this
 //! is a replay-safety shape check after provenance is known, never a detector.
 
+use cpa_core::config::go_trim_space;
+
 use super::wire::RAW_STD;
 use super::{
     ClaudeValidation, Error, GeminiValidation, err, first_invalid_char, inspect_gemini_thought_signature,
     is_valid_claude_cais_signature, is_valid_claude_thinking_signature, is_valid_kimi_thinking_signature,
     maybe_self_describing_envelope, split_provider_prefix,
 };
-use crate::gostr::trim_space;
 
 pub const MAX_GROK_ENCRYPTED_CONTENT_LEN: usize = 8 * 1024 * 1024;
 pub const MIN_GROK_ENCRYPTED_CONTENT_DECODED_LEN: usize = 32;
@@ -23,7 +24,7 @@ pub struct GrokContentInfo {
 /// `InspectGrokEncryptedContent`.
 pub fn inspect_grok_encrypted_content(raw: impl AsRef<[u8]>) -> Result<GrokContentInfo, Error> {
     let raw = raw.as_ref();
-    let sig = trim_space(raw);
+    let sig = go_trim_space(raw);
     if sig.is_empty() {
         return err("empty Grok encrypted_content");
     }

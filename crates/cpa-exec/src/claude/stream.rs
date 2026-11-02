@@ -22,7 +22,7 @@ const MAX_LINE: usize = 52_428_800;
 
 /// Go `observeClaudeSSEEvent`: only a complete event decides completion or failure.
 fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &mut Option<ExecError>) {
-    let trim = cpa_common::gostr::trim_space;
+    let trim = cpa_core::config::go_trim_space;
     let data: Vec<&[u8]> = event
         .split(|byte| *byte == b'\n')
         .filter_map(|line| {
@@ -143,7 +143,7 @@ impl Relay {
         };
         self.event.extend_from_slice(&restored);
         self.event.extend_from_slice(b"\n");
-        if cpa_common::gostr::trim_space(&restored).is_empty() {
+        if cpa_core::config::go_trim_space(&restored).is_empty() {
             observe(
                 &self.event,
                 &mut self.message_id,
@@ -399,7 +399,7 @@ pub(crate) fn buffered_message_id(data: &[u8]) -> String {
     for line in data.split(|b| *b == b'\n') {
         event.extend_from_slice(line);
         event.push(b'\n');
-        if cpa_common::gostr::trim_space(line).is_empty() {
+        if cpa_core::config::go_trim_space(line).is_empty() {
             observe(&event, &mut id, &mut completed, &mut None);
             event.clear();
         }

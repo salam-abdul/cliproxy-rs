@@ -3,11 +3,12 @@
 
 use crate::{
     Registered,
-    common::{self, go_lower, sanitize_function_name, trim_space},
+    common::{self, go_lower, sanitize_function_name},
     gemini::attach_default_safety_settings,
     gemini_chat_response as response,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -54,7 +55,7 @@ fn data_url_part(url: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn demoted_text(text: Vec<u8>, demoted: bool) -> Vec<u8> {
-    if !demoted || trim_space(&text).is_empty() {
+    if !demoted || go_trim_space(&text).is_empty() {
         return text;
     }
     common::system_reminder_text(&text)
@@ -106,7 +107,7 @@ pub(crate) fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     }
     let effort = gj::get(raw, "reasoning_effort");
     if effort.exists() {
-        let effort = go_lower(trim_space(&effort.bytes()));
+        let effort = go_lower(go_trim_space(&effort.bytes()));
         if effort == b"auto" {
             gj::set_int(&mut out, "generationConfig.thinkingConfig.thinkingBudget", -1);
         } else if !effort.is_empty() {
@@ -188,7 +189,7 @@ fn apply_response_format(out: &mut Vec<u8>, raw: &[u8]) {
     if !format.exists() {
         return;
     }
-    match go_lower(trim_space(&format.get("type").bytes())).as_slice() {
+    match go_lower(go_trim_space(&format.get("type").bytes())).as_slice() {
         b"json_object" => {
             gj::set_str(out, "generationConfig.responseMimeType", "application/json");
         }
@@ -370,17 +371,17 @@ fn apply_tools(out: &mut Vec<u8>, raw: &[u8]) {
             list = choice.get("tools").array();
         }
         for t in list {
-            let mut name = trim_space(&t.get("function.name").bytes()).to_vec();
+            let mut name = go_trim_space(&t.get("function.name").bytes()).to_vec();
             if name.is_empty() {
-                name = trim_space(&t.get("name").bytes()).to_vec();
+                name = go_trim_space(&t.get("name").bytes()).to_vec();
             }
             if !name.is_empty() {
                 allowed.insert(name);
             }
         }
-        let mut mode = go_lower(trim_space(&choice.get("allowed_tools.mode").bytes()));
+        let mut mode = go_lower(go_trim_space(&choice.get("allowed_tools.mode").bytes()));
         if mode.is_empty() {
-            mode = go_lower(trim_space(&choice.get("mode").bytes()));
+            mode = go_lower(go_trim_space(&choice.get("mode").bytes()));
         }
         if !mode.is_empty() {
             allowed_mode = mode;
@@ -485,9 +486,9 @@ fn apply_tools(out: &mut Vec<u8>, raw: &[u8]) {
         }
     } else if choice.exists() && choice.kind != Kind::Null {
         let kind = if choice.kind == Kind::String {
-            go_lower(trim_space(&choice.s))
+            go_lower(go_trim_space(&choice.s))
         } else if choice.is_object() {
-            go_lower(trim_space(&choice.get("type").bytes()))
+            go_lower(go_trim_space(&choice.get("type").bytes()))
         } else {
             vec![]
         };
@@ -496,9 +497,9 @@ fn apply_tools(out: &mut Vec<u8>, raw: &[u8]) {
             b"none" => gj::set_str(out, MODE, "NONE"),
             b"required" | b"any" => gj::set_str(out, MODE, "ANY"),
             b"function" | b"tool" => {
-                let mut name = trim_space(&choice.get("function.name").bytes()).to_vec();
+                let mut name = go_trim_space(&choice.get("function.name").bytes()).to_vec();
                 if name.is_empty() {
-                    name = trim_space(&choice.get("name").bytes()).to_vec();
+                    name = go_trim_space(&choice.get("name").bytes()).to_vec();
                 }
                 match declared.get(&name) {
                     Some(sanitized) if sanitized_counts.get(sanitized) == Some(&1) => {

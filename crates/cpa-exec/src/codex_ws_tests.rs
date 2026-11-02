@@ -709,7 +709,7 @@ async fn compressed_upstream_events_read_like_plain_ones() {
         let (mut tcp, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
         let mut buf = [0u8; 4096];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        while !cpa_common::gostr::contains(&request, b"\r\n\r\n") {
             let n = tcp.read(&mut buf).await.unwrap();
             request.extend_from_slice(&buf[..n]);
         }

@@ -15,9 +15,10 @@ use serde_json::Value;
 
 use crate::claude::{alt, peek, read_failed};
 use crate::dispatch::{self, Call, Done};
-use crate::gojson::{self, Obj};
+use crate::gojson::{self};
 use crate::respond::{self, Writer};
 use crate::{Runtime, errors};
+use cpa_common::json::Object;
 
 struct Request {
     caller: Caller,
@@ -256,45 +257,45 @@ fn completions_to_chat(root: &Value) -> String {
         prompt = "Complete this:".into();
     }
     let model = gojson::gjson_string(root.get("model"));
-    let message = Obj::new()
+    let message = Object::new()
         .str("role", "user")
-        .raw("content", &gojson::sjson_string(&prompt))
-        .finish();
-    let mut out = Obj::new()
-        .raw("model", &gojson::sjson_string(&model))
-        .raw("messages", &format!("[{message}]"));
+        .raw("content", gojson::sjson_string(&prompt))
+        .finish_string();
+    let mut out = Object::new()
+        .raw("model", gojson::sjson_string(&model))
+        .raw("messages", format!("[{message}]"));
     let get = |k: &str| root.get(k);
     if let Some(v) = get("max_tokens") {
-        out = out.raw("max_tokens", &go_int(v).to_string());
+        out = out.raw("max_tokens", go_int(v).to_string());
     }
     for key in ["temperature", "top_p", "frequency_penalty", "presence_penalty"] {
         if let Some(v) = get(key) {
-            out = out.raw(key, &go_float(v));
+            out = out.raw(key, go_float(v));
         }
     }
     if let Some(v) = get("stop") {
-        out = out.raw("stop", &v.to_string());
+        out = out.raw("stop", v.to_string());
     }
     for key in ["stream", "logprobs"] {
         if let Some(v) = get(key) {
-            out = out.raw(key, &truthy(v).to_string());
+            out = out.raw(key, truthy(v).to_string());
         }
     }
     if let Some(v) = get("top_logprobs") {
-        out = out.raw("top_logprobs", &go_int(v).to_string());
+        out = out.raw("top_logprobs", go_int(v).to_string());
     }
     if let Some(v) = get("echo") {
-        out = out.raw("echo", &truthy(v).to_string());
+        out = out.raw("echo", truthy(v).to_string());
     }
-    out.finish()
+    out.finish_string()
 }
 
-fn completion_head(root: &Value) -> Obj {
-    Obj::new()
-        .raw("id", &gojson::sjson_string(&gojson::gjson_string(root.get("id"))))
+fn completion_head(root: &Value) -> Object {
+    Object::new()
+        .raw("id", gojson::sjson_string(&gojson::gjson_string(root.get("id"))))
         .str("object", "text_completion")
-        .raw("created", &root.get("created").map_or(0, go_int).to_string())
-        .raw("model", &gojson::sjson_string(&gojson::gjson_string(root.get("model"))))
+        .raw("created", root.get("created").map_or(0, go_int).to_string())
+        .raw("model", gojson::sjson_string(&gojson::gjson_string(root.get("model"))))
 }
 
 /// Go `convertChatCompletionsResponseToCompletions`.
@@ -322,9 +323,9 @@ fn chat_to_completions(root: &Value) -> String {
     };
     let mut out = completion_head(root).raw("choices", &choices);
     if let Some(usage) = root.get("usage") {
-        out = out.raw("usage", &usage.to_string());
+        out = out.raw("usage", usage.to_string());
     }
-    out.finish()
+    out.finish_string()
 }
 
 /// Go `convertChatCompletionsStreamChunkToCompletions`; `None` drops the chunk.
@@ -370,9 +371,9 @@ fn chat_chunk_to_completions(root: &Value) -> Option<String> {
     };
     let mut out = completion_head(root).raw("choices", &choices);
     if let Some(usage) = root.get("usage") {
-        out = out.raw("usage", &usage.to_string());
+        out = out.raw("usage", usage.to_string());
     }
-    Some(out.finish())
+    Some(out.finish_string())
 }
 
 /// Chat Completions SSE: `data:` frames, an error frame, then `data: [DONE]`.
@@ -532,7 +533,7 @@ fn codex_client(headers: &HeaderMap) -> bool {
 /// Go `responsesStreamErrorText`: sensitive values redacted, long text truncated, JSON
 /// errors reduced to their `error` object.
 pub(crate) fn sanitize_error_text(status: u16, text: &str) -> String {
-    let trimmed = gojson::trim(text);
+    let trimmed = text.trim();
     let trimmed = if trimmed.is_empty() {
         gojson::status_text(status)
     } else {
@@ -645,7 +646,7 @@ fn stream_error_class(status: u16) -> (&'static str, &'static str) {
 
 fn nested_error_code(mut detail: Value) -> Value {
     let existing = detail.get("code").filter(|v| !v.is_null());
-    if existing.is_some_and(|v| !gojson::trim(&gojson::gjson_string(Some(v))).is_empty()) {
+    if existing.is_some_and(|v| !gojson::gjson_string(Some(v)).trim().is_empty()) {
         return detail;
     }
     if detail["type"] == "invalid_request_error"
@@ -661,13 +662,11 @@ fn nested_error_code(mut detail: Value) -> Value {
 /// Go `openAIResponsesStreamErrorDetail`.
 fn stream_error_detail(status: u16, text: &str) -> Value {
     let (mut code, kind) = stream_error_class(status);
-    let mut message = gojson::trim(text).to_owned();
+    let mut message = text.trim().to_owned();
     if message.is_empty() {
         message = gojson::status_text(status).into();
     }
-    let payload = serde_json::from_str::<Value>(gojson::trim(text))
-        .ok()
-        .filter(Value::is_object);
+    let payload = serde_json::from_str::<Value>(text.trim()).ok().filter(Value::is_object);
     let code_owned;
     if let Some(p) = &payload {
         if let Some(e) = p.get("error").filter(|e| e.is_object()) {
@@ -684,7 +683,7 @@ fn stream_error_detail(status: u16, text: &str) -> Value {
             message = m.trim().to_owned();
         }
         if let Some(c) = p.get("code").filter(|c| !c.is_null()) {
-            code_owned = gojson::trim(&gojson::gjson_string(Some(c))).to_owned();
+            code_owned = gojson::gjson_string(Some(c)).trim().to_owned();
             code = &code_owned;
         }
     }
@@ -717,19 +716,22 @@ fn stream_error_frame(codex: bool, status: u16, text: &str, seq: i64, lead: bool
     let detail = gojson::sorted(&stream_error_detail(status, text));
     let lead = if lead { "\n" } else { "" };
     if codex {
-        let response = Obj::new().str("status", "failed").raw("error", &detail).finish();
-        let chunk = Obj::new()
+        let response = Object::new()
+            .str("status", "failed")
+            .raw("error", &detail)
+            .finish_string();
+        let chunk = Object::new()
             .str("type", "response.failed")
-            .raw("sequence_number", &seq.to_string())
+            .raw("sequence_number", seq.to_string())
             .raw("response", &response)
-            .finish();
+            .finish_string();
         Bytes::from(format!("{lead}event: response.failed\ndata: {chunk}\n\n"))
     } else {
-        let chunk = Obj::new()
+        let chunk = Object::new()
             .str("type", "error")
             .raw("error", &detail)
-            .raw("sequence_number", &seq.to_string())
-            .finish();
+            .raw("sequence_number", seq.to_string())
+            .finish_string();
         Bytes::from(format!("{lead}event: error\ndata: {chunk}\n\n"))
     }
 }

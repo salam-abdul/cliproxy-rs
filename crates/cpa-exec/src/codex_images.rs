@@ -22,7 +22,7 @@ use gjson::Kind;
 
 use crate::codex::{CodexExecutor, events, explicit_session, report_request};
 use crate::codex_capture::Wire;
-use crate::codex_json::{delete, set_bool_if_different, set_raw, set_str, set_str_if_different};
+use crate::codex_json::{delete, set_raw, set_str};
 use crate::codex_request::{self as request, Settings, View};
 use crate::codex_response::{self as response, OutputItems};
 use crate::openai_compat::prepare_images_payload;
@@ -209,7 +209,9 @@ impl CodexExecutor {
         report_request(&req, Format::Codex, &body);
         let cache = request::session_uuid(&req, None);
         let body = match &cache {
-            Some(id) => set_str_if_different(body, "prompt_cache_key", id),
+            Some(id) => crate::codex_json::edit(body, |b| {
+                cpa_common::json::set_str_if_different(b, "prompt_cache_key", id)
+            }),
             None => body,
         };
         let body = request::sanitize_input_ids(body);
@@ -442,7 +444,9 @@ fn json_body(body: Bytes, cache: Option<&str>) -> Bytes {
     }
     let text = String::from_utf8_lossy(&body).into_owned();
     let text = match cache {
-        Some(id) => set_str_if_different(text, "prompt_cache_key", id),
+        Some(id) => crate::codex_json::edit(text, |b| {
+            cpa_common::json::set_str_if_different(b, "prompt_cache_key", id)
+        }),
         None => text,
     };
     Bytes::from(request::sanitize_input_ids(text))
@@ -816,8 +820,8 @@ fn tool_body(
     };
     let out = cpa_common::payload::apply(&settings.payload, &rules, thought);
     let mut out = String::from_utf8_lossy(&out).into_owned();
-    out = set_str_if_different(out, "model", main_model);
-    out = set_bool_if_different(out, "stream", true);
+    out = crate::codex_json::edit(out, |b| cpa_common::json::set_str_if_different(b, "model", main_model));
+    out = crate::codex_json::edit(out, |b| cpa_common::json::set_bool_if_different(b, "stream", true));
     for key in [
         "previous_response_id",
         "prompt_cache_retention",

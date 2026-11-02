@@ -19,9 +19,10 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cpa_common::json::{self as gj, Kind};
+use cpa_common::json as gj;
 use cpa_common::thinking::{ModelCaps, RequestThinking, apply_request_thinking, parse_suffix};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch, Source};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -36,7 +37,6 @@ use crate::kimi_http::{
     report_model, rfc3339_local_now,
 };
 use crate::meta_auth::{DEFAULT_API_BASE_URL, MetaAuth, MintedKey};
-use crate::meta_codex::go_trim_space;
 use crate::openai_compat_payload::{ensure_responses_usage_details, sanitize_reasoning_encrypted_content};
 use crate::proxy::{GoClients, GoHeaders, MAX_ERROR_BODY, Proxy, default_client, lines, read_all, send};
 use crate::tokenizer::Encoding;
@@ -213,11 +213,11 @@ impl MetaExecutor {
         let body = Bytes::from(prepared.body);
         // Go: TrackHTTPClient for Execute; ExecuteStream uses TrackHTTPClientRoundTripOnly,
         // so its first body byte only records the first-packet fallback.
-        use crate::kimi_http::{account_info, capture_chunk, capture_error, capture_metadata, capture_request};
+        use crate::kimi_http::{capture_chunk, capture_error, capture_metadata, capture_request};
         let capture = req.capture();
         let request_headers = headers(&enriched, &req, &token);
         // recordMetaRequest: the enriched credential's account info.
-        let (auth_type, auth_value) = account_info(&enriched);
+        let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(&enriched);
         capture_request(
             capture,
             &enriched,
@@ -405,8 +405,8 @@ fn prepare(req: &ExecRequest, cfg: &Config, stream: bool) -> Result<Prepared, Ex
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     body = thinking;
     body = payload_rules(cfg, req, &base_model, PROVIDER, body, &original_translated);
-    set_string_if_different(&mut body, "model", &base_model);
-    set_bool_if_different(&mut body, "stream", stream);
+    gj::set_str_if_different(&mut body, "model", &base_model);
+    gj::set_bool_if_different(&mut body, "stream", stream);
     for key in [
         "generate",
         "prompt_cache_retention",
@@ -428,24 +428,6 @@ fn prepare(req: &ExecRequest, cfg: &Config, stream: bool) -> Result<Prepared, Ex
         response,
         apply_patch,
     })
-}
-
-/// `SetStringIfDifferent`.
-fn set_string_if_different(body: &mut Vec<u8>, path: &str, value: &str) {
-    let current = gj::get(body, path);
-    if current.kind == Kind::String && *current.bytes() == *value.as_bytes() {
-        return;
-    }
-    gj::set_str(body, path, value);
-}
-
-/// `SetBoolIfDifferent`.
-fn set_bool_if_different(body: &mut Vec<u8>, path: &str, value: bool) {
-    let kind = gj::get(body, path).kind;
-    if (value && kind == Kind::True) || (!value && kind == Kind::False) {
-        return;
-    }
-    gj::set_bool(body, path, value);
 }
 
 /// `SanitizeMetaWebSearchTools`: Meta rejects `search_content_types` on `web_search` tools,

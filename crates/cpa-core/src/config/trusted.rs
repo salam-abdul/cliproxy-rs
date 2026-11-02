@@ -19,8 +19,7 @@ pub fn go_trim_space(mut b: &[u8]) -> &[u8] {
             Some((c, n))
         })
     }
-    while let Some((c, n)) = edge(b, true).filter(|(c, _)| c.is_whitespace()) {
-        let _ = c;
+    while let Some((_, n)) = edge(b, true).filter(|(c, _)| c.is_whitespace()) {
         b = &b[n..];
     }
     while let Some((_, n)) = edge(b, false).filter(|(c, _)| c.is_whitespace()) {
@@ -195,6 +194,31 @@ impl TrustedProxies {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trim_space_matches_bytes_trim_space() {
+        // Expected values printed by Go 1.26 bytes.TrimSpace for the same inputs.
+        let cases: [(&[u8], &[u8]); 15] = [
+            (b"\xc2\xa0 a b\t\xe3\x80\x80", b"a b"),
+            (b"\xe3\x80", b"\xe3\x80"),
+            (b" \t\x0b\x0cx\r\n", b"x"),
+            ("\u{a0}\u{85}x\u{2028}".as_bytes(), b"x"),
+            (b"\xffx ", b"\xffx"),
+            (b" x\xc2", b"x\xc2"),
+            ("x\u{3000}".as_bytes(), b"x"),
+            (b"\x1c x", b"\x1c x"),
+            (b"   ", b""),
+            ("x\u{200b}".as_bytes(), "x\u{200b}".as_bytes()),
+            ("\u{180e}x".as_bytes(), "\u{180e}x".as_bytes()),
+            (b"x \xe2\x80", b"x \xe2\x80"),
+            (" \u{a0}x\u{2003}\n".as_bytes(), b"x"),
+            (b" \xff ", b"\xff"),
+            ("\u{a0} x \u{3000}\r".as_bytes(), b"x"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(super::go_trim_space(input), want, "{input:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

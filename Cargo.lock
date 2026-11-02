@@ -802,6 +802,7 @@ dependencies = [
  "gjson",
  "http",
  "memchr",
+ "regex",
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",

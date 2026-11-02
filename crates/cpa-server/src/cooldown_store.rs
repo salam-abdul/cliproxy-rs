@@ -74,23 +74,12 @@ fn sanitize(name: &str) -> Option<String> {
     (!out.is_empty()).then(|| format!("{out}.cds"))
 }
 
-/// Go `json.MarshalIndent(v, "", "  ")` plus a newline: serde's pretty layout matches;
-/// Go additionally escapes `<`, `>`, `&`, U+2028 and U+2029, which only occur in strings.
+/// Go `json.MarshalIndent(v, "", "  ")` plus a newline.
 fn marshal_indent(envelope: &Envelope) -> Vec<u8> {
-    let text = serde_json::to_string_pretty(envelope).expect("cooldown records serialize");
-    let mut out = String::with_capacity(text.len() + 1);
-    for c in text.chars() {
-        match c {
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
-    }
-    out.push('\n');
-    out.into_bytes()
+    let compact = serde_json::to_vec(envelope).expect("cooldown records serialize");
+    let mut out = cpa_common::json::marshal_indent(&compact);
+    out.push(b'\n');
+    out
 }
 
 fn cds_files(dir: &Path) -> Vec<PathBuf> {
@@ -363,6 +352,11 @@ mod tests {
         let offset: Quota = serde_json::from_str(r#"{"next_recover_at":"2026-09-21T16:13:20.12+02:00"}"#).unwrap();
         assert_eq!(offset.next_recover_at, Some(t));
         let whole = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
-        assert_eq!(go_time::rfc3339_nano(whole), "2026-09-21T14:13:20Z");
+        let whole = Quota {
+            next_recover_at: Some(whole),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&whole).unwrap();
+        assert!(json.contains(r#""next_recover_at":"2026-09-21T14:13:20Z""#), "{json}");
     }
 }

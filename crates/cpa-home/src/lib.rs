@@ -16,7 +16,6 @@ pub mod dispatch;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
-mod gojson;
 pub mod inflight;
 pub mod kv;
 pub mod refresh;

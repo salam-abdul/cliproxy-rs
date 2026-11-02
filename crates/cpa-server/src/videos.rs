@@ -368,7 +368,7 @@ fn create_request_from_form(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
     let post_form = |key: &str| -> String {
         match &form {
             Some(form) => form.value(key),
-            None if urlencoded => crate::access::query_get(&encoded, key)
+            None if urlencoded => cpa_core::config::go_url::query_get(&encoded, key)
                 .map(|v| String::from_utf8_lossy(&v).into_owned())
                 .unwrap_or_default(),
             None => String::new(),
@@ -958,7 +958,7 @@ pub async fn content(
         return bad_request("Invalid request: video_id is required");
     }
     let query = uri.query().unwrap_or_default();
-    let mut variant = crate::access::query_get(query, "variant")
+    let mut variant = cpa_core::config::go_url::query_get(query, "variant")
         .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
         .unwrap_or_default();
     if variant.is_empty() {

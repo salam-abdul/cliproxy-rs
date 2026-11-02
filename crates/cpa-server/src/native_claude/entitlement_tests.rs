@@ -84,9 +84,7 @@ impl Fixture {
                             let body = axum::body::to_bytes(Body::new(req.into_body()), 65536).await.unwrap();
                             seen.lock().unwrap().push((token.clone(), body.to_vec()));
                             let response = if token == "Bearer token-a"
-                                && body
-                                    .windows(b"claude-opus-test".len())
-                                    .any(|w| w == b"claude-opus-test")
+                                && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
                                 let body = if reply.broken {
                                     let stream = futures_util::stream::once(async move {

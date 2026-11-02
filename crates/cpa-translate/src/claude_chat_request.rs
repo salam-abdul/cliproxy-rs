@@ -1,12 +1,9 @@
 //! OpenAI Chat Completions request -> Claude Messages request
 //! (internal/translator/claude/openai/chat-completions/claude_openai_request.go).
 
-use crate::{
-    Error, Registered, RequestCtx, claude_chat_response,
-    common::{self, trim_space},
-    thinking,
-};
+use crate::{Error, Registered, RequestCtx, claude_chat_response, common, thinking};
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -166,7 +163,7 @@ fn convert(model: &str, raw: &[u8], stream: bool, preserve_thinking: bool) -> Ve
                     let mut blocks: Vec<Vec<u8>> = vec![];
                     if preserve_thinking && role == b"assistant" {
                         let reasoning = message.get("reasoning_content");
-                        if reasoning.kind == Kind::String && !trim_space(&reasoning.s).is_empty() {
+                        if reasoning.kind == Kind::String && !go_trim_space(&reasoning.s).is_empty() {
                             let mut part = br#"{"type":"thinking","thinking":"","signature":""}"#.to_vec();
                             gj::set_str(&mut part, "thinking", &reasoning.s);
                             blocks.push(part);
@@ -284,9 +281,9 @@ fn tools(out: &mut Vec<u8>, root: &Res<'_>) {
             list = choice.get("tools").array();
         }
         for t in list {
-            let mut name = trim_space(&t.get("function.name").bytes()).to_vec();
+            let mut name = go_trim_space(&t.get("function.name").bytes()).to_vec();
             if name.is_empty() {
-                name = trim_space(&t.get("name").bytes()).to_vec();
+                name = go_trim_space(&t.get("name").bytes()).to_vec();
             }
             if !name.is_empty() {
                 allowed_names.insert(common::sanitize_claude_function_name(&name));

@@ -453,7 +453,7 @@ impl Reader<'_> {
         let mut from = 0;
         while let Some(i) = buf
             .get(from..)
-            .and_then(|b| b.windows(nl_dash.len()).position(|w| w == nl_dash.as_slice()))
+            .and_then(|b| cpa_common::gostr::index(b, nl_dash.as_slice()))
             .map(|i| i + from)
         {
             if match_after_prefix(&buf[i..], nl_dash.len()) {
@@ -526,7 +526,7 @@ impl Writer {
     pub fn new() -> Self {
         let mut bytes = [0u8; 30];
         getrandom::fill(&mut bytes).expect("random boundary");
-        Self::with_boundary(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        Self::with_boundary(cpa_core::hex::encode(bytes))
     }
 
     pub fn with_boundary(boundary: String) -> Self {

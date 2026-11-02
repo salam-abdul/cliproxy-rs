@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
-use crate::gostr::trim_space;
 use crate::json::{self as gj, Kind};
 
 const TTL: Duration = Duration::from_secs(3600);
@@ -273,7 +273,7 @@ fn key(model: &str, session: &str) -> Option<String> {
 }
 
 fn trimmed(r: &gj::Res<'_>) -> Vec<u8> {
-    trim_space(&r.bytes()).to_vec()
+    go_trim_space(&r.bytes()).to_vec()
 }
 
 /// The position and context fields both item kinds keep.
@@ -488,7 +488,7 @@ pub fn model_group(model: &str) -> &str {
 
 fn text_hash(text: &[u8]) -> String {
     let sum = Sha256::digest(text);
-    sum[..8].iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&sum[..8])
 }
 
 /// `CacheSignatureBestEffort`.

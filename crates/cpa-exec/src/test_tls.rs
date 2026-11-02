@@ -120,7 +120,7 @@ async fn serve_h1<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut i
     let mut buf = Vec::new();
     loop {
         let head_end = loop {
-            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            if let Some(at) = cpa_common::gostr::index(&buf, b"\r\n\r\n") {
                 break at + 4;
             }
             let mut chunk = [0u8; 4096];

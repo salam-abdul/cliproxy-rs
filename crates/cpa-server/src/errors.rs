@@ -6,11 +6,12 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::dispatch::Failure;
-use crate::gojson::{self, Obj};
+use crate::gojson::{self};
+use cpa_common::json::Object;
 
 /// Go `WriteErrorResponse`'s text: the error text trimmed, else the status text.
 fn text_for(status: u16, text: &str) -> String {
-    let v = gojson::trim(text);
+    let v = text.trim();
     if v.is_empty() {
         gojson::status_text(status).to_owned()
     } else {
@@ -22,12 +23,12 @@ fn text_for(status: u16, text: &str) -> String {
 /// wrapped in an OpenAI error envelope typed by status.
 pub fn openai_body(status: u16, text: &str) -> String {
     let status = if status == 0 { 500 } else { status };
-    let text = if gojson::trim(text).is_empty() {
+    let text = if text.trim().is_empty() {
         gojson::status_text(status)
     } else {
         text
     };
-    let trimmed = gojson::trim(text);
+    let trimmed = text.trim();
     if !trimmed.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
         return trimmed.to_owned();
     }
@@ -40,11 +41,11 @@ pub fn openai_body(status: u16, text: &str) -> String {
         500.. => ("server_error", "internal_server_error"),
         _ => ("invalid_request_error", ""),
     };
-    let mut detail = Obj::new().str("message", text).str("type", kind);
+    let mut detail = Object::new().str("message", text).str("type", kind);
     if !code.is_empty() {
         detail = detail.str("code", code);
     }
-    Obj::new().raw("error", &detail.finish()).finish()
+    Object::new().raw("error", detail.finish_string()).finish_string()
 }
 
 /// Go `claudeErrorTypeFromStatus`.
@@ -75,7 +76,7 @@ pub fn claude_body(status: u16, text: &str) -> String {
         let field = |obj: &serde_json::Map<String, Value>, key: &str| {
             obj.get(key)
                 .and_then(Value::as_str)
-                .map(gojson::trim)
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
         };
@@ -91,11 +92,14 @@ pub fn claude_body(status: u16, text: &str) -> String {
             }
         }
     }
-    let mut detail = Obj::new().str("type", &kind).str("message", &message);
+    let mut detail = Object::new().str("type", &kind).str("message", &message);
     if thread_not_found {
         detail = detail.raw("details", r#"{"error_code":"thread_not_found"}"#);
     }
-    Obj::new().str("type", "error").raw("error", &detail.finish()).finish()
+    Object::new()
+        .str("type", "error")
+        .raw("error", detail.finish_string())
+        .finish_string()
 }
 
 /// Writes a failure with the route's body shape.

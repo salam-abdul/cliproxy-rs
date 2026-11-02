@@ -9,8 +9,9 @@ use cpa_common::json::{self as gj, GoValue, Kind, Res};
 use cpa_common::signature::{
     compatible_antigravity_claude_thinking_signature, sanitize_gemini_request_thought_signatures,
 };
+use cpa_core::config::go_trim_space;
 
-use crate::common::{go_lower, restore_sanitized_tool_name, trim_space};
+use crate::common::{go_lower, restore_sanitized_tool_name};
 use crate::gemini::{attach_default_safety_settings, has_function_response};
 use crate::responses_tools::{disambiguated_tool_name_map, map_sanitized_function_name, sanitized_function_name_map};
 use crate::stream::GoStream;
@@ -70,7 +71,7 @@ pub(crate) fn convert(model: &str, input: &[u8]) -> Vec<u8> {
         ],
     );
 
-    let raw = if go_lower(model.as_bytes()).windows(6).any(|w| w == b"claude") {
+    let raw = if cpa_common::gostr::contains(&go_lower(model.as_bytes()), b"claude") {
         sanitize_claude_signatures(raw)
     } else {
         sanitize_gemini_request_thought_signatures(&raw, "request.contents")
@@ -393,7 +394,7 @@ fn function_response_raw(response: &[u8], fallback: &[u8]) -> Vec<u8> {
     let parsed = gj::parse(response);
     if parsed.is_object() && gj::valid(&parsed.raw) {
         let mut raw = parsed.raw.to_vec();
-        if trim_space(&parsed.get("functionResponse.name").bytes()).is_empty() && !fallback.is_empty() {
+        if go_trim_space(&parsed.get("functionResponse.name").bytes()).is_empty() && !fallback.is_empty() {
             gj::set_str(&mut raw, "functionResponse.name", fallback);
         }
         return raw;
@@ -402,7 +403,7 @@ fn function_response_raw(response: &[u8], fallback: &[u8]) -> Vec<u8> {
     let function_response = parsed.get("functionResponse");
     if function_response.exists() {
         let mut name = function_response.get("name").bytes().into_owned();
-        if trim_space(&name).is_empty() {
+        if go_trim_space(&name).is_empty() {
             name = fallback.to_vec();
         }
         gj::set_str(&mut out, "functionResponse.name", &name);
@@ -612,7 +613,7 @@ fn sanitize_part(part: &Res<'_>, model_turn: bool) -> PartFate {
         Some(GoValue::String(t)) => t.as_str(),
         _ => "",
     };
-    if trim_space(text.as_bytes()).is_empty() {
+    if go_trim_space(text.as_bytes()).is_empty() {
         return PartFate::Drop;
     }
     let changed = Some(&normalized) != signature.as_ref();
@@ -825,7 +826,7 @@ impl Stream {
 impl GoStream for Stream {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let raw = match line.strip_prefix(b"data:") {
-            Some(rest) => trim_space(rest),
+            Some(rest) => go_trim_space(rest),
             None => line,
         };
         if raw == b"[DONE]" {

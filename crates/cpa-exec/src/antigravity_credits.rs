@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use cpa_common::gostr::trim_space;
 use cpa_common::json as gj;
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::Credential;
 
 /// The runtime-only attribute the credits fallback sets on its copy of a credential
@@ -121,7 +121,7 @@ pub(crate) fn balance_exhausted(body: &[u8]) -> bool {
     details.is_array()
         && details.array().iter().any(|d| {
             *d.get("@type").bytes() == *b"type.googleapis.com/google.rpc.ErrorInfo"
-                && trim_space(&d.get("reason").bytes()).eq_ignore_ascii_case(b"INSUFFICIENT_G1_CREDITS_BALANCE")
+                && go_trim_space(&d.get("reason").bytes()).eq_ignore_ascii_case(b"INSUFFICIENT_G1_CREDITS_BALANCE")
         })
 }
 
@@ -176,7 +176,7 @@ pub(crate) fn end_refresh(id: &str) {
 /// the Google One AI credit of `paidTier.availableCredits`, or no credits at all when
 /// that list is missing. `None` when the list has no usable Google One AI entry.
 pub(crate) fn hint_from_load_code_assist(body: &[u8]) -> Option<Hint> {
-    let paid_tier_id = String::from_utf8_lossy(trim_space(&gj::get(body, "paidTier.id").bytes())).into_owned();
+    let paid_tier_id = String::from_utf8_lossy(go_trim_space(&gj::get(body, "paidTier.id").bytes())).into_owned();
     let credits = gj::get(body, "paidTier.availableCredits");
     if !credits.is_array() {
         return Some(Hint {
@@ -186,7 +186,7 @@ pub(crate) fn hint_from_load_code_assist(body: &[u8]) -> Option<Hint> {
             ..Hint::default()
         });
     }
-    let number = |r: gj::Res<'_>| cpa_common::json::go_parse_float(trim_space(&r.bytes())).ok();
+    let number = |r: gj::Res<'_>| cpa_common::json::go_parse_float(go_trim_space(&r.bytes())).ok();
     credits.array().iter().find_map(|credit| {
         if !credit.get("creditType").bytes().eq_ignore_ascii_case(b"GOOGLE_ONE_AI") {
             return None;

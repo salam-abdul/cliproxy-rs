@@ -423,7 +423,7 @@ pub(crate) fn client_bytes(client: Format, alt: bool, chunks: &[Value]) -> Vec<u
             }
             // interactions_handlers.go WriteChunk.
             Format::Interactions => {
-                let trimmed = cpa_common::gostr::trim_space(chunk);
+                let trimmed = cpa_core::config::go_trim_space(chunk);
                 if !(trimmed.starts_with(b"event:") || trimmed.starts_with(b"data:")) {
                     out.extend_from_slice(b"data: ");
                 }

@@ -265,7 +265,7 @@ fn unix_nanos() -> u128 {
 fn random_state() -> Option<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).ok()?;
-    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Some(cpa_core::hex::encode(bytes))
 }
 
 /// `requests.proxy-url`, which Go's auth services use.
@@ -877,7 +877,7 @@ async fn forward(mut stream: tokio::net::TcpStream, target: String) {
     let mut head = Vec::new();
     let read = tokio::time::timeout(FORWARD_TIMEOUT, async {
         let mut buf = [0u8; 2048];
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < MAX_REQUEST_HEAD {
+        while !cpa_common::gostr::contains(&head, b"\r\n\r\n") && head.len() < MAX_REQUEST_HEAD {
             let n = stream.read(&mut buf).await?;
             if n == 0 {
                 break;
@@ -887,7 +887,7 @@ async fn forward(mut stream: tokio::net::TcpStream, target: String) {
         Ok::<_, std::io::Error>(())
     })
     .await;
-    if !matches!(read, Ok(Ok(()))) || !head.windows(4).any(|w| w == b"\r\n\r\n") {
+    if !matches!(read, Ok(Ok(()))) || !cpa_common::gostr::contains(&head, b"\r\n\r\n") {
         return;
     }
     let line = head.split(|b| *b == b'\n').next().unwrap_or_default();
@@ -1112,7 +1112,7 @@ fn handle_callback(state: &Management, req: CallbackRequest) -> Response {
 
 /// `url.Parse(raw).RawQuery`, or `None` where Go's parser fails.
 fn redirect_query(raw: &str) -> Option<String> {
-    cpa_core::config::go_url::parse(raw)?;
+    cpa_core::config::go_url::parse(raw).ok()?;
     let without_fragment = raw.split('#').next().unwrap_or_default();
     Some(
         without_fragment

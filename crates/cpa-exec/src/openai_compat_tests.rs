@@ -98,7 +98,7 @@ impl Mock {
         let mut out = replace(&raw, self.addr.as_bytes(), b"UPSTREAM");
         // Go's multipart writer picks a random 60-hex-digit boundary; so does Rust.
         let marker = b"boundary=";
-        if let Some(i) = out.windows(marker.len()).position(|w| w == marker)
+        if let Some(i) = cpa_common::gostr::index(&out, marker)
             && let Some(boundary) = out.get(i + marker.len()..i + marker.len() + 60)
             && boundary.iter().all(u8::is_ascii_hexdigit)
         {
@@ -574,7 +574,10 @@ fn go_primitive_vectors() {
         );
     }
     for case in v["trim_space"].as_array().unwrap() {
-        assert_eq!(go::trim_space(&b64(&case[0])), b64(&case[1]).as_slice());
+        assert_eq!(
+            cpa_core::config::go_trim_space(&b64(&case[0])),
+            b64(&case[1]).as_slice()
+        );
     }
     for case in v["media_type"].as_array().unwrap() {
         let input = case["input"].as_str().unwrap();

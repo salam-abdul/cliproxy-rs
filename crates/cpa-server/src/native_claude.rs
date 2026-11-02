@@ -145,7 +145,7 @@ impl Drop for Running {
     }
 }
 fn hash(s: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(s.as_ref()))
+    cpa_core::hex::encode(Sha256::digest(s.as_ref()))
 }
 fn now() -> u64 {
     std::time::SystemTime::now()

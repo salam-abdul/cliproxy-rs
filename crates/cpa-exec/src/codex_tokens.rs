@@ -1,7 +1,8 @@
 //! Local input-token counting for Codex request bodies (codex_executor_tokens.go): the
 //! text a Responses request carries, joined and counted with tiktoken.
 
-use cpa_common::gostr::trim_space;
+use cpa_core::config::go_trim_space;
+
 use cpa_common::json::{self as gj, Kind, Res};
 
 use crate::tokenizer::{Encoding, encoder};
@@ -76,7 +77,7 @@ pub(crate) fn count_input_tokens(encoding: Encoding, body: &[u8]) -> Result<i64,
             push(raw_or_string(&schema));
         }
     }
-    segments.extend(owned.iter().map(|s| trim_space(s)).filter(|s| !s.is_empty()));
+    segments.extend(owned.iter().map(|s| go_trim_space(s)).filter(|s| !s.is_empty()));
     let text = String::from_utf8_lossy(&segments.join(&b'\n')).into_owned();
     if text.is_empty() {
         return Ok(0);

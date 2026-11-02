@@ -6,6 +6,8 @@
 //! when the shared executor helpers land. TLS is wreq's default profile, not Go
 //! crypto/tls; these upstreams are not known to fingerprint ClientHello.
 
+use cpa_core::config::go_trim_space;
+
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{ExecError, FailureScope};
@@ -458,9 +460,8 @@ impl DeferredUsage {
 /// Go `jsonPayload`: the JSON payload of a `data:` line (or a bare JSON line), trimmed
 /// with `bytes.TrimSpace`.
 fn line_payload(line: &[u8]) -> Option<&[u8]> {
-    use cpa_common::gostr::trim_space;
-    let trimmed = trim_space(line);
-    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, trim_space);
+    let trimmed = go_trim_space(line);
+    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, go_trim_space);
     (payload.first() == Some(&b'{')).then_some(payload)
 }
 
@@ -577,7 +578,7 @@ pub(crate) fn response_tier(payload: &[u8]) -> String {
     ["response.service_tier", "service_tier", "interaction.service_tier"]
         .iter()
         .map(|p| cpa_common::json::get(payload, p).str().into_owned())
-        .map(|t| String::from_utf8_lossy(cpa_common::gostr::trim_space(t.as_bytes())).into_owned())
+        .map(|t| String::from_utf8_lossy(cpa_core::config::go_trim_space(t.as_bytes())).into_owned())
         .find(|t| !t.is_empty())
         .unwrap_or_default()
 }
@@ -643,7 +644,7 @@ pub(crate) fn defer_usage(
             let kind = cpa_common::json::get(payload, "type").bytes().into_owned();
             match rule {
                 UsageRule::OpenAIStream => {
-                    let has = |n: &[u8]| payload.windows(n.len()).any(|w| w == n);
+                    let has = |n: &[u8]| cpa_common::gostr::contains(payload, n);
                     if has(b"\"usage\"") || has(b"\"service_tier\"") {
                         let payload = if cpa_common::json::valid(payload) {
                             strip_paths(payload, &MODEL_PATHS)
@@ -736,23 +737,6 @@ pub(crate) fn track_first_byte(
         }
     })
     .boxed()
-}
-
-/// Go `Auth.AccountInfo()`: the credential kind and its loggable value, the email for
-/// OAuth and the API key for API-key credentials (masked by the capture sink).
-pub(crate) fn account_info(credential: &Credential) -> (&'static str, String) {
-    match cpa_core::registry::dynamic::auth_kind(credential) {
-        Some("oauth") => ("oauth", credential.str("email").unwrap_or_default().trim().to_owned()),
-        Some("apikey") => (
-            "api_key",
-            credential
-                .attributes
-                .get("api_key")
-                .map(|k| k.trim().to_owned())
-                .unwrap_or_default(),
-        ),
-        _ => ("", String::new()),
-    }
 }
 
 /// Go `http.Response.Header` for an HTTP/1.1 upstream response (net/http

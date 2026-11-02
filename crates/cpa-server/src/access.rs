@@ -12,6 +12,7 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
+use cpa_core::config::go_url::query_get;
 use cpa_core::exec::Caller;
 use subtle::ConstantTimeEq;
 
@@ -28,7 +29,9 @@ pub async fn require_client_key(State(rt): State<Arc<Runtime>>, req: Request, ne
         Ok(Access::Granted { caller, .. }) => caller,
         // gin `AbortWithStatusJSON(status, gin.H{"error": msg})`.
         Err(denied) => {
-            let body = crate::gojson::Obj::new().str("error", denied.message).finish();
+            let body = cpa_common::json::Object::new()
+                .str("error", denied.message)
+                .finish_string();
             return crate::respond::gin_json(denied.status, body);
         }
     };
@@ -79,46 +82,6 @@ fn bearer(header: &[u8]) -> &[u8] {
         Some(i) if header[..i].eq_ignore_ascii_case(b"bearer") => header[i + 1..].trim_ascii(),
         _ => header,
     }
-}
-
-/// `url.ParseQuery(q).Get(name)`: the first value whose decoded name matches. Pairs with
-/// a `;` or a malformed escape in the name or value are skipped, as Go does.
-pub(crate) fn query_get(query: &str, name: &str) -> Option<Vec<u8>> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let (k, v) = (unescape(k)?, unescape(v)?);
-            (k == name.as_bytes()).then_some(v)
-        })
-}
-
-/// Go's QueryUnescape: `+` is a space, `%XX` must be two hex digits, any bytes allowed.
-pub(crate) fn unescape(s: &str) -> Option<Vec<u8>> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' => {
-                let hex = bytes
-                    .get(i + 1..i + 3)
-                    .filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
-                out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
-                i += 3;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    Some(out)
 }
 
 pub(crate) enum Access {

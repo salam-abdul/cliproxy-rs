@@ -47,15 +47,11 @@ pub(super) fn merge_hint(existing: &[u8], hint: &[u8]) -> Vec<u8> {
     }
     if existing == hint
         || existing.starts_with(&[hint, b" ("].concat())
-        || contains_seq(existing, &[&b"("[..], hint, b")"].concat())
+        || crate::gostr::contains(existing, &[&b"("[..], hint, b")"].concat())
     {
         return existing.to_vec();
     }
     [existing, b" (", hint, b")"].concat()
-}
-
-pub(super) fn contains_seq(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Decode only the first JSON value; a later decoder read handles trailing bytes.

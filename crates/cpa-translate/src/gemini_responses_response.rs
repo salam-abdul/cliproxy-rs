@@ -12,12 +12,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cpa_common::json::{self as gj, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::apply_patch::{self, CallState};
 use crate::claude_responses_response::{Echo, copy_request_fields, pick_request};
 use crate::common::{
     go_runes, now_nanos, now_unix, parse_rfc3339_unix, request_model_name, restore_sanitized_tool_name,
-    sanitized_tool_name_map, sse_event, trim_space,
+    sanitized_tool_name_map, sse_event,
 };
 use crate::gemini_responses::{
     ANY, BYPASS_SIGNATURE, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, cache_text_signatures, encode_carrier,
@@ -746,7 +747,7 @@ impl State {
     }
 
     fn emit_detached_reasoning(&mut self, signature: &[u8], direction: &str, target: &str, out: &mut Vec<Vec<u8>>) {
-        let signature = trim_space(signature).to_vec();
+        let signature = go_trim_space(signature).to_vec();
         if signature.is_empty() || self.seen_reasoning_signatures.contains(&signature) {
             return;
         }
@@ -788,7 +789,7 @@ impl State {
     fn emit_trailing_detached_reasoning(&mut self, signature: &[u8], out: &mut Vec<Vec<u8>>) {
         match self.last_semantic_kind {
             TEXT => {
-                let signature = trim_space(signature).to_vec();
+                let signature = go_trim_space(signature).to_vec();
                 if signature.is_empty() || self.seen_reasoning_signatures.contains(&signature) {
                     return;
                 }
@@ -894,9 +895,9 @@ impl State {
             .into_iter()
             .find(Res::exists)
             .map_or(-1, |p| p.int());
-        let mut signature = trim_space(&part.get("thoughtSignature").bytes()).to_vec();
+        let mut signature = go_trim_space(&part.get("thoughtSignature").bytes()).to_vec();
         if signature.is_empty() {
-            signature = trim_space(&part.get("thought_signature").bytes()).to_vec();
+            signature = go_trim_space(&part.get("thought_signature").bytes()).to_vec();
         }
         let function_call = part.get("functionCall");
         let text = part.get("text");
@@ -1468,9 +1469,9 @@ impl GoStream for State {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let mut raw = line;
         if let Some(rest) = raw.strip_prefix(b"data:") {
-            raw = trim_space(rest);
+            raw = go_trim_space(rest);
         }
-        let raw = trim_space(raw);
+        let raw = go_trim_space(raw);
         if raw.is_empty() || self.completed {
             return Ok(vec![]);
         }
@@ -1650,9 +1651,9 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
         for (key, p) in parts.array().iter().enumerate() {
             let explicit = [p.get("partIndex"), p.get("index")].into_iter().find(Res::exists);
             let part_index = explicit.as_ref().map_or(key as i64, Res::int);
-            let mut signature = trim_space(&p.get("thoughtSignature").bytes()).to_vec();
+            let mut signature = go_trim_space(&p.get("thoughtSignature").bytes()).to_vec();
             if signature.is_empty() {
-                signature = trim_space(&p.get("thought_signature").bytes()).to_vec();
+                signature = go_trim_space(&p.get("thought_signature").bytes()).to_vec();
             }
             if p.get("thought").bool() {
                 flush_message!();

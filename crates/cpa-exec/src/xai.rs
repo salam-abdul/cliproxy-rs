@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, trim_space};
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -25,11 +26,12 @@ use http::HeaderMap;
 use crate::gemini_stream::ClaudeInputTokens;
 use crate::openai_compat_http::{self as wire, Clients, GoHeaders};
 use crate::openai_compat_payload::{self as compat, ensure_responses_usage_details};
+use crate::replay::text;
 use crate::upstream::{apply_patch_error, model_status_error};
 use crate::xai_auth::{self, CLI_CHAT_PROXY_BASE_URL, DEFAULT_API_BASE_URL, metadata_string};
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request::{self as request, Prepared};
-use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter, text};
+use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter};
 use cpa_translate::apply_patch_responses as apply_patch;
 
 pub const PROVIDER: &str = "xai";
@@ -292,20 +294,6 @@ fn chat_headers(c: &Credential, token: &str, stream: bool, session: &str, req: &
     }
     apply_custom(&mut h, c, req);
     h
-}
-
-/// `url.PathEscape`.
-fn path_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@')
-        {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// A non-2xx response: `xaiStatusErr` over the whole body (captured), upstream headers
@@ -669,7 +657,10 @@ impl XaiExecutor {
         let request_id = text(&gj::get(&payload, "request_id"));
         let (method, path) = match route {
             Some(path) => (wreq::Method::POST, path.to_owned()),
-            None if !request_id.is_empty() => (wreq::Method::GET, format!("/videos/{}", path_escape(&request_id))),
+            None if !request_id.is_empty() => (
+                wreq::Method::GET,
+                format!("/videos/{}", cpa_core::config::go_url::path_escape(&request_id)),
+            ),
             None => (wreq::Method::POST, VIDEOS_GENERATIONS.to_owned()),
         };
         self.media(credential, &req, cfg.as_ref(), method, &path, payload, true)
@@ -759,7 +750,7 @@ fn buffered(req: &ExecRequest, mut p: Prepared, store: &replay::Store, data: &[u
         let Some(rest) = line.strip_prefix(b"data:") else {
             continue;
         };
-        let event = response::normalize_summary_data(trim_space(rest).to_vec());
+        let event = response::normalize_summary_data(go_trim_space(rest).to_vec());
         p.apply_patch.remember_dispatcher_event(&event);
         let mut event = restorer.restore(event);
         if !p.web_search_alias.is_empty() {
@@ -908,7 +899,7 @@ impl Pipeline {
         let mut chunks = vec![];
         for mut line in lines {
             if let Some(rest) = line.strip_prefix(b"data:") {
-                let event = trim_space(rest).to_vec();
+                let event = go_trim_space(rest).to_vec();
                 let kind = gj::get(&event, "type").bytes().into_owned();
                 match kind.as_slice() {
                     b"response.output_item.done" => self.items.collect(&event),
@@ -951,7 +942,7 @@ impl Pipeline {
             return true;
         }
         if let Some(rest) = line.strip_prefix(b"data:") {
-            let events = response::normalize_summary_data_events(trim_space(rest).to_vec());
+            let events = response::normalize_summary_data_events(go_trim_space(rest).to_vec());
             let had_pending = self.pending.is_some();
             for (i, event) in events.into_iter().enumerate() {
                 self.apply_patch.remember_dispatcher_event(&event);
@@ -1226,7 +1217,7 @@ fn count_input_tokens(body: &[u8]) -> Result<i64, String> {
     }
     let mut segments: Vec<String> = vec![];
     let add = |segments: &mut Vec<String>, v: &gj::Res<'_>| {
-        let s = String::from_utf8_lossy(trim_space(&v.bytes())).into_owned();
+        let s = String::from_utf8_lossy(go_trim_space(&v.bytes())).into_owned();
         if !s.is_empty() {
             segments.push(s);
         }
@@ -1238,7 +1229,7 @@ fn count_input_tokens(body: &[u8]) -> Result<i64, String> {
         if v.kind == Kind::String {
             return add(segments, v);
         }
-        let s = String::from_utf8_lossy(trim_space(v.raw())).into_owned();
+        let s = String::from_utf8_lossy(go_trim_space(v.raw())).into_owned();
         if !s.is_empty() {
             segments.push(s);
         }

@@ -120,7 +120,7 @@ impl GoStream for State {
             );
         }
         let usage = gj::get(raw, "usageMetadata");
-        let has_finish = raw.windows(14).any(|w| w == br#""finishReason""#);
+        let has_finish = cpa_common::gostr::contains(raw, br#""finishReason""#);
         if usage.exists() && has_finish && !self.final_sent && self.has_content {
             if self.block != NONE {
                 self.stop_block(&mut out);

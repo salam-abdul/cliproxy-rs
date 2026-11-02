@@ -28,37 +28,10 @@ pub(super) struct Query(Vec<(String, String)>);
 
 impl Query {
     pub(super) fn parse(raw: Option<String>) -> Self {
-        let raw = raw.unwrap_or_default();
-        let decode = |s: &str| -> Option<String> {
-            let bytes = s.as_bytes();
-            let mut out = Vec::with_capacity(bytes.len());
-            let mut i = 0;
-            while i < bytes.len() {
-                match bytes[i] {
-                    b'%' => {
-                        let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-                        out.push(u8::from_str_radix(hex, 16).ok()?);
-                        i += 3;
-                    }
-                    b'+' => {
-                        out.push(b' ');
-                        i += 1;
-                    }
-                    b => {
-                        out.push(b);
-                        i += 1;
-                    }
-                }
-            }
-            Some(String::from_utf8_lossy(&out).into_owned())
-        };
+        let lossy = |b: Vec<u8>| String::from_utf8_lossy(&b).into_owned();
         Self(
-            raw.split('&')
-                .filter(|p| !p.is_empty() && !p.contains(';'))
-                .filter_map(|pair| {
-                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    Some((decode(k)?, decode(v)?))
-                })
+            cpa_core::config::go_url::parse_query(&raw.unwrap_or_default())
+                .map(|(k, v)| (lossy(k), lossy(v)))
                 .collect(),
         )
     }
@@ -99,26 +72,8 @@ pub(super) fn fail(status: StatusCode, message: impl Into<String>) -> Response {
     reply(status, [("error", Value::from(message.into()))])
 }
 
-/// Go `time.Time` JSON: RFC 3339 with trailing fractional zeros removed.
-pub(super) fn go_time<Tz: chrono::TimeZone>(t: chrono::DateTime<Tz>) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let text = t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-    let Some(dot) = text.find('.') else { return text };
-    let end = text[dot..]
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .map_or(text.len(), |i| dot + i);
-    let fraction = text[dot + 1..end].trim_end_matches('0');
-    if fraction.is_empty() {
-        format!("{}{}", &text[..dot], &text[end..])
-    } else {
-        format!("{}.{fraction}{}", &text[..dot], &text[end..])
-    }
-}
-
 fn local(t: SystemTime) -> String {
-    go_time(chrono::DateTime::<chrono::Local>::from(t))
+    cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Local>::from(t))
 }
 
 /// Go `quotaObservationPayloadForProvider`: the latest passive quota snapshot
@@ -354,7 +309,7 @@ fn cooldown_view(cd: &crate::scheduler::CooldownState) -> Value {
     view.insert("reason".into(), reason.into());
     view.insert(
         "retry_at".into(),
-        go_time(chrono::DateTime::<chrono::Utc>::from(retry_at)).into(),
+        cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Utc>::from(retry_at)).into(),
     );
     view.insert("remaining_seconds".into(), seconds.into());
     // cliproxy-rs only: the upstream's stated reset when `max-trusted-cooldown` cut it;
@@ -362,7 +317,7 @@ fn cooldown_view(cd: &crate::scheduler::CooldownState) -> Value {
     if let Some(recover) = cd.recover_in {
         view.insert(
             "recover_at".into(),
-            go_time(chrono::DateTime::<chrono::Utc>::from(SystemTime::now() + recover)).into(),
+            cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Utc>::from(SystemTime::now() + recover)).into(),
         );
     }
     if reason == "quota" {
@@ -588,7 +543,10 @@ fn entry(state: &Management, c: &Credential) -> Option<BTreeMap<&'static str, Va
     }
     for key in ["last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"] {
         if let Some(t) = c.metadata.get(key).and_then(parse_time) {
-            e.insert("last_refresh", go_time(chrono::DateTime::<chrono::Utc>::from(t)).into());
+            e.insert(
+                "last_refresh",
+                cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Utc>::from(t)).into(),
+            );
             break;
         }
     }
@@ -727,7 +685,7 @@ pub(crate) async fn list(State(state): State<Arc<Management>>, RawQuery(raw): Ra
         q.first("name").trim().to_owned(),
         q.first("auth_index").trim().to_owned(),
     );
-    let observed = go_time(chrono::Utc::now());
+    let observed = cpa_core::gotime::rfc3339_nano(&chrono::Utc::now());
     let all = state.rt.store().snapshot();
     // Forget runtime-only credentials whose relay session ended.
     state
@@ -1829,19 +1787,5 @@ pub(crate) async fn refresh(State(state): State<Arc<Management>>, RawQuery(raw):
             StatusCode::INTERNAL_SERVER_ERROR,
             String::from_utf8_lossy(&e.body).into_owned(),
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn go_time_trims_fraction_like_rfc3339nano() {
-        use chrono::TimeZone;
-        let t = chrono::Utc.timestamp_opt(1_700_000_000, 120_000_000).unwrap();
-        assert_eq!(go_time(t), "2023-11-14T22:13:20.12Z");
-        let t = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-        assert_eq!(go_time(t), "2023-11-14T22:13:20Z");
     }
 }

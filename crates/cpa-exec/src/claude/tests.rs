@@ -1912,7 +1912,7 @@ async fn translating_request_reads_connection_setup_bound_from_config_snapshot()
         let mut bytes = Vec::new();
         socket.read_to_end(&mut bytes).await.unwrap();
         assert!(bytes.starts_with(b"CONNECT api.anthropic.com:443 "));
-        assert!(!bytes.windows(9).any(|bytes| bytes == b"synthetic"));
+        assert!(!cpa_common::gostr::contains(&bytes, b"synthetic"));
     });
     let executor = ClaudeExecutor::new("https://api.anthropic.com").unwrap();
     let config = Config::parse(&format!("oauth: {{auth-dir: /synthetic-isolated-auth}}\nrequests: {{tls-handshake-timeout-seconds: 1, proxy-url: 'http://{address}'}}\n")).unwrap();

@@ -62,7 +62,7 @@ impl ClaudeUsage {
 }
 
 fn token_key(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
+    cpa_core::hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 fn now() -> u64 {

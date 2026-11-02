@@ -13,7 +13,7 @@ use gjson::Kind;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
-use crate::codex_json::{delete, set_bool_if_different, set_raw, set_str, set_str_if_different};
+use crate::codex_json::{delete, set_raw, set_str};
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub(crate) const USER_AGENT: &str = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)";
@@ -476,8 +476,8 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
     let mut body = apply_payload(req, settings, call, model, body, &original);
     match call {
         Call::NonStream => {
-            body = set_str_if_different(body, "model", model);
-            body = set_bool_if_different(body, "stream", true);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", true));
             for key in [
                 "previous_response_id",
                 "generate",
@@ -510,16 +510,16 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
                     set_raw(&body, "stream_options.reasoning_summary_delivery", &raw)
                 };
             }
-            body = set_str_if_different(body, "model", model);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
         }
         Call::Websocket => {
-            body = set_str_if_different(body, "model", model);
-            body = set_bool_if_different(body, "stream", true);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", true));
             body = delete(&body, "prompt_cache_retention");
             body = delete(&body, "safety_identifier");
         }
         Call::Compact => {
-            body = set_str_if_different(body, "model", model);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
             body = delete(&body, "stream");
         }
     }
@@ -535,7 +535,9 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
     body = sanitize_reasoning(body, is_compat);
     body = if call == Call::Websocket {
         if is_lite(&body, &req.headers) {
-            set_bool_if_different(body, "parallel_tool_calls", false)
+            crate::codex_json::edit(body, |b| {
+                cpa_common::json::set_bool_if_different(b, "parallel_tool_calls", false)
+            })
         } else {
             body
         }
@@ -596,7 +598,9 @@ fn ensure_image_tool(body: String, model: &str, view: &View<'_>, headers: &Heade
 
 fn normalize_parallel_tool_calls(body: String, headers: &HeaderMap) -> String {
     if is_lite(&body, headers) {
-        return set_bool_if_different(body, "parallel_tool_calls", false);
+        return crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_bool_if_different(b, "parallel_tool_calls", false)
+        });
     }
     if !gjson::get(&body, "parallel_tool_calls").exists() {
         return body;
@@ -894,10 +898,7 @@ pub(crate) fn sanitize_input_ids(body: String) -> String {
             input.push_str(&attempt.to_string());
         }
         let digest = Sha256::digest(input.as_bytes());
-        let suffix = format!(
-            "_{}",
-            digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        let suffix = format!("_{}", cpa_core::hex::encode(&digest[..8]));
         let keep = (LIMIT - suffix.len()).min(id.chars().count());
         format!("{}{suffix}", id.chars().take(keep).collect::<String>())
     };
@@ -1044,7 +1045,12 @@ pub(crate) fn prompt_cache(
     if id.is_empty() {
         return (body, None);
     }
-    (set_str_if_different(body, "prompt_cache_key", &id), Some(id))
+    (
+        crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "prompt_cache_key", &id)
+        }),
+        Some(id),
+    )
 }
 
 fn set(headers: &mut HeaderMap, name: &str, value: &str) {

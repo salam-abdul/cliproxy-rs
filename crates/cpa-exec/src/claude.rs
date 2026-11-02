@@ -829,15 +829,6 @@ fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// `helps.SetStringIfDifferent`.
-fn set_string_if_different(body: String, path: &str, value: &str) -> String {
-    let current = rawjson::get(&body, path);
-    if current.kind() == gjson::Kind::String && current.str() == value {
-        return body;
-    }
-    rawjson::set_str(&body, path, value)
-}
-
 /// `isKimiMessagesUpstream`: a Kimi credential, or Kimi's API host.
 fn kimi_upstream(provider: &str, base_url: &str) -> bool {
     let provider = provider.trim().to_lowercase();
@@ -1152,7 +1143,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = translated;
-        body = set_string_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1449,7 +1442,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = utf8(translated).into_owned();
-        body = set_string_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1778,7 +1773,7 @@ fn inject_diagnostics(body: &str, previous_message_id: &str) -> String {
     } else {
         format!(
             r#"{{"previous_message_id":{}}}"#,
-            rawjson::js_string(previous_message_id)
+            cpa_common::json::marshal_string(previous_message_id, false)
         )
     };
     if rawjson::get(body, "diagnostics").exists() {

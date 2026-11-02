@@ -2,8 +2,9 @@
 //! (internal/translator/openai/openai/chat-completions). Byte-oriented: bodies pass
 //! through untouched apart from the model rewrite, whatever bytes they contain.
 
-use crate::{Error, Registered, RequestCtx, ResponseCtx, common::trim_space, stream};
+use crate::{Error, Registered, RequestCtx, ResponseCtx, stream};
 use cpa_common::json::{self as gj, Kind};
+use cpa_core::config::go_trim_space;
 
 pub static PAIR: Registered = registered!(
     OpenAI -> OpenAI,
@@ -37,7 +38,7 @@ impl stream::GoStream for Passthrough {
             return Ok(vec![]);
         }
         let payload = match line.strip_prefix(b"data:") {
-            Some(rest) => trim_space(rest),
+            Some(rest) => go_trim_space(rest),
             None => line,
         };
         if payload == b"[DONE]" {

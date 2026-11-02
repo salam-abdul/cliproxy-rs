@@ -226,7 +226,7 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
     if url.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "missing url");
     }
-    if !go_url::parse(&url).is_some_and(|u| !u.scheme.is_empty() && !u.host().is_empty()) {
+    if !go_url::parse(&url).is_ok_and(|u| !u.scheme.is_empty() && !u.host.is_empty()) {
         return fail(StatusCode::BAD_REQUEST, "invalid url");
     }
     let request_proxy = req.proxy_url.trim().to_owned();

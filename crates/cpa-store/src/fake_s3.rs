@@ -50,10 +50,7 @@ fn error(status: StatusCode, code: &str) -> Response {
 }
 
 fn percent_decode(text: &str) -> String {
-    url::form_urlencoded::parse(format!("x={}", text.replace('+', "%2B")).as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default()
+    String::from_utf8_lossy(&cpa_core::config::go_url::percent_decode_lenient(text)).into_owned()
 }
 
 /// S3's `encoding-type=url` (Go `url.QueryEscape`).

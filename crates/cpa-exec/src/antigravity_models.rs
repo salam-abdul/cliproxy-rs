@@ -16,9 +16,10 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, trim_space};
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::Credential;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -106,10 +107,7 @@ impl Capabilities {
         let failure_key = format!(
             "{}#{}",
             credential.id,
-            Sha256::digest(token.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            cpa_core::hex::encode(Sha256::digest(token.as_bytes()))
         );
         loop {
             let now = self.now();
@@ -294,7 +292,7 @@ fn parse(body: &[u8]) -> Option<Hints> {
     });
     ok.then(|| {
         ids.iter()
-            .map(|id| String::from_utf8_lossy(trim_space(id)).go_lower())
+            .map(|id| String::from_utf8_lossy(go_trim_space(id)).go_lower())
             .filter(|id| !id.is_empty())
             .collect()
     })

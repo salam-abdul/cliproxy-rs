@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{CredentialConcurrency, HomeConfig};
 use crate::error::{Error, Result};
-use crate::gojson::Object;
 use crate::resp::{Conn, Value};
 use crate::tls::{Dialer, join_host_port};
+use cpa_common::json::Object;
 
 pub const KEY_CONFIG: &str = "config";
 pub const CHANNEL_CONFIG: &str = "config";

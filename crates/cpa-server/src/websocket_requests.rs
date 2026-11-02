@@ -32,13 +32,6 @@ fn edited(json: &str, edit: impl FnOnce(&mut Vec<u8>) -> bool) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// encoding/json string encoding (`json.Marshal` escapes HTML).
-fn go_quote(s: &str, escape_html: bool) -> String {
-    let mut out = Vec::with_capacity(s.len() + 2);
-    gj::marshal_str(&mut out, s.as_bytes(), escape_html);
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
-
 pub(crate) const CREATE: &str = "response.create";
 pub(crate) const APPEND: &str = "response.append";
 
@@ -826,7 +819,10 @@ fn error_body(status: u16, text: &str) -> String {
         500.. => ("server_error", "internal_server_error"),
         _ => ("invalid_request_error", ""),
     };
-    let mut body = format!(r#"{{"error":{{"message":{},"type":"{kind}""#, go_quote(text, true));
+    let mut body = format!(
+        r#"{{"error":{{"message":{},"type":"{kind}""#,
+        cpa_common::json::marshal_string(text, true)
+    );
     if !code.is_empty() {
         body.push_str(&format!(r#","code":"{code}""#));
     }

@@ -1,12 +1,14 @@
 //! Gemini request -> Codex (OpenAI Responses) request, and Codex events back to Gemini
 //! responses (internal/translator/codex/gemini).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
-use crate::common::{format_rfc3339_utc, go_lower, is_gemini_thought_part, trim_space};
+use crate::codex_names::{self, shorten_name};
+use crate::common::{format_rfc3339_utc, go_lower, is_gemini_thought_part};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx, gemini};
 
@@ -17,24 +19,6 @@ pub static PAIR: Registered = registered!(
     go_stream: go_stream,
     token_count: Some(gemini::token_count),
 );
-
-const NAME_LIMIT: usize = 64;
-
-/// shortenNameIfNeeded.
-fn shorten_name(name: &[u8]) -> Vec<u8> {
-    if name.len() <= NAME_LIMIT {
-        return name.to_vec();
-    }
-    if name.starts_with(b"mcp__")
-        && let Some(idx) = name.windows(2).rposition(|w| w == b"__")
-        && idx > 0
-    {
-        let mut candidate = [&b"mcp__"[..], &name[idx + 2..]].concat();
-        candidate.truncate(NAME_LIMIT);
-        return candidate;
-    }
-    name[..NAME_LIMIT].to_vec()
-}
 
 /// buildShortNameMap over every declared function name (empty names included).
 fn short_name_map(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
@@ -53,26 +37,7 @@ fn short_name_map(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
             }
         }
     }
-    let mut used: HashSet<Vec<u8>> = HashSet::new();
-    let mut map = HashMap::new();
-    for name in names {
-        let candidate = shorten_name(&name);
-        let unique = if used.contains(&candidate) {
-            (1..)
-                .map(|i| {
-                    let suffix = format!("_{i}");
-                    let allowed = NAME_LIMIT.saturating_sub(suffix.len());
-                    [&candidate[..candidate.len().min(allowed)], suffix.as_bytes()].concat()
-                })
-                .find(|tmp| !used.contains(tmp))
-                .unwrap()
-        } else {
-            candidate
-        };
-        used.insert(unique.clone());
-        map.insert(name, unique);
-    }
-    map
+    codex_names::short_name_map(names, shorten_name)
 }
 
 fn mapped_name(map: &HashMap<Vec<u8>, Vec<u8>>, name: &[u8]) -> Vec<u8> {
@@ -99,7 +64,7 @@ fn first_of<'a>(value: &Res<'a>, paths: [&str; 2]) -> Res<'a> {
 }
 
 fn audio_format(mime: &[u8]) -> &'static str {
-    match go_lower(trim_space(mime)).as_slice() {
+    match go_lower(go_trim_space(mime)).as_slice() {
         b"audio/wav" | b"audio/wave" | b"audio/x-wav" => "wav",
         b"audio/flac" => "flac",
         b"audio/opus" | b"audio/ogg" => "opus",
@@ -109,7 +74,7 @@ fn audio_format(mime: &[u8]) -> &'static str {
 }
 
 fn file_name(mime: &[u8]) -> &'static str {
-    let lower = go_lower(trim_space(mime));
+    let lower = go_lower(go_trim_space(mime));
     match lower.as_slice() {
         b"application/pdf" => "document.pdf",
         b"text/plain" => "document.txt",
@@ -197,11 +162,11 @@ fn file_data_part(part: &Res<'_>) -> Option<Vec<u8>> {
 
 /// getGeminiCallID.
 fn call_id(value: &Res<'_>) -> Vec<u8> {
-    let id = trim_space(&value.get("id").bytes()).to_vec();
+    let id = go_trim_space(&value.get("id").bytes()).to_vec();
     if !id.is_empty() {
         return id;
     }
-    trim_space(&value.get("call_id").bytes()).to_vec()
+    go_trim_space(&value.get("call_id").bytes()).to_vec()
 }
 
 /// cleanGeminiCodexToolParameters: no `$schema`, `additionalProperties: false`.
@@ -247,7 +212,7 @@ fn set_tool_choice(out: &mut Vec<u8>, config: &Res<'_>) {
 }
 
 fn effort_of(level: &Res<'_>) -> Vec<u8> {
-    go_lower(trim_space(&level.bytes()))
+    go_lower(go_trim_space(&level.bytes()))
 }
 
 /// ConvertGeminiRequestToCodex.
@@ -265,7 +230,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
 
     gj::set_str(&mut out, "model", model);
     let tier = root.get("service_tier");
-    if tier.kind == Kind::String && matches!(go_lower(trim_space(&tier.s)).as_slice(), b"priority" | b"fast") {
+    if tier.kind == Kind::String && matches!(go_lower(go_trim_space(&tier.s)).as_slice(), b"priority" | b"fast") {
         gj::set_str(&mut out, "service_tier", "priority");
     }
 
@@ -472,7 +437,7 @@ fn short_to_original(raw: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
 /// setGeminiFunctionCallID.
 fn set_call_id(part: &mut Vec<u8>, item: &Res<'_>) {
     for key in ["call_id", "id"] {
-        let id = trim_space(&item.get(key).bytes()).to_vec();
+        let id = go_trim_space(&item.get(key).bytes()).to_vec();
         if !id.is_empty() {
             gj::set_str(part, "functionCall.id", &id);
             return;
@@ -543,7 +508,7 @@ impl State {
         let Some(rest) = line.strip_prefix(b"data:") else {
             return vec![];
         };
-        let root = gj::parse(trim_space(rest));
+        let root = gj::parse(go_trim_space(rest));
         let kind = root.get("type").bytes().into_owned();
         let mut out = br#"{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gemini-2.5-pro","createTime":"2025-08-15T02:52:03.884209Z","responseId":"06CeaPH7NaCU48APvNXDyA4"}"#.to_vec();
         gj::set_str(&mut out, "modelVersion", &self.model);

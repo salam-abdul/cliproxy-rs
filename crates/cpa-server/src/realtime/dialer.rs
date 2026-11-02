@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 
 use btls::ssl::{SslConnector, SslMethod, SslVersion};
 use btls::x509::verify::X509CheckFlags;
+use cpa_core::config::go_url;
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -50,11 +51,11 @@ pub(super) fn build(raw: &str) -> Result<Option<ProxyDialer>, String> {
     if raw.is_empty() || raw.eq_ignore_ascii_case("direct") || raw.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    let url = go_url::parse(raw).map_err(|()| "parse proxy URL failed".to_owned())?;
+    let url = go_url::parse(raw).map_err(|_| "parse proxy URL failed".to_owned())?;
     if url.scheme.is_empty() || url.host.is_empty() {
         return Err("proxy URL missing scheme/host".into());
     }
-    let (host, port) = go_url::split_host_port(&String::from_utf8_lossy(&url.host));
+    let (host, port) = (url.hostname, url.port);
     let (kind, default_port) = match url.scheme.as_str() {
         "socks5" | "socks5h" => (Kind::Socks5, "1080"),
         "http" => (Kind::Connect(None), "80"),
@@ -70,7 +71,7 @@ pub(super) fn build(raw: &str) -> Result<Option<ProxyDialer>, String> {
         kind,
         host,
         port: if port.is_empty() { default_port.into() } else { port },
-        user: url.user,
+        user: url.user.map(|u| (u.username, u.password)),
     }))
 }
 
@@ -159,220 +160,6 @@ fn join_host_port(host: &str, port: &str) -> String {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
-    }
-}
-
-/// The parts of Go 1.26 `net/url.Parse` that decide a proxy URL: which URLs fail, the
-/// scheme, the unescaped host and the userinfo.
-mod go_url {
-    pub(super) struct Url {
-        pub scheme: String,
-        /// `u.Host`: unescaped, port included, IPv6 in brackets.
-        pub host: Vec<u8>,
-        pub user: Option<super::User>,
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Mode {
-        Host,
-        Zone,
-        Other,
-    }
-
-    pub(super) fn parse(raw: &str) -> Result<Url, ()> {
-        let (main, fragment) = raw.split_once('#').unwrap_or((raw, ""));
-        let url = parse_main(main)?;
-        if !fragment.is_empty() {
-            unescape(fragment.as_bytes(), Mode::Other)?;
-        }
-        Ok(url)
-    }
-
-    fn parse_main(raw: &str) -> Result<Url, ()> {
-        if raw.bytes().any(|b| b < b' ' || b == 0x7f) {
-            return Err(());
-        }
-        let mut url = Url {
-            scheme: String::new(),
-            host: Vec::new(),
-            user: None,
-        };
-        if raw == "*" {
-            return Ok(url);
-        }
-        let (scheme, rest) = scheme(raw)?;
-        url.scheme = scheme.to_ascii_lowercase();
-        let rest = match rest.strip_suffix('?') {
-            Some(stripped) if rest.matches('?').count() == 1 => stripped,
-            _ => rest.split('?').next().unwrap_or_default(),
-        };
-        if !rest.starts_with('/') {
-            if !url.scheme.is_empty() {
-                // Opaque: no host.
-                return Ok(url);
-            }
-            if rest.split('/').next().is_some_and(|segment| segment.contains(':')) {
-                return Err(());
-            }
-        }
-        let mut path = rest;
-        if (!url.scheme.is_empty() || !rest.starts_with("///")) && rest.starts_with("//") {
-            let after = &rest[2..];
-            let (authority, tail) = after.find('/').map_or((after, ""), |i| after.split_at(i));
-            path = tail;
-            let (user, host) = authority_parts(&url.scheme, authority)?;
-            url.user = user;
-            url.host = host;
-        }
-        unescape(path.as_bytes(), Mode::Other)?;
-        Ok(url)
-    }
-
-    /// `getScheme`.
-    fn scheme(raw: &str) -> Result<(&str, &str), ()> {
-        for (i, c) in raw.bytes().enumerate() {
-            match c {
-                b'a'..=b'z' | b'A'..=b'Z' => {}
-                b'0'..=b'9' | b'+' | b'-' | b'.' if i > 0 => {}
-                b':' if i == 0 => return Err(()),
-                b':' => return Ok((&raw[..i], &raw[i + 1..])),
-                _ => return Ok(("", raw)),
-            }
-        }
-        Ok(("", raw))
-    }
-
-    /// `parseAuthority`.
-    fn authority_parts(scheme: &str, authority: &str) -> Result<(Option<super::User>, Vec<u8>), ()> {
-        let Some(at) = authority.rfind('@') else {
-            return Ok((None, host(scheme, authority)?));
-        };
-        let host = host(scheme, &authority[at + 1..])?;
-        let userinfo = &authority[..at];
-        let valid = userinfo
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-._:~!$&'()*+,;=%@".contains(c));
-        if !valid {
-            return Err(());
-        }
-        let user = match userinfo.split_once(':') {
-            None => (unescape(userinfo.as_bytes(), Mode::Other)?, None),
-            Some((name, password)) => (
-                unescape(name.as_bytes(), Mode::Other)?,
-                Some(unescape(password.as_bytes(), Mode::Other)?),
-            ),
-        };
-        Ok((Some(user), host))
-    }
-
-    /// `parseHost`.
-    fn host(scheme: &str, host: &str) -> Result<Vec<u8>, ()> {
-        match host.rfind('[') {
-            Some(open) if open > 0 => Err(()),
-            Some(_) => {
-                let close = host.rfind(']').ok_or(())?;
-                let colon_port = &host[close + 1..];
-                if !valid_optional_port(colon_port) {
-                    return Err(());
-                }
-                let port = unescape(colon_port.as_bytes(), Mode::Host)?;
-                let name = &host[1..close];
-                let mut unescaped = match name.find("%25") {
-                    Some(zone) => {
-                        let mut out = unescape(&name.as_bytes()[..zone], Mode::Host)?;
-                        out.extend(unescape(&name.as_bytes()[zone..], Mode::Zone)?);
-                        out
-                    }
-                    None => unescape(name.as_bytes(), Mode::Host)?,
-                };
-                // `netip.ParseAddr`, and only IPv6 belongs in brackets.
-                let text = std::str::from_utf8(&unescaped).map_err(|_| ())?;
-                let (address, zone) = text.split_once('%').map_or((text, None), |(a, z)| (a, Some(z)));
-                if zone == Some("") || address.parse::<std::net::Ipv6Addr>().is_err() {
-                    return Err(());
-                }
-                let mut out = b"[".to_vec();
-                out.append(&mut unescaped);
-                out.push(b']');
-                out.extend(port);
-                Ok(out)
-            }
-            None => {
-                if let Some(first) = host.find(':') {
-                    // Go 1.26 keeps colons in the host strict for http and https.
-                    let last = host.rfind(':').unwrap_or(first);
-                    let i = if scheme == "http" || scheme == "https" {
-                        first
-                    } else {
-                        last
-                    };
-                    if !valid_optional_port(&host[i..]) {
-                        return Err(());
-                    }
-                }
-                unescape(host.as_bytes(), Mode::Host)
-            }
-        }
-    }
-
-    /// `validOptionalPort`: empty, or ':' and digits.
-    pub(super) fn valid_optional_port(port: &str) -> bool {
-        port.is_empty()
-            || port
-                .strip_prefix(':')
-                .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit()))
-    }
-
-    /// Bytes a host may hold unescaped (`shouldEscape(c, encodeHost)` is false).
-    fn host_byte(c: u8) -> bool {
-        c.is_ascii_alphanumeric() || b"-_.~!$&'()*+,;=:[]<>\"".contains(&c)
-    }
-
-    /// `unescape`.
-    fn unescape(s: &[u8], mode: Mode) -> Result<Vec<u8>, ()> {
-        let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-        let mut out = Vec::with_capacity(s.len());
-        let mut i = 0;
-        while i < s.len() {
-            if s[i] == b'%' {
-                let (Some(hi), Some(lo)) = (s.get(i + 1).and_then(|&c| hex(c)), s.get(i + 2).and_then(|&c| hex(c)))
-                else {
-                    return Err(());
-                };
-                let value = hi << 4 | lo;
-                let percent = &s[i..i + 3] == b"%25";
-                if mode == Mode::Host && hi < 8 && !percent {
-                    return Err(());
-                }
-                if mode == Mode::Zone && !percent && value != b' ' && !host_byte(value) {
-                    return Err(());
-                }
-                out.push(value);
-                i += 3;
-            } else {
-                if mode != Mode::Other && s[i] < 0x80 && !host_byte(s[i]) {
-                    return Err(());
-                }
-                out.push(s[i]);
-                i += 1;
-            }
-        }
-        Ok(out)
-    }
-
-    /// `splitHostPort` behind `u.Hostname()` and `u.Port()`.
-    pub(super) fn split_host_port(host: &str) -> (String, String) {
-        let (mut name, mut port) = (host, "");
-        if let Some(colon) = name.rfind(':')
-            && valid_optional_port(&name[colon..])
-        {
-            port = &name[colon + 1..];
-            name = &name[..colon];
-        }
-        if let Some(inner) = name.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
-            name = inner;
-        }
-        (name.to_owned(), port.to_owned())
     }
 }
 

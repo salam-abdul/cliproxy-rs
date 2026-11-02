@@ -13,8 +13,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use cpa_common::gostr::{GoStr, lower_bytes, trim_space};
+use cpa_common::gostr::{GoStr, lower_bytes};
 use cpa_common::json::{self, GoValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
 const TURN_VERSION: &str = "cpa-session-turn-v1";
@@ -77,7 +78,7 @@ pub struct Turn {
 }
 
 fn sha_hex(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
+    cpa_core::hex::encode(Sha256::digest(data))
 }
 
 /// Go `writeFingerprintField`.
@@ -110,7 +111,7 @@ pub fn fingerprint(turn: &Turn) -> String {
             field(&mut hash, &part.value);
         }
     }
-    format!("{:x}", hash.finalize())
+    cpa_core::hex::encode(hash.finalize())
 }
 
 /// Go `ExtractCanonicalTurns`: `format` is the Go translator format name; empty infers
@@ -150,7 +151,7 @@ pub fn extract(format: &str, payload: &[u8]) -> Vec<Turn> {
 
 /// gjson `Result.String()`, trimmed and lowercased as Go's `strings.ToLower(strings.TrimSpace(..))`.
 fn lower_trim(value: &Res<'_>) -> String {
-    lower_bytes(trim_space(&value.bytes()))
+    lower_bytes(go_trim_space(&value.bytes()))
 }
 
 fn infer_format(root: &Res<'_>) -> &'static str {
@@ -581,7 +582,7 @@ fn gemini_tool_kind(value: &Res<'_>) -> Option<&'static str> {
 
 /// Go `canonicalRole`.
 fn canonical_role(role: &[u8]) -> String {
-    let role = lower_bytes(trim_space(role));
+    let role = lower_bytes(go_trim_space(role));
     match role.as_str() {
         "system" | "developer" => "system".into(),
         "assistant" | "model" | "ai" => "assistant".into(),
@@ -599,8 +600,8 @@ fn normalize_turn(turn: &Turn) -> Turn {
             continue;
         }
         let mut part = part.clone();
-        part.kind = lower_bytes(trim_space(part.kind.as_bytes()));
-        part.mime = lower_bytes(trim_space(part.mime.as_bytes()));
+        part.kind = lower_bytes(go_trim_space(part.kind.as_bytes()));
+        part.mime = lower_bytes(go_trim_space(part.mime.as_bytes()));
         if part.original_size <= 0 {
             part.original_size = part.value.len() as i64;
         }
@@ -663,7 +664,7 @@ fn normalize_text(value: &[u8], mask_system_dynamics: bool) -> Vec<u8> {
     } else {
         value.into_owned()
     };
-    trim_space(&value).to_vec()
+    go_trim_space(&value).to_vec()
 }
 
 /// Go `sparseSample`: head, middle and tail thirds of `limit` bytes.
@@ -725,7 +726,7 @@ pub fn environment_digest(turns: &[Turn]) -> String {
         field(&mut hash, fingerprint(turn).as_bytes());
     }
     if any {
-        format!("{:x}", hash.finalize())
+        cpa_core::hex::encode(hash.finalize())
     } else {
         String::new()
     }
@@ -741,7 +742,7 @@ fn fallback_environment(fingerprints: &[String], min_prefix: usize) -> String {
     for fp in &fingerprints[..(min_prefix - 1).min(fingerprints.len())] {
         field(&mut hash, fp.as_bytes());
     }
-    format!("{:x}", hash.finalize())
+    cpa_core::hex::encode(hash.finalize())
 }
 
 fn last_window(fingerprints: &[String]) -> Vec<String> {
@@ -760,7 +761,7 @@ fn rolling_prefix_keys(fingerprints: &[String]) -> Vec<String> {
             hash.update(b"\0");
             hash.update(fp.as_bytes());
             previous = hash.finalize().into();
-            let hex: String = previous.iter().map(|b| format!("{b:02x}")).collect();
+            let hex: String = cpa_core::hex::encode(previous);
             format!("{}:{hex}", i + 1)
         })
         .collect()

@@ -13,10 +13,11 @@ use cpa_core::exec::{ExecError, ExecRequest, FailureScope};
 use cpa_core::format::Format;
 use cpa_translate::RequestCtx;
 
-use crate::openai_compat_payload::{self as compat, set_bool_if_different, set_str_if_different};
+use crate::openai_compat_payload as compat;
+use crate::replay::text;
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_response::{
-    self as response, CUSTOM, ClientToolKey, FUNCTION, NAMESPACE, NamespaceRef, NamespaceRefs, WEB_SEARCH, text,
+    self as response, CUSTOM, ClientToolKey, FUNCTION, NAMESPACE, NamespaceRef, NamespaceRefs, WEB_SEARCH,
 };
 use cpa_translate::apply_patch_responses as apply_patch;
 
@@ -174,8 +175,8 @@ pub(crate) async fn prepare(
         },
         body,
     );
-    set_str_if_different(&mut body, "model", &base_model);
-    set_bool_if_different(&mut body, "stream", stream);
+    gj::set_str_if_different(&mut body, "model", &base_model);
+    gj::set_bool_if_different(&mut body, "stream", stream);
     for key in [
         "previous_response_id",
         "prompt_cache_retention",
@@ -229,7 +230,7 @@ pub(crate) async fn prepare(
     body = normalize_image_refs(body);
     let session_id = composer_session_id(req, &base_model);
     if !session_id.is_empty() {
-        set_str_if_different(&mut body, "prompt_cache_key", &session_id);
+        gj::set_str_if_different(&mut body, "prompt_cache_key", &session_id);
     }
     Ok(Prepared {
         filter_internal_x_search: response::request_has_native_x_search(&body),
@@ -1261,7 +1262,7 @@ fn custom_tool_call_arguments(input: &Res<'_>) -> Vec<u8> {
     }
     if input.kind == Kind::String {
         let value = input.bytes();
-        let trimmed = crate::meta_codex::go_trim_space(&value);
+        let trimmed = cpa_core::config::go_trim_space(&value);
         if gj::valid(trimmed) {
             let parsed = gj::parse(trimmed);
             if parsed.is_object() {

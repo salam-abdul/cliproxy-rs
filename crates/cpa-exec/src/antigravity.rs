@@ -590,7 +590,7 @@ impl AntigravityExecutor {
         let base = ag::base_url(credential);
         let mut url = format!("{base}{}", if stream { ag::STREAM_PATH } else { ag::GENERATE_PATH });
         match gemini::alt(req) {
-            Some(alt) => url.push_str(&format!("?$alt={}", cpa_common::gostr::query_escape(alt))),
+            Some(alt) => url.push_str(&format!("?$alt={}", cpa_core::config::go_url::query_escape(alt))),
             None if stream => url.push_str("?alt=sse"),
             None => {}
         }
@@ -900,7 +900,7 @@ impl AntigravityExecutor {
         }
         let mut url = format!("{}{}", ag::base_url(credential), ag::COUNT_TOKENS_PATH);
         if let Some(alt) = gemini::alt(&req) {
-            url.push_str(&format!("?$alt={}", cpa_common::gostr::query_escape(alt)));
+            url.push_str(&format!("?$alt={}", cpa_core::config::go_url::query_escape(alt)));
         }
         let mut headers = GoHeaders::new();
         headers.set("Content-Type", "application/json");

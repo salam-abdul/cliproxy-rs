@@ -155,7 +155,7 @@ pub(super) async fn realtime(
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     let query = |name| {
-        crate::access::query_get(uri.query().unwrap_or_default(), name)
+        cpa_core::config::go_url::query_get(uri.query().unwrap_or_default(), name)
             .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
             .unwrap_or_default()
     };

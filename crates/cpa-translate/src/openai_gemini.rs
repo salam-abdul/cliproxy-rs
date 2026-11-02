@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
-use crate::common::{go_lower, go_runes, is_gemini_thought_part, trim_space};
+use crate::common::{go_lower, go_runes, is_gemini_thought_part};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx, gemini};
 
@@ -24,7 +25,7 @@ fn first_of<'a>(value: &Res<'a>, paths: [&str; 2]) -> Res<'a> {
 }
 
 fn audio_format(mime: &[u8]) -> &'static str {
-    match go_lower(trim_space(mime)).as_slice() {
+    match go_lower(go_trim_space(mime)).as_slice() {
         b"audio/wav" | b"audio/wave" | b"audio/x-wav" => "wav",
         b"audio/flac" => "flac",
         b"audio/opus" | b"audio/ogg" => "opus",
@@ -34,7 +35,7 @@ fn audio_format(mime: &[u8]) -> &'static str {
 }
 
 fn file_name(mime: &[u8]) -> &'static str {
-    let lower = go_lower(trim_space(mime));
+    let lower = go_lower(go_trim_space(mime));
     match lower.as_slice() {
         b"application/pdf" => "document.pdf",
         b"text/plain" => "document.txt",
@@ -137,14 +138,14 @@ fn deterministic_id(kind: &str, msg: i64, part: i64, name: &[u8], payload: &[u8]
     hasher.update(name);
     hasher.update(b"|");
     hasher.update(payload);
-    format!("call_{}", crate::common::hex(&hasher.finalize()[..12])).into_bytes()
+    format!("call_{}", cpa_core::hex::encode(&hasher.finalize()[..12])).into_bytes()
 }
 
 /// explicitGeminiToolID.
 fn explicit_id(node: &Res<'_>) -> Vec<u8> {
     ["id", "call_id", "callId"]
         .iter()
-        .map(|k| trim_space(&node.get(*k).bytes()).to_vec())
+        .map(|k| go_trim_space(&node.get(*k).bytes()).to_vec())
         .find(|v| !v.is_empty())
         .unwrap_or_default()
 }
@@ -189,7 +190,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
             let list: Vec<&str> = modalities
                 .array()
                 .iter()
-                .filter_map(|m| match go_lower(trim_space(&m.bytes())).as_slice() {
+                .filter_map(|m| match go_lower(go_trim_space(&m.bytes())).as_slice() {
                     b"text" => Some("text"),
                     b"image" => Some("image"),
                     b"audio" => Some("audio"),
@@ -204,7 +205,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
         if thinking.is_object() {
             let level = first_of(&thinking, ["thinkingLevel", "thinking_level"]);
             if level.exists() {
-                let effort = go_lower(trim_space(&level.bytes()));
+                let effort = go_lower(go_trim_space(&level.bytes()));
                 if !effort.is_empty() {
                     gj::set_str(&mut out, "reasoning_effort", &effort);
                 }
@@ -440,7 +441,7 @@ fn reasoning_texts(node: &Res<'_>, out: &mut Vec<Vec<u8>>) {
         Kind::String => out.push(node.s.to_vec()),
         Kind::Json => {
             let text = node.get("text");
-            let raw = trim_space(&node.raw);
+            let raw = go_trim_space(&node.raw);
             if text.exists() {
                 out.push(text.bytes().into_owned());
             } else if !raw.is_empty() && !raw.starts_with(b"{") && !raw.starts_with(b"[") {
@@ -520,12 +521,12 @@ pub fn go_stream(_: &ResponseCtx<'_>) -> Box<dyn GoStream> {
 
 impl GoStream for State {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
-        if trim_space(line) == b"[DONE]" {
+        if go_trim_space(line) == b"[DONE]" {
             return Ok(vec![]);
         }
         let mut raw = line;
         if let Some(rest) = raw.strip_prefix(b"data:") {
-            raw = trim_space(rest);
+            raw = go_trim_space(rest);
         }
         let root = gj::parse(raw);
         let choices = root.get("choices");
@@ -713,7 +714,7 @@ pub fn non_stream(_: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
 /// parseArgsToObjectRaw: a JSON object for function call arguments, recovering what it
 /// can from malformed text.
 fn args_object(arguments: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(arguments);
+    let trimmed = go_trim_space(arguments);
     if trimmed.is_empty() || trimmed == b"{}" {
         return b"{}".to_vec();
     }

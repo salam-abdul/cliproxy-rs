@@ -243,7 +243,7 @@ async fn a_split_payload_reports_its_served_model() {
             .lock()
             .unwrap()
             .iter()
-            .all(|l| !l.windows(7).any(|w| w == b"joined\"")),
+            .all(|l| !cpa_common::gostr::contains(l, b"joined\"")),
         "no part of the joined payload is a usage line"
     );
 }

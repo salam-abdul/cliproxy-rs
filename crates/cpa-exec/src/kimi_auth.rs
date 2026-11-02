@@ -10,6 +10,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
+use cpa_core::config::go_url::values_encode;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, FailureScope};
 use futures_util::FutureExt;
@@ -135,30 +136,6 @@ pub fn resolve_domain(credential: &Credential) -> &'static str {
                 DOMAIN_COM
             }
         })
-}
-
-/// Go `url.QueryEscape` for form bodies.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Go `url.Values.Encode`: keys sorted.
-pub(crate) fn form(pairs: &[(&str, &str)]) -> String {
-    let mut pairs = pairs.to_vec();
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v)))
-        .collect::<Vec<_>>()
-        .join("&")
 }
 
 /// Device-flow device model (`getDeviceModel`), unlike the executor's lowercase form.
@@ -293,7 +270,7 @@ impl DeviceFlow {
     /// Starts the device flow.
     pub async fn request_device_code(&self) -> Result<DeviceCode, ExecError> {
         let url = format!("{}/api/oauth/device_authorization", self.oauth_host);
-        let (status, body) = self.post(&url, form(&[("client_id", CLIENT_ID)])).await?;
+        let (status, body) = self.post(&url, values_encode(&[("client_id", CLIENT_ID)])).await?;
         if status != 200 {
             return Err(auth_error(
                 status,
@@ -314,7 +291,7 @@ impl DeviceFlow {
 
     /// One poll. `Ok(None)` means keep polling (authorization_pending / slow_down).
     async fn exchange(&self, device_code: &str) -> Result<Option<Tokens>, ExecError> {
-        let body = form(&[
+        let body = values_encode(&[
             ("client_id", CLIENT_ID),
             ("device_code", device_code),
             ("grant_type", DEVICE_GRANT),
@@ -392,7 +369,7 @@ impl DeviceFlow {
     }
 
     async fn refresh_once(&self, refresh_token: &str) -> Result<Tokens, ExecError> {
-        let body = form(&[
+        let body = values_encode(&[
             ("client_id", CLIENT_ID),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -560,10 +537,7 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()>
     let mut suffix = [0u8; 8];
     getrandom::fill(&mut suffix).map_err(std::io::Error::other)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("credential");
-    let temporary = directory.join(format!(
-        ".{name}.{}.tmp",
-        suffix.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ));
+    let temporary = directory.join(format!(".{name}.{}.tmp", cpa_core::hex::encode(suffix)));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -723,7 +697,7 @@ mod tests {
     #[test]
     fn form_matches_go_values_encode() {
         assert_eq!(
-            form(&[("grant_type", DEVICE_GRANT), ("client_id", "a b*~")]),
+            values_encode(&[("grant_type", DEVICE_GRANT), ("client_id", "a b*~")]),
             "client_id=a+b%2A~&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
         );
     }

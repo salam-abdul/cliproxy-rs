@@ -476,49 +476,12 @@ pub(crate) fn normalize_completion(payload: String) -> String {
     }
 }
 
-/// `EnsureResponsesUsageDetails` for one JSON object payload.
+/// `EnsureResponsesUsageDetails` on a text payload.
 pub(crate) fn ensure_usage_details(payload: String) -> String {
-    let trimmed = payload.trim();
-    if !trimmed.starts_with('{') || gjson::get(trimmed, "object").str() == "response.compaction" {
-        return payload;
+    match crate::openai_compat_payload::usage_details_patched(payload.as_bytes()) {
+        Some(out) => String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+        None => payload,
     }
-    let mut out = trimmed.to_owned();
-    for path in ["response.usage", "usage"] {
-        let usage = gjson::get(&out, path);
-        if usage.kind() != Kind::Object {
-            continue;
-        }
-        let (output, input) = (usage.get("output_tokens_details"), usage.get("input_tokens_details"));
-        let output = (
-            output.exists(),
-            output.kind(),
-            output.get("reasoning_tokens").exists() && output.get("reasoning_tokens").kind() != Kind::Null,
-        );
-        let input = (
-            input.exists(),
-            input.kind(),
-            input.get("cached_tokens").exists() && input.get("cached_tokens").kind() != Kind::Null,
-        );
-        out = match output {
-            (false, ..) => set_raw(&out, &format!("{path}.output_tokens_details.reasoning_tokens"), "0"),
-            (true, kind, _) if kind != Kind::Object => set_raw(
-                &out,
-                &format!("{path}.output_tokens_details"),
-                r#"{"reasoning_tokens":0}"#,
-            ),
-            (true, _, false) => set_raw(&out, &format!("{path}.output_tokens_details.reasoning_tokens"), "0"),
-            _ => out,
-        };
-        out = match input {
-            (false, ..) => set_raw(&out, &format!("{path}.input_tokens_details.cached_tokens"), "0"),
-            (true, kind, _) if kind != Kind::Object => {
-                set_raw(&out, &format!("{path}.input_tokens_details"), r#"{"cached_tokens":0}"#)
-            }
-            (true, _, false) => set_raw(&out, &format!("{path}.input_tokens_details.cached_tokens"), "0"),
-            _ => out,
-        };
-    }
-    if out == trimmed { payload } else { out }
 }
 
 /// Go `http.StatusText` (where the `http` crate's reason phrases differ).
@@ -541,45 +504,7 @@ pub(crate) fn go_status_text(status: u16) -> &'static str {
 /// `EnsureResponsesUsageDetails` over one stream chunk: a JSON object, or SSE `data:`
 /// lines (Go applies it to every chunk sent to an OpenAI Responses client).
 pub(crate) fn ensure_usage_details_chunk(chunk: Bytes) -> Bytes {
-    let text = String::from_utf8_lossy(&chunk);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return chunk;
-    }
-    if trimmed.starts_with('{') {
-        let out = ensure_usage_details(trimmed.to_owned());
-        return if out == trimmed { chunk } else { Bytes::from(out) };
-    }
-    if !text.contains("data:") {
-        return chunk;
-    }
-    let mut modified = false;
-    let lines: Vec<String> = text
-        .split('\n')
-        .map(|line| {
-            if !line.trim().starts_with("data:") {
-                return line.to_owned();
-            }
-            let prefix = if line.starts_with("data: ") {
-                "data: "
-            } else if line.starts_with("data:") {
-                "data:"
-            } else {
-                return line.to_owned();
-            };
-            let data = line[prefix.len()..].trim();
-            if !data.starts_with('{') {
-                return line.to_owned();
-            }
-            let updated = ensure_usage_details(data.to_owned());
-            if updated == data {
-                return line.to_owned();
-            }
-            modified = true;
-            format!("{prefix}{updated}")
-        })
-        .collect();
-    if modified { Bytes::from(lines.join("\n")) } else { chunk }
+    crate::openai_compat_payload::usage_details_patched(&chunk).map_or(chunk, Bytes::from)
 }
 
 /// Output items seen in `response.output_item.done`, used to patch an empty
@@ -1189,5 +1114,25 @@ pub(crate) async fn bootstrap(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    #[test]
+    fn usage_details_keep_every_other_chunk_byte() {
+        let chunk = Bytes::from_static(b"event: x\ndata: {\"n\":\"\xff\",\"usage\":{}}\n\n");
+        assert_eq!(
+            &super::ensure_usage_details_chunk(chunk)[..],
+            &b"event: x\ndata: {\"n\":\"\xff\",\"usage\":{\"output_tokens_details\":{\"reasoning_tokens\":0},\"input_tokens_details\":{\"cached_tokens\":0}}}\n\n"[..]
+        );
+        let done = Bytes::from_static(b"data: {\"usage\":{\"output_tokens_details\":{\"reasoning_tokens\":1},\"input_tokens_details\":{\"cached_tokens\":2}}}");
+        assert_eq!(
+            super::ensure_usage_details_chunk(done.clone()).as_ptr(),
+            done.as_ptr(),
+            "unchanged chunks are not copied"
+        );
     }
 }

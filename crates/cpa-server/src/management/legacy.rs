@@ -25,11 +25,6 @@ pub(crate) mod view;
 /// Serializes v0 read-modify-write handlers, as Go's handler mutex does.
 static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Go `strings.TrimSpace`.
-pub(crate) fn go_trim(s: &str) -> &str {
-    std::str::from_utf8(cpa_core::config::go_trim_space(s.as_bytes())).unwrap_or(s)
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Bool,
@@ -213,7 +208,7 @@ pub(crate) async fn config(State(state): State<Arc<Management>>) -> Response {
 
 /// Go `normalizeRoutingStrategy`.
 fn routing_strategy(s: &str) -> Option<&'static str> {
-    match go_trim(s).to_lowercase().as_str() {
+    match s.trim().to_lowercase().as_str() {
         "" | "round-robin" | "roundrobin" | "rr" => Some("round-robin"),
         "weighted-round-robin" | "weightedroundrobin" | "wrr" => Some("weighted-round-robin"),
         "fill-first" | "fillfirst" | "ff" => Some("fill-first"),
@@ -309,7 +304,7 @@ pub(crate) async fn field_route(
         let value = match f.route {
             "routing/strategy" => {
                 let raw = cfg["routing"]["strategy"].as_str().unwrap_or_default();
-                Value::from(routing_strategy(raw).unwrap_or(go_trim(raw)))
+                Value::from(routing_strategy(raw).unwrap_or(raw.trim()))
             }
             r if r.starts_with("quota-exceeded/") => cfg["quota-exceeded"][f.key].clone(),
             _ => cfg[f.key].clone(),
@@ -368,33 +363,10 @@ fn query_first(raw: Option<&str>, name: &str) -> Option<String> {
         .map(|(_, v)| v)
 }
 
-/// `url.ParseQuery` pairs (malformed pairs skipped).
+/// `url.ParseQuery` pairs (malformed and non-UTF-8 pairs skipped).
 fn url_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    raw.split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .filter_map(|p| {
-            let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            Some((unescape(k)?, unescape(v)?))
-        })
-}
-
-fn unescape(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => out.push(b' '),
-            b'%' => {
-                let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
+    cpa_core::config::go_url::parse_query(raw)
+        .filter_map(|(k, v)| Some((String::from_utf8(k).ok()?, String::from_utf8(v).ok()?)))
 }
 
 /// Go's `api-keys` routes (`putStringList`, `patchStringList`, `deleteFromStringList`).
@@ -461,10 +433,10 @@ pub(crate) async fn api_keys(
                 return write(state, v8, Value::Array(keys)).await;
             }
             if let Some(value) = query_first(raw, "value")
-                .map(|v| go_trim(&v).to_owned())
+                .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty())
             {
-                keys.retain(|k| go_trim(k.as_str().unwrap_or_default()) != value);
+                keys.retain(|k| k.as_str().unwrap_or_default().trim() != value);
                 return write(state, v8, Value::Array(keys)).await;
             }
             bad("missing index or value")

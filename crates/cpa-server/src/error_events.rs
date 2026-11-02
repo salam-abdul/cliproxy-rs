@@ -16,12 +16,13 @@ use cpa_core::credential::Credential;
 use cpa_core::exec::ExecError;
 
 use crate::cooldown_store::Record;
-use crate::gojson::Obj;
+use cpa_common::json::Object;
 
 fn time(t: SystemTime) -> String {
-    crate::gojson::string(&crate::usage_record::go_timestamp(
-        &chrono::DateTime::<chrono::Local>::from(t),
-    ))
+    cpa_common::json::marshal_string(
+        cpa_core::gotime::rfc3339_nano(&chrono::DateTime::<chrono::Local>::from(t)),
+        true,
+    )
 }
 
 /// Go `errorEventQuotaStatus`, omitted when nothing is set.
@@ -30,17 +31,17 @@ fn quota(record: &Record, reason: &str) -> Option<String> {
     if !q.exceeded && reason.is_empty() && q.next_recover_at.is_none() && q.backoff_level == 0 {
         return None;
     }
-    let mut o = Obj::new().raw("exceeded", if q.exceeded { "true" } else { "false" });
+    let mut o = Object::new().raw("exceeded", if q.exceeded { "true" } else { "false" });
     if !reason.is_empty() {
         o = o.str("reason", reason);
     }
     if let Some(at) = q.next_recover_at {
-        o = o.raw("next_recover_at", &time(at));
+        o = o.raw("next_recover_at", time(at));
     }
     if q.backoff_level != 0 {
-        o = o.raw("backoff_level", &q.backoff_level.to_string());
+        o = o.raw("backoff_level", q.backoff_level.to_string());
     }
-    Some(o.finish())
+    Some(o.finish_string())
 }
 
 /// The payload for a failure of `c` on `model`, given its live cooldown `records`.
@@ -50,7 +51,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
     // that on the auth itself).
     let model_record = records.iter().find(|r| r.model == key);
     let credential_record = records.iter().find(|r| r.model.is_empty());
-    let status_code = match crate::classify::go_status(error) {
+    let status_code = match error.go_status() {
         0 => 500,
         s => s,
     };
@@ -66,7 +67,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
                 .unwrap_or_default()
         }
     };
-    let mut auth_status = Obj::new();
+    let mut auth_status = Object::new();
     match credential_record.or(model_record) {
         Some(auth_record) => {
             let message = message(model_record.unwrap_or(auth_record));
@@ -83,7 +84,7 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
                 .raw("disabled", if c.disabled { "true" } else { "false" })
                 .raw("unavailable", "true");
             if let Some(at) = auth_record.next_retry_after {
-                auth_status = auth_status.raw("next_retry_after", &time(at));
+                auth_status = auth_status.raw("next_retry_after", time(at));
             }
             if let Some(q) = quota(auth_record, auth_reason) {
                 auth_status = auth_status.raw("quota", &q);
@@ -93,18 +94,18 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
                     "credential_quota" => "quota",
                     reason => reason,
                 };
-                let mut model_status = Obj::new().str("name", model.trim()).str("status", "error");
+                let mut model_status = Object::new().str("name", model.trim()).str("status", "error");
                 if !message.is_empty() {
                     model_status = model_status.str("status_message", &message);
                 }
                 model_status = model_status.raw("unavailable", "true");
                 if let Some(at) = r.next_retry_after {
-                    model_status = model_status.raw("next_retry_after", &time(at));
+                    model_status = model_status.raw("next_retry_after", time(at));
                 }
                 if let Some(q) = quota(r, model_reason) {
                     model_status = model_status.raw("quota", &q);
                 }
-                auth_status = auth_status.raw("model", &model_status.finish());
+                auth_status = auth_status.raw("model", model_status.finish_string());
             }
         }
         None => {
@@ -114,9 +115,9 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
                 .raw("unavailable", "false");
         }
     }
-    let mut event = Obj::new().raw(
+    let mut event = Object::new().raw(
         "timestamp",
-        &crate::gojson::string(&crate::usage_record::go_timestamp(&chrono::Local::now())),
+        cpa_common::json::marshal_string(cpa_core::gotime::rfc3339_nano(&chrono::Local::now()), true),
     );
     let provider = c.provider.trim();
     if !provider.is_empty() {
@@ -130,10 +131,10 @@ pub(crate) fn payload(c: &Credential, model: &str, error: &ExecError, records: &
     }
     event = event
         .str("auth_index", cpa_core::config::credentials::auth_index(c).trim())
-        .raw("status_code", &status_code.to_string())
+        .raw("status_code", status_code.to_string())
         .str("body", if body.is_empty() { "request failed" } else { body })
-        .raw("auth_status", &auth_status.finish());
-    event.finish().into_bytes()
+        .raw("auth_status", auth_status.finish_string());
+    event.finish()
 }
 
 #[cfg(test)]

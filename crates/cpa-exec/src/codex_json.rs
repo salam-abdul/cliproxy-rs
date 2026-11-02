@@ -12,6 +12,11 @@ fn edited(json: &str, edit: impl FnOnce(&mut Vec<u8>) -> bool) -> String {
     if !edit(&mut out) {
         return json.to_owned();
     }
+    text(out)
+}
+
+/// Edits of a UTF-8 document stay UTF-8; the lossy fallback is unreachable.
+fn text(out: Vec<u8>) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
@@ -30,29 +35,11 @@ pub fn delete(json: &str, path: &str) -> String {
     edited(json, |out| gj::delete(out, path))
 }
 
-/// `helps.SetStringIfDifferent`.
-pub fn set_str_if_different(json: String, path: &str, value: &str) -> String {
-    let current = gjson::get(&json, path);
-    if current.kind() == Kind::String && current.str() == value {
-        return json;
-    }
-    set_str(&json, path, value)
-}
-
-/// `helps.SetBoolIfDifferent`.
-pub fn set_bool_if_different(json: String, path: &str, value: bool) -> String {
-    let kind = gjson::get(&json, path).kind();
-    if (value && kind == Kind::True) || (!value && kind == Kind::False) {
-        return json;
-    }
-    set_raw(&json, path, if value { "true" } else { "false" })
-}
-
-/// encoding/json string encoding; `escape_html` as `json.Marshal` does.
-pub fn go_quote(s: &str, escape_html: bool) -> String {
-    let mut out = Vec::with_capacity(s.len() + 2);
-    gj::marshal_str(&mut out, s.as_bytes(), escape_html);
-    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+/// A byte-level `cpa_common::json` edit of a text document, without copying it.
+pub fn edit(json: String, edit: impl FnOnce(&mut Vec<u8>)) -> String {
+    let mut out = json.into_bytes();
+    edit(&mut out);
+    text(out)
 }
 
 /// `json.Unmarshal` into `map[string]json.RawMessage` followed by `json.Marshal`: sorted
@@ -83,7 +70,7 @@ pub fn go_remarshal_object(
         if i > 0 {
             out.push(',');
         }
-        out.push_str(&go_quote(key, true));
+        out.push_str(&gj::marshal_string(key, true));
         out.push(':');
         out.push_str(&String::from_utf8_lossy(&gj::compact(value.as_bytes(), true)));
     }
@@ -131,7 +118,6 @@ mod tests {
         );
         assert_eq!(set_str("{}", "v", "a<b\n"), r#"{"v":"a\u003cb\n"}"#);
         assert_eq!(set_str("{}", "v", "é\u{2028}"), "{\"v\":\"é\\u2028\"}");
-        assert_eq!(go_quote("\u{1}\u{8}\u{c}", false), r#""\u0001\b\f""#);
     }
 
     #[test]

@@ -24,7 +24,7 @@ Example input:
 
 /// applypatch.IsCustomTool.
 pub(crate) fn is_custom_tool(tool: &Res<'_>) -> bool {
-    tool.get("type").str() == "custom" && crate::common::trim_space(&tool.get("name").bytes()) == b"apply_patch"
+    tool.get("type").str() == "custom" && cpa_core::config::go_trim_space(&tool.get("name").bytes()) == b"apply_patch"
 }
 
 /// applypatch.Description: the original description (minus the freeform warning), the
@@ -34,20 +34,20 @@ pub(crate) fn description(tool: &Res<'_>) -> Vec<u8> {
     let warning: &[u8] = b"This is a FREEFORM tool, so do not wrap the patch in JSON.";
     let mut stripped = vec![];
     let mut rest = &original[..];
-    while let Some(i) = rest.windows(warning.len()).position(|w| w == warning) {
+    while let Some(i) = cpa_common::gostr::index(rest, warning) {
         stripped.extend_from_slice(&rest[..i]);
         rest = &rest[i + warning.len()..];
     }
     stripped.extend_from_slice(rest);
     let mut out = vec![];
-    if !crate::common::trim_space(&stripped).is_empty() {
+    if !cpa_core::config::go_trim_space(&stripped).is_empty() {
         out.extend_from_slice(&stripped);
         out.extend_from_slice(b"\n\n");
     }
     out.extend_from_slice(INSTRUCTIONS.as_bytes());
     let grammar = tool.get("format.definition").bytes();
     if !grammar.is_empty() {
-        if grammar.windows(19).any(|w| w == b"*** Environment ID:") {
+        if cpa_common::gostr::contains(&grammar, b"*** Environment ID:") {
             out.extend_from_slice(b"\n\nUse *** Environment ID: as specified by the patch grammar.");
         }
         out.extend_from_slice(b"\n\nOriginal patch grammar:\n");

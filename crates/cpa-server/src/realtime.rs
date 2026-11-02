@@ -186,7 +186,9 @@ async fn authenticate(
                 secret: None,
             },
             Err(denied) if matches!(mode, Mode::Ordinary) => {
-                let body = crate::gojson::Obj::new().str("error", denied.message).finish();
+                let body = cpa_common::json::Object::new()
+                    .str("error", denied.message)
+                    .finish_string();
                 return crate::respond::gin_json(denied.status, body);
             }
             Err(denied) => {
@@ -200,19 +202,25 @@ async fn authenticate(
 
 /// `writeRealtimeError`: gin.H marshals with sorted keys.
 fn realtime_error(status: u16, message: &str, kind: &str, code: &str) -> Response {
-    let detail = crate::gojson::Obj::new()
+    let detail = cpa_common::json::Object::new()
         .str("code", code)
         .str("message", message)
         .raw("param", "null")
         .str("type", kind)
-        .finish();
-    crate::respond::gin_json(status, crate::gojson::Obj::new().raw("error", &detail).finish())
+        .finish_string();
+    crate::respond::gin_json(
+        status,
+        cpa_common::json::Object::new().raw("error", &detail).finish_string(),
+    )
 }
 
 /// `writeLiveError`: the OpenAI envelope under `/v1/realtime`, else `{"error": msg}`.
 fn live_error(realtime: bool, status: u16, message: &str) -> Response {
     if !realtime {
-        return crate::respond::gin_json(status, crate::gojson::Obj::new().str("error", message).finish());
+        return crate::respond::gin_json(
+            status,
+            cpa_common::json::Object::new().str("error", message).finish_string(),
+        );
     }
     let kind = match status {
         401 => "authentication_error",
@@ -300,13 +308,6 @@ async fn select_oauth(
             });
     }
     let policy = rt.policy();
-    let exclude = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| c.provider == "codex" && cpa_core::registry::dynamic::auth_kind(c) != Some("oauth"))
-        .map(|c| c.id.clone())
-        .collect();
     let (primary, parent, fork) = session_hierarchy(headers, body, execution_session);
     let bound = |s: String| (!s.is_empty()).then(|| cpa_common::session::bound_session_identity(&s));
     let selection = Selection {
@@ -315,7 +316,7 @@ async fn select_oauth(
         session_parent: bound(parent),
         session_fork: fork,
         pinned: pinned.map(str::to_owned),
-        exclude,
+        accept: Some(|c| c.provider != "codex" || cpa_core::registry::dynamic::auth_kind(c) == Some("oauth")),
         ..Selection::default()
     };
     rt.acquire(selection, cfg, policy, &rt.registry())

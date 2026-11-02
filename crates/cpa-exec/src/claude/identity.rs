@@ -6,7 +6,6 @@ use cpa_core::credential::Credential;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::session::hex;
 use crate::rawjson;
 
 fn valid_device(s: &str) -> bool {
@@ -50,14 +49,14 @@ pub(crate) fn wire_identity(credential: &Credential, seed: &str, synthesize: boo
         .and_then(Value::as_array)
         .is_some_and(|a| a.len() == 1 && a[0].as_str().is_some_and(|s| first_device(raw).as_deref() == Some(s)));
     let device = if synthesize && !canonical {
-        hex(&Sha256::digest(format!("cpa-claude-code-cli-device|{seed}").as_bytes()))
+        cpa_core::hex::encode(Sha256::digest(format!("cpa-claude-code-cli-device|{seed}").as_bytes()))
     } else {
         // ponytail: an OAuth credential reaching execute without a pool (prepare not yet
         // committed) gets a request-local random device, as Go's in-memory ensure does.
         first_device(raw).unwrap_or_else(|| {
             let mut bytes = [0u8; 32];
             let _ = getrandom::fill(&mut bytes);
-            hex(&bytes)
+            cpa_core::hex::encode(bytes)
         })
     };
     (device, account)
@@ -87,9 +86,9 @@ pub(crate) fn apply(body: &str, device: &str, account: &str, session: &str) -> R
     }
     let mut out = format!(
         r#"{{"device_id":{},"account_uuid":{},"session_id":{}"#,
-        rawjson::go_string(device),
-        rawjson::go_string(account),
-        rawjson::go_string(session)
+        cpa_common::json::marshal_string(device, true),
+        cpa_common::json::marshal_string(account, true),
+        cpa_common::json::marshal_string(session, true)
     );
     let trimmed = existing.trim();
     if trimmed.starts_with('{') && gjson::valid(trimmed) {
@@ -103,7 +102,7 @@ pub(crate) fn apply(body: &str, device: &str, account: &str, session: &str) -> R
             }
             if !matches!(key.as_str(), "device_id" | "account_uuid" | "session_id") {
                 out.push(',');
-                out.push_str(&rawjson::go_string(&key));
+                out.push_str(&cpa_common::json::marshal_string(&key, true));
                 out.push(':');
                 // Go decodes into json.RawMessage, which keeps the raw bytes.
                 out.push_str(v.json());

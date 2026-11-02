@@ -1,11 +1,10 @@
 //! OpenAI Chat Completions request -> Codex (OpenAI Responses) request
 //! (internal/translator/codex/openai/chat-completions/codex_openai_request.go).
 
-use crate::{
-    Registered, apply_patch, codex_chat_response as response,
-    common::{go_lower, sanitize, trim_space},
-};
+use crate::codex_names::{self, service_tier};
+use crate::{Registered, apply_patch, codex_chat_response as response, common::sanitize};
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -16,24 +15,9 @@ pub static PAIR: Registered = registered!(
     token_count: None,
 );
 
-const NAME_LIMIT: usize = 64;
-
-/// shortenNameIfNeeded: sanitized, then at most 64 bytes, keeping `mcp__` plus the last
-/// `__` segment when possible.
+/// shortenNameIfNeeded over the sanitized name.
 pub(crate) fn shorten_name(name: &[u8]) -> Vec<u8> {
-    let sanitized = sanitize(name);
-    if sanitized.len() <= NAME_LIMIT {
-        return sanitized;
-    }
-    if sanitized.starts_with(b"mcp__")
-        && let Some(idx) = sanitized.windows(2).rposition(|w| w == b"__")
-        && idx > 0
-    {
-        let mut candidate = [&b"mcp__"[..], &sanitized[idx + 2..]].concat();
-        candidate.truncate(NAME_LIMIT);
-        return candidate;
-    }
-    sanitized[..NAME_LIMIT].to_vec()
+    codex_names::shorten_name(&sanitize(name))
 }
 
 /// collectRequestToolNames: declared tools, the tool choice, then assistant tool calls.
@@ -90,44 +74,6 @@ pub(crate) fn request_tool_names(raw: &[u8]) -> Vec<Vec<u8>> {
     names
 }
 
-/// buildShortNameMap: unique short names, suffixing `_1`, `_2`, ... on collisions.
-pub(crate) fn short_name_map(names: &[Vec<u8>]) -> HashMap<Vec<u8>, Vec<u8>> {
-    let mut used: HashSet<Vec<u8>> = HashSet::new();
-    let mut map = HashMap::new();
-    for name in names {
-        let candidate = shorten_name(name);
-        let unique = if used.contains(&candidate) {
-            (1..)
-                .map(|i| {
-                    let suffix = format!("_{i}");
-                    let allowed = NAME_LIMIT.saturating_sub(suffix.len());
-                    let mut tmp = candidate[..candidate.len().min(allowed)].to_vec();
-                    tmp.extend_from_slice(suffix.as_bytes());
-                    tmp
-                })
-                .find(|tmp| !used.contains(tmp))
-                .unwrap()
-        } else {
-            candidate
-        };
-        used.insert(unique.clone());
-        map.insert(name.clone(), unique);
-    }
-    map
-}
-
-/// normalizeCodexServiceTier.
-pub(crate) fn service_tier(r: &Res<'_>) -> &'static str {
-    if r.kind != Kind::String {
-        return "";
-    }
-    match go_lower(trim_space(&r.s)).as_slice() {
-        b"fast" | b"priority" => "priority",
-        b"ultrafast" => "ultrafast",
-        _ => "",
-    }
-}
-
 struct PendingCall {
     call_id: Vec<u8>,
     source_id: Vec<u8>,
@@ -175,7 +121,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
         }
         custom_names.retain(|n| !function_names.contains(n));
     }
-    let short_names = short_name_map(&request_tool_names(raw));
+    let short_names = codex_names::short_name_map(request_tool_names(raw), shorten_name);
     let short = |name: &[u8]| short_names.get(name).cloned().unwrap_or_else(|| shorten_name(name));
 
     // (custom, name, input)
@@ -191,7 +137,7 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
                 let custom = custom_names.contains(&name);
                 let mut input = call.get("function.arguments").bytes().into_owned();
                 if custom
-                    && trim_space(&name) == b"apply_patch"
+                    && go_trim_space(&name) == b"apply_patch"
                     && let Some(unwrapped) = apply_patch::unwrap_input(&input)
                 {
                     input = unwrapped.into_bytes();

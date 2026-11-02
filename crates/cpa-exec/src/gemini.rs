@@ -446,7 +446,7 @@ impl GeminiExecutor {
         body = payload::fix_image_aspect_ratio(&base_model, body);
         let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &base_model, to.as_str(), body, &original_translated, req);
-        body = payload::set_str_if_different(body, "model", &base_model);
+        gj::set_str_if_different(&mut body, "model", &base_model);
         body = payload::cap_max_output_tokens(body, &base_model);
         body = cpa_common::signature::sanitize_gemini_request_thought_signatures(&body, "contents");
         body = payload::ensure_leading_user_content(body, "contents");
@@ -522,7 +522,7 @@ impl GeminiExecutor {
             translate_pair(req, cfg, to, &target, compat)?
         };
         if gj::get(&body, "model").exists() && !target.is_empty() {
-            body = payload::set_str_if_different(body, "model", &target);
+            gj::set_str_if_different(&mut body, "model", &target);
         }
         // applyGeminiInteractionsThinking: the Gemini applier family for the target.
         body = apply_thinking(req, body, from, to, "gemini", resolved.as_ref())?;
@@ -530,7 +530,7 @@ impl GeminiExecutor {
         body = apply_payload_rules(&rules, &target, "interactions", body, &original_translated, req);
         body = payload::sanitize_interactions_input_ids(body);
         if req.stream {
-            body = payload::set_bool_if_different(body, "stream", true);
+            gj::set_bool_if_different(&mut body, "stream", true);
         }
         let url = format!("{}/{API_VERSION}/interactions", base_url(credential));
         let mut headers = request_headers(credential, req);
@@ -604,7 +604,7 @@ impl GeminiExecutor {
         for path in ["tools", "generationConfig", "safetySettings"] {
             body = payload::delete(body, path);
         }
-        body = payload::set_str_if_different(body, "model", &base_model);
+        gj::set_str_if_different(&mut body, "model", &base_model);
         body = cpa_common::signature::sanitize_gemini_request_thought_signatures(&body, "contents");
         body = payload::ensure_leading_user_content(body, "contents");
         let url = format!("{}/{API_VERSION}/models/{base_model}:countTokens", base_url(credential));
@@ -1017,9 +1017,9 @@ pub(crate) fn gemini_stream_has_finish_signal(line: &[u8]) -> bool {
             value
                 .array()
                 .iter()
-                .any(|item| !cpa_common::gostr::trim_space(&item.bytes()).is_empty())
+                .any(|item| !cpa_core::config::go_trim_space(&item.bytes()).is_empty())
         } else {
-            value.exists() && !cpa_common::gostr::trim_space(&value.bytes()).is_empty()
+            value.exists() && !cpa_core::config::go_trim_space(&value.bytes()).is_empty()
         }
     })
 }
@@ -1059,9 +1059,9 @@ pub(crate) fn antigravity_payloads(lines: ExecStream) -> ExecStream {
                     _ => Some(Bytes::from(filtered)),
                 }
             } else {
-                let mut piece = cpa_common::gostr::trim_space(&filtered);
+                let mut piece = cpa_core::config::go_trim_space(&filtered);
                 if let Some(rest) = piece.strip_prefix(b"data:") {
-                    piece = cpa_common::gostr::trim_space(rest);
+                    piece = cpa_core::config::go_trim_space(rest);
                 }
                 if !piece.is_empty() {
                     pending.push(b'\n');

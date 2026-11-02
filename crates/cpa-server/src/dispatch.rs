@@ -236,10 +236,10 @@ impl Failure {
                 } else {
                     providers.join(",")
                 };
-                let model = if gojson::trim(model).is_empty() {
+                let model = if model.trim().is_empty() {
                     "unknown"
                 } else {
-                    gojson::trim(model)
+                    model.trim()
                 };
                 let mut detail = match cause.as_deref().map(upstream_summary).filter(|s| !s.is_empty()) {
                     Some(summary) => format!(
@@ -324,7 +324,7 @@ pub fn upstream_summary(raw: &str) -> String {
         _ => raw,
     };
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
-        let s = |v: Option<&serde_json::Value>| gojson::trim(&gojson::gjson_string(v)).to_owned();
+        let s = |v: Option<&serde_json::Value>| gojson::gjson_string(v).trim().to_owned();
         let (mut code, mut message) = (String::new(), String::new());
         match v.get("error") {
             Some(e @ serde_json::Value::Object(_)) => {
@@ -376,7 +376,7 @@ const IMAGE_ONLY: [&str; 8] = [
 /// Go `getRequestDetails`: resolve `auto`, find the providers, keep the suffix.
 fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>, String), RunError> {
     if let Some(provider) = &call.forced_provider {
-        return Ok((vec![provider.clone()], gojson::trim(&call.model).to_owned()));
+        return Ok((vec![provider.clone()], call.model.trim().to_owned()));
     }
     let model = call.model.as_str();
     let base = match model.rfind('(') {
@@ -393,7 +393,7 @@ fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>,
     } else {
         model.to_owned()
     };
-    let base = gojson::trim(canonical_model_raw(&resolved)).to_owned();
+    let base = canonical_model_raw(&resolved).trim().to_owned();
     let image = base
         .rsplit('/')
         .next()
@@ -627,7 +627,7 @@ async fn retry_bootstrap(
             Err(RunError {
                 failure: Failure::Exec(e),
                 bootstrap: true,
-            }) if bootstrap_eligible(classify::go_status(e)) => e.clone(),
+            }) if bootstrap_eligible(e.go_status()) => e.clone(),
             _ => break,
         };
         result = match run_routed(rt, call.clone(), trace, resolved.clone()).await {
@@ -1079,7 +1079,7 @@ async fn run_routed(
         // Go `shouldRetryAfterErrorWithAttempted` / `isRequestRetryRoundError`.
         let (status, retry_round) = match &round_error.failure {
             Failure::Exec(e) => (
-                classify::go_status(e),
+                e.go_status(),
                 classify::is_retry_round(e) && !classify::is_request_invalid(e) && !last_broke,
             ),
             Failure::Cooldown { .. } => (429, true),
@@ -1251,7 +1251,7 @@ impl RemoteFault {
     /// Go's status for retry decisions: transport faults have none.
     fn status(&self) -> u16 {
         match &self.failure {
-            Failure::Exec(e) | Failure::Remote { error: e, .. } => classify::go_status(e),
+            Failure::Exec(e) | Failure::Remote { error: e, .. } => e.go_status(),
             other => other.status(),
         }
     }
@@ -1787,7 +1787,7 @@ async fn remote_round(
 
 /// Go `isConnectionLifecycleError` for a statusless error's text.
 fn lifecycle(e: &ExecError) -> bool {
-    if classify::go_status(e) != 0 {
+    if e.go_status() != 0 {
         return false;
     }
     let lower = classify::error_text(e).trim().to_lowercase();
@@ -1883,7 +1883,7 @@ impl Credits<'_> {
             .any(|p| p.trim().eq_ignore_ascii_case("antigravity"))
             && cpa_exec::antigravity_credits::enabled(cfg)
             && match &error.failure {
-                Failure::Exec(e) => matches!(classify::go_status(e), 429 | 503),
+                Failure::Exec(e) => matches!(e.go_status(), 429 | 503),
                 Failure::Cooldown { .. } => true,
                 Failure::Unavailable { code, .. } => matches!(*code, "auth_not_found" | "auth_unavailable"),
                 _ => false,

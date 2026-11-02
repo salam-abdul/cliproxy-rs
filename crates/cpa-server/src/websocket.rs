@@ -104,7 +104,7 @@ impl Sink {
         }
         let mut part = format!(
             "Timestamp: {}\nEvent: websocket.{kind}\n",
-            crate::request_logging::timestamp(chrono::Local::now())
+            cpa_core::gotime::rfc3339_nano(&chrono::Local::now())
         )
         .into_bytes();
         part.extend_from_slice(payload);

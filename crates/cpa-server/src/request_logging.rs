@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use bytes::Bytes;
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, Local};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::Runtime;
@@ -110,7 +110,7 @@ fn eligible(request: &Request, path: &str) -> bool {
             && request
                 .headers()
                 .get("upgrade")
-                .is_some_and(|v| trim(v.as_bytes()).eq_ignore_ascii_case(b"websocket")))
+                .is_some_and(|v| cpa_core::config::go_trim_space(v.as_bytes()).eq_ignore_ascii_case(b"websocket")))
 }
 
 async fn capture(State(state): State<CaptureState>, mut request: Request, next: Next) -> Response {
@@ -121,7 +121,7 @@ async fn capture(State(state): State<CaptureState>, mut request: Request, next: 
     let config = state.rt.config();
     let enabled = setting(&config, "request-log").and_then(serde_yaml_ng::Value::as_bool) == Some(true);
     let multipart = request.headers().get("content-type").is_some_and(|v| {
-        String::from_utf8_lossy(trim(v.as_bytes()))
+        String::from_utf8_lossy(cpa_core::config::go_trim_space(v.as_bytes()))
             .to_lowercase()
             .starts_with("multipart/form-data")
     });
@@ -250,12 +250,7 @@ async fn capture_response(sink: RequestLog, head: bool, mut response: Response) 
             || (content_type.trim().is_empty()
                 && [b"\"stream\":true".as_slice(), b"\"stream\": true".as_slice()]
                     .iter()
-                    .any(|needle| {
-                        record
-                            .request_body
-                            .windows(needle.len())
-                            .any(|window| window == *needle)
-                    })));
+                    .any(|needle| cpa_common::gostr::contains(&record.request_body, needle))));
     let chunks = if record.streaming && !head {
         match Spool::new(&record.state.dir, "response-body") {
             Ok(spool) => match spool.file.try_clone() {
@@ -517,7 +512,7 @@ impl RequestLog {
                 write!(
                     head,
                     "=== API REQUEST {index} ===\nTimestamp: {}\nUpstream URL: {}\n",
-                    timestamp(Local::now()),
+                    cpa_core::gotime::rfc3339_nano(&Local::now()),
                     if info.url.is_empty() {
                         String::from("<unknown>")
                     } else {
@@ -589,7 +584,7 @@ impl RequestLog {
                 record.upstream.error = true;
             }
             ResponseChunk(chunk) => {
-                let chunk = trim(chunk);
+                let chunk = cpa_core::config::go_trim_space(chunk);
                 if chunk.is_empty() {
                     return;
                 }
@@ -637,7 +632,7 @@ impl RequestLog {
                 upstream_timeline(&mut record.api_timeline, &record.state.dir, &part);
             }
             WebsocketResponse(payload) => {
-                let payload = trim(payload);
+                let payload = cpa_core::config::go_trim_space(payload);
                 if payload.is_empty() {
                     return;
                 }
@@ -649,7 +644,7 @@ impl RequestLog {
             WebsocketError { stage, error } => {
                 record.api_timestamp.get_or_insert_with(Local::now);
                 let mut part = websocket_event("api.websocket.error");
-                let stage = crate::gojson::trim(stage);
+                let stage = stage.trim();
                 if !stage.is_empty() {
                     writeln!(part, "Stage: {stage}").unwrap();
                 }
@@ -678,7 +673,7 @@ fn upstream_intro(record: &mut Record) {
         part,
         "=== API RESPONSE {} ===\nTimestamp: {}\n\n",
         record.upstream.attempts,
-        timestamp(Local::now())
+        cpa_core::gotime::rfc3339_nano(&Local::now())
     )
     .unwrap();
     record.api_response.append(&record.state.dir, &part);
@@ -706,13 +701,13 @@ fn upstream_auth(out: &mut Vec<u8>, info: &cpa_core::exec::UpstreamRequest<'_>) 
         ("auth_id", info.auth_id),
         ("label", info.auth_label),
     ] {
-        let value = crate::gojson::trim(value);
+        let value = value.trim();
         if !value.is_empty() {
             parts.push(format!("{label}={value}"));
         }
     }
-    let kind = cpa_common::gostr::lower_bytes(crate::gojson::trim(info.auth_type).as_bytes());
-    let value = crate::gojson::trim(info.auth_value);
+    let kind = cpa_common::gostr::lower_bytes(info.auth_type.trim().as_bytes());
+    let value = info.auth_value.trim();
     if !kind.is_empty() {
         let mut text = format!("type={kind}");
         if kind != "oauth" && !value.is_empty() {
@@ -731,14 +726,18 @@ fn upstream_auth(out: &mut Vec<u8>, info: &cpa_core::exec::UpstreamRequest<'_>) 
 }
 
 fn websocket_event(event: &str) -> Vec<u8> {
-    format!("Timestamp: {}\nEvent: {event}\n", timestamp(Local::now())).into_bytes()
+    format!(
+        "Timestamp: {}\nEvent: {event}\n",
+        cpa_core::gotime::rfc3339_nano(&Local::now())
+    )
+    .into_bytes()
 }
 
 fn upstream_timeline(out: &mut Section, dir: &Path, part: &[u8]) {
     if !out.is_empty() {
         out.append(dir, b"\n\n");
     }
-    out.append(dir, trim(part));
+    out.append(dir, cpa_core::config::go_trim_space(part));
 }
 
 /// Connection-owned timeline sink. Explicit `close().await` waits for the durable
@@ -747,7 +746,7 @@ pub struct WebsocketLog(Option<RequestLog>);
 
 impl WebsocketLog {
     pub fn append_part(&self, part: &[u8]) -> io::Result<()> {
-        if trim(part).is_empty() {
+        if cpa_core::config::go_trim_space(part).is_empty() {
             return Ok(());
         }
         if let Some(sink) = &self.0 {
@@ -1058,7 +1057,7 @@ impl Section {
         } else {
             newlines
         };
-        self.blank &= trim(bytes).is_empty();
+        self.blank &= cpa_core::config::go_trim_space(bytes).is_empty();
     }
 
     fn append(&mut self, dir: &Path, bytes: &[u8]) {
@@ -1250,7 +1249,7 @@ impl Record {
             || self
                 .headers
                 .get("upgrade")
-                .is_some_and(|v| trim(v.as_bytes()).eq_ignore_ascii_case(b"websocket"))
+                .is_some_and(|v| cpa_core::config::go_trim_space(v.as_bytes()).eq_ignore_ascii_case(b"websocket"))
         {
             "websocket"
         } else {
@@ -1274,7 +1273,11 @@ impl Record {
         if !upstream.is_empty() {
             writeln!(out, "Upstream Transport: {upstream}")?;
         }
-        write!(out, "Timestamp: {}\n\n\n=== HEADERS ===\n", timestamp(self.timestamp))?;
+        write!(
+            out,
+            "Timestamp: {}\n\n\n=== HEADERS ===\n",
+            cpa_core::gotime::rfc3339_nano(&self.timestamp)
+        )?;
         headers(out, &self.headers, true)?;
         out.write_all(b"\n\n")?;
         if !websocket {
@@ -1350,20 +1353,6 @@ impl Record {
     }
 }
 
-fn trim(bytes: &[u8]) -> &[u8] {
-    cpa_core::config::go_trim_space(bytes)
-}
-pub(crate) fn timestamp(at: DateTime<Local>) -> String {
-    let text = at.to_rfc3339_opts(SecondsFormat::Nanos, true);
-    let zone = &text[29..];
-    let fraction = text[20..29].trim_end_matches('0');
-    if fraction.is_empty() {
-        format!("{}{zone}", &text[..19])
-    } else {
-        format!("{}.{fraction}{zone}", &text[..19])
-    }
-}
-
 fn header_name(name: &str) -> String {
     name.split('-')
         .map(|part| {
@@ -1431,7 +1420,7 @@ fn masked_header(name: &str, value: &[u8]) -> Vec<u8> {
         return REDACTED.as_bytes().to_vec();
     }
     if name.contains("authorization") {
-        let trimmed = trim(value);
+        let trimmed = cpa_core::config::go_trim_space(value);
         if let Some(i) = trimmed.iter().position(|b| *b == b' ') {
             return [&trimmed[..i + 1], &hide_key(&trimmed[i + 1..])].concat();
         }
@@ -1487,7 +1476,7 @@ fn section(out: &mut dyn Write, name: &str, bytes: &Section, at: Option<DateTime
     if !bytes.head.starts_with(format!("=== {name}").as_bytes()) {
         writeln!(out, "=== {name} ===")?;
         if let Some(at) = at {
-            writeln!(out, "Timestamp: {}", timestamp(at))?;
+            writeln!(out, "Timestamp: {}", cpa_core::gotime::rfc3339_nano(&at))?;
         }
     }
     bytes.write_to(out)?;
@@ -1859,7 +1848,7 @@ mod tests {
         for request in [false, true] {
             let (body, _) = decode(compressed.clone(), &headers, request, None).await;
             assert!(body.len() < source.len() + 128);
-            assert!(body.windows(9).any(|bytes| bytes == b"TRUNCATED"));
+            assert!(cpa_common::gostr::contains(&body, b"TRUNCATED"));
         }
         // One raw-byte block with a 16 MiB window advertised in its frame header.
         let oversized_window = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0x70, 9, 0, 0, b'x'];
@@ -2428,7 +2417,6 @@ mod tests {
         let at = DateTime::parse_from_rfc3339("2026-10-03T04:05:06.12001Z")
             .unwrap()
             .with_timezone(&Local);
-        assert!(timestamp(at).contains(".12001"));
         assert_eq!(
             filename("/v1//x:  y?secret=not-in-name", "0198-aaaa-a1b2c3d4", at, true),
             format!("error-v1-x-y-{}-a1b2c3d4.log", at.format("%Y-%m-%dT%H%M%S"))
@@ -2834,16 +2822,13 @@ mod tests {
                 .decode(case["raw"].as_str().unwrap())
                 .unwrap();
             let section = b"=== RESPONSE ===\n";
-            let start = log.windows(section.len()).position(|b| b == section).unwrap() + section.len();
-            let start = start + log[start..].windows(2).position(|b| b == b"\n\n").unwrap() + 2;
+            let start = cpa_common::gostr::index(&log, section).unwrap() + section.len();
+            let start = start + cpa_common::gostr::index(&log[start..], b"\n\n").unwrap() + 2;
             let logged_body = &log[start..log.len() - 1];
             let mut headers = HeaderMap::new();
             headers.insert("content-encoding", case["encoding"].as_str().unwrap().parse().unwrap());
             let (body, error) = decode(raw.clone(), &headers, false, None).await;
-            if logged_body
-                .windows(b"\n[DECOMPRESSION ERROR: ".len())
-                .any(|bytes| bytes == b"\n[DECOMPRESSION ERROR: ")
-            {
+            if cpa_common::gostr::contains(logged_body, b"\n[DECOMPRESSION ERROR: ") {
                 assert_eq!(body, raw);
                 assert!(logged_body.starts_with(&body));
                 assert!(logged_body[body.len()..].starts_with(b"\n[DECOMPRESSION ERROR: "));
@@ -3046,9 +3031,7 @@ mod tests {
         };
         let content = persisted(true, StatusCode::OK, events).await;
         let find = |from: usize, needle: &[u8]| {
-            from + content[from..]
-                .windows(needle.len())
-                .position(|w| w == needle)
+            from + cpa_common::gostr::index(&content[from..], needle)
                 .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(needle)))
         };
         let expect = |at: usize, want: &[u8]| {

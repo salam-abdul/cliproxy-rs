@@ -55,7 +55,7 @@ pub fn frame(client: Format, chunk: &[u8]) -> Option<Vec<u8>> {
         // interactions_handlers.go: empty chunks are dropped, chunks that already carry
         // SSE fields are written as is, and a missing blank line is added.
         Format::Interactions => {
-            let trimmed = crate::common::trim_space(chunk);
+            let trimmed = cpa_core::config::go_trim_space(chunk);
             let mut out = vec![];
             if !(trimmed.starts_with(b"event:") || trimmed.starts_with(b"data:")) {
                 out.extend_from_slice(b"data: ");
@@ -93,7 +93,7 @@ pub struct ResponsesFramer {
 fn has_field(chunk: &[u8], prefix: &[u8]) -> bool {
     chunk
         .split(|&c| c == b'\n')
-        .any(|line| crate::common::trim_space(line).starts_with(prefix))
+        .any(|line| cpa_core::config::go_trim_space(line).starts_with(prefix))
 }
 
 /// responsesSSEDataLinesValid: no data, `[DONE]`, or one valid JSON payload.
@@ -101,13 +101,13 @@ fn data_lines_valid(chunk: &[u8]) -> bool {
     let mut payload: Option<Vec<u8>> = None;
     for line in chunk.split(|&c| c == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if let Some(data) = crate::common::trim_space(line).strip_prefix(b"data:") {
+        if let Some(data) = cpa_core::config::go_trim_space(line).strip_prefix(b"data:") {
             match &mut payload {
                 Some(p) => {
                     p.push(b'\n');
-                    p.extend_from_slice(crate::common::trim_space(data));
+                    p.extend_from_slice(cpa_core::config::go_trim_space(data));
                 }
-                None => payload = Some(crate::common::trim_space(data).to_vec()),
+                None => payload = Some(cpa_core::config::go_trim_space(data).to_vec()),
             }
         }
     }
@@ -118,12 +118,12 @@ fn data_payload_valid(payload: Option<Vec<u8>>) -> bool {
     let Some(payload) = payload else {
         return true;
     };
-    let payload = crate::common::trim_space(&payload);
+    let payload = cpa_core::config::go_trim_space(&payload);
     payload.is_empty() || payload == b"[DONE]" || cpa_common::json::std_valid(payload)
 }
 
 fn starts_new_data_frame(pending: &[u8], chunk: &[u8]) -> bool {
-    let trimmed = crate::common::trim_space(pending);
+    let trimmed = cpa_core::config::go_trim_space(pending);
     if trimmed.is_empty()
         || has_field(trimmed, b"event:")
         || !has_field(trimmed, b"data:")
@@ -158,8 +158,8 @@ fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
 }
 
 fn frame_len(chunk: &[u8]) -> usize {
-    let lf = chunk.windows(2).position(|w| w == b"\n\n");
-    let crlf = chunk.windows(4).position(|w| w == b"\r\n\r\n");
+    let lf = cpa_common::gostr::index(chunk, b"\n\n");
+    let crlf = cpa_common::gostr::index(chunk, b"\r\n\r\n");
     match (lf, crlf) {
         (None, None) => 0,
         (None, Some(c)) => c + 4,
@@ -175,7 +175,7 @@ fn frame_len(chunk: &[u8]) -> usize {
 }
 
 fn can_emit_without_delimiter(chunk: &[u8]) -> bool {
-    let trimmed = crate::common::trim_space(chunk);
+    let trimmed = cpa_core::config::go_trim_space(chunk);
     let needs_more_data = has_field(trimmed, b"event:") && !has_field(trimmed, b"data:");
     !trimmed.is_empty()
         && !needs_more_data
@@ -237,7 +237,7 @@ impl ResponsesFramer {
             out.extend(terminated(&self.pending[..n]));
             self.pending.drain(..n);
         }
-        if crate::common::trim_space(&self.pending).is_empty() {
+        if cpa_core::config::go_trim_space(&self.pending).is_empty() {
             self.pending.clear();
             return;
         }
@@ -249,7 +249,7 @@ impl ResponsesFramer {
 
     fn flush_into(&mut self, out: &mut Vec<Vec<u8>>) {
         let pending = std::mem::take(&mut self.pending);
-        let trimmed = crate::common::trim_space(&pending);
+        let trimmed = cpa_core::config::go_trim_space(&pending);
         if !trimmed.is_empty() && has_field(trimmed, b"data:") && data_lines_valid(trimmed) {
             out.extend(terminated(&pending));
         }
@@ -292,16 +292,16 @@ pub struct StreamOptions {
 /// non-empty, non-`[DONE]` `data:` payloads joined with newlines. Public for the Gemini
 /// executor's usage reporting, which observes the same payload per frame.
 pub fn interactions_frame_payload(frame: &[u8]) -> Vec<u8> {
-    let trimmed = crate::common::trim_space(frame);
+    let trimmed = cpa_core::config::go_trim_space(frame);
     if trimmed.starts_with(b"{") {
         return trimmed.to_vec();
     }
     let mut payload = vec![];
     for line in frame.split(|&c| c == b'\n') {
-        let Some(data) = crate::common::trim_space(line).strip_prefix(b"data:") else {
+        let Some(data) = cpa_core::config::go_trim_space(line).strip_prefix(b"data:") else {
             continue;
         };
-        let data = crate::common::trim_space(data);
+        let data = cpa_core::config::go_trim_space(data);
         if data.is_empty() || data == b"[DONE]" {
             continue;
         }
@@ -315,17 +315,17 @@ pub fn interactions_frame_payload(frame: &[u8]) -> Vec<u8> {
 
 /// geminiInteractionsSSEDone: a `[DONE]` frame or data line, or an `event: done` line.
 fn interactions_frame_done(frame: &[u8]) -> bool {
-    if crate::common::trim_space(frame) == b"[DONE]" {
+    if cpa_core::config::go_trim_space(frame) == b"[DONE]" {
         return true;
     }
     let mut done_event = false;
     for line in frame.split(|&c| c == b'\n') {
-        let line = crate::common::trim_space(line);
+        let line = cpa_core::config::go_trim_space(line);
         // strings.EqualFold: no letter of "event: done" has a non-ASCII fold partner.
         if line.eq_ignore_ascii_case(b"event: done") {
             done_event = true;
         } else if let Some(data) = line.strip_prefix(b"data:")
-            && crate::common::trim_space(data) == b"[DONE]"
+            && cpa_core::config::go_trim_space(data) == b"[DONE]"
         {
             return true;
         }
@@ -433,7 +433,7 @@ impl Framed {
     /// the translation of its joined `data:` payload (`[DONE]` for a done frame).
     fn interactions_frame(&mut self) -> Result<Vec<Vec<u8>>, Error> {
         let frame = std::mem::take(&mut self.frame);
-        let trimmed = crate::common::trim_space(&frame);
+        let trimmed = cpa_core::config::go_trim_space(&frame);
         if trimmed.is_empty() {
             return Ok(vec![]);
         }
@@ -459,7 +459,7 @@ impl Framed {
         if self.upstream == Format::Interactions {
             // The executor reads lines and ends a frame at each blank line.
             for line in scan_lines(event) {
-                if crate::common::trim_space(line).is_empty() {
+                if cpa_core::config::go_trim_space(line).is_empty() {
                     chunks.extend(self.interactions_frame()?);
                     continue;
                 }

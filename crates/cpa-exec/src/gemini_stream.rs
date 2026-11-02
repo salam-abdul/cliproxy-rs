@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use cpa_common::gostr::trim_space;
 use cpa_common::json::{self as gj, Kind};
+use cpa_core::config::go_trim_space;
 use cpa_core::format::Format;
 
 /// How long after each remember Go deletes a trace ID (`time.AfterFunc(10*time.Minute)`).
@@ -92,7 +92,7 @@ fn is_stop_without_usage(json: &[u8]) -> bool {
         return false;
     }
     let reason = finish_reason(json);
-    if !reason.exists() || trim_space(&reason.bytes()).is_empty() {
+    if !reason.exists() || go_trim_space(&reason.bytes()).is_empty() {
         return false;
     }
     !has_usage(json)
@@ -101,12 +101,12 @@ fn is_stop_without_usage(json: &[u8]) -> bool {
 /// `StripUsageMetadataFromJSON`: non-terminal chunks keep their usage under
 /// `cpaUsageMetadata` (top level and `response.`); terminal chunks are untouched.
 pub(crate) fn strip_usage_metadata(raw: &[u8]) -> Option<Vec<u8>> {
-    let json = trim_space(raw);
+    let json = go_trim_space(raw);
     if json.is_empty() || !gj::valid(json) {
         return None;
     }
     let reason = finish_reason(json);
-    if reason.exists() && !trim_space(&reason.bytes()).is_empty() {
+    if reason.exists() && !go_trim_space(&reason.bytes()).is_empty() {
         return None;
     }
     if !gj::get(json, "usageMetadata").exists() && !gj::get(json, "response.usageMetadata").exists() {
@@ -140,15 +140,15 @@ pub(crate) fn filter_sse_usage_metadata_at(payload: &[u8], now: Instant) -> Vec<
     let mut modified = false;
     let mut found_data = false;
     for line in &mut lines {
-        let trimmed = trim_space(line);
+        let trimmed = go_trim_space(line);
         if trimmed.is_empty() || !trimmed.starts_with(b"data:") {
             continue;
         }
         found_data = true;
-        let Some(data_index) = find(line, b"data:") else {
+        let Some(data_index) = cpa_common::gostr::index(line, b"data:") else {
             continue;
         };
-        let raw = trim_space(&line[data_index + 5..]).to_vec();
+        let raw = go_trim_space(&line[data_index + 5..]).to_vec();
         let trace = gj::get(&raw, "traceId").bytes().into_owned();
         if is_stop_without_usage(&raw) && !trace.is_empty() {
             remember_stop(&trace, now);
@@ -173,26 +173,22 @@ pub(crate) fn filter_sse_usage_metadata_at(payload: &[u8], now: Instant) -> Vec<
     if !modified {
         if !found_data {
             // Raw JSON without an SSE `data:` prefix.
-            return strip_usage_metadata(trim_space(payload)).unwrap_or_else(|| payload.to_vec());
+            return strip_usage_metadata(go_trim_space(payload)).unwrap_or_else(|| payload.to_vec());
         }
         return payload.to_vec();
     }
     lines.join(&b'\n')
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
 /// `helps.JSONPayload`: the JSON object of a line, without its `data:` prefix; `None`
 /// for blank lines, `[DONE]`, `event:` lines and anything that is not an object.
 pub(crate) fn json_payload(line: &[u8]) -> Option<&[u8]> {
-    let mut trimmed = trim_space(line);
+    let mut trimmed = go_trim_space(line);
     if trimmed.is_empty() || trimmed == b"[DONE]" || trimmed.starts_with(b"event:") {
         return None;
     }
     if let Some(rest) = trimmed.strip_prefix(b"data:") {
-        trimmed = trim_space(rest);
+        trimmed = go_trim_space(rest);
     }
     (trimmed.first() == Some(&b'{')).then_some(trimmed)
 }
@@ -297,7 +293,7 @@ impl ClaudeInputTokens {
 /// `CountClaudeInputTokens`: O200kBase tokens of the request's text segments joined by
 /// newlines; `None` when the request is not JSON (Go logs and leaves the event as is).
 pub(crate) fn claude_input_tokens(payload: &[u8]) -> Option<i64> {
-    if trim_space(payload).is_empty() {
+    if go_trim_space(payload).is_empty() {
         return Some(0);
     }
     if !gj::valid(payload) {
@@ -441,7 +437,7 @@ fn push_json(segments: &mut Vec<String>, value: &gj::Res<'_>) {
         push(segments, &value.str());
         return;
     }
-    let raw = trim_space(value.raw());
+    let raw = go_trim_space(value.raw());
     if raw.is_empty() {
         return;
     }

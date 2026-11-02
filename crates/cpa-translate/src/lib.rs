@@ -78,6 +78,7 @@ mod codex_claude;
 mod codex_claude_response;
 mod codex_gemini;
 mod codex_interactions;
+pub mod codex_names;
 mod codex_responses;
 mod common;
 mod gemini;

@@ -38,20 +38,6 @@ fn explicit_request_scoped(e: &ExecError) -> bool {
     e.scope == FailureScope::Request && e.headers.is_empty()
 }
 
-/// The Go status of an error: transport faults and statusless failures after the
-/// response started (`Interrupted`, `Unprocessed`) have none.
-pub fn go_status(e: &ExecError) -> u16 {
-    let statusless = matches!(
-        e.after_accept,
-        Some(AfterAccept::Interrupted | AfterAccept::Unprocessed)
-    );
-    if e.scope == FailureScope::Transport || statusless {
-        0
-    } else {
-        e.status
-    }
-}
-
 /// Go's `empty_stream`: an accepted stream that ended before its first payload. It is
 /// statusless (answered 500) and cools no account; dispatch fails it over once per
 /// account, as a response that broke off before any output.
@@ -77,12 +63,12 @@ pub fn is_unauthorized(e: &ExecError) -> bool {
         return false;
     }
     let raw = error_text(e).to_lowercase();
-    go_status(e) == 401 || raw.contains("status 401") || raw.contains("401 unauthorized")
+    e.go_status() == 401 || raw.contains("status 401") || raw.contains("401 unauthorized")
 }
 
 /// Downstream status for a terminal error. Go answers status-less errors with 500.
 pub fn response_status(e: &ExecError) -> u16 {
-    match go_status(e) {
+    match e.go_status() {
         0 => 500,
         s => s,
     }
@@ -289,7 +275,7 @@ pub fn is_request_invalid(e: &ExecError) -> bool {
     if explicit_request_scoped(e) {
         return true;
     }
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     if is_cloudflare(status, &text) || is_invalid_grant(status, &text) || is_model_support(status, &text) {
         return false;
@@ -299,7 +285,7 @@ pub fn is_request_invalid(e: &ExecError) -> bool {
 
 /// Faults that stop a `responses/compact` request without failover.
 pub fn is_compact_fault(e: &ExecError) -> bool {
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     if credential_scoped(e) || is_cloudflare(status, &text) || is_invalid_grant(status, &text) {
         return false;
@@ -309,7 +295,7 @@ pub fn is_compact_fault(e: &ExecError) -> bool {
 
 /// Compact failures that must not change credential availability.
 pub fn is_compact_neutral(e: &ExecError) -> bool {
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     !(credential_scoped(e)
         || is_cloudflare(status, &text)
@@ -320,7 +306,7 @@ pub fn is_compact_neutral(e: &ExecError) -> bool {
 /// A count_tokens 404 that names no model: the endpoint is missing, not the model.
 pub fn is_count_endpoint_missing(e: &ExecError, requested_model: &str) -> bool {
     let base = crate::scheduler::canonical_model(requested_model);
-    go_status(e) == 404 && !explicit_model_not_found(&error_text(e), base)
+    e.go_status() == 404 && !explicit_model_not_found(&error_text(e), base)
 }
 
 /// Executor-reported credential-wide quota (`IsCredentialScoped`).
@@ -537,12 +523,12 @@ mod tests {
         let policy = crate::scheduler::Policy::default();
         for after in [AfterAccept::Interrupted, AfterAccept::Unprocessed] {
             let error = local(500, after);
-            assert_eq!(go_status(&error), 0, "{after:?}");
+            assert_eq!(error.go_status(), 0, "{after:?}");
             assert_eq!(response_status(&error), 500, "{after:?}");
             assert!(!policy.error_action(&credential, &error).matched, "{after:?}");
         }
         let truncated = local(502, AfterAccept::Truncated);
-        assert_eq!(go_status(&truncated), 502);
+        assert_eq!(truncated.go_status(), 502);
         assert!(policy.error_action(&credential, &truncated).matched);
     }
 
@@ -564,7 +550,7 @@ mod tests {
         let error = empty_stream();
         assert_eq!(error.scope, FailureScope::Request);
         assert!(error.headers.is_empty());
-        assert_eq!(go_status(&error), 0);
+        assert_eq!(error.go_status(), 0);
         assert_eq!(response_status(&error), 500);
         assert!(is_request_invalid(&error));
         let credential = cpa_core::credential::Credential::from_file(

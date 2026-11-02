@@ -3,9 +3,11 @@
 //! and interactions_openai_request.go). The response sides live in
 //! [`crate::openai_interactions_response`].
 
+use cpa_core::config::go_trim_space;
+
 use cpa_common::json::{self as gj, Kind, Res};
 
-use crate::common::{go_lower, normalize_openai_file_data, trim_space};
+use crate::common::{go_lower, normalize_openai_file_data};
 use crate::openai_interactions_response as response;
 use crate::{Registered, gemini_interactions::first_existing};
 
@@ -31,7 +33,7 @@ pub static INTERACTIONS_TO_OPENAI: Registered = registered!(
 pub(crate) fn first_nonblank(values: &[&[u8]]) -> Vec<u8> {
     values
         .iter()
-        .find(|v| !trim_space(v).is_empty())
+        .find(|v| !go_trim_space(v).is_empty())
         .map(|v| v.to_vec())
         .unwrap_or_default()
 }
@@ -42,7 +44,7 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 
 /// isAntigravityModel.
 pub(crate) fn is_antigravity(model: &[u8]) -> bool {
-    go_lower(model).windows(11).any(|w| w == b"antigravity")
+    cpa_common::gostr::contains(&go_lower(model), b"antigravity")
 }
 
 const EXTERNAL_TOOL_PREFIX: &[u8] = b"external_";
@@ -140,7 +142,7 @@ fn append_messages(out: &mut Vec<u8>, messages: &Res<'_>, antigravity: bool) {
     let mut system = vec![];
     let mut names: std::collections::HashMap<Vec<u8>, Vec<u8>> = std::collections::HashMap::new();
     messages.each(|_, message| {
-        let role = go_lower(trim_space(&message.get("role").bytes()));
+        let role = go_lower(go_trim_space(&message.get("role").bytes()));
         match role.as_slice() {
             b"system" | b"developer" => {
                 let text = chat_content_text(&message.get("content"));
@@ -217,7 +219,7 @@ fn set_raw_json_value(out: &mut Vec<u8>, path: &str, value: &Res<'_>, fallback: 
         return;
     }
     let text = value.bytes();
-    let raw = trim_space(&text);
+    let raw = go_trim_space(&text);
     if value.kind == Kind::String && gj::valid(raw) {
         gj::set_raw(out, path, raw);
     } else if value.kind == Kind::String {
@@ -281,7 +283,7 @@ fn content_step(kind: &str, content: &Res<'_>) -> Option<Vec<u8>> {
 
 /// openAIInputAudioMIMEType.
 fn input_audio_mime(format: &[u8]) -> &'static str {
-    match go_lower(trim_space(format)).as_slice() {
+    match go_lower(go_trim_space(format)).as_slice() {
         b"wav" => "audio/wav",
         b"flac" => "audio/flac",
         b"opus" => "audio/opus",
@@ -292,7 +294,7 @@ fn input_audio_mime(format: &[u8]) -> &'static str {
 
 /// openAIChatContentPartToInteractions.
 fn chat_part_to_interactions(part: &Res<'_>) -> Option<Vec<u8>> {
-    let mut kind = go_lower(trim_space(&part.get("type").bytes()));
+    let mut kind = go_lower(go_trim_space(&part.get("type").bytes()));
     if kind.is_empty() && part.get("text").exists() {
         kind = b"text".to_vec();
     }
@@ -367,7 +369,7 @@ fn parse_data_url(value: &[u8]) -> Option<(&[u8], &[u8])> {
     };
     use cpa_common::gostr::GoStr;
     let base64 = String::from_utf8_lossy(encoding).go_eq_fold("base64");
-    (base64 && !trim_space(mime).is_empty() && !data.is_empty()).then_some((mime, data))
+    (base64 && !go_trim_space(mime).is_empty() && !data.is_empty()).then_some((mime, data))
 }
 
 /// openAIChatImagePartToInteractions.
@@ -466,7 +468,7 @@ fn copy_generation_config(out: &mut Vec<u8>, root: &Res<'_>, antigravity: bool) 
         gj::set_str(
             out,
             "generation_config.thinking_level",
-            go_lower(trim_space(&effort.bytes())),
+            go_lower(go_trim_space(&effort.bytes())),
         );
     }
     copy_raw(out, "response_format", &root.get("response_format"));
@@ -479,7 +481,7 @@ fn copy_generation_config(out: &mut Vec<u8>, root: &Res<'_>, antigravity: bool) 
 
 /// openAIChatToolToInteractions.
 fn tool_to_interactions(tool: &Res<'_>, antigravity: bool) -> Option<Vec<u8>> {
-    let kind = go_lower(trim_space(&tool.get("type").bytes()));
+    let kind = go_lower(go_trim_space(&tool.get("type").bytes()));
     if !kind.is_empty() && kind != b"function" {
         return None;
     }
@@ -724,7 +726,7 @@ fn media_data_url(part: &Res<'_>, fallback_mime: &[u8]) -> Vec<u8> {
 
 /// openAIInputAudioFormatFromMIME.
 fn audio_format(mime: &[u8]) -> &'static str {
-    match go_lower(trim_space(mime)).as_slice() {
+    match go_lower(go_trim_space(mime)).as_slice() {
         b"audio/wav" | b"audio/wave" | b"audio/x-wav" => "wav",
         b"audio/flac" => "flac",
         b"audio/opus" | b"audio/ogg" => "opus",
@@ -735,7 +737,7 @@ fn audio_format(mime: &[u8]) -> &'static str {
 
 /// openAIFileNameFromMIME.
 fn file_name_from_mime(mime: &[u8]) -> Vec<u8> {
-    match go_lower(trim_space(mime)).as_slice() {
+    match go_lower(go_trim_space(mime)).as_slice() {
         b"application/pdf" => b"document.pdf".to_vec(),
         b"text/plain" => b"document.txt".to_vec(),
         b"text/csv" => b"document.csv".to_vec(),
@@ -835,7 +837,7 @@ fn copy_generation_config_to_openai(out: &mut Vec<u8>, root: &Res<'_>) {
     .into_iter()
     .find(|v| v.kind == Kind::String);
     if let Some(effort) = effort {
-        let effort = go_lower(trim_space(&effort.bytes()));
+        let effort = go_lower(go_trim_space(&effort.bytes()));
         if !effort.is_empty() {
             gj::set_str(out, "reasoning_effort", &effort);
         }

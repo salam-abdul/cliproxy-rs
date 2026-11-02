@@ -69,7 +69,7 @@ fn digits_offset(body: &str) -> Option<usize> {
     let base = rawjson::offset(body, &billing)?;
     let raw = billing.json().as_bytes();
     let mut from = 0;
-    while let Some(rel) = find(&raw[from..], b"cch=") {
+    while let Some(rel) = cpa_common::gostr::index(&raw[from..], b"cch=") {
         let digits = from + rel + 4;
         let end = digits + 5;
         if end < raw.len()
@@ -83,10 +83,6 @@ fn digits_offset(body: &str) -> Option<usize> {
         from = from + rel + 4;
     }
     None
-}
-
-fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 fn sign(body: String) -> Result<String, String> {

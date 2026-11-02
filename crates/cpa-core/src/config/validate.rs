@@ -129,7 +129,9 @@ fn live_media_relay(section: Option<&Value>) -> Result<()> {
             bail!("codex.live-media-relay.ice-servers[{i}].urls is required");
         }
         for raw in urls {
-            let parsed = go_url::parse(super::go_string(raw).trim()).filter(|u| !u.scheme.is_empty());
+            let parsed = go_url::parse(super::go_string(raw).trim())
+                .ok()
+                .filter(|u| !u.scheme.is_empty());
             let Some(parsed) = parsed else {
                 bail!("codex.live-media-relay.ice-servers[{i}] contains an invalid URL");
             };

@@ -8,10 +8,10 @@ use cpa_core::exec::{CacheBreakpoint, CacheFingerprint, ClaudeCacheTelemetry, Ex
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Ctx, Prepared, alias, detect, identity, session, signals};
+use super::{Ctx, Prepared, alias, detect, identity, signals};
 
 fn hash(secret: &str, domain: &str, value: &str) -> String {
-    session::hex(&alias::digest(secret, &format!("cache-telemetry-{domain}"), value))
+    cpa_core::hex::encode(alias::digest(secret, &format!("cache-telemetry-{domain}"), value))
 }
 
 fn identifier(secret: &str, domain: &str, value: &str) -> String {
@@ -23,7 +23,7 @@ fn identifier(secret: &str, domain: &str, value: &str) -> String {
 
 fn snapshot(secret: &str, hasher: &Sha256, bytes: usize) -> CacheFingerprint {
     CacheFingerprint {
-        hash: hash(secret, "content", &session::hex(&hasher.clone().finalize())),
+        hash: hash(secret, "content", &cpa_core::hex::encode(hasher.clone().finalize())),
         bytes,
     }
 }
@@ -52,7 +52,7 @@ pub(super) fn collect(ctx: &Ctx<'_>, req: &ExecRequest, prepared: &Prepared) -> 
         .get_or_init(|| {
             let mut bytes = [0; 32];
             getrandom::fill(&mut bytes).ok()?;
-            Some(session::hex(&bytes))
+            Some(cpa_core::hex::encode(bytes))
         })
         .as_ref()?;
     let mut root: Value = serde_json::from_str(&prepared.body).ok()?;

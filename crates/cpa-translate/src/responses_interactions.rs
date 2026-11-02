@@ -3,12 +3,12 @@
 //! The response sides live in [`crate::responses_interactions_response`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::claude_responses::qualify_namespace_name;
-use crate::common::{go_lower, trim_space};
+use crate::common::go_lower;
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::{
     antigravity_name_to_client, antigravity_name_to_upstream, first_nonblank, is_antigravity, json_string_value,
@@ -17,6 +17,7 @@ use crate::openai_interactions::{
 use crate::responses_interactions_response as response;
 use crate::responses_tools::{self as tools, Identity};
 use crate::{Registered, apply_patch};
+use cpa_common::devin_tools::{is_codex_app_automation_update, sanitize_tool_description};
 
 /// OpenAI Responses client, Interactions upstream.
 pub static RESPONSES_TO_INTERACTIONS: Registered = registered!(
@@ -42,7 +43,7 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 
 /// requestModel: the requested model unless blank, else the body's.
 fn request_model(model: &str, root: &Res<'_>) -> Vec<u8> {
-    if trim_space(model.as_bytes()).is_empty() {
+    if go_trim_space(model.as_bytes()).is_empty() {
         string(&root.get("model"))
     } else {
         model.as_bytes().to_vec()
@@ -51,100 +52,7 @@ fn request_model(model: &str, root: &Res<'_>) -> Vec<u8> {
 
 /// isDevinModel.
 fn is_devin(model: &[u8]) -> bool {
-    go_lower(trim_space(model)).windows(5).any(|w| w == b"devin")
-}
-
-/// strings.EqualFold, on Go's Unicode folding.
-fn eq_fold(a: &[u8], b: &str) -> bool {
-    use cpa_common::gostr::GoStr;
-    String::from_utf8_lossy(a).go_eq_fold(b)
-}
-
-/// common.IsDevinCodexAppAutomationUpdate.
-pub(crate) fn is_devin_automation_update(namespace: &[u8], tool: &[u8]) -> bool {
-    let (namespace, tool) = (trim_space(namespace), trim_space(tool));
-    (eq_fold(namespace, "mcp__codex_app") && eq_fold(tool, "automation_update"))
-        || eq_fold(tool, "mcp__codex_app__automation_update")
-}
-
-const EXEC_TARGET: &[u8] = b"returning output or a session ID for ongoing interaction";
-const EXEC_OBFUSCATED: &[u8] = b"returning output or an session ID for ongoing interaction";
-const STDIN_TARGET: &[u8] = b"Writes characters to an existing unified exec session and returns recent output.";
-const STDIN_OBFUSCATED: &[u8] = b"Writes characters to a existing unified exec session and returns recent output.";
-
-static EXEC_REGEX: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(r"(?i)returning output or a session ID for ongoing interaction").expect("valid")
-});
-static STDIN_REGEX: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(
-        r"(?i)Writes characters to an existing unified exec session and returns recent output(\.?)",
-    )
-    .expect("valid")
-});
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-fn replace_all(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(haystack.len());
-    let mut rest = haystack;
-    while let Some(i) = rest.windows(from.len()).position(|w| w == from) {
-        out.extend_from_slice(&rest[..i]);
-        out.extend_from_slice(to);
-        rest = &rest[i + from.len()..];
-    }
-    out.extend_from_slice(rest);
-    out
-}
-
-/// ObfuscateExecCommandDescription / ObfuscateWriteStdinDescription.
-fn obfuscate(
-    desc: &[u8],
-    target: &[u8],
-    obfuscated: &[u8],
-    regex: &regex::bytes::Regex,
-    replacement: &[u8],
-) -> Vec<u8> {
-    if contains(desc, obfuscated) {
-        desc.to_vec()
-    } else if contains(desc, target) {
-        replace_all(desc, target, obfuscated)
-    } else {
-        regex.replace_all(desc, replacement).into_owned()
-    }
-}
-
-/// common.SanitizeDevinToolDescription.
-pub(crate) fn sanitize_devin_description(tool: &[u8], desc: Vec<u8>) -> Vec<u8> {
-    if desc.is_empty() {
-        return desc;
-    }
-    let tool = go_lower(trim_space(tool));
-    let mut desc = desc;
-    if tool == b"exec_command" || tool.ends_with(b"__exec_command") {
-        desc = obfuscate_exec_command_description(&desc);
-    }
-    if tool == b"write_stdin" || tool.ends_with(b"__write_stdin") {
-        desc = obfuscate_write_stdin_description(&desc);
-    }
-    desc
-}
-
-/// common.ObfuscateExecCommandDescription.
-pub(crate) fn obfuscate_exec_command_description(desc: &[u8]) -> Vec<u8> {
-    obfuscate(desc, EXEC_TARGET, EXEC_OBFUSCATED, &EXEC_REGEX, EXEC_OBFUSCATED)
-}
-
-/// common.ObfuscateWriteStdinDescription.
-pub(crate) fn obfuscate_write_stdin_description(desc: &[u8]) -> Vec<u8> {
-    obfuscate(
-        desc,
-        STDIN_TARGET,
-        STDIN_OBFUSCATED,
-        &STDIN_REGEX,
-        b"Writes characters to a existing unified exec session and returns recent output$1",
-    )
+    cpa_common::gostr::contains(&go_lower(go_trim_space(model)), b"devin")
 }
 
 /// setJSONValue: a string holding valid JSON is set raw (untrimmed).
@@ -225,7 +133,7 @@ pub(crate) fn responses_to_interactions(model: &str, raw: &[u8], stream: bool) -
         gj::set_str(
             &mut out,
             "generation_config.thinking_level",
-            go_lower(trim_space(&effort.bytes())),
+            go_lower(go_trim_space(&effort.bytes())),
         );
     }
     let summary = root.get("reasoning.summary");
@@ -293,7 +201,7 @@ fn copy_tool_choice(out: &mut Vec<u8>, choice: &Res<'_>, antigravity: bool, devi
     if !namespace.is_empty() && !name.is_empty() {
         name = qualify_namespace_name(&namespace, &name);
     }
-    if devin && (is_devin_automation_update(&namespace, &name) || is_devin_automation_update(b"", &name)) {
+    if devin && (is_codex_app_automation_update(&namespace, &name) || is_codex_app_automation_update(b"", &name)) {
         return;
     }
     if antigravity && !name.is_empty() {
@@ -550,8 +458,8 @@ fn append_tools(out: &mut Vec<u8>, root: &Res<'_>, antigravity: bool, devin: boo
             continue;
         }
         if devin
-            && (is_devin_automation_update(&descriptor.namespace, &descriptor.local_name)
-                || is_devin_automation_update(b"", &descriptor.name))
+            && (is_codex_app_automation_update(&descriptor.namespace, &descriptor.local_name)
+                || is_codex_app_automation_update(b"", &descriptor.name))
         {
             continue;
         }
@@ -569,9 +477,9 @@ fn append_tools(out: &mut Vec<u8>, root: &Res<'_>, antigravity: bool, devin: boo
         };
         if !desc.is_empty() {
             if devin {
-                desc = sanitize_devin_description(&descriptor.name, desc);
+                desc = sanitize_tool_description(&descriptor.name, &desc);
                 if !descriptor.local_name.is_empty() && descriptor.local_name != descriptor.name {
-                    desc = sanitize_devin_description(&descriptor.local_name, desc);
+                    desc = sanitize_tool_description(&descriptor.local_name, &desc);
                 }
             }
             gj::set_str(&mut item, "description", &desc);
@@ -670,7 +578,7 @@ pub(crate) fn interactions_to_responses(model: &str, raw: &[u8], stream: bool) -
     .iter()
     .map(|p| root.get(*p))
     .find(|v| v.kind == Kind::String)
-    .map(|v| go_lower(trim_space(&v.bytes())))
+    .map(|v| go_lower(go_trim_space(&v.bytes())))
     .unwrap_or_default();
     if !effort.is_empty() {
         gj::set_str(&mut out, "reasoning.effort", &effort);
@@ -989,37 +897,4 @@ pub(crate) fn tool_identity_map(raw: &[u8], antigravity: bool) -> HashMap<Vec<u8
         }
     }
     identities
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Expected values from Go 1.26 (SanitizeDevinToolDescription, regexp (?i) folding).
-    #[test]
-    fn devin_descriptions_match_go() {
-        let exec = sanitize_devin_description(
-            b" Exec_Command ",
-            "Runs, RETURNING output or a \u{17f}ession ID for ongoing interaction."
-                .as_bytes()
-                .to_vec(),
-        );
-        assert_eq!(
-            exec,
-            b"Runs, returning output or an session ID for ongoing interaction."
-        );
-        let stdin = sanitize_devin_description(
-            b"ns__write_stdin",
-            b"WRITES characters to an existing unified exec session and returns recent output!".to_vec(),
-        );
-        assert_eq!(
-            stdin,
-            b"Writes characters to a existing unified exec session and returns recent output!"
-        );
-        let kept = b"returning output or an session ID for ongoing interaction, returning output or a session ID for ongoing interaction";
-        assert_eq!(sanitize_devin_description(b"exec_command", kept.to_vec()), kept);
-        assert!(is_devin_automation_update(b" MCP__codex_app ", b"Automation_Update"));
-        assert!(is_devin_automation_update(b"", b"mcp__codex_app__automation_update"));
-        assert!(!is_devin_automation_update(b"mcp__codex_app", b"other"));
-    }
 }
