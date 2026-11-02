@@ -502,16 +502,6 @@ fn tool_from_declaration(declaration: &Res<'_>) -> Option<Vec<u8>> {
     Some(out)
 }
 
-pub(crate) fn set_raw_if_different(out: &mut Vec<u8>, path: &str, value: &Res<'_>) {
-    let current = gj::get(out, path);
-    if current.exists() && current.raw == value.raw {
-        return;
-    }
-    if let Ok(updated) = gj::try_set_raw(out, path, &value.raw) {
-        *out = updated;
-    }
-}
-
 /// ConvertInteractionsRequestToCodex.
 fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     let root = gj::parse(raw);
@@ -627,12 +617,12 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     }
     let choice = root.get("tool_choice");
     if choice.exists() {
-        set_raw_if_different(&mut out, "tool_choice", &choice);
+        gj::set_raw_if_different(&mut out, "tool_choice", &choice.raw);
     }
     for path in ["parallel_tool_calls", "store", "metadata", "include", "truncation"] {
         let value = root.get(path);
         if value.exists() {
-            set_raw_if_different(&mut out, path, &value);
+            gj::set_raw_if_different(&mut out, path, &value.raw);
         }
     }
     out

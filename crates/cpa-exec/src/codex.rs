@@ -666,7 +666,7 @@ impl CodexExecutor {
 /// `CountTokens` (codex_executor_tokens.go): the request shaped as for Codex, counted
 /// locally with the model's tiktoken encoding; nothing is sent upstream.
 fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecError> {
-    use crate::codex_json::{delete, set_bool_if_different, set_str, set_str_if_different};
+    use crate::codex_json::{delete, set_str};
     let model = request::base_model(&req.model);
     // Go reads is-compat only from the attempt's binding here (APIKeyModelIsCompat).
     let is_compat = req.resolved_model.as_ref().is_some_and(|r| r.is_compat());
@@ -695,7 +695,7 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
     })
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let mut body = String::from_utf8_lossy(&body).into_owned();
-    body = set_str_if_different(body, "model", &model);
+    body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", &model));
     for key in [
         "previous_response_id",
         "generate",
@@ -705,7 +705,7 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
     ] {
         body = delete(&body, key);
     }
-    body = set_bool_if_different(body, "stream", false);
+    body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", false));
     if !request::is_native(req) {
         let instructions = gjson::get(&body, "instructions");
         if !instructions.exists() || instructions.kind() == gjson::Kind::Null {

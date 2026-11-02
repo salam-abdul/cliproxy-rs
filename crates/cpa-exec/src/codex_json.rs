@@ -35,17 +35,10 @@ pub fn delete(json: &str, path: &str) -> String {
     edited(json, |out| gj::delete(out, path))
 }
 
-/// `helps.SetStringIfDifferent`.
-pub fn set_str_if_different(json: String, path: &str, value: &str) -> String {
+/// A byte-level `cpa_common::json` edit of a text document, without copying it.
+pub fn edit(json: String, edit: impl FnOnce(&mut Vec<u8>)) -> String {
     let mut out = json.into_bytes();
-    gj::set_str_if_different(&mut out, path, value);
-    text(out)
-}
-
-/// `helps.SetBoolIfDifferent`.
-pub fn set_bool_if_different(json: String, path: &str, value: bool) -> String {
-    let mut out = json.into_bytes();
-    gj::set_bool_if_different(&mut out, path, value);
+    edit(&mut out);
     text(out)
 }
 

@@ -2713,6 +2713,16 @@ pub fn set_str_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), 
     set_str(out, path, value);
 }
 
+/// Sets raw JSON unless the value there already has exactly that raw text; an sjson
+/// error leaves the document unchanged.
+pub fn set_raw_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), raw: &[u8]) {
+    let current = get(out, path);
+    if current.exists() && *current.raw == *raw {
+        return;
+    }
+    set_raw(out, path, raw);
+}
+
 /// `helps.SetBoolIfDifferent`.
 pub fn set_bool_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: bool) {
     if get(out, path).kind == if value { Kind::True } else { Kind::False } {
@@ -3482,6 +3492,23 @@ pub fn canonical(text: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn if_different_setters_leave_matching_values_byte_for_byte() {
+        let mut doc = br#"{"m":"a\u0062","s":true,"r":{ "k" : 1 }}"#.to_vec();
+        let original = doc.clone();
+        set_str_if_different(&mut doc, "m", "ab");
+        set_bool_if_different(&mut doc, "s", true);
+        set_raw_if_different(&mut doc, "r", br#"{ "k" : 1 }"#);
+        assert_eq!(doc, original, "equal values keep their original encoding");
+        set_raw_if_different(&mut doc, "r", br#"{"k":1}"#);
+        set_bool_if_different(&mut doc, "s", false);
+        set_str_if_different(&mut doc, "m", "x");
+        assert_eq!(doc, br#"{"m":"x","s":false,"r":{"k":1}}"#);
+        let mut bad = b"[1".to_vec();
+        set_raw_if_different(&mut bad, "a.b", b"2");
+        assert_eq!(bad, b"[1", "an sjson error leaves the document unchanged");
+    }
 
     #[test]
     fn marshal_string_escapes_like_go() {

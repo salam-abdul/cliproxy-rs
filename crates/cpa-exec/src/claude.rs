@@ -1143,7 +1143,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = translated;
-        body = crate::codex_json::set_str_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1440,7 +1442,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = utf8(translated).into_owned();
-        body = crate::codex_json::set_str_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
