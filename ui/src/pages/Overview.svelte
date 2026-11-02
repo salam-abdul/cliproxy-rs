@@ -9,28 +9,7 @@
   import { accountHealth, requestBuckets } from "../history";
   import { checkAll } from "../quota";
   import { credName, provider, label, type Data } from "../core";
-  $effect(() => {
-    let active = true;
-    const stop = every(
-      15000,
-      async () => {
-        await store.creds.load(true);
-        if (active && !store.creds.error)
-          await checkAll(
-            (store.creds.data || []).filter(
-              (a) => !store.native.data?.enabled || provider(a) !== "claude",
-            ),
-            true,
-            () => active,
-          );
-      },
-      true,
-    );
-    return () => {
-      active = false;
-      stop();
-    };
-  });
+  $effect(() => every(15000, () => store.creds.load(true), true));
   const enabled = $derived(!!store.native.data?.enabled);
   $effect(() => {
     if (!enabled) return;
@@ -68,7 +47,7 @@
   async function refreshQuotas() {
     refreshing = true;
     try {
-      await checkAll(store.creds.data || [], false, () => mounted);
+      await checkAll(store.creds.data || [], () => mounted);
       if (mounted) await store.native.load(true);
     } finally {
       refreshing = false;
@@ -189,7 +168,7 @@
       class="key small"
       disabled={refreshing || !store.creds.data?.length}
       onclick={refreshQuotas}
-      >{refreshing ? "Refreshing…" : "Refresh"}</button
+      >{refreshing ? "Checking…" : "Check quotas"}</button
     >
   </div>
   <div class="account-columns" aria-hidden="true">

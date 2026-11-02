@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "./store.svelte";
   import { quotaSummary } from "./quota";
-  import { span, type Data } from "./core";
+  import { ago, span, type Data } from "./core";
   let { a, compact = false }: { a: Data; compact?: boolean } = $props();
   const quota = $derived(quotaSummary(a));
   const windows = $derived(compact ? quota.windows.slice(0, 2) : quota.windows);
@@ -45,10 +45,9 @@
       {#if w.detail}<span class="muted">{w.detail}</span>{/if}
     </span>
   {:else}<span class="muted quota-unreported">Quota not reported</span>{/each}
-  {#if quota.failed}<span class="warning-text"
-      >Last reading · refresh failed</span
+  {#if quota.failed}<span class="warning-text">Last reading · check failed</span>
+  {:else if quota.at}<span class:warning-text={quota.stale} class:muted={!quota.stale}
+      >Updated {ago(quota.at, store.now)}</span
     >
-  {:else if quota.stale}<span class="warning-text"
-      >Last reading · needs refresh</span
-    >{/if}
+  {:else if quota.stale}<span class="warning-text">Last reading · needs refresh</span>{/if}
 </span>

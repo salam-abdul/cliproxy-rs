@@ -87,7 +87,6 @@ class Store {
   dirty = $state(false);
   toast = $state<{ text: string; bad: boolean } | null>(null);
   now = $state(Date.now());
-  quotaPending = $state<Record<string, boolean>>({});
   native = new Res<Data>(() => api("/observability/native/status"));
   activity = new Res<Data>(() => api("/observability/native/events"));
   historyRange = $state("24h");
@@ -166,7 +165,6 @@ class Store {
       resource.loading = false;
     }
     this.quota = {};
-    this.quotaPending = {};
     this.busy = false;
     this.dirty = false;
   }

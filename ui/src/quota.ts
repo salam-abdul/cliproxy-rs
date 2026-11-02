@@ -58,25 +58,20 @@ export function quotaSummary(a: Data) {
         ? q.windows
         : [],
     failed: !!(q?.error || (native && store.native.error)),
+    at: native ? 0 : q && "at" in q ? q.at : 0,
     stale: native
       ? !(store.native.data?.validUntil > store.now)
       : !!(q && "at" in q && store.now - q.at > 90000),
   };
 }
 
-export function check(a: Data, automatic = false): Promise<void> {
-  if (!canCheck(a)) return Promise.resolve();
+function check(a: Data): Promise<void> {
   const lifetime = requests;
-  return lifetime.once(
-    `quota:${quotaKey(a)}`,
-    () => read(a, lifetime),
-    automatic ? 60_000 : 0,
-  );
+  return lifetime.once(`quota:${quotaKey(a)}`, () => read(a, lifetime));
 }
 
 async function read(a: Data, lifetime: Lifetime) {
   const p = provider(a);
-  store.quotaPending[quotaKey(a)] = true;
   try {
     let raw: Data;
     const header: Data = {
@@ -127,20 +122,17 @@ async function read(a: Data, lifetime: Lifetime) {
       ...store.quota[quotaKey(a)],
       error: e instanceof Error ? e.message : String(e),
     };
-  } finally {
-    if (lifetime.active) store.quotaPending[quotaKey(a)] = false;
   }
 }
 
-/** One check per supported credential, one after another so the provider is not hammered. */
-export async function checkAll(
-  list: Data[],
-  automatic = false,
-  active = () => true,
-) {
+/**
+ * One check per supported account, one after another so the provider is not hammered. Only
+ * the Check quotas button calls this: each check reaches the provider's usage endpoint.
+ */
+export async function checkAll(list: Data[], active = () => true) {
   const lifetime = requests;
   for (const a of list) {
-    if (!active() || document.hidden || !lifetime.active) break;
-    if (canCheck(a)) await check(a, automatic);
+    if (!active() || !lifetime.active) break;
+    if (canCheck(a)) await check(a);
   }
 }

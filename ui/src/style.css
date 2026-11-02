@@ -369,7 +369,7 @@ select { appearance: none; padding-right: 34px; background: var(--raised) url("d
 .quota-caption { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .quota-caption strong { white-space: nowrap; }
 .quota-meter time { font-size: 11px; }
-.quota-unreported, .quota-meters > .warning-text { grid-column: 1 / -1; }
+.quota-unreported, .quota-meters > :last-child:not(.quota-meter) { grid-column: 1 / -1; }
 .meter-track { display: block; height: 4px; border-radius: 4px; background: var(--hole); overflow: hidden; }
 .meter-track > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
 .meter-track > .low { background: var(--warn); }
