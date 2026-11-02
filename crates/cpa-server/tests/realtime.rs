@@ -40,7 +40,6 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
-use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_exec::Executors;
 use cpa_exec::codex::CodexExecutor;
@@ -114,7 +113,7 @@ async fn proxy(credentials: Vec<Credential>, mock: Shared) -> String {
             format!("ws{}/v1", upstream_url.trim_start_matches("http")),
         );
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("api-keys: [good-key, other-key]").unwrap(),
+        cpa_server::testing::config("api-keys: [good-key, other-key]"),
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -353,7 +352,6 @@ async fn realtime_http_matches_go() {
     );
 }
 
-// ---------------------------------------------------------------------------------------
 // WebSockets
 
 /// One relayed frame as both harnesses record it.
@@ -533,7 +531,7 @@ async fn realtime_websockets_match_go() {
         ),
     ];
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("api-keys: [owner-key, other-key]").unwrap(),
+        cpa_server::testing::config("api-keys: [owner-key, other-key]"),
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -797,7 +795,7 @@ async fn sideband_claims_and_hangup_teardown() {
             format!("ws{}/v1", upstream_url.trim_start_matches("http")),
         );
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("api-keys: [owner-key]").unwrap(),
+        cpa_server::testing::config("api-keys: [owner-key]"),
         vec![credential(
             "only-oauth",
             serde_json::json!({"type":"codex","access_token":"only-token"}),
@@ -883,7 +881,7 @@ async fn raw_handshakes_match_gorilla() {
             format!("ws{}/v1", upstream_url.trim_start_matches("http")),
         );
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("api-keys: [owner-key]").unwrap(),
+        cpa_server::testing::config("api-keys: [owner-key]"),
         vec![credential(
             "only-oauth",
             serde_json::json!({"type":"codex","access_token":"only-token"}),
@@ -972,7 +970,7 @@ async fn relay_end_close_codes_match_gorilla() {
             format!("ws{}/v1", upstream_url.trim_start_matches("http")),
         );
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("api-keys: [owner-key]").unwrap(),
+        cpa_server::testing::config("api-keys: [owner-key]"),
         vec![credential(
             "only-oauth",
             serde_json::json!({"type":"codex","access_token":"only-token"}),

@@ -102,7 +102,7 @@ fn error_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -> Vec<&'a (dyn s
 // ponytail: the common transport failures are spelled as Go spells them (a refused
 // dial, a connection closed before the response); any other reads as the transport's
 // innermost error. A refused dial names the hop's host, which for a host name is not
-// the address Go dialed.
+// the address Go dialed. Spell more failures as Go does if the dashboard shows them.
 fn send_error_parts(err: SendError) -> (String, String) {
     let (err, hop) = match err {
         SendError::Local { error, url } => return (url, String::from_utf8_lossy(&error.body).into_owned()),
@@ -142,7 +142,8 @@ pub(crate) fn transport_cause(err: &wreq::Error, url: Option<&GoUrl>) -> String 
 
 /// The error Go's body reader reports.
 // ponytail: a truncated body (`unexpected EOF`) and a bad gzip header are spelled as Go
-// spells them; any other failure reads as the innermost error.
+// spells them; any other failure reads as the innermost error. Spell more as Go does if
+// the dashboard shows them.
 pub(crate) fn go_read_error(err: &std::io::Error) -> String {
     let chain = error_chain(err);
     for e in &chain {

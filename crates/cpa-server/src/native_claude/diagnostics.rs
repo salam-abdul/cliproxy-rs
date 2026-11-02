@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
         mpsc::{SyncSender, sync_channel},
     },
@@ -22,14 +22,14 @@ pub(crate) struct Diagnostics {
 }
 impl Diagnostics {
     pub(super) fn record(&self, event: Value) {
-        let mut recent = self.recent.lock().unwrap();
+        let mut recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner);
         if recent.len() == RECENT {
             recent.pop_front();
         }
         recent.push_back(event);
     }
     pub(crate) fn snapshot(&self) -> Value {
-        json!({"events": self.recent.lock().unwrap().iter().rev().cloned().collect::<Vec<_>>(), "lostEvents": self.lost.load(Ordering::Relaxed), "capacity": RECENT})
+        json!({"events": self.recent.lock().unwrap_or_else(PoisonError::into_inner).iter().rev().cloned().collect::<Vec<_>>(), "lostEvents": self.lost.load(Ordering::Relaxed), "capacity": RECENT})
     }
 }
 pub(super) struct Writer(SyncSender<Vec<u8>>);

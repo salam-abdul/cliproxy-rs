@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::decode;
 use super::view::{self, Shape};
-use super::{Management, go_json, go_trim, keys, query_first, remove, sscanf_int, touch, write};
+use super::{Management, go_json, keys, query_first, remove, sscanf_int, touch, write};
 
 const META_BASE_URL: &str = "https://api.meta.ai/v1";
 
@@ -39,7 +39,7 @@ fn text(o: &Map<String, Value>, k: &str) -> String {
 }
 
 fn trimmed(o: &Map<String, Value>, k: &str) -> String {
-    go_trim(&text(o, k)).to_owned()
+    (text(o, k)).trim().to_owned()
 }
 
 fn entries(list: &Value) -> Vec<Map<String, Value>> {
@@ -167,7 +167,7 @@ fn check_weight(field: &str, weight: Option<&Value>) -> Result<(), Fail> {
 
 /// Go `NormalizeClaudeFingerprintProfile`: the canonical value and whether it is known.
 fn fingerprint_profile(raw: &str) -> (&'static str, bool) {
-    match keys::lower(go_trim(raw)).as_str() {
+    match keys::lower(raw.trim()).as_str() {
         "claude-code-cli" | "oauth-cli" => ("claude-code-cli", true),
         "" => ("", true),
         _ => ("", false),
@@ -181,13 +181,13 @@ fn check_profile(field: &str, raw: &str) -> Result<(), Fail> {
     }
     Err(Fail::bad(format!(
         "{field}: unsupported fingerprint-profile {} (supported: \"claude-code-cli\" or empty)",
-        cpa_common::gostr::quote(go_trim(raw))
+        cpa_common::gostr::quote(raw.trim())
     )))
 }
 
 fn trim_field(e: &mut Map<String, Value>, k: &str) {
     if let Some(Value::String(s)) = e.get_mut(k) {
-        *s = go_trim(s).to_owned();
+        *s = s.trim().to_owned();
     }
 }
 
@@ -228,7 +228,7 @@ fn normalize_cloak(e: &mut Map<String, Value>) {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|w| Some(go_trim(w.as_str()?)).filter(|w| !w.is_empty()).map(Value::from))
+        .filter_map(|w| Some((w.as_str()?).trim()).filter(|w| !w.is_empty()).map(Value::from))
         .collect();
     if words.is_empty() {
         cloak.shift_remove("sensitive-words");
@@ -246,7 +246,7 @@ fn normalize(family: &str, e: &mut Map<String, Value>) {
             let profile = text(e, "fingerprint-profile");
             let profile = match fingerprint_profile(&profile) {
                 (canonical, true) => canonical.to_owned(),
-                _ => go_trim(&profile).to_owned(),
+                _ => profile.trim().to_owned(),
             };
             e.insert("fingerprint-profile".into(), profile.into());
             trim_field(e, "base-url");
@@ -527,7 +527,7 @@ fn patch_shape(family: &str) -> Shape {
 
 /// Go `parseCredentialWeightPatch`.
 fn weight_patch(raw: &str) -> Result<Value, Fail> {
-    if go_trim(raw) == "null" {
+    if raw.trim() == "null" {
         return Ok(Value::Null);
     }
     match decode::whole(raw.as_bytes()).and_then(decode::int_token) {
@@ -539,7 +539,7 @@ fn weight_patch(raw: &str) -> Result<Value, Fail> {
 
 /// Go `applyDisableCoolingPatch` / `applyDisableCodexCloakingPatch`.
 fn bool_patch(name: &str, raw: &str) -> Result<Value, Fail> {
-    if go_trim(raw) == "null" {
+    if raw.trim() == "null" {
         return Ok(Value::Null);
     }
     match raw {
@@ -557,7 +557,7 @@ fn cloak_patch(
     raw: &str,
     identity_changed: bool,
 ) -> Result<(), Fail> {
-    if go_trim(raw) == "null" {
+    if raw.trim() == "null" {
         e.insert("cloak".into(), Value::Null);
         return Ok(());
     }
@@ -573,7 +573,7 @@ fn cloak_patch(
         _ => Map::new(),
     };
     if let Some(mode) = given("mode") {
-        let mode = go_trim(mode.as_str().unwrap_or_default()).to_owned();
+        let mode = mode.as_str().unwrap_or_default().trim().to_owned();
         let mode = match cloak_mode(old) {
             Some(previous) if mode.is_empty() && !identity_changed => previous,
             _ => mode,
@@ -600,7 +600,7 @@ enum Patched {
 /// One entry patched as Go's `Patch*Key` does, or removed where Go removes it.
 fn apply(family: &str, old: &Map<String, Value>, p: &Map<String, Value>) -> Result<Patched, Fail> {
     let given = |k: &str| p.get(k).filter(|v| !v.is_null());
-    let trim_given = |k: &str| given(k).map(|v| go_trim(v.as_str().unwrap_or_default()).to_owned());
+    let trim_given = |k: &str| given(k).map(|v| v.as_str().unwrap_or_default().trim().to_owned());
     let identity_changed = family == "claude-api-key"
         && ["api-key", "base-url", "prefix", "proxy-url"]
             .iter()
@@ -611,7 +611,7 @@ fn apply(family: &str, old: &Map<String, Value>, p: &Map<String, Value>) -> Resu
         let raw = v.as_str().unwrap_or_default();
         let value = match name {
             "api-key" | "name" | "prefix" | "proxy-url" | "base-url" => {
-                let t = go_trim(raw).to_owned();
+                let t = raw.trim().to_owned();
                 let removes = match name {
                     "api-key" => family == "vertex-api-key",
                     "base-url" => matches!(family, "codex-api-key" | "xai-api-key" | "openai-compatibility"),
@@ -674,7 +674,7 @@ fn patch_target(
 ) -> Result<Option<usize>, Fail> {
     let compat = family == "openai-compatibility";
     let lookup = if compat { "name" } else { "match" };
-    let Some(wanted) = body.get(lookup).and_then(Value::as_str).map(|m| go_trim(m).to_owned()) else {
+    let Some(wanted) = body.get(lookup).and_then(Value::as_str).map(|m| m.trim().to_owned()) else {
         return Ok(None);
     };
     match family {
@@ -682,7 +682,7 @@ fn patch_target(
             if wanted.is_empty() {
                 return Ok(None);
             }
-            let base = query_first(query, "base-url").map(|b| go_trim(&b).to_owned());
+            let base = query_first(query, "base-url").map(|b| b.trim().to_owned());
             let hits: Vec<usize> = (0..list.len())
                 .filter(|&i| trimmed(&list[i], "api-key") == wanted)
                 .filter(|&i| base.as_ref().is_none_or(|b| trimmed(&list[i], "base-url") == *b))
@@ -738,13 +738,13 @@ fn delete(family: &str, old: &Value, query: Option<&str>) -> Result<Value, Fail>
         }
         "missing name or index"
     } else {
-        let key = query_first(query, "api-key").map(|k| go_trim(&k).to_owned());
+        let key = query_first(query, "api-key").map(|k| k.trim().to_owned());
         if let Some(key) = key.filter(|k| !k.is_empty()) {
             let strict = matches!(family, "gemini-api-key" | "interactions-api-key");
             let mut hits: Vec<usize> = (0..list.len())
                 .filter(|&i| trimmed(&list[i], "api-key") == key)
                 .collect();
-            if let Some(base) = query_first(query, "base-url").map(|b| go_trim(&b).to_owned()) {
+            if let Some(base) = query_first(query, "base-url").map(|b| b.trim().to_owned()) {
                 hits.retain(|&i| trimmed(&list[i], "base-url") == base);
                 if strict && hits.is_empty() {
                     return Err(Fail::not_found("item not found"));
@@ -851,7 +851,7 @@ fn map_change(route: &str, old: &Value, method: &Method, query: Option<&str>, bo
                 (None, None) if excluded => return Err(Fail::bad("invalid body")),
                 (None, None) => "",
             };
-            let key = keys::lower(go_trim(raw));
+            let key = keys::lower(raw.trim());
             if key.is_empty() {
                 return Err(Fail::bad(format!("invalid {what}")));
             }
@@ -869,7 +869,7 @@ fn map_change(route: &str, old: &Value, method: &Method, query: Option<&str>, bo
             key
         }
         _ => {
-            let query_key = |name: &str| keys::lower(go_trim(&query_first(query, name).unwrap_or_default()));
+            let query_key = |name: &str| keys::lower((query_first(query, name).unwrap_or_default()).trim());
             let mut key = query_key(what);
             if key.is_empty() && !excluded {
                 key = query_key("provider");

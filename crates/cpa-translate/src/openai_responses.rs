@@ -5,15 +5,14 @@
 use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::claude_responses::{extract_call_id, normalize_tool_call_outputs};
-use crate::common::{align_openai_tool_call_messages_with, go_lower, trim_space};
+use crate::codex_names::NAME_LIMIT;
+use crate::common::{align_openai_tool_call_messages_with, go_lower};
 use crate::responses_tools::{tool_description, tool_parameters};
 
-// ---------------------------------------------------------------------------------------
 // Tool declarations and Chat names (openai_openai-responses_tools.go)
-
-const NAME_LIMIT: usize = 64;
 
 /// One function or custom tool declaration and its Chat Completions name.
 #[derive(Clone, Debug)]
@@ -27,7 +26,7 @@ pub(crate) struct Declaration {
 
 /// rawResponsesNamespaceQualifiedName (the namespace is not trimmed).
 fn raw_qualified(namespace: &[u8], child: &[u8]) -> Vec<u8> {
-    let child = trim_space(child);
+    let child = go_trim_space(child);
     if child.is_empty() || namespace.is_empty() || child.starts_with(b"mcp__") {
         return child.to_vec();
     }
@@ -66,7 +65,7 @@ fn tool_name(tool: &Res<'_>) -> Vec<u8> {
 fn declarations(root: &Res<'_>) -> Vec<Declaration> {
     let mut out: Vec<Declaration> = vec![];
     let mut emit = |tool: &Res<'_>, namespace: &[u8]| {
-        let custom = match trim_space(&tool.get("type").bytes()) {
+        let custom = match go_trim_space(&tool.get("type").bytes()) {
             b"" | b"function" => false,
             b"custom" => true,
             _ => return,
@@ -88,10 +87,10 @@ fn declarations(root: &Res<'_>) -> Vec<Declaration> {
             return;
         }
         tools.each(|_, tool| {
-            if trim_space(&tool.get("type").bytes()) == b"namespace" {
+            if go_trim_space(&tool.get("type").bytes()) == b"namespace" {
                 let children = tool.get("tools");
                 if children.is_array() {
-                    let namespace = trim_space(&tool.get("name").bytes()).to_vec();
+                    let namespace = go_trim_space(&tool.get("name").bytes()).to_vec();
                     children.each(|_, child| {
                         emit(&child, &namespace);
                         true
@@ -260,7 +259,7 @@ impl ToolIndex {
 
     /// applyIdentity: the declared local name and namespace for a Chat name.
     pub(crate) fn apply_identity(&self, item: &mut Vec<u8>, qualified: &[u8], path: &str) {
-        let mut name = trim_space(qualified).to_vec();
+        let mut name = go_trim_space(qualified).to_vec();
         let mut namespace = vec![];
         if let Some(d) = self.by_chat.get(&name) {
             name = d.local_name.clone();
@@ -323,7 +322,7 @@ impl ToolIndex {
 }
 
 fn override_name(tool: &Res<'_>, name: &[u8]) -> Vec<u8> {
-    let name = trim_space(name);
+    let name = go_trim_space(name);
     if name.is_empty() {
         tool_name(tool)
     } else {
@@ -404,7 +403,6 @@ pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Tool outputs (setFunctionCallOutputContent and helpers)
 
 /// normalizeChatImageDetail: (detail, ok).
@@ -415,7 +413,7 @@ fn image_detail(detail: &Res<'_>) -> (Vec<u8>, bool) {
     if detail.kind != Kind::String {
         return (vec![], false);
     }
-    let normalized = go_lower(trim_space(&detail.s));
+    let normalized = go_lower(go_trim_space(&detail.s));
     match normalized.as_slice() {
         b"auto" | b"low" | b"high" => (normalized, true),
         b"original" => (b"high".to_vec(), true),
@@ -433,7 +431,7 @@ fn image_fields(item: &Res<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
     if url.kind != Kind::String {
         return None;
     }
-    let url = trim_space(&url.s).to_vec();
+    let url = go_trim_space(&url.s).to_vec();
     if url.is_empty() {
         return None;
     }
@@ -551,7 +549,7 @@ fn standalone_output(output: &Res<'_>, set: SetOutput) -> Option<Vec<u8>> {
     }
     let content = gj::get(&message, "content");
     if !content.exists()
-        || (content.kind == Kind::String && trim_space(&content.s).is_empty())
+        || (content.kind == Kind::String && go_trim_space(&content.s).is_empty())
         || (content.is_array() && !content.get("0").exists())
     {
         return None;
@@ -559,7 +557,6 @@ fn standalone_output(output: &Res<'_>, set: SetOutput) -> Option<Vec<u8>> {
     Some(message)
 }
 
-// ---------------------------------------------------------------------------------------
 // Reasoning helpers
 
 const UNAVAILABLE: &[u8] = b"[reasoning unavailable]";
@@ -581,7 +578,7 @@ fn reasoning_content(item: &Res<'_>) -> Vec<u8> {
 
 /// combineOpenAIResponsesReasoning.
 fn combine_reasoning(existing: &[u8], incoming: &[u8]) -> Vec<u8> {
-    let (e, i) = (trim_space(existing), trim_space(incoming));
+    let (e, i) = (go_trim_space(existing), go_trim_space(incoming));
     if e.is_empty() || e == UNAVAILABLE {
         return incoming.to_vec();
     }
@@ -592,16 +589,15 @@ fn combine_reasoning(existing: &[u8], incoming: &[u8]) -> Vec<u8> {
 }
 
 fn usable_reasoning(reasoning: &[u8]) -> bool {
-    let t = trim_space(reasoning);
+    let t = go_trim_space(reasoning);
     !t.is_empty() && t != UNAVAILABLE
 }
 
 fn effort_enables_reasoning(value: &Res<'_>) -> bool {
-    let effort = go_lower(trim_space(&value.bytes()));
+    let effort = go_lower(go_trim_space(&value.bytes()));
     !matches!(effort.as_slice(), b"" | b"none" | b"0" | b"false")
 }
 
-// ---------------------------------------------------------------------------------------
 // Request conversion
 
 /// convertResponsesToolChoiceWithIndex.
@@ -623,7 +619,7 @@ fn tool_choice(choice: &Res<'_>, index: &ToolIndex) -> Vec<u8> {
     }
     let namespace = ["namespace", "function.namespace", "custom.namespace"]
         .iter()
-        .map(|p| trim_space(&choice.get(*p).bytes()).to_vec())
+        .map(|p| go_trim_space(&choice.get(*p).bytes()).to_vec())
         .find(|n| !n.is_empty())
         .unwrap_or_default();
     let name = if namespace.is_empty() {
@@ -771,7 +767,7 @@ impl Conversation<'_> {
             self.messages.push(message);
         }
         for id in std::mem::take(&mut self.pending_call_ids) {
-            let id = trim_space(&id).to_vec();
+            let id = go_trim_space(&id).to_vec();
             if !id.is_empty() {
                 self.awaiting_outputs.insert(id);
             }
@@ -853,7 +849,7 @@ impl Conversation<'_> {
             let name = item.get("name");
             if name.exists() {
                 let name = name.bytes().into_owned();
-                let namespace = trim_space(&item.get("namespace").bytes()).to_vec();
+                let namespace = go_trim_space(&item.get("namespace").bytes()).to_vec();
                 let name = if namespace.is_empty() {
                     self.index.canonical_name(&name)
                 } else {
@@ -983,7 +979,7 @@ pub(crate) fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
         } else if flat_effort.exists() {
             effort_enables_reasoning(&flat_effort)
         } else if reasoning.exists() {
-            let raw = go_lower(trim_space(&reasoning.bytes()));
+            let raw = go_lower(go_trim_space(&reasoning.bytes()));
             !matches!(raw.as_slice(), b"" | b"none" | b"false" | b"{}")
         } else {
             false
@@ -1051,7 +1047,7 @@ pub(crate) fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
     }
     let effort = root.get("reasoning.effort");
     if effort.exists() {
-        let effort = go_lower(trim_space(&effort.bytes()));
+        let effort = go_lower(go_trim_space(&effort.bytes()));
         if !effort.is_empty() {
             gj::set_str(&mut out, "reasoning_effort", &effort);
         }

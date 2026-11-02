@@ -91,7 +91,8 @@ pub async fn count_tokens(
 /// Go `GetAlt`: `alt` when present (even empty), else `$alt`; `sse` and the empty
 /// string both mean none, as Go's `""`.
 pub fn alt(query: &str) -> Option<String> {
-    let value = crate::access::query_get(query, "alt").or_else(|| crate::access::query_get(query, "$alt"))?;
+    let value = cpa_core::config::go_url::query_get(query, "alt")
+        .or_else(|| cpa_core::config::go_url::query_get(query, "$alt"))?;
     let value = String::from_utf8_lossy(&value).into_owned();
     (!value.is_empty() && value != "sse").then_some(value)
 }

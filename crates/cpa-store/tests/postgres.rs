@@ -10,8 +10,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use cpa_server::cooldown_store::{Backend, Record};
-use cpa_server::persist::StorePersister;
+use cpa_core::store::StorePersister;
+use cpa_core::store::cooldown::{Backend, Record};
 use cpa_store::{PostgresConfig, PostgresPersister, PostgresStore};
 
 fn scratch(name: &str) -> PathBuf {

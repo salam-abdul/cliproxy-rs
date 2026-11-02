@@ -78,6 +78,7 @@ mod codex_claude;
 mod codex_claude_response;
 mod codex_gemini;
 mod codex_interactions;
+pub mod codex_names;
 mod codex_responses;
 mod common;
 mod gemini;
@@ -259,7 +260,8 @@ pub(crate) struct Registered {
 }
 
 fn registered(client: Format, upstream: Format) -> Option<&'static Registered> {
-    // ponytail: static match. Plugin-registered translators (M6) need a runtime table.
+    // ponytail: static match, because the fork has no plugin host. Plugin-registered
+    // translators would need a runtime table here.
     match (client, upstream) {
         (Format::OpenAI, Format::OpenAI) => Some(&openai::PAIR),
         (Format::OpenAI, Format::Claude) => Some(&claude_chat_request::PAIR),
@@ -335,7 +337,8 @@ pub fn go_stream(client: Format, upstream: Format) -> Option<GoStreamFn> {
 /// sdk/translator TranslateRequest. A registered pair runs between summary extraction
 /// (from the client body) and summary application (to the upstream body); without one,
 /// only a differing top-level `model` is rewritten.
-// ponytail: plugin NormalizeRequest/TranslateRequest hooks (M6) are not ported.
+// ponytail: Go's plugin NormalizeRequest/TranslateRequest hooks are not ported because
+// the fork has no plugin host; a plugin host would call them around the pair here.
 pub fn translate_request(
     client: Format,
     upstream: Format,
@@ -473,6 +476,13 @@ pub(crate) fn levels(bodies: &[&[u8]]) -> usize {
         })
         .max()
         .unwrap_or(0)
+}
+
+/// [`deep_stack`] for callers outside the translators whose own request rewrites walk
+/// `body` per nesting level before translating it. The translator entry points `f`
+/// calls run on the same stack instead of spawning another.
+pub fn on_deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> Result<T, Error> + Send) -> Result<T, Error> {
+    deep_stack(levels(&[body]), f)
 }
 
 /// Runs `f` on a thread with a stack sized for `levels` of nesting when that exceeds what

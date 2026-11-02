@@ -32,7 +32,7 @@ fn hostname() -> String {
 /// Go `extractCleanHost`: the host name without a `.local` suffix.
 fn clean_host() -> String {
     let raw = hostname();
-    let h = super::go_trim(&raw);
+    let h = raw.trim();
     let h = h.strip_suffix('.').unwrap_or(h);
     let h = h.strip_suffix(".local").unwrap_or(h);
     let h = h.strip_suffix('.').unwrap_or(h);

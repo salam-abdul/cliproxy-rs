@@ -13,7 +13,7 @@ use gjson::Kind;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 
-use crate::codex_json::{delete, set_bool_if_different, set_raw, set_str, set_str_if_different};
+use crate::codex_json::{delete, set_raw, set_str};
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub(crate) const USER_AGENT: &str = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)";
@@ -53,7 +53,7 @@ pub(crate) struct Settings {
     pub default_beta_features: String,
     pub image_generation: bool,
     /// `requests.payload` rules and image-generation mode for this config snapshot.
-    pub payload: cpa_common::payload::Rules,
+    pub payload: std::sync::Arc<cpa_common::payload::Rules>,
     /// Multi-agent v2 and orphan-delegation settings (Go reads them from `ForAPIKey` for
     /// API keys, as [`Settings::scoped`] does).
     pub client: cpa_common::codex_client::Settings,
@@ -98,6 +98,7 @@ impl Settings {
         };
         // ponytail: Go's executor-side resolveCodexKeyConfig skips the prefix/proxy
         // tie-break of the shared resolver; they differ only for duplicate key+URL entries.
+        // Skip the tie-break here too if such duplicates must resolve as Go's executor does.
         settings.key_models = cpa_core::config::credentials::resolve_api_key_entry(cfg, "codex", view.credential)
             .map(|entry| entry.models)
             .unwrap_or_default();
@@ -174,7 +175,7 @@ impl Settings {
             default_user_agent: text(&["oauth", "providers", "codex", "header-defaults", "user-agent"]),
             default_beta_features: text(&["oauth", "providers", "codex", "header-defaults", "beta-features"]),
             image_generation: image_off,
-            payload: cpa_common::payload::Rules::from_config(cfg),
+            payload: cpa_common::payload::Rules::of(cfg),
             client: cpa_common::codex_client::Settings::from_config(cfg),
             key_models: Vec::new(),
             home: None,
@@ -217,7 +218,8 @@ pub(crate) struct View<'a> {
     /// `$CPA-SESSION-ID`: the request's explicit session, never derived fallbacks.
     pub session: Option<String>,
     /// `oauth.providers.codex.chatgpt-keep-alive` (cliproxy-rs addition, off by default):
-    /// keep idle chatgpt.com connections instead of Go's connection per request. Read
+    /// keep idle chatgpt.com connections, saving a TLS handshake per request, instead of
+    /// Go's connection per request. Read
     /// from the config snapshot of each request, so a reload applies to the next one.
     pub chatgpt_keep_alive: bool,
     /// `requests.tls-handshake-timeout-seconds` for chatgpt.com ([`crate::tls::handshake_timeout`]).
@@ -347,12 +349,13 @@ pub(crate) fn is_native(req: &ExecRequest) -> bool {
 /// thinking pipeline for `codex` (`openai-response` for compact). Also returns the
 /// translated original request, which payload default rules consult.
 // ponytail: the translator's configuration-update intent is not surfaced, so
-// `updates_changed` stays false.
+// `updates_changed` stays false. Return the intent from cpa-translate and pass it here
+// if thinking must see a translated update.
 fn translate_request(req: &ExecRequest, call: Call, is_compat: bool) -> Result<(String, Vec<u8>), ExecError> {
     let target = call.target();
     let registered = cpa_translate::pair(req.source_format, target).is_some();
     if !registered && !matches!(req.source_format, Format::Codex | Format::OpenAIResponse) {
-        // ponytail: Go forwards an untranslatable body as-is; refusing locally is clearer.
+        // Go forwards an untranslatable body as-is; refusing locally is clearer.
         return Err(ExecError::local(
             501,
             FailureScope::Request,
@@ -458,7 +461,8 @@ pub(crate) struct Shaped {
 }
 
 /// Applies the Codex body rules for `call`.
-// ponytail: the Claude-source reasoning replay cache is not applied here yet.
+// The executors apply the Claude-source reasoning replay after these rules
+// (`codex_replay::apply`); compact requests skip it.
 // ponytail: each rule that edits the body returns a new copy while the previous one is
 // still alive, so a streamed 1.9 MB /v1/responses request peaks at 16.8 MB of live heap
 // (8.8x the body; alloc.codex.* in crates/cpa-server/tests/fixtures/allocation_limits.txt). At that peak, heaptrack counted
@@ -476,8 +480,8 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
     let mut body = apply_payload(req, settings, call, model, body, &original);
     match call {
         Call::NonStream => {
-            body = set_str_if_different(body, "model", model);
-            body = set_bool_if_different(body, "stream", true);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", true));
             for key in [
                 "previous_response_id",
                 "generate",
@@ -510,16 +514,16 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
                     set_raw(&body, "stream_options.reasoning_summary_delivery", &raw)
                 };
             }
-            body = set_str_if_different(body, "model", model);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
         }
         Call::Websocket => {
-            body = set_str_if_different(body, "model", model);
-            body = set_bool_if_different(body, "stream", true);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", true));
             body = delete(&body, "prompt_cache_retention");
             body = delete(&body, "safety_identifier");
         }
         Call::Compact => {
-            body = set_str_if_different(body, "model", model);
+            body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", model));
             body = delete(&body, "stream");
         }
     }
@@ -535,7 +539,9 @@ pub(crate) fn shape(req: &ExecRequest, view: &View<'_>, settings: &Settings, cal
     body = sanitize_reasoning(body, is_compat);
     body = if call == Call::Websocket {
         if is_lite(&body, &req.headers) {
-            set_bool_if_different(body, "parallel_tool_calls", false)
+            crate::codex_json::edit(body, |b| {
+                cpa_common::json::set_bool_if_different(b, "parallel_tool_calls", false)
+            })
         } else {
             body
         }
@@ -596,7 +602,9 @@ fn ensure_image_tool(body: String, model: &str, view: &View<'_>, headers: &Heade
 
 fn normalize_parallel_tool_calls(body: String, headers: &HeaderMap) -> String {
     if is_lite(&body, headers) {
-        return set_bool_if_different(body, "parallel_tool_calls", false);
+        return crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_bool_if_different(b, "parallel_tool_calls", false)
+        });
     }
     if !gjson::get(&body, "parallel_tool_calls").exists() {
         return body;
@@ -680,7 +688,8 @@ fn sanitize_reasoning(body: String, is_compat: bool) -> String {
 /// `helps.NormalizeCodexToolSchemas` (codex_tool_schema.go): only the Codex executors
 /// call it, so it lives here rather than in `cpa_common::payload`.
 // ponytail: the companion stripIncompatiblePatterns pass (drops `\p{..}` regex patterns by
-// re-encoding the schema) is not ported; such schemas pass through unchanged.
+// re-encoding the schema) is not ported; such schemas pass through unchanged. Port the
+// pass if Codex starts rejecting them.
 fn normalize_tool_schemas(body: String) -> String {
     let tools = gjson::get(&body, "tools");
     match normalize_tool_list(&tools) {
@@ -894,10 +903,7 @@ pub(crate) fn sanitize_input_ids(body: String) -> String {
             input.push_str(&attempt.to_string());
         }
         let digest = Sha256::digest(input.as_bytes());
-        let suffix = format!(
-            "_{}",
-            digest[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        let suffix = format!("_{}", cpa_core::hex::encode(&digest[..8]));
         let keep = (LIMIT - suffix.len()).min(id.chars().count());
         format!("{}{suffix}", id.chars().take(keep).collect::<String>())
     };
@@ -1044,7 +1050,12 @@ pub(crate) fn prompt_cache(
     if id.is_empty() {
         return (body, None);
     }
-    (set_str_if_different(body, "prompt_cache_key", &id), Some(id))
+    (
+        crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "prompt_cache_key", &id)
+        }),
+        Some(id),
+    )
 }
 
 fn set(headers: &mut HeaderMap, name: &str, value: &str) {

@@ -860,7 +860,7 @@ fn go_account(credential: &Credential) -> [String; 5] {
     ]
 }
 
-/// Upstream capture (M4-0250) at Go's Codex HTTP sites (`codex_executor_execute.go:93,264`,
+/// Upstream capture at Go's Codex HTTP sites (`codex_executor_execute.go:93,264`,
 /// `codex_executor_stream.go:101`). Go records the request header map and body as sent,
 /// the response status, the error body or, on success, the whole body (Execute, compact)
 /// or each scanned line (streams), and every stream failure it reports. So for each case
@@ -1157,6 +1157,70 @@ async fn capture_keeps_each_sites_read_error_policy() {
         [Tap::Error(String::from_utf8_lossy(&error.body).into_owned())],
         "{taps:?}"
     );
+}
+
+/// A buffered image response that completed without an image, or whose stream broke off
+/// before completing, followed work the upstream already did: the first is terminal
+/// and the second marks a broken response, so dispatch resends neither.
+#[tokio::test]
+async fn image_responses_the_upstream_worked_on_are_never_resent() {
+    use base64::Engine;
+    for (name, scope, after) in [
+        ("tool_no_image_output", FailureScope::Request, None),
+        (
+            "tool_disconnected_before_completion",
+            FailureScope::Credential,
+            Some(cpa_core::exec::AfterAccept::Truncated),
+        ),
+    ] {
+        let case = GO["images"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: fixture case"));
+        let mock = Mock::start().await;
+        mock.script(
+            case["upstream"]["path"].as_str().unwrap_or("/responses"),
+            vec![reply(case)],
+        );
+        let body = Bytes::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(case["payload_b64"].as_str().unwrap())
+                .unwrap(),
+        );
+        let request_path = case["request_path"].as_str().unwrap();
+        let model = case["model"].as_str().unwrap();
+        let req = ExecRequest {
+            operation: Operation::Generate,
+            source_format: Format::OpenAI,
+            response_format: Format::OpenAI,
+            requested_model: model.into(),
+            model: model.into(),
+            original_body: body.clone(),
+            body,
+            stream: false,
+            alt: None,
+            session: None,
+            headers: HeaderMap::new(),
+            execution_session: None,
+            derived_session: None,
+            resolved_model: None,
+            usage: Default::default(),
+            request_path: request_path.into(),
+            caller: Caller {
+                principal: "client-key-FAKE".into(),
+                source: "authorization",
+            },
+        };
+        let error = executor()
+            .images(&credential(case, &mock.url), req, request_path, &Config::default())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{name}: expected an error"));
+        assert_eq!(error.scope, scope, "{name}: {error}");
+        assert_eq!(error.after_accept, after, "{name}");
+    }
 }
 
 /// The direct Images endpoints (`executeDirectOpenAIImage` and its stream form) read a

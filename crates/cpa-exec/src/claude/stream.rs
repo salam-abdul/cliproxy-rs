@@ -6,11 +6,12 @@
 //! upstream appends after the terminal event is never forwarded. A transport read
 //! failure before `message_stop` becomes Go's `unexpected EOF`; clean truncation is 502.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use cpa_core::exec::{ExecError, ExecStream, FailureScope};
+use cpa_core::exec::{AfterAccept, ExecError, ExecStream, FailureScope};
 use futures_util::StreamExt;
 
 use super::alias::{self, Reverse};
@@ -21,7 +22,7 @@ const MAX_LINE: usize = 52_428_800;
 
 /// Go `observeClaudeSSEEvent`: only a complete event decides completion or failure.
 fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &mut Option<ExecError>) {
-    let trim = cpa_common::gostr::trim_space;
+    let trim = cpa_core::config::go_trim_space;
     let data: Vec<&[u8]> = event
         .split(|byte| *byte == b'\n')
         .filter_map(|line| {
@@ -72,39 +73,49 @@ fn observe(event: &[u8], message_id: &mut String, completed: &mut bool, error: &
     }
 }
 
-/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line.
-pub(crate) fn restore_line(line: &[u8], reverse: &Reverse) -> Result<Vec<u8>, String> {
+/// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line; borrowed when no name
+/// changes.
+pub(crate) fn restore_line<'a>(line: &'a [u8], reverse: &Reverse) -> Result<Cow<'a, [u8]>, String> {
     if reverse.is_empty() {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
     let trimmed = line.trim_ascii();
     if trimmed.is_empty() || trimmed == b"[DONE]" || trimmed.starts_with(b"event:") {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     }
-    let is_data = trimmed.starts_with(b"data:");
-    let payload = if is_data { trimmed[5..].trim_ascii() } else { trimmed };
+    let (is_data, payload) = match trimmed.strip_prefix(b"data:") {
+        Some(payload) => (true, payload.trim_ascii()),
+        None => (false, trimmed),
+    };
     let Ok(payload) = std::str::from_utf8(payload) else {
-        return Ok(line.to_vec());
+        return Ok(Cow::Borrowed(line));
     };
     Ok(match alias::restore_event_payload(payload, reverse)? {
-        Some(updated) if is_data => [b"data: ".as_slice(), updated.as_bytes()].concat(),
-        Some(updated) => updated.into_bytes(),
-        None => line.to_vec(),
+        Some(updated) if is_data => Cow::Owned([b"data: ".as_slice(), updated.as_bytes()].concat()),
+        Some(updated) => Cow::Owned(updated.into_bytes()),
+        None => Cow::Borrowed(line),
     })
 }
 
-/// Message ID of a completed stream; `None` when `message_stop` was never seen.
+/// Runs once with the message ID (empty when no `message_start` carried one) after a
+/// stream completed with `message_stop` or a bare message object with a stop reason.
+/// It never runs for a stream that did not complete.
 pub(crate) type OnComplete = Box<dyn FnOnce(String) + Send>;
 
 struct Relay {
     body: ExecStream,
     reverse: Arc<Reverse>,
     line: BytesMut,
+    /// Prefix of `line` already searched for a newline, so a long line arriving in
+    /// many chunks is scanned once overall.
+    scanned: usize,
     event: BytesMut,
     ready: VecDeque<Result<Bytes, ExecError>>,
     message_id: String,
     completed: bool,
     finished: bool,
+    /// Whether any event went out: a body that ends without one is an empty stream.
+    relayed: bool,
     upstream_error: Option<ExecError>,
     done: Option<OnComplete>,
     /// Go's usage reporter: every upstream line, before alias restore.
@@ -126,7 +137,7 @@ impl Relay {
         let restored = match restore_line(line, &self.reverse) {
             Ok(restored) => restored,
             Err(message) => {
-                self.fail(super::plain_error(format!(
+                self.fail(crate::upstream::plain_error_after_response(format!(
                     "restore Claude OAuth tool name from streaming response: {message}"
                 )));
                 return false;
@@ -134,7 +145,7 @@ impl Relay {
         };
         self.event.extend_from_slice(&restored);
         self.event.extend_from_slice(b"\n");
-        if cpa_common::gostr::trim_space(&restored).is_empty() {
+        if cpa_core::config::go_trim_space(&restored).is_empty() {
             observe(
                 &self.event,
                 &mut self.message_id,
@@ -169,6 +180,7 @@ impl Relay {
         if !self.event.is_empty() {
             let event = std::mem::take(&mut self.event).freeze();
             self.ready.push_back(Ok(event));
+            self.relayed = true;
         }
     }
 
@@ -198,10 +210,17 @@ impl Relay {
 
     fn chunk(&mut self, chunk: &[u8]) {
         self.line.extend_from_slice(chunk);
-        while let Some(pos) = self.line.iter().position(|b| *b == b'\n') {
+        while let Some(pos) = self.line[self.scanned..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|pos| self.scanned + pos)
+        {
+            self.scanned = 0;
             // bufio.Scanner holds at most MAX_LINE bytes: the line and its newline must fit.
             if pos + 1 > MAX_LINE {
-                self.fail(super::plain_error("bufio.Scanner: token too long"));
+                self.fail(crate::upstream::plain_error_after_response(
+                    "bufio.Scanner: token too long",
+                ));
                 return;
             }
             let mut line = self.line.split_to(pos + 1);
@@ -213,8 +232,11 @@ impl Relay {
                 return;
             }
         }
+        self.scanned = self.line.len();
         if self.line.len() > MAX_LINE {
-            self.fail(super::plain_error("bufio.Scanner: token too long"));
+            self.fail(crate::upstream::plain_error_after_response(
+                "bufio.Scanner: token too long",
+            ));
         }
     }
 
@@ -232,15 +254,20 @@ impl Relay {
             &mut self.upstream_error,
         );
         self.flush();
-        if !self.completed {
+        // An empty body ends quietly: dispatch reports it as an empty stream.
+        if !self.completed && (self.relayed || error.is_some() || self.upstream_error.is_some()) {
             // A submitted inference may have completed remotely; local truncation cannot replay.
             let read_error = error.is_some();
             let mut error = error.or_else(|| self.upstream_error.take()).unwrap_or_else(|| {
                 ExecError::local(502, FailureScope::Request, "upstream stream closed before message_stop")
+                    .accepted(AfterAccept::Truncated)
             });
             if read_error {
                 error.body = Bytes::from_static(b"unexpected EOF");
-                error = crate::upstream::body_read_error_after_response(200, error);
+                error = crate::upstream::body_read_error_after_response(error);
+                if error.scope == FailureScope::Request && error.headers.is_empty() {
+                    error.after_accept.get_or_insert(AfterAccept::Interrupted);
+                }
             }
             self.capture_error(&error);
             self.ready.push_back(Err(error));
@@ -249,8 +276,7 @@ impl Relay {
     }
 }
 
-/// Relays decoded upstream bytes as whole native SSE events. `done` runs once with
-/// the message ID when the upstream completed with `message_stop`.
+/// Relays decoded upstream bytes as whole native SSE events; `done` is an [`OnComplete`].
 /// Every upstream line is reported to `usage` and `capture` before alias restore.
 pub(crate) fn relay(
     body: ExecStream,
@@ -265,11 +291,13 @@ pub(crate) fn relay(
         body,
         reverse,
         line: BytesMut::new(),
+        scanned: 0,
         event: BytesMut::new(),
         ready: VecDeque::new(),
         message_id: String::new(),
         completed: false,
         finished: false,
+        relayed: false,
         upstream_error: None,
         done: Some(done),
     };
@@ -293,9 +321,17 @@ pub(crate) fn relay(
 
 /// `validateClaudeStreamingResponse` for buffered SSE behind a non-stream client.
 pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
-    // statusErr{502}: classified by status like any upstream 502.
-    let bad = |m: &str| ExecError::local(502, crate::upstream::scope_for(502), m.to_owned());
+    // statusErr{502}: classified by status like any upstream 502. Once an event came
+    // before it, the upstream did work for the request, so it is never resent.
     let (mut has_data, mut start, mut delta) = (false, false, false);
+    let bad = |m: &str, after_data: bool| {
+        let error = ExecError::local(502, crate::upstream::scope_for(502), m.to_owned());
+        if after_data {
+            error.accepted(AfterAccept::Truncated)
+        } else {
+            error
+        }
+    };
     for line in data.split(|b| *b == b'\n') {
         let line = line.trim_ascii();
         let Some(payload) = line.strip_prefix(b"data:") else {
@@ -305,10 +341,10 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
         if payload.is_empty() || payload == b"[DONE]" {
             continue;
         }
-        has_data = true;
+        let earlier = std::mem::replace(&mut has_data, true);
         let payload = std::str::from_utf8(payload).unwrap_or("");
         if !gjson::valid(payload) {
-            return Err(bad("claude executor: upstream returned malformed stream data"));
+            return Err(bad("claude executor: upstream returned malformed stream data", earlier));
         }
         match rawjson::get(payload, "type").str() {
             "error" => {
@@ -319,9 +355,10 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
                 if message.is_empty() {
                     message = "unknown upstream error".into();
                 }
-                return Err(bad(&format!(
-                    "claude executor: upstream returned error event: {message}"
-                )));
+                return Err(bad(
+                    &format!("claude executor: upstream returned error event: {message}"),
+                    earlier,
+                ));
             }
             "message_start" => {
                 if rawjson::string(payload, "message.id").trim().is_empty()
@@ -329,6 +366,7 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
                 {
                     return Err(bad(
                         "claude executor: upstream stream message_start is missing id or model",
+                        earlier,
                     ));
                 }
                 start = true;
@@ -338,16 +376,18 @@ pub(crate) fn validate_buffered(data: &[u8]) -> Result<(), ExecError> {
         }
     }
     if !has_data {
-        return Err(bad("claude executor: upstream returned empty stream response"));
+        return Err(bad("claude executor: upstream returned empty stream response", false));
     }
     if !start {
         return Err(bad(
             "claude executor: upstream stream response is missing message_start",
+            true,
         ));
     }
     if !delta {
         return Err(bad(
             "claude executor: upstream stream response ended before message completion",
+            true,
         ));
     }
     Ok(())
@@ -360,7 +400,7 @@ pub(crate) fn buffered_message_id(data: &[u8]) -> String {
     for line in data.split(|b| *b == b'\n') {
         event.extend_from_slice(line);
         event.push(b'\n');
-        if cpa_common::gostr::trim_space(line).is_empty() {
+        if cpa_core::config::go_trim_space(line).is_empty() {
             observe(&event, &mut id, &mut completed, &mut None);
             event.clear();
         }
@@ -675,5 +715,77 @@ mod tests {
         assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(error.body.as_ref(), b"unexpected EOF");
         assert_eq!(out[1].as_ref().unwrap().as_ref(), b"partial\n");
+    }
+
+    /// A long line that arrives in many small chunks is searched for its newline once
+    /// overall, not from its first byte on every chunk. Rescanning would take tens of
+    /// seconds here; `.config/nextest.toml` runs this test alone.
+    #[tokio::test]
+    async fn a_long_line_in_small_chunks_is_scanned_once() {
+        const LINE: usize = 4 << 20;
+        const CHUNK: usize = 256;
+        let mut line = vec![b'a'; LINE];
+        line[..6].copy_from_slice(b"data: ");
+        line.extend_from_slice(b"\n\n");
+        let body = Bytes::from(line.clone());
+        let pieces: Vec<_> = (0..body.len())
+            .step_by(CHUNK)
+            .map(|at| Ok(body.slice(at..(at + CHUNK).min(body.len()))))
+            .collect();
+        let started = std::time::Instant::now();
+        let out = relay(
+            futures_util::stream::iter(pieces).boxed(),
+            Arc::default(),
+            Box::new(|_| panic!("not complete")),
+            Default::default(),
+            Default::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(out[0].as_ref().unwrap().as_ref(), line.as_slice());
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+    }
+
+    /// An over-long line or an unrestorable tool alias ends a stream the upstream already
+    /// accepted, so the error is request-scoped and dispatch never resends the request.
+    #[tokio::test]
+    async fn relay_failures_after_the_response_started_are_not_replayed() {
+        let last_error = |body: ExecStream, reverse: Arc<Reverse>| async move {
+            let out = relay(
+                body,
+                reverse,
+                Box::new(|_| panic!("not complete")),
+                Default::default(),
+                Default::default(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+            out.last().unwrap().as_ref().unwrap_err().clone()
+        };
+        let long = Bytes::from(vec![b'a'; MAX_LINE + 1]);
+        let terminated =
+            futures_util::stream::iter([Ok(long.slice(..MAX_LINE)), Ok(Bytes::from_static(b"\n"))]).boxed();
+        let unterminated = futures_util::stream::iter([Ok(long)]).boxed();
+        for (name, body) in [("terminated", terminated), ("unterminated", unterminated)] {
+            let error = last_error(body, Arc::default()).await;
+            assert_eq!(error.body.as_ref(), b"bufio.Scanner: token too long", "{name}");
+            assert_eq!(error.scope, FailureScope::Request, "{name}");
+        }
+        let mut reverse = Reverse::new();
+        reverse.insert("mcp__srv1__query".into(), "mcp__srv1__query".into());
+        reverse.insert("mcp__srv2__query".into(), "mcp__srv2__query".into());
+        reverse.insert("mcp__virt__word_other".into(), "other".into());
+        let ambiguous = chunks(vec![Ok(
+            b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"mcp__virt__query\",\"input\":{}}}\n\n",
+        )]);
+        let error = last_error(ambiguous, Arc::new(reverse)).await;
+        assert!(
+            error
+                .body
+                .starts_with(b"restore Claude OAuth tool name from streaming response: "),
+            "{error}"
+        );
+        assert_eq!(error.scope, FailureScope::Request);
     }
 }

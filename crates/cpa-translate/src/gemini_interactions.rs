@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 
 use cpa_common::json::{self as gj, GoValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::common::{go_lower, go_runes, go_upper, normalize_openai_file_data, trim_space};
+use crate::common::{go_lower, go_runes, go_upper, normalize_openai_file_data};
 use crate::gemini::{reorder_user_parts, set_function_response_result};
 use crate::gemini_chat_request::content_node;
 use crate::gemini_interactions_response as response;
@@ -54,14 +55,13 @@ impl stream::GoStream for Passthrough {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Small Go helpers
 
 /// firstNonEmptyString: the first value that is not blank, trimmed.
 pub(crate) fn first_trimmed(values: &[&[u8]]) -> Vec<u8> {
     values
         .iter()
-        .map(|v| trim_space(v))
+        .map(|v| go_trim_space(v))
         .find(|v| !v.is_empty())
         .unwrap_or_default()
         .to_vec()
@@ -89,7 +89,6 @@ fn requoted(first: (&str, &[u8]), second: (&str, &[u8])) -> Res<'static> {
     gj::parse(text.as_bytes()).into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini parts (interactions_gemini_common.go)
 
 /// geminiTextPartJSON.
@@ -152,7 +151,7 @@ fn inline_part_from_data_url(url: &[u8]) -> Option<Vec<u8>> {
 
 /// interactionsInputAudioMimeType.
 fn input_audio_mime(format: &[u8]) -> &'static [u8] {
-    match go_lower(trim_space(format)).as_slice() {
+    match go_lower(go_trim_space(format)).as_slice() {
         b"wav" => b"audio/wav",
         b"flac" => b"audio/flac",
         b"opus" => b"audio/opus",
@@ -192,7 +191,7 @@ pub(crate) fn content_part_to_gemini(part: &Res<'_>, thought: bool) -> Option<Ve
             return inline_data_part(&inline);
         }
     }
-    match go_lower(trim_space(&part.get("type").bytes())).as_slice() {
+    match go_lower(go_trim_space(&part.get("type").bytes())).as_slice() {
         b"image" | b"audio" | b"video" | b"document" => {
             let mime = part.get("mime_type");
             if mime.exists() || part.get("mimeType").exists() {
@@ -276,7 +275,6 @@ fn with_parts(content: &[u8], extra: &[Vec<u8>], reorder: bool) -> Vec<u8> {
     gj::try_set_raw(content, "parts", gj::join(&parts)).unwrap_or_else(|_| content.to_vec())
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions request -> Gemini request
 
 /// ConvertInteractionsRequestToGemini.
@@ -362,7 +360,7 @@ fn normalize_generation_config(out: &mut Vec<u8>) {
     let summaries = gj::get(out, "generationConfig.thinkingSummaries");
     if summaries.exists() {
         let include = (summaries.kind == Kind::String)
-            .then(|| match go_lower(trim_space(&summaries.bytes())).as_slice() {
+            .then(|| match go_lower(go_trim_space(&summaries.bytes())).as_slice() {
                 b"auto" => Some(true),
                 b"none" => Some(false),
                 _ => None,
@@ -386,7 +384,7 @@ pub(crate) fn copy_response_modalities(out: &mut Vec<u8>, root: &Res<'_>) {
     }
     let mut modalities: Vec<&str> = vec![];
     mods.each(|_, m| {
-        match go_lower(trim_space(&m.bytes())).as_slice() {
+        match go_lower(go_trim_space(&m.bytes())).as_slice() {
             b"text" => modalities.push("TEXT"),
             b"image" => modalities.push("IMAGE"),
             b"audio" => modalities.push("AUDIO"),
@@ -414,7 +412,7 @@ fn copy_tool_choice(out: &mut Vec<u8>, root: &Res<'_>) {
     }
     let mut allowed: Vec<Vec<u8>> = vec![];
     let mode = if choice.kind == Kind::String {
-        match go_lower(trim_space(&choice.bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.bytes())).as_slice() {
             b"none" => "NONE",
             b"auto" => "AUTO",
             b"required" | b"any" => "ANY",
@@ -422,12 +420,12 @@ fn copy_tool_choice(out: &mut Vec<u8>, root: &Res<'_>) {
         }
     } else if choice.is_object() {
         let mut name_at = |path: &str| {
-            let name = trim_space(&choice.get(path).bytes()).to_vec();
+            let name = go_trim_space(&choice.get(path).bytes()).to_vec();
             if !name.is_empty() {
                 allowed.push(name);
             }
         };
-        match go_lower(trim_space(&choice.get("type").bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.get("type").bytes())).as_slice() {
             b"none" => "NONE",
             b"auto" => "AUTO",
             b"required" | b"any" => "ANY",
@@ -696,7 +694,7 @@ fn step_signature(item: &Res<'_>) -> Vec<u8> {
 
 /// interactionsGeminiContentRole.
 fn content_role(role: &[u8], default_role: &str) -> &'static str {
-    match go_lower(trim_space(role)).as_slice() {
+    match go_lower(go_trim_space(role)).as_slice() {
         b"model" | b"assistant" => "model",
         b"user" => "user",
         _ if default_role == "model" => "model",
@@ -961,7 +959,6 @@ pub(crate) fn input_contents(input: &Res<'_>) -> Vec<Vec<u8>> {
     ctx.items
 }
 
-// ---------------------------------------------------------------------------------------
 // Gemini request -> Interactions request
 
 /// ConvertGeminiRequestToInteractions.
@@ -1059,7 +1056,7 @@ fn normalize_thinking_config(out: &mut Vec<u8>) {
         gj::set_str(
             out,
             "generation_config.thinking_level",
-            go_lower(trim_space(&level.bytes())),
+            go_lower(go_trim_space(&level.bytes())),
         );
     }
     let budget = first_existing(

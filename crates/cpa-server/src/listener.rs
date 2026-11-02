@@ -39,7 +39,8 @@ fn tls_settings(cfg: &Config) -> (bool, String, String) {
 /// Go's TLS setup in `Server.Start`: `None` when `server.tls.enable` is off; an error,
 /// worded as Go's, when the certificate or key path is empty or the pair does not load.
 // ponytail: load failures carry BoringSSL's reason, not Go's `tls.LoadX509KeyPair`
-// text; the "failed to start HTTPS server: " prefix and the startup abort match.
+// text; the "failed to start HTTPS server: " prefix and the startup abort match. Port
+// Go's text if a script parses it.
 pub fn tls_acceptor(cfg: &Config) -> anyhow::Result<Option<Arc<SslAcceptor>>> {
     let (enable, cert, key) = tls_settings(cfg);
     if !enable {
@@ -235,7 +236,7 @@ async fn handshake(
 /// streams and no extended CONNECT (x/net http2 `defaultMaxStreams`,
 /// `disableExtendedConnectProtocol`).
 // ponytail: other HTTP/2 settings (window sizes, frame and header-list limits) are
-// hyper's defaults, not Go's.
+// hyper's defaults, not Go's. Set Go's values on the builder if a client depends on them.
 async fn serve_connection<I>(io: I, peer: SocketAddr, app: Router, h2: bool)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,

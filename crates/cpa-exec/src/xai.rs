@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, trim_space};
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -23,13 +24,14 @@ use futures_util::StreamExt;
 use http::HeaderMap;
 
 use crate::gemini_stream::ClaudeInputTokens;
-use crate::openai_compat::status_err;
 use crate::openai_compat_http::{self as wire, Clients, GoHeaders};
 use crate::openai_compat_payload::{self as compat, ensure_responses_usage_details};
+use crate::replay::text;
+use crate::upstream::{apply_patch_error, model_status_error};
 use crate::xai_auth::{self, CLI_CHAT_PROXY_BASE_URL, DEFAULT_API_BASE_URL, metadata_string};
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request::{self as request, Prepared};
-use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter, text};
+use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter};
 use cpa_translate::apply_patch_responses as apply_patch;
 
 pub const PROVIDER: &str = "xai";
@@ -65,11 +67,7 @@ pub struct XaiExecutor {
     pub(crate) ws: Arc<crate::xai_ws::Ws>,
 }
 
-pub(crate) fn apply_patch_error() -> ExecError {
-    status_err(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
-}
-
-// --- credentials and endpoints (xai_executor_request.go) ---------------------------------
+// Credentials and endpoints (xai_executor_request.go)
 
 fn attribute<'a>(c: &'a Credential, key: &str) -> &'a str {
     c.attributes.get(key).map_or("", |v| v.trim())
@@ -298,20 +296,6 @@ fn chat_headers(c: &Credential, token: &str, stream: bool, session: &str, req: &
     h
 }
 
-/// `url.PathEscape`.
-fn path_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'$' | b'&' | b'+' | b':' | b'=' | b'@')
-        {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 /// A non-2xx response: `xaiStatusErr` over the whole body (captured), upstream headers
 /// kept. Like Go, a failed body read is returned (and captured) instead.
 async fn upstream_error(upstream: wire::Upstream, capture: &wire::Capture) -> ExecError {
@@ -438,7 +422,10 @@ impl XaiExecutor {
             if req.stream {
                 // Go answers before creating its usage reporter.
                 req.usage.discard();
-                return Err(status_err(400, "streaming not supported for /responses/compact"));
+                return Err(model_status_error(
+                    400,
+                    "streaming not supported for /responses/compact",
+                ));
             }
             return self.compact(credential, &req, cfg, downstream_websocket).await;
         }
@@ -670,7 +657,10 @@ impl XaiExecutor {
         let request_id = text(&gj::get(&payload, "request_id"));
         let (method, path) = match route {
             Some(path) => (wreq::Method::POST, path.to_owned()),
-            None if !request_id.is_empty() => (wreq::Method::GET, format!("/videos/{}", path_escape(&request_id))),
+            None if !request_id.is_empty() => (
+                wreq::Method::GET,
+                format!("/videos/{}", cpa_core::config::go_url::path_escape(&request_id)),
+            ),
             None => (wreq::Method::POST, VIDEOS_GENERATIONS.to_owned()),
         };
         self.media(credential, &req, cfg.as_ref(), method, &path, payload, true)
@@ -760,7 +750,7 @@ fn buffered(req: &ExecRequest, mut p: Prepared, store: &replay::Store, data: &[u
         let Some(rest) = line.strip_prefix(b"data:") else {
             continue;
         };
-        let event = response::normalize_summary_data(trim_space(rest).to_vec());
+        let event = response::normalize_summary_data(go_trim_space(rest).to_vec());
         p.apply_patch.remember_dispatcher_event(&event);
         let mut event = restorer.restore(event);
         if !p.web_search_alias.is_empty() {
@@ -799,7 +789,7 @@ fn buffered(req: &ExecRequest, mut p: Prepared, store: &replay::Store, data: &[u
         }
     }
     p.apply_patch.finish().map_err(|_| apply_patch_error())?;
-    Err(status_err(408, DISCONNECTED))
+    Err(model_status_error(408, DISCONNECTED))
 }
 
 /// Same-format passthrough when no pair is registered (Go's TranslateStream returns
@@ -885,7 +875,7 @@ impl Pipeline {
         let mut out = match self.translator.event(line) {
             Ok(out) => out,
             Err(e) => {
-                self.terminal(status_err(502, e.to_string()));
+                self.terminal(model_status_error(502, e.to_string()));
                 return None;
             }
         };
@@ -909,7 +899,7 @@ impl Pipeline {
         let mut chunks = vec![];
         for mut line in lines {
             if let Some(rest) = line.strip_prefix(b"data:") {
-                let event = trim_space(rest).to_vec();
+                let event = go_trim_space(rest).to_vec();
                 let kind = gj::get(&event, "type").bytes().into_owned();
                 match kind.as_slice() {
                     b"response.output_item.done" => self.items.collect(&event),
@@ -952,7 +942,7 @@ impl Pipeline {
             return true;
         }
         if let Some(rest) = line.strip_prefix(b"data:") {
-            let events = response::normalize_summary_data_events(trim_space(rest).to_vec());
+            let events = response::normalize_summary_data_events(go_trim_space(rest).to_vec());
             let had_pending = self.pending.is_some();
             for (i, event) in events.into_iter().enumerate() {
                 self.apply_patch.remember_dispatcher_event(&event);
@@ -1025,7 +1015,7 @@ impl Pipeline {
         match self.translator.finish() {
             Ok(out) => self.ready.extend(out.into_iter().filter(|f| !f.is_empty()).map(Ok)),
             Err(e) => {
-                let error = status_err(502, e.to_string());
+                let error = model_status_error(502, e.to_string());
                 wire::publish_failure(&self.usage, &error);
                 return self.ready.push_back(Err(error));
             }
@@ -1064,7 +1054,7 @@ impl Pipeline {
     }
 }
 
-// --- compaction trigger stream (xaiBuildCompactionTriggerStreamChunks) -------------------
+// Compaction trigger stream (xaiBuildCompactionTriggerStreamChunks)
 
 /// `xaiCompactionResponseID`.
 pub(crate) fn compaction_response_id(data: &[u8], now: SystemTime) -> String {
@@ -1216,7 +1206,7 @@ pub(crate) fn compaction_frames(p: &Prepared, data: &[u8], now: SystemTime) -> V
     ]
 }
 
-// --- token counting (xai_executor_tokens.go) ----------------------------------------------
+// Token counting (xai_executor_tokens.go)
 
 /// `countXAIInputTokens`: O200kBase over instructions, input, function tools and the
 /// text format, joined by newlines.
@@ -1227,7 +1217,7 @@ fn count_input_tokens(body: &[u8]) -> Result<i64, String> {
     }
     let mut segments: Vec<String> = vec![];
     let add = |segments: &mut Vec<String>, v: &gj::Res<'_>| {
-        let s = String::from_utf8_lossy(trim_space(&v.bytes())).into_owned();
+        let s = String::from_utf8_lossy(go_trim_space(&v.bytes())).into_owned();
         if !s.is_empty() {
             segments.push(s);
         }
@@ -1239,7 +1229,7 @@ fn count_input_tokens(body: &[u8]) -> Result<i64, String> {
         if v.kind == Kind::String {
             return add(segments, v);
         }
-        let s = String::from_utf8_lossy(trim_space(v.raw())).into_owned();
+        let s = String::from_utf8_lossy(go_trim_space(v.raw())).into_owned();
         if !s.is_empty() {
             segments.push(s);
         }

@@ -10,17 +10,18 @@
 use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::common::{self, canonical_tool_name, trim_space};
+use crate::common::{self, canonical_tool_name};
 
 /// util.placeholderReasonDescription.
 const PLACEHOLDER_REASON_DESCRIPTION: &[u8] = b"Brief explanation of why you are calling this tool";
 
 /// A tool's declared name: `name`, else `function.name`, trimmed.
 fn declared_name(tool: &Res<'_>) -> Vec<u8> {
-    let name = trim_space(&tool.get("name").bytes()).to_vec();
+    let name = go_trim_space(&tool.get("name").bytes()).to_vec();
     if name.is_empty() {
-        trim_space(&tool.get("function.name").bytes()).to_vec()
+        go_trim_space(&tool.get("function.name").bytes()).to_vec()
     } else {
         name
     }
@@ -567,7 +568,7 @@ fn find_translated_schemas<'a>(translated: &'a [u8], name: &[u8], original: &[u8
                 continue;
             }
             for declaration in declarations.array() {
-                let declared = trim_space(&declaration.get("name").bytes()).to_vec();
+                let declared = go_trim_space(&declaration.get("name").bytes()).to_vec();
                 if declared.is_empty() {
                     continue;
                 }
@@ -1413,7 +1414,7 @@ pub fn clean_claude_tool_arguments_with_translated(
         return clean_claude_tool_arguments(raw, name, original);
     }
     let original_raw = raw;
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     if raw.is_empty() || raw == b"{}" {
         return b"{}".to_vec();
     }
@@ -1439,7 +1440,7 @@ pub fn clean_claude_tool_arguments_with_translated(
 /// removed, judged from the original declaration; parameterless tools get `{}`.
 pub fn clean_claude_tool_arguments(raw: &[u8], name: &[u8], original: &[u8]) -> Vec<u8> {
     let original_raw = raw;
-    let raw = trim_space(raw);
+    let raw = go_trim_space(raw);
     if raw.is_empty() || raw == b"{}" {
         return b"{}".to_vec();
     }

@@ -18,7 +18,6 @@ use cpa_core::credential::{Credential, Source};
 use serde_json::{Value, json};
 
 use crate::Runtime;
-use crate::scheduler::{ErrorRule, Policy};
 
 mod access;
 mod api_call;
@@ -112,11 +111,9 @@ impl Management {
         Self::with_options(rt, path, Options::default())
     }
 
-    /// Captures startup-only settings (trusted proxies, environment secret) and
-    /// publishes the scheduler policy derived from the current config.
+    /// Captures startup-only settings (trusted proxies, environment secret).
     pub fn with_options(rt: Arc<Runtime>, path: PathBuf, options: Options) -> Arc<Self> {
         let cfg = rt.config();
-        rt.publish_policy(policy(&cfg));
         let login_base = options.login_base.clone();
         let log_dir = options
             .log_dir
@@ -180,6 +177,17 @@ impl Management {
         self.publish_locked(cfg, files);
     }
 
+    /// Publishes a config Home supplied: what [`Self::publish`] derives from a config,
+    /// except the credential set, which Home dispatches. The usage queue stays on, as Go
+    /// enables it in Home mode whatever the management secret.
+    pub fn publish_home(&self, cfg: Config) {
+        let _guard = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        self.access.config_published(&cfg);
+        crate::logging::configure(&cfg);
+        self.rt.usage_queue().configure(true, &cfg);
+        self.rt.publish_config(cfg);
+    }
+
     /// Caller holds `disk` and the store's exclusive reload gate through the scan and publication.
     pub(crate) fn publish_locked(
         &self,
@@ -237,62 +245,12 @@ impl Management {
         self.access.config_published(&cfg);
         crate::logging::configure(&cfg);
         self.rt.usage_queue().configure(self.access.available(), &cfg);
-        let policy = policy(&cfg);
-        self.rt.publish_config_and_policy(cfg, policy);
+        self.rt.publish_config(cfg);
         self.rt.store().reconcile_locked(all);
         // Go's watcher calls redisqueue.NotifyUsageRefresh after every client reload.
         self.rt.usage_queue().notify_usage_refresh();
         scan.read
     }
-}
-
-/// `Policy::from(routing)` plus the provider-level rules Go reads from config:
-/// `oauth.request-scoped-errors`, sanitized like `SanitizeOAuthRequestScopedErrors`.
-pub fn policy(cfg: &Config) -> Policy {
-    let mut policy = Policy::from(&cfg.routing);
-    let rules = cfg
-        .document
-        .get("oauth")
-        .and_then(|o| o.get("request-scoped-errors"))
-        .and_then(serde_yaml_ng::Value::as_mapping);
-    for (channel, list) in rules.into_iter().flatten() {
-        let channel = channel.as_str().unwrap_or_default().trim().to_lowercase();
-        let clean: Vec<ErrorRule> = list
-            .as_sequence()
-            .into_iter()
-            .flatten()
-            .filter_map(|r| {
-                let words = |k: &str| -> Vec<String> {
-                    r.get(k)
-                        .and_then(serde_yaml_ng::Value::as_sequence)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|v| v.as_str().map(|s| s.trim().to_owned()))
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                let rule = ErrorRule {
-                    status: r.get("status").and_then(serde_yaml_ng::Value::as_i64).unwrap_or(0),
-                    r#match: words("match"),
-                    match_regex: words("match-regexr"),
-                    action: r
-                        .get("action")
-                        .and_then(serde_yaml_ng::Value::as_str)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_lowercase(),
-                };
-                (rule.status > 0
-                    && !(rule.r#match.is_empty() && rule.match_regex.is_empty())
-                    && !rule.action.is_empty())
-                .then_some(rule)
-            })
-            .collect();
-        if !channel.is_empty() && !clean.is_empty() {
-            policy.oauth_request_scoped_errors.insert(channel, clean);
-        }
-    }
-    policy
 }
 
 /// gin `c.JSON` of a `gin.H` map: Go's `json.Marshal` (sorted keys; `<`, `>`, `&`,
@@ -368,10 +326,6 @@ fn json_body(status: StatusCode, body: String) -> Response {
 
 pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     json(status, &json!({"error": message}))
-}
-
-fn error(code: u16, message: &str) -> Response {
-    json_error(StatusCode::from_u16(code).unwrap(), message)
 }
 
 /// Wraps one method handler in the management guard; methods without a handler fall
@@ -649,29 +603,12 @@ pub(crate) async fn config(
     let if_match = if_match_values(&headers);
     tokio::task::spawn_blocking(move || config_sync(&state, &path, method, &if_match, &body))
         .await
-        .unwrap_or_else(|_| error(500, "internal_error"))
+        .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))
 }
 
+/// The decoded request path, as gin's `*path` parameter sees it.
 pub(crate) fn percent_decode(path: &str) -> String {
-    let bytes = path.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
-        match (bytes[i], hex) {
-            (b'%', Some(b)) => {
-                out.push(b);
-                i += 3;
-            }
-            (b, _) => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy(&cpa_core::config::go_url::percent_decode_lenient(path)).into_owned()
 }
 
 /// Root-level comment lines after the last mapping entry.
@@ -694,7 +631,8 @@ fn invalid_config(status: StatusCode, err: impl std::fmt::Display) -> Response {
 
 /// Go `Handler.ConfigV8`: every call reads the file and migrates it in memory (legacy
 /// layout to v8, unknown sections archived as comments); only successful mutations
-/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding.
+/// persist. The write keeps untouched text byte-stable instead of Go's re-encoding, so
+/// the formatting and comments outside a change survive it.
 pub(crate) fn config_sync(
     state: &Management,
     path: &str,
@@ -705,7 +643,7 @@ pub(crate) fn config_sync(
     let _guard = state.disk.lock().unwrap_or_else(PoisonError::into_inner);
     let original = match std::fs::read_to_string(&state.path) {
         Ok(v) => v,
-        Err(_) => return error(500, "read_failed"),
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "read_failed"),
     };
     let etag = config_etag(original.as_bytes());
     if method != Method::GET && !if_match_satisfied(if_match, &etag) {
@@ -743,12 +681,12 @@ pub(crate) fn config_sync(
                     text + &archive_comments(&archived),
                 )
                     .into_response(),
-                Err(_) => error(500, "decode_failed"),
+                Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "decode_failed"),
             };
         }
         let mut result = match serde_json::to_value(doc.value()) {
             Ok(v) => v,
-            Err(_) => return error(500, "decode_failed"),
+            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "decode_failed"),
         };
         // TURN passwords are omitted from JSON reads, never from YAML downloads.
         if let Some(servers) = result
@@ -765,7 +703,7 @@ pub(crate) fn config_sync(
         let mut selected = &result;
         for part in &parts {
             let Some(next) = selected.as_object().and_then(|o| o.get(*part)) else {
-                return error(404, "not_found");
+                return json_error(StatusCode::NOT_FOUND, "not_found");
             };
             selected = next;
         }
@@ -780,14 +718,14 @@ pub(crate) fn config_sync(
     let mut written = None;
     if method == Method::DELETE {
         if parts.is_empty() {
-            return error(400, "cannot_delete_config");
+            return json_error(StatusCode::BAD_REQUEST, "cannot_delete_config");
         }
         if !doc.delete(&parts) {
-            return error(404, "not_found");
+            return json_error(StatusCode::NOT_FOUND, "not_found");
         }
     } else {
         if !yaml && serde_json::from_slice::<serde::de::IgnoredAny>(body).is_err() {
-            return error(400, "invalid_json");
+            return json_error(StatusCode::BAD_REQUEST, "invalid_json");
         }
         // yaml.v3 yields no document for an empty or comment-only body (an explicit
         // `null` is a document).
@@ -797,17 +735,17 @@ pub(crate) fn config_sync(
         });
         let mut value = match serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(body) {
             Ok(v) if has_document => v,
-            _ => return error(400, "invalid_body"),
+            _ => return json_error(StatusCode::BAD_REQUEST, "invalid_body"),
         };
         // Go's typed saver flattens merges in an upload; a scalar merge fails to decode.
         if let Err(e) = cpa_core::config::expand_merges(&mut value) {
             return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e);
         }
         if parts.is_empty() && !value.is_mapping() {
-            return error(400, "config_must_be_object");
+            return json_error(StatusCode::BAD_REQUEST, "config_must_be_object");
         }
         if doc.update(&parts, value.clone(), method == Method::PATCH).is_err() {
-            return error(400, "invalid_path");
+            return json_error(StatusCode::BAD_REQUEST, "invalid_path");
         }
         if !yaml {
             doc.preserve_turn_secrets(&before);
@@ -841,6 +779,7 @@ pub(crate) fn config_sync(
     // a YAML 1.1 spelling) as `!!str <bool>` and fails to decode its own output; the
     // file is left unchanged. ponytail: YAML uploads are not checked, since quoted
     // and plain scalars are indistinguishable here and Go only fails on quoted ones.
+    // Check them with a YAML parser that keeps scalar styles to match Go.
     if !yaml
         && let Some(value) = written
             .as_ref()
@@ -867,13 +806,13 @@ pub(crate) fn config_sync(
             Err(e) => return invalid_config(StatusCode::UNPROCESSABLE_ENTITY, e),
         };
         if doc.update(&["management", "secret-key"], hash.into(), false).is_err() {
-            return error(422, "invalid_config");
+            return json_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config");
         }
     }
     let basis = if yaml {
         match std::str::from_utf8(body) {
             Ok(v) => v.to_owned(),
-            Err(_) => return error(400, "invalid_body"),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid_body"),
         }
     } else {
         basis
@@ -917,7 +856,8 @@ fn if_match_values(headers: &HeaderMap) -> Vec<String> {
 // Go `configV8ETag`: hash the persisted source, including comments and whitespace.
 fn config_etag(raw: &[u8]) -> HeaderValue {
     use sha2::{Digest, Sha256};
-    HeaderValue::from_str(&format!("\"{:x}\"", Sha256::digest(raw))).expect("SHA-256 is a valid ETag")
+    HeaderValue::from_str(&format!("\"{}\"", cpa_core::hex::encode(Sha256::digest(raw))))
+        .expect("SHA-256 is a valid ETag")
 }
 
 // Go `ifMatchSatisfied`: strong tags across all header lines; quoted commas stay in a tag.
@@ -926,7 +866,7 @@ fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
         return true;
     }
     let field = values.join(",");
-    let field = cpa_common::gostr::trim_space(field.as_bytes());
+    let field = cpa_core::config::go_trim_space(field.as_bytes());
     if field == b"*" {
         return true;
     }
@@ -936,11 +876,11 @@ fn if_match_satisfied(values: &[String], etag: &HeaderValue) -> bool {
             quoted ^= byte == b'"';
             byte == b',' && !quoted
         })
-        .any(|tag| cpa_common::gostr::trim_space(tag) == etag.as_bytes())
+        .any(|tag| cpa_core::config::go_trim_space(tag) == etag.as_bytes())
 }
 
 fn config_precondition_failed(etag: HeaderValue) -> Response {
-    let mut response = error(412, "precondition_failed");
+    let mut response = json_error(StatusCode::PRECONDITION_FAILED, "precondition_failed");
     response.headers_mut().insert(header::ETAG, etag);
     response
 }
@@ -976,21 +916,21 @@ async fn legacy_yaml(State(state): State<Arc<Management>>) -> Response {
                 bytes,
             )
                 .into_response(),
-            Err(_) => error(404, "not_found"),
+            Err(_) => json_error(StatusCode::NOT_FOUND, "not_found"),
         }
     })
     .await
-    .unwrap_or_else(|_| error(500, "internal_error"))
+    .unwrap_or_else(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))
 }
 
 include!(concat!(env!("OUT_DIR"), "/dashboard.rs"));
 
 async fn panel(State(state): State<Arc<Management>>, OriginalUri(uri): OriginalUri) -> Response {
     if state.rt.config().management.disable_control_panel {
-        return error(404, "not_found");
+        return json_error(StatusCode::NOT_FOUND, "not_found");
     }
     let Some((bytes, mime)) = dashboard_asset(uri.path()) else {
-        return error(404, "not_found");
+        return json_error(StatusCode::NOT_FOUND, "not_found");
     };
     (
         [
@@ -1047,5 +987,32 @@ mod etag_tests {
             let values = values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
             assert_eq!(if_match_satisfied(&values, &etag), expected, "{values:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_home_config_sets_management_availability_with_its_policy() {
+        let rt = Arc::new(crate::testing::runtime(
+            crate::testing::config(""),
+            Vec::new(),
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        ));
+        let management = Management::new(rt.clone(), std::env::temp_dir().join("cpa-home-unused-config.yaml"));
+        assert!(!management.routes_enabled());
+        management.publish_home(crate::testing::config(
+            "remote-management:\n  secret-key: fake-secret\nrouting:\n  strategy: ff\n",
+        ));
+        assert!(management.routes_enabled());
+        assert_eq!(rt.policy().strategy, crate::scheduler::Strategy::FillFirst);
     }
 }

@@ -177,23 +177,21 @@ fn xml_unescape(text: &str) -> String {
     out
 }
 
-/// Go `url.QueryUnescape` (S3 `encoding-type=url` keys).
+/// Go `url.QueryUnescape` (S3 `encoding-type=url` keys); a malformed key stays raw.
 fn query_unescape(value: &str) -> String {
-    url::form_urlencoded::parse(format!("k={value}").as_bytes())
-        .next()
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default()
+    cpa_core::config::go_url::query_unescape(value)
+        .map_or_else(|| value.to_owned(), |b| String::from_utf8_lossy(&b).into_owned())
 }
 
 fn mkdir_0700(path: &Path) -> Result<()> {
-    crate::private_fs::create_dir_all(path)?;
+    cpa_core::private_fs::create_dir_all(path)?;
     Ok(())
 }
 
 /// Go `os.WriteFile(path, data, 0o600)`.
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    let mut file = crate::private_fs::create_truncate(path)?;
+    let mut file = cpa_core::private_fs::create_truncate(path)?;
     file.write_all(bytes)?;
     Ok(())
 }
@@ -529,7 +527,7 @@ impl ObjectStore {
                     continue;
                 }
                 let rel_path = Path::new(rel);
-                // ponytail: Go cleans `sub/../x.json` to `x.json` and fetches it; URL
+                // Go cleans `sub/../x.json` to `x.json` and fetches it; URL
                 // parsing here would rewrite such a key, so any dot segment is skipped.
                 if rel_path.is_absolute() || rel.split('/').any(|s| s == "." || s == "..") {
                     tracing::warn!(key, "object store: skip auth outside mirror");
@@ -554,8 +552,8 @@ impl ObjectStore {
     }
 
     /// Go `filepath.Rel(authDir, path)` on cleaned paths.
-    // ponytail: Go would upload a path outside the mirror as `auths/../<name>`; it is
-    // refused here instead.
+    // Go would upload a path outside the mirror as `auths/../<name>`; it is
+    // refused here so no object key escapes the auths prefix.
     fn auth_key(&self, path: &Path) -> Result<String> {
         let rel = path.strip_prefix(&self.auth_dir).map_err(|_| {
             anyhow!(
@@ -619,7 +617,7 @@ impl ObjectStore {
 
 pub struct ObjectPersister(pub Arc<ObjectStore>);
 
-impl cpa_server::persist::StorePersister for ObjectPersister {
+impl cpa_core::store::StorePersister for ObjectPersister {
     fn persist_config(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.0.persist_config())
     }

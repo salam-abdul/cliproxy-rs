@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use bytes::Bytes;
-use cpa_common::gostr::trim_space;
 use cpa_common::json::{self as gj, GoValue};
+use cpa_core::config::go_trim_space;
 use serde_json::{Map, Value};
 
 use crate::meta_wire::{self, Slot};
@@ -125,14 +125,6 @@ fn get_line(data: &[u8]) -> (&[u8], &[u8], usize) {
     (line, &data[j..], j)
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|w| w == needle)
-}
-
 /// Go 1.26 `pem.Decode`: the first END line, the last BEGIN line before it, headers,
 /// and the base64 body; `None` when no block parses.
 pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
@@ -146,9 +138,9 @@ pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
             return None;
         }
         rest = &rest[end_trailer_index as usize..];
-        let mut end_index = find(rest, END)? as isize;
+        let mut end_index = cpa_common::gostr::index(rest, END)? as isize;
         end_trailer_index = end_index + END.len() as isize;
-        let Some(begin) = rfind(&rest[..end_index as usize], &START[1..]) else {
+        let Some(begin) = cpa_common::gostr::last_index(&rest[..end_index as usize], &START[1..]) else {
             continue;
         };
         if begin > 0 && rest[begin - 1] != b'\n' {
@@ -174,8 +166,8 @@ pub fn pem_decode(data: &[u8]) -> Option<PemBlock> {
             let Some(colon) = line.iter().position(|b| *b == b':') else {
                 break;
             };
-            let key = String::from_utf8_lossy(trim_space(&line[..colon])).into_owned();
-            let value = String::from_utf8_lossy(trim_space(&line[colon + 1..])).into_owned();
+            let key = String::from_utf8_lossy(go_trim_space(&line[..colon])).into_owned();
+            let value = String::from_utf8_lossy(go_trim_space(&line[colon + 1..])).into_owned();
             headers.insert(key, value);
             rest = next;
             end_index -= consumed as isize;
@@ -331,6 +323,7 @@ fn pkcs1_der(rsa: &btls::rsa::Rsa<btls::pkey::Private>) -> Result<Vec<u8>, Strin
 /// x509 message otherwise.
 // ponytail: Go also accepts keys that omit the CRT values and multi-prime keys, which
 // BoringSSL rejects; Google issues neither. Other parse errors carry no asn1 detail.
+// Use a DER RSA parser that accepts them if such a key ever appears.
 fn parse_pkcs1(der: &[u8]) -> Result<btls::rsa::Rsa<btls::pkey::Private>, String> {
     const FAILED: &str = "x509: failed to parse private key";
     let key = btls::rsa::Rsa::private_key_from_der(der).map_err(|_| FAILED)?;
@@ -372,7 +365,7 @@ fn parse_pkcs8_rsa(der: &[u8]) -> Result<btls::rsa::Rsa<btls::pkey::Private>, bo
 
 /// `ensureRSAPrivateKey`.
 // ponytail: x509 parse errors carry BoringSSL's reason rather than Go's encoding/asn1
-// text; which inputs fail matches.
+// text; which inputs fail matches. Port Go's text if a client depends on it.
 fn ensure_rsa(block: PemBlock) -> Result<PemBlock, String> {
     let pkcs1 = |bytes: Vec<u8>| PemBlock {
         kind: "RSA PRIVATE KEY".into(),
@@ -405,7 +398,7 @@ fn ensure_rsa(block: PemBlock) -> Result<PemBlock, String> {
 pub fn sanitize_private_key(raw: &str) -> Result<String, String> {
     let pk = raw.replace("\r\n", "\n").replace('\r', "\n");
     let pk = strip_ansi(&pk);
-    let pk = String::from_utf8_lossy(trim_space(pk.as_bytes())).into_owned();
+    let pk = String::from_utf8_lossy(go_trim_space(pk.as_bytes())).into_owned();
     let normalized = if pem_decode(pk.as_bytes()).is_some() {
         pk
     } else {
@@ -540,14 +533,15 @@ pub struct KeyFileView<'a> {
 pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, String), String> {
     // ponytail: Go first tries the key as a `web`/`installed` OAuth client file
     // (ConfigFromJSON), whose token source then needs an interactive handler; a Go
-    // service-account file never has those members.
+    // service-account file never has those members. Port ConfigFromJSON if Vertex import
+    // must accept OAuth client files.
     let file = KeyFile::parse(sa)?;
     match file.kind.as_str() {
         "service_account" => {}
         // ponytail: with a refresh token Go refreshes an `authorized_user` key at its token
         // URL, and it runs the external-account, impersonation and GDCH flows for those
         // types. Vertex service-account files carry none of them; without a refresh token
-        // Go fails like this.
+        // Go fails like this. Port those flows if Vertex import must accept other key types.
         "authorized_user" => return Err("oauth2: token expired and refresh token is not set".into()),
         "" => return Err("missing 'type' field in credentials".into()),
         other => return Err(format!("unknown credential type: {}", gostr_quote(other))),
@@ -573,8 +567,8 @@ pub fn token_request(sa: &Map<String, Value>, now: i64) -> Result<(String, Strin
     )?;
     let body = format!(
         "assertion={}&grant_type={}",
-        cpa_common::gostr::query_escape(&assertion),
-        cpa_common::gostr::query_escape(GRANT_TYPE)
+        cpa_core::config::go_url::query_escape(&assertion),
+        cpa_core::config::go_url::query_escape(GRANT_TYPE)
     );
     Ok((token_url.to_owned(), body))
 }

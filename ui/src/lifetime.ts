@@ -2,7 +2,6 @@ export class Lifetime {
   #controller = new AbortController();
   #latest = new WeakMap<object, object>();
   #pending = new Map<string, Promise<void>>();
-  #attempted = new Map<string, number>();
   #cleanup = new Set<() => void>();
 
   get signal() {
@@ -18,13 +17,10 @@ export class Lifetime {
     return () => this.active && this.#latest.get(resource) === version;
   }
 
-  once(key: string, work: () => Promise<void>, interval = 0): Promise<void> {
+  once(key: string, work: () => Promise<void>): Promise<void> {
     if (!this.active) return Promise.resolve();
     const pending = this.#pending.get(key);
     if (pending) return pending;
-    if (Date.now() - (this.#attempted.get(key) ?? -Infinity) < interval)
-      return Promise.resolve();
-    this.#attempted.set(key, Date.now());
     const task = Promise.resolve()
       .then(() => (this.active ? work() : undefined))
       .finally(() => this.#pending.delete(key));
@@ -69,6 +65,5 @@ export class Lifetime {
     this.#controller.abort();
     for (const stop of this.#cleanup) stop();
     this.#pending.clear();
-    this.#attempted.clear();
   }
 }

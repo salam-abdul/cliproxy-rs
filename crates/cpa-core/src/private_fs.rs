@@ -7,7 +7,7 @@ use std::io;
 use std::path::Path;
 
 /// Go `os.MkdirAll(path, 0o700)`.
-pub(crate) fn create_dir_all(path: &Path) -> io::Result<()> {
+pub fn create_dir_all(path: &Path) -> io::Result<()> {
     let mut builder = DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -16,7 +16,7 @@ pub(crate) fn create_dir_all(path: &Path) -> io::Result<()> {
 }
 
 /// Go `os.OpenFile(path, O_WRONLY|O_CREATE|O_TRUNC, 0o600)`.
-pub(crate) fn create_truncate(path: &Path) -> io::Result<File> {
+pub fn create_truncate(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -25,7 +25,7 @@ pub(crate) fn create_truncate(path: &Path) -> io::Result<File> {
 }
 
 /// Go `os.Chmod(path, 0o600)`; a no-op where modes do not apply.
-pub(crate) fn restrict(path: &Path) -> io::Result<()> {
+pub fn restrict(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

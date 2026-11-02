@@ -45,6 +45,7 @@ pub(crate) const MAX_LINE: usize = 52_428_800;
 const INTERACTIONS_REVISION: &str = "2026-05-20";
 pub(crate) const COMPACT_ALT: &str = "responses/compact";
 /// helps.ApplyPatchUpstreamErrorMessage: Go's answer to an empty or failed translation.
+#[cfg(test)]
 const EMPTY_TRANSLATION: &str = "Invalid apply_patch tool arguments received from upstream.";
 
 pub struct GeminiExecutor {
@@ -57,35 +58,6 @@ impl Default for GeminiExecutor {
             clients: GoClients::new(Hooks::default()),
         }
     }
-}
-
-/// Same status-only classification as the other API-key executors.
-fn scope_for(status: u16) -> FailureScope {
-    match status {
-        401 | 402 | 403 | 408 | 429 | 500.. => FailureScope::Credential,
-        _ => FailureScope::Request,
-    }
-}
-
-/// `statusErr{code, msg}`: no retry hint, no headers; an empty message reads `status N`.
-pub(crate) fn status_err(status: u16, message: impl Into<Bytes>) -> ExecError {
-    let mut body: Bytes = message.into();
-    if body.is_empty() {
-        body = Bytes::from(format!("status {status}"));
-    }
-    ExecError {
-        status,
-        scope: scope_for(status),
-        body,
-        headers: Box::default(),
-        retry_after: None,
-        direct: false,
-        addon: None,
-    }
-}
-
-pub(crate) fn bad_gateway() -> ExecError {
-    status_err(502, EMPTY_TRANSLATION)
 }
 
 /// `geminiAPIKey`: the attribute as stored.
@@ -149,52 +121,8 @@ pub(crate) fn translate(
 ) -> Result<Vec<u8>, ExecError> {
     let ctx = RequestCtx { model, stream };
     let client = crate::codex_client::Client::new(&req.headers, cfg, "", compat);
-    deep_stack(body, || {
-        crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
-    })
-    .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
-}
-
-/// Runs a translator on a thread with Go's maximum goroutine stack when the body nests
-/// deeply, as `cpa_translate::translate_request` does for registered pairs: the ported
-/// schema walkers recurse per nesting level like Go's, whose stacks grow.
-// ponytail: duplicate of cpa_translate's private guard until its exported `...WithCompat`
-// entry points guard themselves (owner: translators).
-pub(crate) fn deep_stack<T: Send>(body: &[u8], f: impl FnOnce() -> T + Send) -> T {
-    const DEEP: usize = 256;
-    let (mut depth, mut max, mut in_string, mut escaped) = (0usize, 0usize, false, false);
-    for &b in body {
-        if in_string {
-            match b {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                max = max.max(depth);
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    if max <= DEEP {
-        return f();
-    }
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(1 << 30)
-            .spawn_scoped(scope, f)
-            .map(|handle| handle.join())
-    })
-    .ok()
-    .and_then(Result::ok)
-    .expect("deep JSON translation thread")
+    crate::codex_client::translate_request(req.source_format, target, &ctx, body, &client)
+        .map_err(|e| ExecError::local(400, FailureScope::Request, e.to_string()))
 }
 
 /// `TranslateRequestPairWithAPIKeyModelCompatibility`: the payload-config baseline from
@@ -415,7 +343,7 @@ pub(crate) async fn error_from(capture: &CaptureSink, upstream: Upstream) -> Exe
         .await
         .unwrap_or_default();
     capture.record(CaptureEvent::ResponseChunk(&body));
-    status_err(status, body)
+    crate::upstream::status_error(status, body)
 }
 
 /// `io.ReadAll` of the whole response, then Go's status check (countTokens and
@@ -427,7 +355,7 @@ async fn read_then_check(capture: &CaptureSink, upstream: Upstream) -> Result<(h
     let limit = if ok { usize::MAX } else { proxy::MAX_ERROR_BODY };
     let data = read_captured(capture, upstream, limit).await?;
     if !ok {
-        return Err(status_err(status, data));
+        return Err(crate::upstream::status_error(status, data));
     }
     Ok((headers, data))
 }
@@ -460,11 +388,11 @@ pub(crate) fn translate_non_stream(
             },
             data,
         )
-        .map_err(|_| bad_gateway())?,
+        .map_err(|_| crate::upstream::apply_patch_error())?,
         None => data.to_vec(),
     };
     if out.is_empty() {
-        return Err(bad_gateway());
+        return Err(crate::upstream::apply_patch_error());
     }
     if response == Format::OpenAIResponse {
         out = crate::openai_compat_payload::ensure_responses_usage_details(&out);
@@ -494,7 +422,7 @@ impl GeminiExecutor {
             return self.count_tokens(credential, &req, cfg).await;
         }
         if req.alt.as_deref() == Some(COMPACT_ALT) {
-            return Err(status_err(501, "/responses/compact not supported"));
+            return Err(crate::upstream::status_error(501, "/responses/compact not supported"));
         }
         if native_interactions(credential, req.source_format) {
             return self.interactions(credential, &req, cfg).await;
@@ -516,9 +444,9 @@ impl GeminiExecutor {
         let (original_translated, body) = translate_pair(req, cfg, to, &base_model, compat)?;
         let mut body = apply_thinking(req, body, from, to, &credential.provider, resolved.as_ref())?;
         body = payload::fix_image_aspect_ratio(&base_model, body);
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &base_model, to.as_str(), body, &original_translated, req);
-        body = payload::set_str_if_different(body, "model", &base_model);
+        gj::set_str_if_different(&mut body, "model", &base_model);
         body = payload::cap_max_output_tokens(body, &base_model);
         body = cpa_common::signature::sanitize_gemini_request_thought_signatures(&body, "contents");
         body = payload::ensure_leading_user_content(body, "contents");
@@ -594,15 +522,15 @@ impl GeminiExecutor {
             translate_pair(req, cfg, to, &target, compat)?
         };
         if gj::get(&body, "model").exists() && !target.is_empty() {
-            body = payload::set_str_if_different(body, "model", &target);
+            gj::set_str_if_different(&mut body, "model", &target);
         }
         // applyGeminiInteractionsThinking: the Gemini applier family for the target.
         body = apply_thinking(req, body, from, to, "gemini", resolved.as_ref())?;
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = apply_payload_rules(&rules, &target, "interactions", body, &original_translated, req);
         body = payload::sanitize_interactions_input_ids(body);
         if req.stream {
-            body = payload::set_bool_if_different(body, "stream", true);
+            gj::set_bool_if_different(&mut body, "stream", true);
         }
         let url = format!("{}/{API_VERSION}/interactions", base_url(credential));
         let mut headers = request_headers(credential, req);
@@ -676,7 +604,7 @@ impl GeminiExecutor {
         for path in ["tools", "generationConfig", "safetySettings"] {
             body = payload::delete(body, path);
         }
-        body = payload::set_str_if_different(body, "model", &base_model);
+        gj::set_str_if_different(&mut body, "model", &base_model);
         body = cpa_common::signature::sanitize_gemini_request_thought_signatures(&body, "contents");
         body = payload::ensure_leading_user_content(body, "contents");
         let url = format!("{}/{API_VERSION}/models/{base_model}:countTokens", base_url(credential));
@@ -847,7 +775,7 @@ impl Output {
             Err(_) => {
                 return Emit {
                     out: Vec::new(),
-                    stop: Some(bad_gateway()),
+                    stop: Some(crate::upstream::apply_patch_error()),
                 };
             }
         };
@@ -872,7 +800,7 @@ impl Output {
             Err(_) => {
                 return Emit {
                     out: Vec::new(),
-                    stop: Some(bad_gateway()),
+                    stop: Some(crate::upstream::apply_patch_error()),
                 };
             }
         };
@@ -892,7 +820,10 @@ impl Output {
     fn checked(&self, out: Vec<Bytes>) -> Emit {
         Emit {
             out,
-            stop: self.translator.tool_input_failed().then(bad_gateway),
+            stop: self
+                .translator
+                .tool_input_failed()
+                .then(crate::upstream::apply_patch_error),
         }
     }
 
@@ -1086,9 +1017,9 @@ pub(crate) fn gemini_stream_has_finish_signal(line: &[u8]) -> bool {
             value
                 .array()
                 .iter()
-                .any(|item| !cpa_common::gostr::trim_space(&item.bytes()).is_empty())
+                .any(|item| !cpa_core::config::go_trim_space(&item.bytes()).is_empty())
         } else {
-            value.exists() && !cpa_common::gostr::trim_space(&value.bytes()).is_empty()
+            value.exists() && !cpa_core::config::go_trim_space(&value.bytes()).is_empty()
         }
     })
 }
@@ -1128,9 +1059,9 @@ pub(crate) fn antigravity_payloads(lines: ExecStream) -> ExecStream {
                     _ => Some(Bytes::from(filtered)),
                 }
             } else {
-                let mut piece = cpa_common::gostr::trim_space(&filtered);
+                let mut piece = cpa_core::config::go_trim_space(&filtered);
                 if let Some(rest) = piece.strip_prefix(b"data:") {
-                    piece = cpa_common::gostr::trim_space(rest);
+                    piece = cpa_core::config::go_trim_space(rest);
                 }
                 if !piece.is_empty() {
                     pending.push(b'\n');

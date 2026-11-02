@@ -98,7 +98,7 @@ impl Mock {
         let mut out = replace(&raw, self.addr.as_bytes(), b"UPSTREAM");
         // Go's multipart writer picks a random 60-hex-digit boundary; so does Rust.
         let marker = b"boundary=";
-        if let Some(i) = out.windows(marker.len()).position(|w| w == marker)
+        if let Some(i) = cpa_common::gostr::index(&out, marker)
             && let Some(boundary) = out.get(i + marker.len()..i + marker.len() + 60)
             && boundary.iter().all(u8::is_ascii_hexdigit)
         {
@@ -574,7 +574,10 @@ fn go_primitive_vectors() {
         );
     }
     for case in v["trim_space"].as_array().unwrap() {
-        assert_eq!(go::trim_space(&b64(&case[0])), b64(&case[1]).as_slice());
+        assert_eq!(
+            cpa_core::config::go_trim_space(&b64(&case[0])),
+            b64(&case[1]).as_slice()
+        );
     }
     for case in v["media_type"].as_array().unwrap() {
         let input = case["input"].as_str().unwrap();
@@ -682,4 +685,54 @@ async fn claude_target_eof_requires_openai_finish_reason_or_done() {
             assert!(out.iter().all(Result::is_ok), "{out:?}");
         }
     }
+}
+
+/// A translator that rejects every event.
+struct Rejects;
+
+impl StreamTranslator for Rejects {
+    fn event(&mut self, _: &[u8]) -> Result<Vec<Bytes>, cpa_translate::Error> {
+        Err(cpa_translate::Error("synthetic translation failure".into()))
+    }
+
+    fn finish(&mut self) -> Result<Vec<Bytes>, cpa_translate::Error> {
+        Ok(vec![])
+    }
+}
+
+/// A response translation failure is terminal even before any output: another account
+/// would answer the same way. A stream that closes before `[DONE]` broke off, which
+/// dispatch may fail over while the client has received nothing.
+#[tokio::test]
+async fn translation_failures_are_terminal_and_an_early_close_broke_off() {
+    let lines =
+        futures_util::stream::iter([Ok(Bytes::from_static(b"data: {\"choices\":[]}")), Ok(Bytes::new())]).boxed();
+    let out: Vec<_> = frames(
+        lines,
+        Box::new(Rejects),
+        Format::OpenAI,
+        Default::default(),
+        Default::default(),
+    )
+    .collect()
+    .await;
+    let error = out.last().unwrap().as_ref().expect_err("translation failed");
+    assert_eq!(error.status, 502);
+    assert_eq!(error.scope, FailureScope::Request);
+    assert_eq!(error.after_accept, None);
+
+    let lines =
+        futures_util::stream::iter([Ok(Bytes::from_static(b"data: {\"choices\":[]}")), Ok(Bytes::new())]).boxed();
+    let out: Vec<_> = frames(
+        lines,
+        Box::new(Pending),
+        Format::OpenAIResponse,
+        Default::default(),
+        Default::default(),
+    )
+    .collect()
+    .await;
+    let error = out.last().unwrap().as_ref().expect_err("closed before [DONE]");
+    assert_eq!(error.body.as_ref(), b"upstream stream closed before [DONE]");
+    assert_eq!(error.after_accept, Some(cpa_core::exec::AfterAccept::Truncated));
 }

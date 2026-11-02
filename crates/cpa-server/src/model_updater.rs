@@ -231,9 +231,13 @@ mod tests {
     #[test]
     fn test_runtime_start_does_not_spawn() {
         let rt = isolated_runtime();
-        // No Tokio executor: attempting to spawn any updater fails before it can dial.
-        start(&rt, false);
-        start(&rt, true);
+        let tokio = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        // The block never yields, so a spawned updater would be counted but never polled.
+        tokio.block_on(async {
+            start(&rt, false);
+            start(&rt, true);
+        });
+        assert_eq!(tokio.metrics().num_alive_tasks(), 0);
     }
 
     #[test]

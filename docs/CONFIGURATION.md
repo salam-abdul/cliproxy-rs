@@ -94,7 +94,7 @@ These settings control translating-proxy account selection. Native CONNECT has [
 
 ### Optional preset: fail over only on 429
 
-This commented preset keeps 429 cooldown and failover for Claude and Codex OAuth accounts. It stops ordinary failover after a failed attempt for the listed non-429 statuses, without adding a cooldown. Credential-preparation failures and an enabled `requests.streaming.bootstrap-retries` can still cause another attempt. Unlisted statuses keep normal handling. The preset applies only to OAuth accounts and leaves plan limits and provider checks unchanged. A credential's own `request_scoped_errors` rules take precedence.
+This commented preset keeps 429 cooldown and failover for Claude and Codex OAuth accounts. It stops ordinary failover after a failed attempt for the listed non-429 statuses, without adding a cooldown. Credential-preparation failures can still cause another attempt, and so can `requests.streaming.bootstrap-retries` for an error the upstream sent before a stream's first payload. Unlisted statuses keep normal handling. The preset applies only to OAuth accounts and leaves plan limits and provider checks unchanged. A credential's own `request_scoped_errors` rules take precedence.
 
 Uncomment the block to use it. `oauth-request-scoped-errors` is the legacy spelling of `oauth.request-scoped-errors`; use only one. `(?s).*` matches any body, including an empty one. Rules need a body matcher; status alone does not match.
 
@@ -119,7 +119,8 @@ Uncomment the block to use it. `oauth-request-scoped-errors` is the legacy spell
 
 | Setting | What it does |
 |---|---|
-| `tls-handshake-timeout-seconds` | Positive seconds bound DNS, TCP, proxy CONNECT and TLS setup for translating Anthropic native-profile HTTP and chatgpt.com Chrome HTTP requests. Missing, null or nonpositive disables it. Established response/header waits and streams are unaffected. Legacy root spelling is accepted; the nested setting takes precedence. Compact OAuth and native CONNECT behavior are unchanged. |
+| `tls-handshake-timeout-seconds` | Bounds DNS, TCP, proxy CONNECT and TLS setup, in seconds, for the translating proxy's Anthropic native-profile requests and chatgpt.com Chrome-profile requests. Missing, null, zero or negative turns it off. It does not bound waits for response headers or streams, and does not apply to compact OAuth or native CONNECT. A root-level `tls-handshake-timeout-seconds` is accepted; this nested setting wins. |
+| `streaming.bootstrap-retries` | Reruns a translated streaming request this many extra times, `0` by default, when the upstream answered with an error before the stream's first payload: an auth, quota, timeout or server-error status in an error event. A stream that broke off before its first payload (empty, cut off or reset) is never rerun: its account is tried once per request. Home mode never reruns. |
 | `proxy-url` | Outbound proxy, e.g. `socks5://127.0.0.1:1080` or `http://proxy:3128`. An account can override it with `proxy_url` in its auth file, or `"direct"` to skip proxies. |
 
 Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy, they connect directly. Set `requests.proxy-url` or the account's `proxy_url` when you need one. Claude API keys pointed at a custom, non-Anthropic base URL use the standard transport, which can inherit environment proxies.
@@ -131,13 +132,13 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `logs.logging-to-file` | `true` writes the log to `main.log` in a `logs` folder, rotated, instead of standard output. |
 | `logs.logs-max-total-size-mb` | The most disk space the log files may use. |
 | `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
-| `usage.claude-cache-telemetry` | `false` by default. With usage collection and management enabled, add content-free final-wire cache observations to the usage queue/RESP channel. This adds parsing/hashing work; it sends no maintenance requests and changes no cache markers or request bytes. |
+| `usage.claude-cache-telemetry` | `false` by default. With usage collection and management on, `true` adds content-free cache observations of the final request bytes to the usage queue and RESP channel. It costs parsing and hashing per request, sends no extra requests and changes no cache markers or request bytes. |
 
 ## worker-threads
 
 `worker-threads: 4` at the top level sets how many threads serve requests. Without it, the server uses the smaller of the CPU count and two. Each extra thread can keep its own pool of freed memory, so more threads mean a larger resident size. The `TOKIO_WORKER_THREADS` environment variable overrides it.
 
-The key is read once at start from the `-config` file (`./config.yaml` by default), before a remote store (`PGSTORE_*`, `OBJECTSTORE_*`, `GITSTORE_*`) or Home supplies a config. It has no effect in a store's `config.yaml` or in the config Home supplies (the local `-config` file still applies); set `TOKIO_WORKER_THREADS` there. A value there that differs from the running thread count logs a warning.
+The key is read once at start from the `--config` file (`./config.yaml` by default), before a remote store (`PGSTORE_*`, `OBJECTSTORE_*`, `GITSTORE_*`) or Home supplies a config. In a store's `config.yaml` or the config Home supplies it has no effect, and a value that differs from the running thread count logs a warning; set `TOKIO_WORKER_THREADS` instead.
 
 ## Environment
 

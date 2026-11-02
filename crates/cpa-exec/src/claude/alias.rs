@@ -560,14 +560,24 @@ impl<'a> Resolver<'a> {
     }
 }
 
-/// `reverseRemapOAuthToolNames` on a buffered Messages response.
-pub(crate) fn restore_response(body: &str, reverse: &Reverse) -> Result<String, String> {
+/// `reverseRemapOAuthToolNames` on a buffered Messages response. The body comes back
+/// as it was when no name changes; otherwise each name is set by path in the original
+/// bytes, so every other byte, invalid UTF-8 included, stays as the upstream sent it.
+pub(crate) fn restore_response(body: bytes::Bytes, reverse: &Reverse) -> Result<bytes::Bytes, String> {
     if reverse.is_empty() {
-        return Ok(body.to_owned());
+        return Ok(body);
     }
-    let content = rawjson::get(body, "content");
+    let edited = restored_names(&body, reverse)?;
+    Ok(edited.map_or(body, bytes::Bytes::from))
+}
+
+fn restored_names(body: &[u8], reverse: &Reverse) -> Result<Option<Vec<u8>>, String> {
+    // Lookups read a lossy view: paths are positional and declared names are UTF-8, so
+    // the view finds the same names the bytes hold.
+    let text = String::from_utf8_lossy(body);
+    let content = rawjson::get(&text, "content");
     if content.kind() != gjson::Kind::Array {
-        return Ok(body.to_owned());
+        return Ok(None);
     }
     let resolver = Resolver::new(reverse);
     let mut paths = Vec::new();
@@ -598,11 +608,14 @@ pub(crate) fn restore_response(body: &str, reverse: &Reverse) -> Result<String, 
             _ => {}
         }
     }
-    let mut out = body.to_owned();
+    let mut out: Option<Vec<u8>> = None;
     for path in paths {
-        let name = rawjson::string(&out, &path);
-        if let Some(original) = resolver.resolve(&name)? {
-            out = rawjson::set_str(&out, &path, &original);
+        // Each path is its own leaf: an earlier edit never changes this name.
+        let name = rawjson::string(&text, &path);
+        if let Some(original) = resolver.resolve(&name)?
+            && let Ok(edited) = gj::try_set_str(out.as_deref().unwrap_or(body), path.as_str(), &original)
+        {
+            out = Some(edited);
         }
     }
     Ok(out)
@@ -703,8 +716,9 @@ mod tests {
         ] {
             let response =
                 format!(r#"{{"content":[{{"type":"tool_use","id":"toolu_1","name":"{wrapped}","input":{{}}}}]}}"#);
-            let restored = restore_response(&response, &reverse).unwrap();
-            assert_eq!(rawjson::string(&restored, "content.0.name"), recall, "{wrapped}");
+            let restored = restore_response(response.clone().into(), &reverse).unwrap();
+            let restored = std::str::from_utf8(&restored).unwrap();
+            assert_eq!(rawjson::string(restored, "content.0.name"), recall, "{wrapped}");
             assert_eq!(
                 restored,
                 response.replace(&format!("\"name\":\"{wrapped}\""), &format!("\"name\":\"{recall}\""))
@@ -721,7 +735,7 @@ mod tests {
         let response = format!(
             r#"{{"content":[{{"type":"tool_use","id":"toolu_1","name":"mcp__{server}__query","input":{{}}}}]}}"#
         );
-        let error = restore_response(&response, &reverse).unwrap_err();
+        let error = restore_response(response.into(), &reverse).unwrap_err();
         assert!(error.contains("matches multiple declared tools"), "{error}");
         let event = format!(
             r#"{{"type":"content_block_start","content_block":{{"type":"tool_use","name":"mcp__{server}__query"}}}}"#

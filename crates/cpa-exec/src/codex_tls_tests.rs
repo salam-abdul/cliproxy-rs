@@ -18,7 +18,7 @@ fn u16_name(v: u16) -> String {
 }
 
 fn hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(data)
 }
 
 fn be(data: &[u8], at: usize) -> u16 {
@@ -325,7 +325,7 @@ where
     let mut buf = Vec::new();
     loop {
         let head_end = loop {
-            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            if let Some(at) = cpa_common::gostr::index(&buf, b"\r\n\r\n") {
                 break at + 4;
             }
             let mut chunk = [0u8; 4096];

@@ -77,21 +77,6 @@ export const provider = (a: Data) => String(a.provider || a.type || "unknown").r
 export const credName = (a: Data) => String(a.email || a.label || a.account || a.name);
 /** A random client key: "sk-" and 48 hex characters. */
 export const newKey = () => `sk-${Array.from(crypto.getRandomValues(new Uint8Array(24)), (n) => n.toString(16).padStart(2, "0")).join("")}`;
-/** Small flags this browser keeps for the first-run card. Never keys. */
-export const flag = {
-  get: (k: string) => {
-    try {
-      return localStorage.getItem(`cliproxy-${k}`);
-    } catch {
-      return null;
-    }
-  },
-  set: (k: string, v: string) => {
-    try {
-      localStorage.setItem(`cliproxy-${k}`, v);
-    } catch {}
-  },
-};
 export const mask = (k: string) => (k.length > 10 ? `${k.slice(0, 3)}…${k.slice(-4)}` : "••••");
 
 /** Durations like 45s, 4m, 2h 5m, 3d. */
@@ -111,7 +96,7 @@ export function ago(value: unknown, now = Date.now()): string {
 }
 
 export type CredState = { lamp: Lamp; label: string; detail: string };
-/** One state per credential, derived only from fields Go's /credentials reports. */
+/** One state per credential, derived only from fields /credentials reports. */
 export function credState(a: Data, now = Date.now()): CredState {
   if (a.disabled) return { lamp: "off", label: "Disabled", detail: "" };
   const all: Data[] = Array.isArray(a.cooldowns) ? a.cooldowns : [];
@@ -152,7 +137,7 @@ export function credState(a: Data, now = Date.now()): CredState {
 }
 
 export type Buckets = { total: number[]; failed: number[] };
-/** Go reports 20 ten-minute buckets per credential. Null means the server did not report history. */
+/** Ten-minute request buckets, oldest first. Null means the server did not report history. */
 export function buckets(a: Data): Buckets | null {
   if (!Array.isArray(a.recent_requests)) return null;
   const rows = a.recent_requests as Data[];
@@ -167,10 +152,9 @@ export const level = (n: number, max: number) => (n <= 0 || max <= 0 ? 0 : Math.
 
 /**
  * One usage window. `used` is percent used, or null when the limit has no ceiling (an
- * uncapped extra-usage budget) and only `detail` applies. `source` is the signal-name
- * prefix a passive window was read from.
+ * uncapped extra-usage budget) and only `detail` applies.
  */
-export type Window = { label: string; used: number | null; reset: string; source?: string; detail?: string };
+export type Window = { label: string; used: number | null; reset: string; detail?: string };
 const clamp = (n: number) => Math.round(Math.max(0, Math.min(100, n)) * 10) / 10;
 /** Normalised quota groups first; then the built-in Claude, Codex and Kimi usage payloads. */
 export function quotaWindows(p: string, payload: Data): Window[] {
@@ -295,7 +279,6 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
         label: codexWindow(minutes * 60, w === "primary" ? "Primary limit" : "Secondary limit"),
         used: clamp(used),
         reset: resetAt > 0 ? new Date(resetAt * 1000).toISOString() : after >= 0 && at ? new Date(at + after * 1000).toISOString() : "",
-        source: `x-codex-${w}-`,
       });
     }
   else if (p === "claude")
@@ -305,35 +288,30 @@ export function signalWindows(p: string, quota: Data | undefined): Window[] {
       if (typeof raw !== "string" || !raw.trim() || !Number.isFinite(used) || used < 0) continue;
       const reset = sig[source + "reset"], seconds = Number(reset);
       const date = new Date(seconds > 0 ? seconds * 1000 : reset);
-      out.push({label, used: clamp(used * 100), reset: Number.isFinite(date.getTime()) ? date.toISOString() : "", source});
+      out.push({label, used: clamp(used * 100), reset: Number.isFinite(date.getTime()) ? date.toISOString() : ""});
     }
   else if (p === "devin")
     for (const w of ["daily", "weekly"]) {
       const left = parseFloat(sig[`${w}_quota_remaining_percent`]);
       if (!Number.isNaN(left))
-        out.push({ label: w === "daily" ? "Daily" : "Weekly", used: clamp(100 - left), reset: sig[`${w}_quota_reset_at`] || "", source: `${w}_quota_` });
+        out.push({ label: w === "daily" ? "Daily" : "Weekly", used: clamp(100 - left), reset: sig[`${w}_quota_reset_at`] || "" });
     }
   return out;
 }
 
-/** Signals no window was read from (code-review limits, credits, retry-after), to show as they are. */
-export const otherSignals = (quota: Data | undefined, windows: Window[]): [string, string][] =>
-  Object.entries<string>(quota?.signals || {}).filter(([k]) => !windows.some((w) => w.source && k.toLowerCase().startsWith(w.source)));
 
-/** routing.strategy values, with a one-line explanation each. `rust`: offered only by cliproxy-rs. */
+/** routing.strategy values, with a one-line explanation each. */
 export const strategies = [
-  { value: "round-robin", name: "Round robin", rust: false, help: "Takes the accounts in turn, one request each. This is the default." },
-  { value: "fill-first", name: "Fill first", rust: false, help: "Uses one account until it cools down or reaches a limit, then moves to the next." },
+  { value: "round-robin", name: "Round robin", help: "Takes the accounts in turn, one request each. This is the default." },
+  { value: "fill-first", name: "Fill first", help: "Uses one account until it cools down or reaches a limit, then moves to the next." },
   {
     value: "weighted-round-robin",
     name: "Weighted round robin",
-    rust: false,
-    help: "Takes the accounts in turn in proportion to each account's weight, which you set on Credentials.",
+    help: "Takes the accounts in turn in proportion to each account's weight, which you set on each account.",
   },
   {
     value: "soonest-reset",
     name: "Soonest reset first",
-    rust: true,
     help: "Experimental. Uses the account whose weekly limit resets soonest until it cools down or uses up a window, then moves to the next. Conversations bound to an account stay on it.",
   },
 ] as const;

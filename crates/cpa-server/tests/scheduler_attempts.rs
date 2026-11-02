@@ -25,6 +25,8 @@ enum Mode {
     BeforeCommit,
     AfterCommit,
     EmptyStream,
+    /// fake-a sends an empty stream, every other account answers 503.
+    EmptyThenUnavailable,
 }
 
 struct Mock {
@@ -39,6 +41,10 @@ async fn upstream(State(mock): State<Arc<Mock>>, req: Request) -> Response {
     mock.seen.lock().unwrap().push(token.clone());
     match mock.mode {
         Mode::EmptyStream => ([("content-type", "text/event-stream")], "").into_response(),
+        Mode::EmptyThenUnavailable if token == "Bearer fake-a" => {
+            ([("content-type", "text/event-stream")], "").into_response()
+        }
+        Mode::EmptyThenUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response(),
         Mode::Quota => (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")], "quota").into_response(),
         Mode::FirstFails if token == "Bearer fake-a" => {
             (StatusCode::SERVICE_UNAVAILABLE, "first failed").into_response()
@@ -461,9 +467,13 @@ async fn stopped_bootstrap_failure_skips_bootstrap_retries() {
     upstream.abort();
 }
 
+/// A stream that broke off before its first payload fails over to the next account
+/// once, even with retries, bootstrap reruns and continue rules configured: no account
+/// is tried twice. Two empty streams answer the last failure; a reset on the first
+/// account leaves the second to answer.
 #[tokio::test]
-async fn ambiguous_bootstrap_eof_never_replays_even_with_continue_rules() {
-    for mode in [Mode::EmptyStream, Mode::BeforeCommit] {
+async fn bootstrap_eof_fails_over_once_per_account_even_with_continue_rules() {
+    for (mode, expected_status) in [(Mode::EmptyStream, 500), (Mode::BeforeCommit, 200)] {
         let continue_rule = serde_json::json!({"request_scoped_errors":[{"status":502,"action":"continue","match":["upstream"]}], "disable_cooling":true});
         let fixture = Fixture::new(mode, &[continue_rule.clone(), continue_rule], Policy::default()).await;
         let mut config = Config::parse(
@@ -475,17 +485,19 @@ async fn ambiguous_bootstrap_eof_never_replays_even_with_continue_rules() {
         let response = fixture.request(true).await;
         let status = response.status().as_u16();
         let body = response.text().await.unwrap();
-        assert_eq!(status, 502, "{body}");
+        assert_eq!(status, expected_status, "{body}");
         assert_eq!(
             fixture.seen(),
-            ["Bearer fake-a"],
-            "ambiguous inference must never replay"
+            ["Bearer fake-a", "Bearer fake-b"],
+            "each account is tried once"
         );
     }
 }
 
+/// Two keys that both accept and send an empty stream: each is tried once, despite
+/// request-retry and bootstrap reruns, and the client gets the last failure.
 #[tokio::test]
-async fn successful_empty_compat_stream_never_replays() {
+async fn an_empty_compat_stream_fails_over_once_per_key() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -551,12 +563,35 @@ async fn successful_empty_compat_stream_never_replays() {
         let body = response.text().await.unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "accepted empty inference must never replay: {path} {status} {body}"
+            2,
+            "each key is tried once: {path} {status} {body}"
         );
         assert_eq!(status, expected_status, "{body}");
         assert!(!addon, "terminal local errors keep classification headers private");
     }
     proxy.abort();
     upstream.abort();
+}
+
+/// A request-retry round that another account's 503 starts never returns to the account
+/// whose stream broke off before its first payload, and neither does a bootstrap rerun.
+#[tokio::test]
+async fn a_retry_round_skips_an_account_whose_stream_broke_off() {
+    let cooling_off = serde_json::json!({"disable_cooling": true});
+    let fixture = Fixture::new(
+        Mode::EmptyThenUnavailable,
+        &[cooling_off.clone(), cooling_off],
+        Policy::default(),
+    )
+    .await;
+    let mut config =
+        Config::parse("routing:\n  retry:\n    request-retry: 1\nrequests:\n  streaming:\n    bootstrap-retries: 1\n")
+            .unwrap();
+    config.auth_dir = fixture.rt.config().auth_dir.clone();
+    fixture.rt.publish_config(config);
+    let response = fixture.request(true).await;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b", "Bearer fake-b"]);
 }

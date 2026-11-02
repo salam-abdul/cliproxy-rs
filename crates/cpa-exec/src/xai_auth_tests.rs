@@ -164,6 +164,10 @@ fn fixture() -> Value {
 #[test]
 fn endpoint_validation_matches_go_net_url() {
     let f = fixture();
+    // One vector deliberately follows Go 1.27.3 parseHost, not the Go that generated the
+    // fixture: `https://attacker.example\[::1%25.x.ai]/...` is "invalid IP-literal", since
+    // the older parser called it an x.ai host while the HTTP client would contact
+    // attacker.example.
     let cases = f["validate"].as_array().unwrap();
     assert!(cases.len() >= 55, "fixture lost validation vectors");
     for case in cases {

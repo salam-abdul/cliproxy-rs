@@ -7,10 +7,11 @@
 
 use crate::{
     Error, ResponseCtx,
-    common::{self, fix_json, map_tool_name, sanitize_claude_tool_id, sse_event, trim_space},
+    common::{self, fix_json, map_tool_name, sanitize_claude_tool_id, sse_event},
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{BTreeMap, HashMap};
 
 type ToolNames = Option<HashMap<Vec<u8>, Vec<u8>>>;
@@ -336,12 +337,12 @@ impl GoStream for State {
         let Some(payload) = line.strip_prefix(b"data:") else {
             return Ok(vec![]);
         };
-        let payload = trim_space(payload);
+        let payload = go_trim_space(payload);
         if self.names.is_none() {
             self.names = common::tool_name_map_from_claude_request(&self.original);
         }
         let mut out = vec![];
-        if trim_space(payload) == b"[DONE]" {
+        if go_trim_space(payload) == b"[DONE]" {
             self.finalize_blocks(&mut out);
             self.message_delta(&mut out);
             self.message_stop(&mut out);
@@ -625,7 +626,7 @@ impl State {
             if call.arguments.is_empty() {
                 return true;
             }
-            let args = trim_space(&call.arguments);
+            let args = go_trim_space(&call.arguments);
             if args.is_empty() {
                 return false;
             }

@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_exec::Executors;
 use cpa_exec::claude::ClaudeExecutor;
@@ -33,7 +32,7 @@ async fn upstream(State(seen): State<Seen>, req: Request) -> Response {
     let model = body["model"].as_str().unwrap_or_default().to_owned();
     seen.lock().unwrap().push(model.clone());
     let reply = r#"{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
-    if raw.windows(8).any(|w| w == b"MODE_429") {
+    if cpa_common::gostr::contains(&raw, b"MODE_429") {
         // A rejected shared window: a credential-scope quota failure.
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -100,7 +99,7 @@ async fn proxy(name: &str) -> Proxy {
     ];
     let yaml = "api-keys:\n  - client-key\n";
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse(yaml).unwrap(),
+        cpa_server::testing::config(yaml),
         credentials,
         Executors {
             claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

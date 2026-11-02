@@ -10,10 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cpa_common::json::{self as gj, AnyValue, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::apply_patch::{self, CallState};
 use crate::claude_responses_response::{Echo, RequestEcho, copy_request_fields, pick_request};
-use crate::common::{now_nanos, now_unix, request_model_name, sse_event, trim_space};
+use crate::common::{now_nanos, now_unix, request_model_name, sse_event};
 use crate::openai_responses::{ToolIndex, unwrap_custom_tool_input};
 use crate::stream::GoStream;
 use crate::{Error, Registered, ResponseCtx};
@@ -754,9 +755,9 @@ impl GoStream for State {
         }
         let mut raw = line;
         if let Some(rest) = raw.strip_prefix(b"data:") {
-            raw = trim_space(rest);
+            raw = go_trim_space(rest);
         }
-        let raw = trim_space(raw);
+        let raw = go_trim_space(raw);
         if raw.is_empty() {
             return Ok(vec![]);
         }

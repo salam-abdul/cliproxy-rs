@@ -20,7 +20,8 @@ use super::auth_files::{auth_kind, fail};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// ponytail: Go reads the upstream body without a bound; 64 MiB keeps a hostile
-/// upstream from exhausting a small VPS and covers every provider usage endpoint.
+/// upstream from exhausting a small VPS and covers every provider usage endpoint. Raise
+/// it if an endpoint returns more.
 const MAX_BODY: usize = 64 << 20;
 const MAX_HEADERS: usize = 16_384;
 
@@ -226,7 +227,7 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
     if url.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "missing url");
     }
-    if !go_url::parse(&url).is_some_and(|u| !u.scheme.is_empty() && !u.host().is_empty()) {
+    if !go_url::parse(&url).is_ok_and(|u| !u.scheme.is_empty() && !u.host.is_empty()) {
         return fail(StatusCode::BAD_REQUEST, "invalid url");
     }
     let request_proxy = req.proxy_url.trim().to_owned();
@@ -251,8 +252,22 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
                 .find(|c| credentials::auth_index(c) == auth_index)
         })
         .flatten();
-    // ponytail: Go refreshes antigravity, meta and xai tokens here when due; those
-    // providers have no executor in cliproxy-rs yet, so their stored token is used.
+    // Go refreshes antigravity, meta and xai tokens here when due. A failed refresh
+    // keeps the stored token.
+    let credential = match credential {
+        Some(c)
+            if [
+                cpa_exec::antigravity::PROVIDER,
+                cpa_exec::meta::PROVIDER,
+                cpa_exec::xai::PROVIDER,
+            ]
+            .contains(&c.provider.as_str())
+                && state.rt.executors.needs_prepare(&c, &state.rt.config()) =>
+        {
+            Some(state.rt.refresh_credential(&c.id).await.unwrap_or(c))
+        }
+        other => other,
+    };
     let token = credential.as_deref().map(token_for).unwrap_or_default();
     let token_error = || {
         if !auth_index.is_empty() && credential.is_none() {
@@ -287,7 +302,7 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
     let Ok(method) = axum::http::Method::from_bytes(method.as_bytes()) else {
         return fail(StatusCode::BAD_REQUEST, "failed to build request");
     };
-    // ponytail: `http::HeaderMap` panics past 32768 entries where Go's map would not;
+    // `http::HeaderMap` panics past 32768 entries where Go's map would not;
     // such a request is refused instead of sent.
     if headers.len() > MAX_HEADERS {
         return fail(StatusCode::BAD_GATEWAY, "request failed");

@@ -17,6 +17,9 @@
 
 use std::borrow::Cow;
 
+mod encode;
+pub use encode::{Object, indent, marshal_indent};
+
 /// A gjson/sjson path. Go paths are byte strings, so keys taken from documents may not be
 /// UTF-8; text paths work as before.
 pub trait JsonPath {
@@ -2054,7 +2057,6 @@ fn match_limit(s: &[u8], pattern: &[u8]) -> bool {
     go(s, pattern, s.len(), &mut counter) == R::Match
 }
 
-// ---------------------------------------------------------------------------------------
 // Encoding
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2228,6 +2230,14 @@ pub fn quote(s: impl AsRef<[u8]>) -> Vec<u8> {
     out
 }
 
+/// `json.Marshal(string)` as text, or with `escape_html` false a `json.Encoder` with
+/// `SetEscapeHTML(false)` (JavaScript's `JSON.stringify` for valid UTF-8).
+pub fn marshal_string(s: impl AsRef<[u8]>, escape_html: bool) -> String {
+    let mut out = Vec::with_capacity(s.as_ref().len() + 2);
+    marshal_str(&mut out, s.as_ref(), escape_html);
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
 /// `json.Marshal([]string)`; an empty slice is `[]` (Go's nil slice would be `null`).
 pub fn quote_all<S: AsRef<[u8]>>(items: &[S]) -> Vec<u8> {
     let mut out = vec![b'['];
@@ -2241,7 +2251,6 @@ pub fn quote_all<S: AsRef<[u8]>>(items: &[S]) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Editing (sjson)
 
 struct PathPart {
@@ -2692,6 +2701,34 @@ pub fn set_raw(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), raw: impl AsR
     apply(out, path, raw.as_ref(), false, false)
 }
 
+/// `helps.SetStringIfDifferent`: sets a string unless the value there is already that
+/// string; an sjson error leaves the document unchanged.
+pub fn set_str_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: &str) {
+    let current = get(out, path);
+    if current.kind == Kind::String && *current.bytes() == *value.as_bytes() {
+        return;
+    }
+    set_str(out, path, value);
+}
+
+/// Sets raw JSON unless the value there already has exactly that raw text; an sjson
+/// error leaves the document unchanged.
+pub fn set_raw_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), raw: &[u8]) {
+    let current = get(out, path);
+    if current.exists() && *current.raw == *raw {
+        return;
+    }
+    set_raw(out, path, raw);
+}
+
+/// `helps.SetBoolIfDifferent`.
+pub fn set_bool_if_different(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: bool) {
+    if get(out, path).kind == if value { Kind::True } else { Kind::False } {
+        return;
+    }
+    set_bool(out, path, value);
+}
+
 /// `sjson.SetBytes` with any Go integer type.
 pub fn set_int(out: &mut Vec<u8>, path: &(impl JsonPath + ?Sized), value: i64) -> bool {
     let path = path.as_path();
@@ -2767,7 +2804,6 @@ pub fn set_items<S: AsRef<[u8]>>(out: &mut Vec<u8>, path: &(impl JsonPath + ?Siz
     set_raw(out, path, join(items));
 }
 
-// ---------------------------------------------------------------------------------------
 // gjson's `any` model (`Result.Value()`)
 
 /// What gjson's `Result.Value()` returns, as Go code then edits and marshals it: objects
@@ -3083,7 +3119,6 @@ impl AnyValue {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Go's `any` model (encoding/json decode then marshal)
 
 /// A JSON document decoded the way Go decodes into `any`: objects become maps that
@@ -3453,6 +3488,34 @@ pub fn canonical(text: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn if_different_setters_leave_matching_values_byte_for_byte() {
+        let mut doc = br#"{"m":"a\u0062","s":true,"r":{ "k" : 1 }}"#.to_vec();
+        let original = doc.clone();
+        set_str_if_different(&mut doc, "m", "ab");
+        set_bool_if_different(&mut doc, "s", true);
+        set_raw_if_different(&mut doc, "r", br#"{ "k" : 1 }"#);
+        assert_eq!(doc, original, "equal values keep their original encoding");
+        set_raw_if_different(&mut doc, "r", br#"{"k":1}"#);
+        set_bool_if_different(&mut doc, "s", false);
+        set_str_if_different(&mut doc, "m", "x");
+        assert_eq!(doc, br#"{"m":"x","s":false,"r":{"k":1}}"#);
+        let mut bad = b"[1".to_vec();
+        set_raw_if_different(&mut bad, "a.b", b"2");
+        assert_eq!(bad, b"[1", "an sjson error leaves the document unchanged");
+    }
+
+    #[test]
+    fn marshal_string_escapes_like_go() {
+        assert_eq!(marshal_string("a\u{2028}<\u{1}", false), "\"a\\u2028<\\u0001\"");
+        assert_eq!(marshal_string("\u{1}\u{8}\u{c}", false), r#""\u0001\b\f""#);
+        assert_eq!(
+            marshal_string("a<b>&\"\u{2028}\u{1}", true),
+            r#""a\u003cb\u003e\u0026\"\u2028\u0001""#
+        );
+        assert_eq!(marshal_string(b"\xff", true), r#""\ufffd""#);
+    }
 
     fn s(b: Vec<u8>) -> String {
         String::from_utf8(b).unwrap()

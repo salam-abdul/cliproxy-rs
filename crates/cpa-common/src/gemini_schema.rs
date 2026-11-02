@@ -9,9 +9,7 @@ use crate::schema_path::{
     delete as schema_delete, get as schema_get, set_bool as schema_set_bool, set_raw as schema_set_raw,
     set_str as schema_set_str, set_strs as schema_set_strs,
 };
-use crate::schema_support::{
-    contains_seq, decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, ref_name,
-};
+use crate::schema_support::{decode_first, is_literal_value_keyword, is_name_map_keyword, merge_hint, ref_name};
 use std::collections::{BTreeMap, HashMap};
 
 #[path = "schema_indexed.rs"]
@@ -173,7 +171,7 @@ fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
         Child(usize),
     }
     // The inliner can re-marshal the whole document even for a literal "$ref" value.
-    if contains_seq(raw, br#""$ref""#) {
+    if crate::gostr::contains(raw, br#""$ref""#) {
         return None;
     }
     let document = Document::parse(raw)?;
@@ -188,7 +186,8 @@ fn clean_indexed(raw: &[u8], options: Options) -> Option<Vec<u8>> {
             return None;
         }
         // ponytail: raw-formatting preservation is limited to 128 schema fields and
-        // independent local rules. Other valid schemas use the literal-key arena passes.
+        // independent local rules. Other valid schemas use the literal-key arena passes, which
+        // do not keep the client's formatting; extend the raw pass if a client needs it there.
         if nodes[node].children.len() > 128 {
             return None;
         }
@@ -404,7 +403,6 @@ fn clean_inlined(mut s: Vec<u8>, options: Options) -> Vec<u8> {
     s
 }
 
-// ---------------------------------------------------------------------------------------
 // Path helpers
 
 fn escape_key(key: &[u8]) -> Vec<u8> {
@@ -598,7 +596,6 @@ fn delete(mut json: Vec<u8>, path: &[u8]) -> Vec<u8> {
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 0: malformed object repair (Go's `any` model)
 
 type Map = BTreeMap<String, GoValue>;
@@ -888,7 +885,6 @@ fn repair_node(node: &Map, _add_items: bool) -> (Map, bool) {
     (value.into_object().unwrap(), modified)
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 1: references, enums and hints
 
 fn inline_refs(json: Vec<u8>) -> Vec<u8> {
@@ -1069,7 +1065,6 @@ fn move_not_to_description(mut json: Vec<u8>) -> Vec<u8> {
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 2: flattening
 
 fn merge_conditionals(mut json: Vec<u8>) -> Vec<u8> {
@@ -1503,7 +1498,6 @@ fn flatten_type_arrays(mut json: Vec<u8>, preserve_native_nullable: bool) -> Vec
     json
 }
 
-// ---------------------------------------------------------------------------------------
 // Phase 3: cleanup
 
 fn delete_keyword_paths(mut json: Vec<u8>, keywords: &[&[u8]], keep: impl Fn(&[u8], &[u8], &[u8]) -> bool) -> Vec<u8> {

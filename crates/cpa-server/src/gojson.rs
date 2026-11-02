@@ -1,13 +1,8 @@
 //! Server-side helpers for the bodies CLIProxyAPI builds itself (error envelopes, model
-//! lists): Go struct-ordered objects ([`Obj`]), status texts and durations. Go's JSON
-//! encoding itself comes from `cpa_common::json`.
+//! lists): status texts and durations. Go's JSON encoding, including struct-ordered
+//! objects, comes from `cpa_common::json`.
 
 use serde_json::Value;
-
-/// A Go JSON string literal (`json.Marshal(string)`).
-pub fn string(s: &str) -> String {
-    String::from_utf8(cpa_common::json::quote(s)).expect("valid UTF-8 in, valid UTF-8 out")
-}
 
 /// sjson's string encoding: plain quoting unless a byte needs escaping, then
 /// `json.Marshal` (which also HTML-escapes).
@@ -15,7 +10,7 @@ pub fn sjson_string(s: &str) -> String {
     if s.bytes()
         .any(|b| !(b' '..=0x7f).contains(&b) || b == b'"' || b == b'\\')
     {
-        string(s)
+        cpa_common::json::marshal_string(s, true)
     } else {
         format!("\"{s}\"")
     }
@@ -26,38 +21,6 @@ pub fn sorted(v: &Value) -> String {
     String::from_utf8(cpa_common::json::GoValue::from_json(v).marshal()).expect("valid UTF-8 in, valid UTF-8 out")
 }
 
-/// An ordered object, for Go structs: fields render in insertion order.
-#[derive(Default)]
-pub struct Obj(String);
-
-impl Obj {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// A field whose value is already JSON.
-    pub fn raw(mut self, key: &str, json: &str) -> Self {
-        self.0.push(if self.0.is_empty() { '{' } else { ',' });
-        self.0.push_str(&string(key));
-        self.0.push(':');
-        self.0.push_str(json);
-        self
-    }
-
-    pub fn str(self, key: &str, value: &str) -> Self {
-        let value = string(value);
-        self.raw(key, &value)
-    }
-
-    pub fn finish(mut self) -> String {
-        if self.0.is_empty() {
-            self.0.push('{');
-        }
-        self.0.push('}');
-        self.0
-    }
-}
-
 /// gjson `Result.String()` for a decoded value: strings verbatim, other scalars as
 /// their JSON text, objects and arrays as compact JSON, null or missing as empty.
 pub fn gjson_string(v: Option<&Value>) -> String {
@@ -66,11 +29,6 @@ pub fn gjson_string(v: Option<&Value>) -> String {
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
     }
-}
-
-/// Go `strings.TrimSpace`.
-pub fn trim(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace())
 }
 
 /// Go `http.StatusText`.
@@ -138,18 +96,10 @@ mod tests {
     #[test]
     fn strings_and_maps_match_go_marshal() {
         // Values checked against Go 1.26 json.Marshal.
-        assert_eq!(
-            string("a<b>&\"\u{2028}\u{1}"),
-            r#""a\u003cb\u003e\u0026\"\u2028\u0001""#
-        );
         let v: Value = serde_json::from_str(r#"{"z":1,"a":{"y":[true,null],"b":"x"}}"#).unwrap();
         assert_eq!(sorted(&v), r#"{"a":{"b":"x","y":[true,null]},"z":1}"#);
         assert_eq!(sjson_string("q\"é"), r#""q\"é""#);
         assert_eq!(sjson_string("plain <b>"), r#""plain <b>""#);
-        assert_eq!(
-            Obj::new().str("message", "m").str("type", "t").finish(),
-            r#"{"message":"m","type":"t"}"#
-        );
     }
 
     #[test]

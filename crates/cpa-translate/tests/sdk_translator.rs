@@ -6,7 +6,7 @@
 //! outputs and apply_patch nil results are byte goldens in tests/golden.rs (the generator
 //! calls sdk.TranslateRequest, TranslateRequestEnvelope, TranslateNonStream,
 //! TranslateStream and TranslateTokenCount).
-//! ponytail: plugin-hook tests (M6) are not ported; Rust has no plugin hooks.
+//! Go's plugin-hook tests are not ported: the fork has no plugin host.
 use cpa_core::format::Format;
 use cpa_translate::{RequestCtx, pair, token_count, translate_request, translate_token_count};
 use serde_json::Value;

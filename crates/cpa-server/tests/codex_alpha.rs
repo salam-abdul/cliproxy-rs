@@ -8,7 +8,6 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use cpa_core::config::Config;
 use cpa_core::credential::Credential;
 use cpa_exec::Executors;
 use cpa_exec::codex::CodexExecutor;
@@ -75,7 +74,7 @@ async fn alpha_search_uses_policy_eligible_credential_and_passes_upstream_throug
         ),
     ];
     let rt = Arc::new(cpa_server::testing::runtime(
-        Config::parse("{}").unwrap(),
+        cpa_server::testing::config("{}"),
         credentials,
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

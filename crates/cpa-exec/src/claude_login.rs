@@ -158,7 +158,7 @@ fn open_browser(url: &str) -> bool {
 }
 
 /// `util.PrintSSHTunnelInstructions`.
-// ponytail: Go asks four public IP services for the address first; this prints the
+// Go asks four public IP services for the address first; this prints the
 // outbound interface address (no packet is sent), Go's second choice, without
 // announcing the login to third parties.
 pub(crate) fn print_ssh_tunnel_instructions(port: u16) {
@@ -486,7 +486,7 @@ pub(crate) fn credential_file_name(email: &str, organization: &str, account: &st
         return format!("claude-{email}.json");
     }
     let digest = Sha256::digest(identity.as_bytes());
-    let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+    let hash: String = cpa_core::hex::encode(&digest[..4]);
     format!("claude-{hash}-{email}.json")
 }
 

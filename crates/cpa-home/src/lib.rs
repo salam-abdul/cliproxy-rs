@@ -6,7 +6,7 @@
 //! request (`RPOP <request json>`), concurrency leases are released in cumulative
 //! frames, in-flight executions are reported in bounded snapshots, and shared caches
 //! live in Home KV. An issued dispatch whose reply is lost fences the whole client
-//! lifetime (PARITY risk 8): a lease may exist that this node can no longer account for.
+//! lifetime: a lease may exist that this node can no longer account for.
 
 pub mod applog;
 pub mod cert;
@@ -16,10 +16,8 @@ pub mod dispatch;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
-mod gojson;
 pub mod inflight;
 pub mod kv;
-mod private_fs;
 pub mod refresh;
 pub mod registry;
 pub mod release;

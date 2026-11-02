@@ -69,13 +69,14 @@ const CLOSE_SERVICE_RESTART: u16 = 1012;
 const CLOSE_MESSAGE_TOO_BIG: u16 = 1009;
 const TURN_STATE: &str = "x-codex-turn-state";
 // ponytail: gorilla reads messages of any size; 64 MiB (the HTTP body cap) bounds
-// per-connection memory instead.
+// per-connection memory instead. Raise it if a client needs more.
 const MAX_MESSAGE: usize = crate::MAX_REQUEST_BYTES;
 /// Bound on a terminal close or error write. Go closes the socket at once when a data
 /// write is still in flight (`closeForUpstreamError`); here the write may have been
 /// interrupted with bytes still queued, and a client that stopped reading would hold the
 /// flush, the connection task and its executor session forever.
-// ponytail: one fixed best-effort bound instead of Go's in-flight-writer check.
+// ponytail: one fixed best-effort bound instead of Go's in-flight-writer check. Track
+// the in-flight data write to close at once, as Go does, if the bound shows.
 const TERMINAL_WRITE: Duration = Duration::from_secs(1);
 /// `readResponsesWebsocketInput`'s queue: steering frames backpressure the client.
 const STEERING_QUEUE: usize = 16;
@@ -104,7 +105,7 @@ impl Sink {
         }
         let mut part = format!(
             "Timestamp: {}\nEvent: websocket.{kind}\n",
-            crate::request_logging::timestamp(chrono::Local::now())
+            cpa_core::gotime::rfc3339_nano(&chrono::Local::now())
         )
         .into_bytes();
         part.extend_from_slice(payload);
@@ -550,6 +551,7 @@ impl Connection {
             let store = self.rt.store().clone();
             // `WithWebsocketAuthCheck`. ponytail: Go falls back to the execution session's
             // snapshot of a credential removed since; a missing credential counts as enabled.
+            // Keep the session's snapshot to check it if removed credentials must be refused.
             let enabled = move |id: &str| store.get(id).is_none_or(|c| !c.disabled);
             let access = self.access.clone();
             self.rt.executors.codex.attach_steering(
@@ -677,7 +679,7 @@ impl Connection {
         if !explicit_model.is_empty() && !use_upstream_ws {
             self.passthrough_model.clear();
         }
-        // ponytail: Go also tracks observed compaction per route/plugin; with only Codex
+        // Go also tracks observed compaction per route/plugin; with only Codex
         // credentials on this route the pinned/all-Codex rule below gives the same answer.
         let allow_bypass = !native
             && match self.credential(&self.pinned) {
@@ -1220,7 +1222,8 @@ async fn send_text(socket: &mut Sink, payload: String) -> bool {
     match socket.inner.send(Message::Text(payload.into())).await {
         Ok(()) => true,
         Err(error) => {
-            // ponytail: the write error's text is axum's, not net's.
+            // ponytail: the write error's text is axum's, not net's; port Go's text if a client
+            // depends on it.
             socket.terminate(&error.to_string());
             false
         }
@@ -1264,6 +1267,7 @@ fn close_code(failure: &Failure) -> Option<(u16, String)> {
 /// `shouldExposeResponsesUpstreamError`: only request faults reach the client; credential,
 /// quota and transport failures close silently so the client reconnects and resends.
 // ponytail: Go also exposes terminal upstream-auth errors; no executor reports them yet.
+// Expose them here once an executor classifies them.
 fn exposed(failure: &Failure) -> bool {
     classify::is_request_fault(failure.status, &failure.text)
 }
@@ -1292,7 +1296,8 @@ async fn close_for_failure(socket: &mut Sink, failure: &Failure) {
 /// `closeForUpstreamDisconnect`: the session's upstream socket was lost. Go's notifier
 /// writes nothing to the timeline.
 // ponytail: Go's final disconnect is whatever its blocked read returns once the notifier
-// closed the socket; this logs gorilla's "close sent".
+// closed the socket; this logs gorilla's "close sent". Log the read's error if logs must
+// match.
 async fn close_for_upstream_loss(socket: &mut Sink, error: &ExecError) {
     let failure = Failure::from_exec(error);
     if let Some((code, reason)) = close_code(&failure) {

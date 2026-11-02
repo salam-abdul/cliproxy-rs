@@ -11,9 +11,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, quote as go_quote, trim_space};
+use cpa_common::gostr::{GoStr, quote as go_quote};
 use cpa_common::json::{self as gj, GoValue, Kind};
-use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
+use cpa_core::config::{Config, go_url};
 use cpa_core::credential::Credential;
 use cpa_core::exec::{CaptureEvent, CaptureSink, ExecError, UpstreamRequest};
 use http::HeaderMap;
@@ -41,7 +42,8 @@ pub const MAX_WS_MESSAGE: usize = MAX_BODY;
 /// gorilla keeps at most 1 KiB of a rejected handshake's body.
 const MAX_HANDSHAKE_BODY: usize = 1024;
 // ponytail: Go's sideband dialer has no handshake timeout (request cancellation only);
-// a fixed bound keeps a stalled upstream from holding the call claim forever.
+// a fixed bound keeps a stalled upstream from holding the call claim forever. Make it
+// configurable if a slow upstream needs longer.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `liveProtocolHeaders`: client headers forwarded to every live upstream request.
@@ -96,11 +98,6 @@ fn invalid(message: impl Into<String>) -> ShapeError {
     ShapeError::Invalid(message.into())
 }
 
-/// `strings.TrimSpace` on a Go string.
-fn trim(s: &str) -> &str {
-    std::str::from_utf8(trim_space(s.as_bytes())).unwrap_or(s)
-}
-
 /// The media type when `mime.ParseMediaType` succeeds.
 fn media(content_type: &str) -> Option<String> {
     match parse_media_type(content_type) {
@@ -119,14 +116,14 @@ pub fn prepare(body: &[u8], content_type: &str) -> Result<Call, ShapeError> {
     if let MediaType::Ok(media, params) = parse_media_type(content_type)
         && media == "multipart/form-data"
     {
-        let boundary = params.get("boundary").map(|b| trim(b)).unwrap_or_default();
+        let boundary = params.get("boundary").map(|b| b.trim()).unwrap_or_default();
         return multipart_call(body, boundary);
     }
     let mut model = model_from_json(body);
     if model.is_empty() {
         model = DEFAULT_MODEL.into();
     }
-    let content_type = if trim(content_type).is_empty() {
+    let content_type = if content_type.trim().is_empty() {
         "application/json"
     } else {
         content_type
@@ -170,7 +167,7 @@ pub fn rewrite_model(call: Call) -> Result<Call, ShapeError> {
         model: upstream.clone(),
         ..call
     };
-    if media(&call.content_type).as_deref() != Some("application/json") || trim_space(&call.body).is_empty() {
+    if media(&call.content_type).as_deref() != Some("application/json") || go_trim_space(&call.body).is_empty() {
         return Ok(unchanged(call));
     }
     let Some(mut payload) =
@@ -201,7 +198,7 @@ pub fn rewrite_model(call: Call) -> Result<Call, ShapeError> {
 pub fn request_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
     let media = media(content_type);
     if is_sdp(media.as_deref()) {
-        if trim_space(body).is_empty() {
+        if go_trim_space(body).is_empty() {
             return Err("Codex live call request requires an SDP offer".into());
         }
         return Ok(String::from_utf8_lossy(body).into_owned());
@@ -210,7 +207,7 @@ pub fn request_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
         return Err("Codex live media relay requires an SDP or JSON call request".into());
     }
     let sdp = unmarshal_sdp(body).map_err(|e| format!("failed to decode Codex live call request: {e}"))?;
-    if trim(&sdp).is_empty() {
+    if sdp.trim().is_empty() {
         return Err("Codex live call request requires an SDP offer".into());
     }
     Ok(sdp)
@@ -236,12 +233,12 @@ pub fn replace_sdp(body: &[u8], content_type: &str, sdp: &str) -> Result<(Vec<u8
 pub fn response_sdp(body: &[u8], content_type: &str) -> Result<String, String> {
     if media(content_type).as_deref() == Some("application/json") {
         let sdp = unmarshal_sdp(body).map_err(|e| format!("failed to decode Codex live response: {e}"))?;
-        if trim(&sdp).is_empty() {
+        if sdp.trim().is_empty() {
             return Err("Codex live response requires an SDP answer".into());
         }
         return Ok(sdp);
     }
-    if trim_space(body).is_empty() {
+    if go_trim_space(body).is_empty() {
         return Err("Codex live response requires an SDP answer".into());
     }
     Ok(String::from_utf8_lossy(body).into_owned())
@@ -355,8 +352,8 @@ pub fn model_from_json(body: &[u8]) -> String {
     if failed {
         return String::new();
     }
-    match trim(&session_model) {
-        "" => trim(&model).to_owned(),
+    match session_model.trim() {
+        "" => model.trim().to_owned(),
         session => session.to_owned(),
     }
 }
@@ -495,7 +492,7 @@ fn multipart_call(body: &[u8], boundary: &str) -> Result<Call, ShapeError> {
 
 /// `codexRealtimeModel`: OpenAI Realtime model names map to the Codex live model.
 pub fn codex_model(model: &str) -> String {
-    let trimmed = trim(model);
+    let trimmed = model.trim();
     let lower = trimmed.go_lower();
     if lower.is_empty()
         || lower == "gpt-realtime"
@@ -515,116 +512,26 @@ pub fn valid_call_id(id: &str) -> bool {
 /// `callIDFromLocation`: a bare ID, `?call_id=`, or the last segment after `live` or
 /// `calls`.
 pub fn call_id_from_location(location: &str) -> String {
-    let location = trim(location);
+    let location = location.trim();
     if valid_call_id(location) {
         return location.into();
     }
-    let Some((path, query)) = go_url_path_query(location) else {
+    let Ok(url) = go_url::parse(location) else {
         return String::new();
     };
-    if let Some(id) = query_first(&query, "call_id").map(|id| trim(&id).to_owned())
+    if let Some(id) =
+        go_url::query_get(&url.raw_query, "call_id").map(|id| String::from_utf8_lossy(&id).trim().to_owned())
         && valid_call_id(&id)
     {
         return id;
     }
+    let path = go_url::path_unescape(&url.raw_path).unwrap_or_default();
+    let path = String::from_utf8_lossy(&path);
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
         [.., previous, id] if valid_call_id(id) && matches!(*previous, "live" | "calls") => (*id).to_owned(),
         _ => String::new(),
     }
-}
-
-/// The unescaped path and raw query of `url.Parse(raw)`, `None` where Go errors.
-// ponytail: covers what an upstream `Location` can carry (scheme, authority, escapes,
-// query, fragment); Go's host and port validation is not ported.
-fn go_url_path_query(raw: &str) -> Option<(String, String)> {
-    if raw.bytes().any(|b| b < 0x20 || b == 0x7f) {
-        return None;
-    }
-    let (rest, fragment) = raw.split_once('#').unwrap_or((raw, ""));
-    unescape(fragment, false)?;
-    let scheme_end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
-    let (scheme, mut rest) = match scheme_end {
-        Some(0) if rest.starts_with(':') => return None,
-        Some(i) if rest[i..].starts_with(':') && rest.as_bytes()[0].is_ascii_alphabetic() => {
-            (&rest[..i], &rest[i + 1..])
-        }
-        _ => ("", rest),
-    };
-    let query;
-    if rest.ends_with('?') && rest.matches('?').count() == 1 {
-        query = "";
-        rest = &rest[..rest.len() - 1];
-    } else {
-        let (path, q) = rest.split_once('?').unwrap_or((rest, ""));
-        rest = path;
-        query = q;
-    }
-    if !rest.starts_with('/') {
-        if !scheme.is_empty() {
-            return Some((String::new(), query.into()));
-        }
-        if rest.split('/').next().is_some_and(|segment| segment.contains(':')) {
-            return None;
-        }
-    }
-    if (!scheme.is_empty() || !rest.starts_with("///")) && rest.starts_with("//") {
-        let after = &rest[2..];
-        let end = after.find('/').unwrap_or(after.len());
-        rest = &after[end..];
-    }
-    let path = unescape(rest, false)?;
-    Some((String::from_utf8_lossy(&path).into_owned(), query.into()))
-}
-
-/// Go `url.unescape`: `%XX` must be hex; `+` is a space only in query components.
-fn unescape(s: &str, query: bool) -> Option<Vec<u8>> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'%' => {
-                let hex = b.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit))?;
-                out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
-                i += 3;
-            }
-            b'+' if query => {
-                out.push(b' ');
-                i += 1;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    Some(out)
-}
-
-/// `url.ParseQuery(query).Get(name)`.
-fn query_first(query: &str, name: &str) -> Option<String> {
-    query
-        .split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .find_map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            let (k, v) = (unescape(k, true)?, unescape(v, true)?);
-            (k == name.as_bytes()).then(|| String::from_utf8_lossy(&v).into_owned())
-        })
-}
-
-/// `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 /// The three sideband URL shapes (`sidebandStyle`).
@@ -643,7 +550,10 @@ pub fn sideband_url(base: &str, style: Sideband, call_id: &str) -> String {
     let root = base.trim_end_matches('/');
     match style {
         Sideband::Calls => format!("{root}/realtime/calls/{call_id}"),
-        Sideband::Query => format!("{root}/realtime?intent=quicksilver&call_id={}", query_escape(call_id)),
+        Sideband::Query => format!(
+            "{root}/realtime?intent=quicksilver&call_id={}",
+            go_url::query_escape(call_id)
+        ),
         Sideband::Frameless => format!("{root}/live/{call_id}"),
     }
 }
@@ -653,7 +563,7 @@ pub fn direct_url(base: &str, model: &str) -> String {
     format!(
         "{}/realtime?model={}",
         base.trim_end_matches('/'),
-        query_escape(trim(model))
+        go_url::query_escape(model.trim())
     )
 }
 
@@ -676,9 +586,9 @@ pub fn http_base(api_base: &str) -> String {
 
 /// `bearerToken`: the trimmed token after a case-insensitive `Bearer `.
 pub fn bearer_token(authorization: &str) -> &str {
-    let value = trim(authorization);
+    let value = authorization.trim();
     match value.get(..7) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => trim(&value[7..]),
+        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => value[7..].trim(),
         _ => "",
     }
 }
@@ -695,7 +605,7 @@ pub enum SessionError {
 /// `normalizeClientSecretSession`: the session shown to the client and the one sent
 /// upstream (Codex model), both as Go's `map[string]any` marshals them.
 pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SessionError> {
-    let trimmed = trim_space(session);
+    let trimmed = go_trim_space(session);
     let session = if trimmed.is_empty() || trimmed == b"null" {
         br#"{"type":"realtime","model":"gpt-realtime"}"#.as_slice()
     } else {
@@ -709,7 +619,7 @@ pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u
         _ => String::new(),
     };
     let mut kind = string(&map, "type");
-    if trim(&kind).is_empty() {
+    if kind.trim().is_empty() {
         kind = "realtime".into();
         map.insert("type".into(), GoValue::String(kind.clone()));
     }
@@ -720,7 +630,7 @@ pub fn normalize_client_secret_session(session: &[u8]) -> Result<(Vec<u8>, Vec<u
         )));
     }
     let mut model = string(&map, "model");
-    if trim(&model).is_empty() {
+    if model.trim().is_empty() {
         model = DEFAULT_STANDARD_MODEL.into();
         map.insert("model".into(), GoValue::String(model.clone()));
     }
@@ -740,7 +650,7 @@ pub struct SecretRequest {
 
 pub fn decode_secret_request(body: &[u8]) -> Option<SecretRequest> {
     let mut request = SecretRequest::default();
-    if trim_space(body).is_empty() {
+    if go_trim_space(body).is_empty() {
         return Some(request);
     }
     check_valid(body).ok()?;
@@ -950,7 +860,7 @@ impl LiveTarget<'_> {
         if !self.capture.enabled() {
             return;
         }
-        let (auth_type, auth_value) = account_info(self.credential);
+        let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(self.credential);
         let headers = logged_headers(headers);
         self.capture.record(CaptureEvent::Request(UpstreamRequest {
             url,
@@ -963,25 +873,6 @@ impl LiveTarget<'_> {
             auth_type,
             auth_value: &auth_value,
         }));
-    }
-}
-
-/// Go `Auth.AccountInfo`: `oauth` with the account email, or `api_key` with the key.
-fn account_info(credential: &Credential) -> (&'static str, String) {
-    match cpa_core::registry::dynamic::auth_kind(credential) {
-        Some("oauth") => (
-            "oauth",
-            credential.str("email").map(|e| e.trim().to_owned()).unwrap_or_default(),
-        ),
-        Some("apikey") => (
-            "api_key",
-            credential
-                .attributes
-                .get("api_key")
-                .map(|k| k.trim().to_owned())
-                .unwrap_or_default(),
-        ),
-        _ => ("", String::new()),
     }
 }
 
@@ -1047,10 +938,10 @@ impl CodexExecutor {
             headers.retain(|(n, _)| *n != name);
             headers.push((name, value));
         }
-        if let Some(account) = view.credential.str("account_id").filter(|a| !trim(a).is_empty()) {
+        if let Some(account) = view.credential.str("account_id").filter(|a| !a.trim().is_empty()) {
             set(&mut headers, "Chatgpt-Account-Id", account.to_owned());
         }
-        if trim(view.token).is_empty() {
+        if view.token.trim().is_empty() {
             headers.retain(|(n, _)| n != "Authorization");
         } else {
             set(&mut headers, "Authorization", format!("Bearer {}", view.token));
@@ -1192,7 +1083,7 @@ fn dial_text(error: &wreq::Error) -> String {
 /// memory, as `multipartCallRequest` walks it: `NextPart` then `io.ReadAll(part)`.
 // ponytail: based on cpa-server's management multipart reader (the most Go-accurate of
 // the three in the tree) plus `NextPart`'s quoted-printable decoding and header limits.
-// Consolidate the copies into cpa-common when an owner is free.
+// Consolidate the three copies into cpa-common to give each reader both.
 mod form {
     use super::MediaType;
 
@@ -1524,7 +1415,7 @@ mod form {
                 return (0, Scan::UnexpectedEof);
             }
         }
-        if let Some(i) = buf.windows(nl_dash.len()).position(|w| w == nl_dash) {
+        if let Some(i) = cpa_common::gostr::index(buf, nl_dash) {
             return match match_after_prefix(&buf[i..], nl_dash) {
                 true => (i, Scan::End),
                 false => (i + nl_dash.len(), Scan::Data),

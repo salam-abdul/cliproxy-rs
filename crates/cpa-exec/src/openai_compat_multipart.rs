@@ -4,8 +4,9 @@
 //!
 //! ponytail: quoted-printable parts are not decoded (Go's `NextPart` does) and ReadForm's
 //! part, header and memory limits are not enforced beyond the route's body cap; image
-//! clients send binary parts. Field and file order follow first appearance, one of the
-//! orders Go's map iteration can produce.
+//! clients send binary parts. Sharing the `codex_live` reader would add the decoding and
+//! header limits. Field and file order follow first appearance, one of the orders Go's
+//! map iteration can produce.
 
 use std::collections::BTreeMap;
 
@@ -191,7 +192,8 @@ pub fn parse_media_type(v: &str) -> MediaType {
         v = rest;
     }
     // ponytail: Go keeps parameter bytes as they are; values that are not UTF-8 after
-    // RFC 2231 decoding are stored lossily here.
+    // RFC 2231 decoding are stored lossily here. Keep them as bytes if a client sends such
+    // names.
     for (key, pieces) in continuation {
         if let Some(v) = pieces.get(&format!("{key}*")) {
             if let Some(decoded) = decode_2231(v) {
@@ -453,7 +455,7 @@ impl Reader<'_> {
         let mut from = 0;
         while let Some(i) = buf
             .get(from..)
-            .and_then(|b| b.windows(nl_dash.len()).position(|w| w == nl_dash.as_slice()))
+            .and_then(|b| cpa_common::gostr::index(b, nl_dash.as_slice()))
             .map(|i| i + from)
         {
             if match_after_prefix(&buf[i..], nl_dash.len()) {
@@ -526,7 +528,7 @@ impl Writer {
     pub fn new() -> Self {
         let mut bytes = [0u8; 30];
         getrandom::fill(&mut bytes).expect("random boundary");
-        Self::with_boundary(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        Self::with_boundary(cpa_core::hex::encode(bytes))
     }
 
     pub fn with_boundary(boundary: String) -> Self {

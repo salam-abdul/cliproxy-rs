@@ -451,7 +451,8 @@ fn load_config(path: &Path, optional: bool) -> anyhow::Result<Config> {
             if !missing {
                 // ponytail: Go stays fatal for its post-decode validations (trusted
                 // proxies, weights, in-flight); cpa-core reports both kinds alike, so
-                // cloud mode stands by on every load error and logs it.
+                // cloud mode stands by on every load error and logs it. Split cpa-core's
+                // load error into decode and validation kinds to stay fatal on the latter.
                 tracing::error!("{e:#}");
             }
             Config::parse("")
@@ -924,7 +925,7 @@ impl Drop for QuietStdio {
 
 /// ponytail: Windows keeps the console handles. Go swaps only its `os.Stdout`
 /// variable there too; the log lines already go to the hook, so only a stray direct
-/// print could reach the screen.
+/// print could reach the screen. Redirect the handles with `SetStdHandle` if one does.
 #[cfg(not(unix))]
 struct QuietStdio;
 
@@ -1218,9 +1219,7 @@ async fn serve(
     let home = home_config.map(|home_config| {
         let dispatcher = Arc::new(home::Dispatcher::new(&rt));
         rt.set_remote_dispatch(Some(dispatcher.clone()));
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let task = home::spawn_subscriber(home_config, rt.clone(), dispatcher, shutdown.clone());
-        (shutdown, task)
+        (home_config, dispatcher)
     });
     // Translators and thinking validation read model capabilities through the global
     // overlay; without it they see only the static catalog.
@@ -1234,6 +1233,18 @@ async fn serve(
         ..Default::default()
     };
     let management = cpa_server::management::Management::with_options(rt.clone(), config_path, options);
+    // The subscriber publishes Home's configs through management, so it starts after it.
+    let home = home.map(|(home_config, dispatcher)| {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = home::spawn_subscriber(
+            home_config,
+            rt.clone(),
+            management.clone(),
+            dispatcher,
+            shutdown.clone(),
+        );
+        (shutdown, task)
+    });
     if home.is_some() {
         // Go enables the usage queue in Home mode whatever the management secret
         // (`redisqueue.SetEnabled(... || cfg.Home.Enabled)`); the forwarder drains it.

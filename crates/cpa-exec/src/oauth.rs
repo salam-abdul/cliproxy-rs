@@ -617,7 +617,7 @@ fn canonical_pool(value: Option<&Value>) -> bool {
 pub(crate) fn random_hex(n: usize) -> Result<String, ExecError> {
     let mut bytes = vec![0; n];
     getrandom::fill(&mut bytes).map_err(|_| acquisition_error("secure random source unavailable"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(cpa_core::hex::encode(&bytes))
 }
 
 fn acquisition_error(message: &str) -> ExecError {

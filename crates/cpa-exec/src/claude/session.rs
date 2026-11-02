@@ -25,10 +25,6 @@ pub(crate) fn normalize(raw: &str) -> String {
     shared::normalize_explicit_id(raw)
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// Request facts that select the agent-conversation identity.
 pub(crate) struct Inputs<'a> {
     pub headers: &'a HeaderMap,
@@ -213,11 +209,11 @@ pub(crate) fn deterministic_prompt_id(seed: &str) -> String {
     d[8] = (d[8] & 0x3f) | 0x80;
     format!(
         "{}-{}-{}-{}-{}",
-        hex(&d[0..4]),
-        hex(&d[4..6]),
-        hex(&d[6..8]),
-        hex(&d[8..10]),
-        hex(&d[10..16])
+        cpa_core::hex::encode(&d[0..4]),
+        cpa_core::hex::encode(&d[4..6]),
+        cpa_core::hex::encode(&d[6..8]),
+        cpa_core::hex::encode(&d[8..10]),
+        cpa_core::hex::encode(&d[10..16])
     )
 }
 
@@ -279,7 +275,7 @@ pub(crate) fn begin(credential: &str, session: &str, new_turn: bool, explicit_pr
     if credential.is_empty() || session.is_empty() {
         return Continuity::default();
     }
-    let key = hex(&Sha256::digest(format!("{credential}\0{session}").as_bytes()));
+    let key = cpa_core::hex::encode(Sha256::digest(format!("{credential}\0{session}").as_bytes()));
     let now = Instant::now();
     let mut s = store().lock().expect("continuity store");
     if s.last_cleanup

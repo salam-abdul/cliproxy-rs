@@ -175,7 +175,10 @@ impl HttpRequest {
             ("url".to_owned(), GoValue::String(self.url.clone())),
             ("headers".to_owned(), GoValue::Object(headers)),
             ("body".to_owned(), GoValue::String(go_lossy(&self.body))),
-            ("sent_at".to_owned(), GoValue::String(rfc3339_nano(chrono::Utc::now()))),
+            (
+                "sent_at".to_owned(),
+                GoValue::String(cpa_core::gotime::rfc3339_nano(&chrono::Utc::now())),
+            ),
         ])
     }
 }
@@ -222,18 +225,6 @@ fn go_lossy(bytes: &[u8]) -> String {
         out.extend(std::iter::repeat_n('\u{FFFD}', chunk.invalid().len()));
     }
     out
-}
-
-/// Go's `time.RFC3339Nano`: fractional seconds without trailing zeros.
-fn rfc3339_nano(t: chrono::DateTime<chrono::Utc>) -> String {
-    let nanos = format!("{:09}", t.timestamp_subsec_nanos());
-    let nanos = nanos.trim_end_matches('0');
-    let fraction = if nanos.is_empty() {
-        String::new()
-    } else {
-        format!(".{nanos}")
-    };
-    format!("{}{fraction}Z", t.format("%Y-%m-%dT%H:%M:%S"))
 }
 
 /// `decodeResponse`.

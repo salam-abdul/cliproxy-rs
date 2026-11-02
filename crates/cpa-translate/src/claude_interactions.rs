@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::common::{
     format_rfc3339_utc, go_lower, normalize_claude_tool_input_schema, now_nanos, now_unix,
-    sanitize_claude_function_name, sanitize_claude_tool_id, sse_event, trim_space,
+    sanitize_claude_function_name, sanitize_claude_tool_id, sse_event,
 };
 use crate::gemini_interactions::first_existing;
 use crate::stream::GoStream;
@@ -35,7 +36,6 @@ fn first_nonempty(values: &[&[u8]]) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// common.ClaudeMessageAccumulator: consecutive same-role messages merge into one, with
@@ -193,7 +193,7 @@ fn copy_generation_config(out: &mut Vec<u8>, root: &Res<'_>) {
 
 /// setClaudeThinkingFromLevel.
 fn set_thinking_from_level(out: &mut Vec<u8>, level: &[u8]) {
-    let normalized = go_lower(trim_space(level));
+    let normalized = go_lower(go_trim_space(level));
     if normalized.is_empty() {
         return;
     }
@@ -231,8 +231,8 @@ fn set_thinking_from_level(out: &mut Vec<u8>, level: &[u8]) {
 /// copyInteractionsToolChoiceToClaude.
 fn copy_tool_choice(out: &mut Vec<u8>, choice: &Res<'_>) {
     let kind = match choice.kind {
-        Kind::String => go_lower(trim_space(&choice.bytes())),
-        Kind::Json => go_lower(trim_space(&choice.get("type").bytes())),
+        Kind::String => go_lower(go_trim_space(&choice.bytes())),
+        Kind::Json => go_lower(go_trim_space(&choice.get("type").bytes())),
         _ => return,
     };
     match kind.as_slice() {
@@ -532,7 +532,6 @@ fn claude_text(value: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 const USAGE_KEYS: [&str; 5] = [
@@ -784,11 +783,11 @@ impl State {
 
 /// claudeInteractionsSSEPayload: only `data:` lines (and a bare `[DONE]`) carry events.
 fn sse_payload(raw: &[u8]) -> &[u8] {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed == b"[DONE]" {
         return trimmed;
     }
-    trimmed.strip_prefix(b"data:").map(trim_space).unwrap_or_default()
+    trimmed.strip_prefix(b"data:").map(go_trim_space).unwrap_or_default()
 }
 
 impl GoStream for State {
@@ -901,7 +900,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
             match part.get("type").bytes().as_ref() {
                 b"text" => steps.push(text_step("model_output", &part.get("text").bytes())),
                 b"thinking" => steps.push(text_step("thought", &part.get("thinking").bytes())),
-                b"tool_use" => steps.push(tool_use_step(&part, trim_space(&part.get("input").raw))),
+                b"tool_use" => steps.push(tool_use_step(&part, go_trim_space(&part.get("input").raw))),
                 _ => {}
             }
             true
@@ -916,10 +915,10 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     gj::set_str(&mut out, "model", ctx.model);
     let mut st = State::default();
     for line in body.split(|&c| c == b'\n') {
-        let Some(payload) = trim_space(line).strip_prefix(b"data:") else {
+        let Some(payload) = go_trim_space(line).strip_prefix(b"data:") else {
             continue;
         };
-        let payload = trim_space(payload);
+        let payload = go_trim_space(payload);
         if payload == b"[DONE]" {
             continue;
         }
@@ -971,7 +970,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
                         let mut part = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
                         gj::set_str(&mut part, "id", st.ids.get(&index).cloned().unwrap_or_default());
                         gj::set_str(&mut part, "name", st.names.get(&index).cloned().unwrap_or_default());
-                        tool_use_step(&gj::parse(&part), trim_space(&text))
+                        tool_use_step(&gj::parse(&part), go_trim_space(&text))
                     }
                     _ => text_step("model_output", &text),
                 };

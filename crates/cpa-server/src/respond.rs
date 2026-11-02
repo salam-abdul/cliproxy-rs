@@ -30,11 +30,14 @@ pub fn gin_json(status: u16, body: String) -> Response {
 
 /// gin `c.JSON(status, ErrorResponse{Error: ErrorDetail{Message, Type}})`.
 pub fn error_detail(status: u16, message: &str, kind: &str) -> Response {
-    let detail = crate::gojson::Obj::new()
+    let detail = cpa_common::json::Object::new()
         .str("message", message)
         .str("type", kind)
-        .finish();
-    gin_json(status, crate::gojson::Obj::new().raw("error", &detail).finish())
+        .finish_string();
+    gin_json(
+        status,
+        cpa_common::json::Object::new().raw("error", &detail).finish_string(),
+    )
 }
 
 /// The headers every Go SSE handler sets before the first event.
@@ -147,7 +150,7 @@ pub fn write_upstream_headers(dst: &mut axum::http::HeaderMap, src: &axum::http:
 /// Go `WriteErrorResponse` with passthrough on: the error's addon headers replace the
 /// response's, reserved names excepted. Content-Type stays the response's: Go sets
 /// `application/json` after copying the addon.
-// ponytail: Go copies these unfiltered, so an upstream Content-Length (or other
+// Go copies these unfiltered, so an upstream Content-Length (or other
 // framing header) can declare the wrong length for CPA's error body; framing and
 // hop-by-hop headers are dropped here to keep the response valid.
 pub fn write_error_headers(dst: &mut axum::http::HeaderMap, src: &axum::http::HeaderMap) {

@@ -3,12 +3,13 @@
 
 use crate::{
     Error, Registered, RequestCtx,
-    common::{self, go_lower, sanitize_function_name, trim_space},
+    common::{self, go_lower, sanitize_function_name},
     gemini::{self, attach_default_safety_settings},
     gemini_chat_request::content_node,
     gemini_claude_response as response, openai_claude,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::HashMap;
 
 pub static PAIR: Registered = registered!(
@@ -168,7 +169,7 @@ fn convert(model: &str, raw: &[u8], preserve_thinking: bool) -> Vec<u8> {
             b"adaptive" | b"auto" => {
                 let effort = gj::get(raw, "output_config.effort");
                 let effort = if effort.kind == Kind::String {
-                    go_lower(trim_space(&effort.s))
+                    go_lower(go_trim_space(&effort.s))
                 } else {
                     vec![]
                 };

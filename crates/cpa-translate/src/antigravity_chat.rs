@@ -7,11 +7,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::antigravity_gemini::{has_response_payload, restore_names, sanitize_claude_signatures};
 use crate::common::{
     go_lower, go_upper, normalize_openai_file_data, now_nanos, parse_rfc3339_unix, restore_sanitized_tool_name,
-    sanitize_claude_tool_id, system_reminder_text, trim_space,
+    sanitize_claude_tool_id, system_reminder_text,
 };
 use crate::gemini::attach_default_safety_settings;
 use crate::gemini_chat_request::{audio_mime, content_node, function_declaration, text_part};
@@ -31,7 +32,6 @@ const SKIP_SIGNATURE: &str = "skip_thought_signature_validator";
 const CONFIG: &str = "request.generationConfig";
 const THINKING: &str = "request.generationConfig.thinkingConfig";
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// antigravityOpenAIInlineDataPart: camelCase `mimeType`, or `mime_type` for audio.
@@ -66,7 +66,7 @@ fn data_url_part(url: &[u8]) -> Option<Vec<u8>> {
 
 /// antigravityDemotedSystemText.
 fn demoted_text(text: Vec<u8>, demoted: bool) -> Vec<u8> {
-    if !demoted || trim_space(&text).is_empty() {
+    if !demoted || go_trim_space(&text).is_empty() {
         return text;
     }
     system_reminder_text(&text)
@@ -88,7 +88,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     }
     let effort = gj::get(raw, "reasoning_effort");
     if effort.exists() {
-        let effort = go_lower(trim_space(&effort.bytes()));
+        let effort = go_lower(go_trim_space(&effort.bytes()));
         if effort == b"auto" {
             gj::set_int(&mut out, &format!("{THINKING}.thinkingBudget"), -1);
         } else if !effort.is_empty() {
@@ -114,7 +114,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     }
     let format = gj::get(raw, "response_format");
     if format.exists() {
-        let kind = go_lower(trim_space(&format.get("type").bytes()));
+        let kind = go_lower(go_trim_space(&format.get("type").bytes()));
         if kind == b"json_object" || kind == b"json_schema" {
             for key in [
                 "responseSchema",
@@ -174,7 +174,7 @@ fn convert(model: &str, raw: &[u8]) -> Vec<u8> {
     }
     apply_tools(&mut out, raw, &names);
     apply_tool_choice(&mut out, raw, &names);
-    if go_lower(model.as_bytes()).windows(6).any(|w| w == b"claude") {
+    if cpa_common::gostr::contains(&go_lower(model.as_bytes()), b"claude") {
         out = sanitize_claude_signatures(out);
     }
     attach_default_safety_settings(out, "request.safetySettings")
@@ -506,14 +506,14 @@ fn apply_tool_choice(out: &mut Vec<u8>, raw: &[u8], names: &HashMap<Vec<u8>, Vec
     }
     let mut allowed: Vec<u8> = vec![];
     let mode = if choice.kind == Kind::String {
-        match go_lower(trim_space(&choice.bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.bytes())).as_slice() {
             b"none" => "NONE",
             b"auto" => "AUTO",
             b"required" | b"any" => "ANY",
             _ => "",
         }
     } else if choice.is_object() {
-        match go_lower(trim_space(&choice.get("type").bytes())).as_slice() {
+        match go_lower(go_trim_space(&choice.get("type").bytes())).as_slice() {
             b"none" => "NONE",
             b"function" => {
                 allowed = choice.get("function.name").bytes().into_owned();
@@ -531,7 +531,7 @@ fn apply_tool_choice(out: &mut Vec<u8>, raw: &[u8], names: &HashMap<Vec<u8>, Vec
     if mode == "NONE" {
         gj::delete(out, "request.tools");
     }
-    if !trim_space(&allowed).is_empty() {
+    if !go_trim_space(&allowed).is_empty() {
         let mapped = map_sanitized_function_name(names, &allowed);
         gj::set_strs(
             out,
@@ -541,7 +541,6 @@ fn apply_tool_choice(out: &mut Vec<u8>, raw: &[u8], names: &HashMap<Vec<u8>, Vec
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// ConvertAntigravityResponseToOpenAINonStream: the unwrapped response with restored

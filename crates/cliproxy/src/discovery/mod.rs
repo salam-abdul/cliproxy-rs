@@ -108,7 +108,7 @@ pub fn build_txt_records(opts: &TxtOptions) -> Vec<String> {
     let mut records = Vec::new();
     let mut total = 0;
     for (key, value) in candidates {
-        let value: String = go_trim(&value).chars().filter(|c| (' '..='~').contains(c)).collect();
+        let value: String = value.trim().chars().filter(|c| (' '..='~').contains(c)).collect();
         if value.is_empty() {
             continue;
         }
@@ -122,18 +122,12 @@ pub fn build_txt_records(opts: &TxtOptions) -> Vec<String> {
     records
 }
 
-/// Go `strings.TrimSpace` (Unicode White_Space).
-pub(crate) fn go_trim(s: &str) -> &str {
-    // Trimming whole whitespace characters keeps valid UTF-8 valid.
-    std::str::from_utf8(cpa_core::config::go_trim_space(s.as_bytes())).unwrap_or(s)
-}
-
 /// Go `ParseTXTRecords`: keys trimmed and lowercased, last duplicate wins.
 pub fn parse_txt_records(txt: &[String]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for entry in txt {
         let (key, value) = entry.split_once('=').unwrap_or((entry, ""));
-        let key = cpa_common::gostr::lower_bytes(go_trim(key).as_bytes());
+        let key = cpa_common::gostr::lower_bytes(key.trim().as_bytes());
         if !key.is_empty() {
             out.insert(key, value.to_owned());
         }
@@ -150,7 +144,7 @@ pub fn state_dir() -> Option<PathBuf> {
     let trimmed = |k: &str| {
         std::env::var(k)
             .ok()
-            .map(|v| go_trim(&v).to_owned())
+            .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
     };
     if let Some(w) = trimmed("WRITABLE_PATH").or_else(|| trimmed("writable_path")) {
@@ -184,7 +178,7 @@ pub fn instance_id(dir: Option<&Path>) -> String {
     if let Some(id) = path
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|s| go_trim(&s).to_owned())
+        .map(|s| s.trim().to_owned())
         .filter(|s| is_hex4(s))
     {
         let id = id.to_uppercase();
@@ -245,7 +239,7 @@ fn truncate_chars(s: &str, max: usize) -> &str {
 /// Go `sanitizeInstanceName`: control characters dropped, trimmed, at most 63 bytes.
 pub fn sanitize_instance_name(name: &str) -> String {
     let clean: String = name.chars().filter(|&c| c >= ' ' && c != '\x7f').collect();
-    truncate_chars(go_trim(&clean), 63).to_owned()
+    truncate_chars(clean.trim(), 63).to_owned()
 }
 
 /// Go `FormatInstanceName`: `CPA-<ID>` or `<name>-<ID>` within the 63-byte label limit.
@@ -261,9 +255,9 @@ pub fn format_instance_name(custom: &str, id: &str) -> String {
         && base.is_char_boundary(base.len() - suffix.len())
         && base[base.len() - suffix.len()..].eq_ignore_ascii_case(&suffix)
     {
-        base = go_trim(&base[..base.len() - suffix.len()]).to_owned();
+        base = (base[..base.len() - suffix.len()]).trim().to_owned();
     }
-    let base = go_trim(truncate_chars(&base, 63 - suffix.len()));
+    let base = (truncate_chars(&base, 63 - suffix.len())).trim();
     if base.is_empty() {
         default
     } else {
@@ -273,7 +267,7 @@ pub fn format_instance_name(custom: &str, id: &str) -> String {
 
 /// Go `validateServiceType` (RFC 6763 / RFC 6335, TCP only).
 pub fn validate_service_type(st: &str) -> Result<(), String> {
-    let st = go_trim(st);
+    let st = st.trim();
     if st.is_empty() {
         return Err("service type cannot be empty".into());
     }
@@ -324,7 +318,7 @@ fn go_rune_quote(c: char) -> String {
 
 /// Go `sanitizeSubtype`: `_label` with RFC 6335 characters, else empty.
 pub fn sanitize_subtype(sub: &str) -> String {
-    let sub = go_trim(sub);
+    let sub = sub.trim();
     if sub.is_empty() || sub.contains('.') {
         return String::new();
     }
@@ -451,7 +445,7 @@ pub fn build_service_spec(
     }
     let id = instance_id();
     let instance_name = format_instance_name(&d.service_name, &id);
-    let service_type = match go_trim(&d.service_type) {
+    let service_type = match d.service_type.trim() {
         "" => DEFAULT_SERVICE_TYPE.to_owned(),
         st => {
             validate_service_type(st).map_err(|e| format!("discovery: invalid service-type: {e}"))?;
@@ -481,7 +475,7 @@ pub fn build_service_spec(
                 .into(),
         );
     }
-    let bind_host = go_trim(bind_host);
+    let bind_host = bind_host.trim();
     let bind_ip = if bind_host.is_empty() {
         None
     } else {
@@ -633,7 +627,7 @@ fn usable_ips(ips: &[IpAddr]) -> Vec<IpAddr> {
 /// Go `appendUniqueStrings`.
 fn append_unique(dst: &mut Vec<String>, src: &[String]) {
     for value in src {
-        let value = go_trim(value);
+        let value = value.trim();
         if value.is_empty()
             || value.len() > MAX_METADATA_ITEM_BYTES
             || dst.len() >= MAX_METADATA_ITEMS
@@ -659,7 +653,7 @@ pub fn parse_txt_list(mut value: &str) -> Vec<String> {
     while !value.is_empty() && out.len() < MAX_METADATA_ITEMS {
         let item;
         (item, value) = value.split_once(',').unwrap_or((value, ""));
-        let item = go_trim(item);
+        let item = item.trim();
         if !item.is_empty() && item.len() <= MAX_METADATA_ITEM_BYTES {
             append_unique(&mut out, &[item.to_owned()]);
         }
@@ -669,7 +663,7 @@ pub fn parse_txt_list(mut value: &str) -> Vec<String> {
 
 /// Go `sanitizeEndpointPath`.
 pub fn sanitize_endpoint_path(p: &str) -> String {
-    let p = go_trim(p);
+    let p = p.trim();
     let bad = !p.starts_with('/')
         || p.starts_with("//")
         || p.contains('\\')
@@ -751,7 +745,7 @@ pub fn merge_discovered(dst: &mut DiscoveredService, src: &DiscoveredService) {
         total = next;
     }
     if let Some(v) = dst.raw_txt.get("auth_required") {
-        dst.auth_required = go_trim(v).eq_ignore_ascii_case("true");
+        dst.auth_required = v.trim().eq_ignore_ascii_case("true");
     }
     append_unique(&mut dst.auth_methods, &src.auth_methods);
     append_unique(&mut dst.protocols, &src.protocols);

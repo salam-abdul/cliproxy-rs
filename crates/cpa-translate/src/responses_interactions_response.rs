@@ -5,9 +5,10 @@
 use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
 use crate::apply_patch::{self, CallState};
-use crate::common::{format_rfc3339_utc, now_nanos, now_unix, request_model_name, sse_event, trim_space};
+use crate::common::{format_rfc3339_utc, now_nanos, now_unix, request_model_name, sse_event};
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::{
     antigravity_name_to_client, antigravity_name_to_upstream, first_nonblank, is_antigravity, json_string_value,
@@ -26,16 +27,16 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 
 /// interactionsSSEPayload: the payload of one line or frame.
 fn sse_payload(raw: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed.is_empty() || trimmed == b"[DONE]" {
         return trimmed.to_vec();
     }
     if let Some(rest) = trimmed.strip_prefix(b"data:") {
-        return trim_space(rest).to_vec();
+        return go_trim_space(rest).to_vec();
     }
     let lines: Vec<&[u8]> = trimmed
         .split(|&c| c == b'\n')
-        .filter_map(|line| trim_space(line).strip_prefix(b"data:").map(trim_space))
+        .filter_map(|line| go_trim_space(line).strip_prefix(b"data:").map(go_trim_space))
         .collect();
     if lines.is_empty() {
         trimmed.to_vec()
@@ -71,7 +72,7 @@ fn interactions_usage<'a>(root: &Res<'a>) -> Res<'a> {
 
 /// interactionsReasoningEncryptedContent: a trimmed signature Go recognizes, else empty.
 fn encrypted_content(raw: &[u8]) -> Vec<u8> {
-    let candidate = trim_space(raw);
+    let candidate = go_trim_space(raw);
     if !candidate.is_empty() && cpa_common::signature::is_recognized_reasoning_signature(candidate) {
         candidate.to_vec()
     } else {
@@ -150,7 +151,6 @@ fn incomplete_reason(status: &[u8], reason: &[u8]) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> Responses (non-stream)
 
 /// interactionsStepToResponsesOutput.
@@ -283,7 +283,6 @@ pub(crate) fn interactions_to_responses_non_stream(ctx: &ResponseCtx<'_>, body: 
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> Responses (stream)
 
 /// interactionsFunctionCallState. Errors only matter by presence: every apply_patch
@@ -994,7 +993,7 @@ impl ToResponses {
                 && !call.has_snapshot
                 && call.arguments.is_empty()
                 && !call.item_done
-                && trim_space(&json_string_value(&args, b"")) == b"{}")
+                && go_trim_space(&json_string_value(&args, b"")) == b"{}")
         {
             let arguments = json_string_value(&args, b"{}");
             if !call.added && call.initial_arguments.is_empty() && call.arguments.is_empty() {
@@ -1420,7 +1419,6 @@ impl GoStream for ToResponses {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses -> Interactions
 
 /// setInteractionsUsageFromResponses.

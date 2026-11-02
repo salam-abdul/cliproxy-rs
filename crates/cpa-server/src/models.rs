@@ -46,7 +46,8 @@ pub async fn unified(State(rt): State<Arc<Runtime>>, OriginalUri(uri): OriginalU
         };
         let grok_shell = header("user-agent").is_some_and(|ua| ua.to_lowercase().contains("grok-shell"));
         // ponytail: Go builds the Codex client catalog (`client_version`) from Home's
-        // model IDs with its template metadata; here such clients get the OpenAI list.
+        // model IDs with its template metadata; here such clients get the OpenAI list. Build
+        // the Codex catalog from Home's IDs if Codex clients use Home mode.
         let body = if grok_shell {
             crate::home_models::grok(&entries)
         } else if anthropic && query_value(&uri, "client_version").is_none() {
@@ -109,12 +110,12 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
             } else {
                 &m.display_name
             };
-            let mut entry = gojson::Obj::new()
+            let mut entry = cpa_common::json::Object::new()
                 .str("id", &m.id)
                 .str("model", &m.id)
                 .str("name", name);
             if m.context_length > 0 {
-                entry = entry.raw("context_window", &m.context_length.to_string());
+                entry = entry.raw("context_window", m.context_length.to_string());
             }
             entry = entry.str("api_backend", "responses").raw("supported_in_api", "true");
             let efforts: Vec<String> = m
@@ -123,18 +124,18 @@ pub fn grok_list<'a>(models: impl Iterator<Item = &'a Spec>) -> String {
                 .flat_map(|t| &t.levels)
                 .map(|level| level.trim())
                 .filter(|level| !level.is_empty())
-                .map(|level| gojson::Obj::new().str("value", level).finish())
+                .map(|level| cpa_common::json::Object::new().str("value", level).finish_string())
                 .collect();
             if !efforts.is_empty() {
-                entry = entry.raw("reasoning_efforts", &format!("[{}]", efforts.join(",")));
+                entry = entry.raw("reasoning_efforts", format!("[{}]", efforts.join(",")));
             }
-            entry.finish()
+            entry.finish_string()
         })
         .collect();
-    gojson::Obj::new()
+    cpa_common::json::Object::new()
         .str("object", "list")
-        .raw("data", &format!("[{}]", data.join(",")))
-        .finish()
+        .raw("data", format!("[{}]", data.join(",")))
+        .finish_string()
 }
 
 /// Go `convertModelToMap(model, "claude")` plus `claudemodels.BuildResponse`.

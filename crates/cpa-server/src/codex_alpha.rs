@@ -94,14 +94,6 @@ async fn alpha_search(
         .map(|log| log.capture_sink())
         .unwrap_or_default();
     let (cfg, policy) = rt.request_snapshot();
-    // The credential policy narrows selection; disallowed Codex credentials are excluded.
-    let exclude = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| c.provider == "codex" && !allowed(c))
-        .map(|c| c.id.clone())
-        .collect();
     // Go selects with the route model (`pickNextLegacy`: registry admission and per-model
     // cooldown) and keys session affinity on the explicit session, with `X-Session-ID`
     // set from the body's `id` and no derived identity.
@@ -138,11 +130,12 @@ async fn alpha_search(
         session: bound(primary),
         session_parent: bound(parent),
         session_fork: fork,
-        exclude,
+        // The credential policy narrows selection to allowed Codex credentials.
+        accept: Some(|c| c.provider != "codex" || allowed(c)),
         ..Selection::default()
     };
-    // ponytail: one selection, no failover or outcome recording, as in Go; plugin model
-    // routing is not ported.
+    // One selection, with no failover or outcome recording, as in Go. Plugin model routing
+    // is not ported because the fork has no plugin host.
     if let Some(remote) = rt.remote_dispatch() {
         let lease = match home_lease(&rt, remote.as_ref(), selection, &headers).await {
             Ok(lease) => lease,

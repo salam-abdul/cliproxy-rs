@@ -86,7 +86,8 @@ impl Inner {
     /// `purgeExpiredClaudeThinkingReplayCache`, run when Go's ten-minute cleanup would
     /// have: expired entries are removed, so their old generations stop accepting writes.
     // ponytail: swept lazily on cache access instead of by a background ticker; an idle
-    // cache keeps expired content in memory until the next request.
+    // cache keeps expired content in memory until the next request. Add a sweep ticker if
+    // idle memory matters.
     fn sweep(&mut self, now: Instant) {
         if self.swept.is_some_and(|at| now.duration_since(at) < SWEEP_INTERVAL) {
             return;
@@ -433,7 +434,7 @@ fn model_family(credential: &Credential, api_key: &str, base_url: &str, base_mod
         return format!("claude:{base}");
     }
     let digest = Sha256::digest(identity.as_bytes());
-    let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let prefix: String = cpa_core::hex::encode(&digest[..8]);
     format!("claude:{prefix}:{base}")
 }
 
@@ -658,7 +659,7 @@ mod tests {
         )
         .unwrap();
         let digest = Sha256::digest(credential.id.as_bytes());
-        let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let prefix: String = cpa_core::hex::encode(&digest[..8]);
         assert_eq!(
             model_family(&credential, "k", "", "claude-x"),
             format!("claude:{prefix}:claude-x")

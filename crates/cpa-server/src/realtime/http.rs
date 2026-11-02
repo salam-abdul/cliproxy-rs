@@ -169,7 +169,8 @@ impl Drop for TrackedBody {
 
 /// `http.DetectContentType` for what a live upstream returns.
 // ponytail: HTML, XML, UTF BOMs and text-versus-binary only; Go also recognises images,
-// audio, archives and fonts. SDP and JSON are text/plain in Go too.
+// audio, archives and fonts. SDP and JSON are text/plain in Go too. Port the rest of
+// `http.DetectContentType` if other bodies reach this.
 fn sniff(body: &[u8]) -> &'static str {
     let data = &body[..body.len().min(512)];
     if data.starts_with(b"\xFE\xFF") {
@@ -530,7 +531,7 @@ fn media_credential_name(credential: &cpa_core::credential::Credential) -> Strin
 /// The call ID path parameter, trimmed; `None` when it cannot be decoded.
 fn path_call_id(path: Result<Path<String>, PathRejection>) -> Option<String> {
     path.ok()
-        .map(|Path(id)| cpa_common::gostr::trim_space(id.as_bytes()).to_owned())
+        .map(|Path(id)| cpa_core::config::go_trim_space(id.as_bytes()).to_owned())
         .and_then(|id| String::from_utf8(id).ok())
 }
 
@@ -627,7 +628,7 @@ pub(super) async fn hangup(
     };
     let mut upstream_headers = live::protocol_headers(&headers);
     let content_type = header_text(&headers, header::CONTENT_TYPE);
-    let content_type = String::from_utf8_lossy(cpa_common::gostr::trim_space(content_type.as_bytes())).into_owned();
+    let content_type = String::from_utf8_lossy(cpa_core::config::go_trim_space(content_type.as_bytes())).into_owned();
     if !content_type.is_empty() {
         upstream_headers.push(("Content-Type".into(), content_type));
     }
@@ -910,7 +911,7 @@ mod relay_tests {
         )
         .unwrap();
         let rt = Arc::new(crate::testing::runtime(
-            cpa_core::config::Config::parse(yaml).unwrap(),
+            crate::testing::config(yaml),
             vec![credential],
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),

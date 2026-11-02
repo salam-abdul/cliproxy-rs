@@ -62,7 +62,8 @@ fn compat_translator(from: Format, to: Format) -> Option<cpa_translate::RequestF
 /// 3. An is-compat model uses its pair's `...WithCompat` translator between summary
 ///    extraction and application; anything else goes through `translate_request`.
 // ponytail: plugin NormalizeRequest hooks after a compat translator are not ported
-// (cpa_translate has none either).
+// because the fork has no plugin host (cpa_translate has none either); a plugin host
+// would run them here.
 pub(crate) fn translate_request(
     from: Format,
     to: Format,
@@ -70,30 +71,35 @@ pub(crate) fn translate_request(
     body: &[u8],
     client: &Client<'_>,
 ) -> Result<Vec<u8>, cpa_translate::Error> {
-    let mut payload = if codex_target(client.target_executor) {
-        body.to_vec()
-    } else {
-        cpa_common::payload::normalize_codex_tool_integer_types(body, client.headers)
-    };
-    if from == Format::OpenAIResponse {
-        payload = cc::rewrite_orphan_delegation_input(client.headers, &payload, client.settings.orphan_delegation);
-        if !matches!(to, Format::Codex | Format::OpenAIResponse) {
-            payload = cc::rewrite_multi_agent_v2_input(client.headers, &payload, &client.settings, client.is_compat);
+    // The integer-type rewrite recurses per nested tool namespace, so it shares the
+    // translator's stack guard.
+    cpa_translate::on_deep_stack(body, || {
+        let mut payload = if codex_target(client.target_executor) {
+            body.to_vec()
+        } else {
+            cpa_common::payload::normalize_codex_tool_integer_types(body, client.headers)
+        };
+        if from == Format::OpenAIResponse {
+            payload = cc::rewrite_orphan_delegation_input(client.headers, &payload, client.settings.orphan_delegation);
+            if !matches!(to, Format::Codex | Format::OpenAIResponse) {
+                payload =
+                    cc::rewrite_multi_agent_v2_input(client.headers, &payload, &client.settings, client.is_compat);
+            }
         }
-    }
-    let compat = client.is_compat.then(|| compat_translator(from, to)).flatten();
-    let Some(translate) = compat else {
-        return cpa_translate::translate_request(from, to, ctx, &payload);
-    };
-    use cpa_common::thinking::{apply_summary_config_for_model, extract_translated_summary_config};
-    let summary = extract_translated_summary_config(&payload, from.as_str(), to.as_str());
-    let translated = translate(ctx, &payload)?;
-    Ok(apply_summary_config_for_model(
-        &translated,
-        to.as_str(),
-        ctx.model,
-        summary,
-    ))
+        let compat = client.is_compat.then(|| compat_translator(from, to)).flatten();
+        let Some(translate) = compat else {
+            return cpa_translate::translate_request(from, to, ctx, &payload);
+        };
+        use cpa_common::thinking::{apply_summary_config_for_model, extract_translated_summary_config};
+        let summary = extract_translated_summary_config(&payload, from.as_str(), to.as_str());
+        let translated = translate(ctx, &payload)?;
+        Ok(apply_summary_config_for_model(
+            &translated,
+            to.as_str(),
+            ctx.model,
+            summary,
+        ))
+    })
 }
 
 /// `TranslateRequestEnvelopeWithCodexMultiAgentV2`: the Responses orphan-delegation and
@@ -107,14 +113,17 @@ pub(crate) fn translate_request_envelope(
     client: &Client<'_>,
     model_info: Option<&cpa_core::registry::ModelInfo>,
 ) -> Result<Vec<u8>, cpa_translate::Error> {
-    let mut payload = body.to_vec();
-    if from == Format::OpenAIResponse {
-        payload = cc::rewrite_orphan_delegation_input(client.headers, &payload, client.settings.orphan_delegation);
-        if !matches!(to, Format::Codex | Format::OpenAIResponse) {
-            payload = cc::rewrite_multi_agent_v2_input(client.headers, &payload, &client.settings, client.is_compat);
+    cpa_translate::on_deep_stack(body, || {
+        let mut payload = body.to_vec();
+        if from == Format::OpenAIResponse {
+            payload = cc::rewrite_orphan_delegation_input(client.headers, &payload, client.settings.orphan_delegation);
+            if !matches!(to, Format::Codex | Format::OpenAIResponse) {
+                payload =
+                    cc::rewrite_multi_agent_v2_input(client.headers, &payload, &client.settings, client.is_compat);
+            }
         }
-    }
-    cpa_translate::translate_request_envelope(from, to, ctx, &payload, model_info)
+        cpa_translate::translate_request_envelope(from, to, ctx, &payload, model_info)
+    })
 }
 
 /// Routes whose handler runs Go's `prepareCodexMultiAgentV2Tools` before dispatch (the

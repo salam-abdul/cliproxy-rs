@@ -36,6 +36,7 @@ pub(crate) mod kv_test;
 mod profile;
 mod reconcile;
 mod replay;
+mod rules;
 mod session;
 mod settings;
 mod signals;
@@ -62,39 +63,22 @@ use crate::rawjson;
 use crate::tls::Transport;
 use crate::upstream::{Decoded, decode_upstream};
 use crate::{quota, tokens, translate};
+use rules::{
+    DEFAULT_MAX_TOKENS, cloak_thinking_display, disable_thinking_if_tool_choice_forced, extract_betas,
+    inject_diagnostics, needs_fake_user_id, normalize_sampling, rebuild_mid_system, sanitize_for_upstream,
+    strip_attribution_system, validate_mid_system,
+};
 use settings::Settings;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The message of the executor's own 404 for a thread continuation whose state is gone.
 pub use thread::NOT_FOUND as THREAD_NOT_FOUND;
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The `Anthropic-Version` the executor sends when the caller sent none.
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Advertised in `CLIProxyAPI/<version>` when a caller-owned request has no User-Agent.
 pub(crate) const PROXY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use crate::proxy::Hooks;
-
-/// The fields of a `"type": "claude"` credential this executor needs.
-pub struct ClaudeView<'a> {
-    pub access_token: &'a str,
-    pub email: &'a str,
-}
-
-impl<'a> ClaudeView<'a> {
-    pub fn new(credential: &'a Credential) -> Result<Self, ExecError> {
-        let access_token = credential
-            .attributes
-            .get("api_key")
-            .map(String::as_str)
-            .filter(|t| !t.is_empty())
-            .or_else(|| credential.str("access_token"))
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| ExecError::local(401, FailureScope::Credential, "claude credential has no access_token"))?;
-        Ok(Self {
-            access_token,
-            email: credential.str("email").unwrap_or_default(),
-        })
-    }
-}
 
 /// The first-party Anthropic transport.
 enum Native {
@@ -352,81 +336,89 @@ impl ClaudeExecutor {
         let request_id = header_value(&response.headers, "request-id");
         let fast = ctx.first_party && prepared.fast;
         let wrap = |e| fast_request_error(fast, e);
-        let body = match response.body {
-            ResponseBody::Stream(raw) if upstream_stream && req.stream && req.operation == Operation::Generate => {
-                let done: stream::OnComplete = Box::new(move |message_id| {
-                    completion.complete(&message_id, &request_id);
-                });
-                // ExecuteStream publishes through its stream buffer only (no
-                // EnsurePublished): a stream that never carried usage records nothing.
+        let raw = response.body;
+        let body = if upstream_stream && req.stream && req.operation == Operation::Generate {
+            let done: stream::OnComplete = Box::new(move |message_id| {
+                completion.complete(&message_id, &request_id);
+            });
+            // ExecuteStream publishes through its stream buffer only (no
+            // EnsurePublished): a stream that never carried usage records nothing.
+            req.usage.usage_required();
+            let (usage, capture) = (req.usage.clone(), req.capture().clone());
+            let relayed = stream::relay(raw, reverse, done, usage, capture);
+            ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
+        } else {
+            let capture = req.capture();
+            let data = collect(raw).await.map_err(|e| {
+                capture_error(capture, &e);
+                wrap(e)
+            })?;
+            capture.record(CaptureEvent::ResponseChunk(&data));
+            if upstream_stream {
+                // Translated Execute publishes with streamUsage.Publish only: no usage
+                // seen, no record. A restore failure below keeps the usage seen so far
+                // (streamUsage.PublishFailure), which the server does for Claude.
                 req.usage.usage_required();
-                let (usage, capture) = (req.usage.clone(), req.capture().clone());
-                let relayed = stream::relay(raw, reverse, done, usage, capture);
-                ResponseBody::Stream(relayed.map(move |r| r.map_err(|e| fast_request_error(fast, e))).boxed())
-            }
-            ResponseBody::Stream(raw) => {
-                let capture = req.capture();
-                let data = collect(raw).await.map_err(|e| {
+                stream::validate_buffered(&data).map_err(|e| {
                     capture_error(capture, &e);
                     wrap(e)
                 })?;
-                capture.record(CaptureEvent::ResponseChunk(&data));
-                if upstream_stream {
-                    // Translated Execute publishes with streamUsage.Publish only: no usage
-                    // seen, no record. A restore failure below keeps the usage seen so far
-                    // (streamUsage.PublishFailure), which the server does for Claude.
-                    req.usage.usage_required();
-                    stream::validate_buffered(&data).map_err(|e| {
-                        capture_error(capture, &e);
-                        wrap(e)
-                    })?;
-                    let id = stream::buffered_message_id(&data);
-                    if !id.is_empty() {
-                        completion.complete(&id, &request_id);
-                    }
-                    let mut out = Vec::with_capacity(data.len());
-                    for (i, line) in data.split(|b| *b == b'\n').enumerate() {
-                        if i > 0 {
-                            out.push(b'\n');
-                        }
-                        // ObserveResponseModel and ObserveClaudeStream, before restore.
-                        req.usage.response_line(Format::Claude, line);
-                        out.extend(stream::restore_line(line, &reverse).map_err(|m| {
-                            let error =
-                                plain_error(format!("restore Claude OAuth tool name from streaming response: {m}"));
-                            capture_error(capture, &error);
-                            wrap(error)
-                        })?);
-                    }
-                    if let Some(scope) = replay {
-                        scope.store_response(&out);
-                    }
-                    ResponseBody::Buffered(Bytes::from(out))
-                } else {
-                    // ObserveResponseModel and ParseClaudeUsage of the upstream body.
-                    req.usage.response_body(Format::Claude, &data);
-                    let text = String::from_utf8_lossy(&data).into_owned();
-                    let id = rawjson::string(&text, "id").trim().to_owned();
+                let id = stream::buffered_message_id(&data);
+                if !id.is_empty() {
                     completion.complete(&id, &request_id);
-                    // A failed restore returns before ParseClaudeUsage: Go's deferred
-                    // TrackFailure publishes no tokens. The error is plain (wrapped for a
-                    // fast request with the 2xx status), so Go records no status.
-                    let restored = alias::restore_response(&text, &reverse).map_err(|m| {
-                        let message = format!("restore Claude OAuth tool name from response: {m}");
-                        req.usage.publish_failure(0, &message);
-                        capture.record(CaptureEvent::ResponseError(&message));
-                        wrap(plain_error(message))
-                    })?;
-                    if let Some(scope) = replay {
-                        scope.store_response(restored.as_bytes());
-                    }
-                    // reporter.Publish(ParseClaudeUsage(data)): native Execute always
-                    // publishes, with whatever usage the body carried.
-                    req.usage.publish();
-                    ResponseBody::Buffered(Bytes::from(restored))
                 }
+                // Lines whose names need no restore keep their bytes: the body is
+                // copied only from the first line that changes.
+                let mut out: Option<Vec<u8>> = None;
+                let mut end = 0;
+                for line in data.split(|b| *b == b'\n') {
+                    let start = end;
+                    end += line.len() + 1;
+                    // ObserveResponseModel and ObserveClaudeStream, before restore.
+                    req.usage.response_line(Format::Claude, line);
+                    let restored = stream::restore_line(line, &reverse).map_err(|m| {
+                        let error = crate::upstream::plain_error_after_response(format!(
+                            "restore Claude OAuth tool name from streaming response: {m}"
+                        ));
+                        capture_error(capture, &error);
+                        wrap(error)
+                    })?;
+                    if out.is_none() && matches!(restored, std::borrow::Cow::Borrowed(_)) {
+                        continue;
+                    }
+                    let out = out.get_or_insert_with(|| data[..start].to_vec());
+                    out.extend_from_slice(&restored);
+                    if end <= data.len() {
+                        out.push(b'\n');
+                    }
+                }
+                let out = out.map_or(data, Bytes::from);
+                if let Some(scope) = replay {
+                    scope.store_response(&out);
+                }
+                ResponseBody::Buffered(out)
+            } else {
+                // ObserveResponseModel and ParseClaudeUsage of the upstream body.
+                req.usage.response_body(Format::Claude, &data);
+                let id = rawjson::string(&String::from_utf8_lossy(&data), "id").trim().to_owned();
+                completion.complete(&id, &request_id);
+                // A failed restore returns before ParseClaudeUsage: Go's deferred
+                // TrackFailure publishes no tokens. The error is plain (wrapped for a
+                // fast request with the 2xx status), so Go records no status.
+                let restored = alias::restore_response(data, &reverse).map_err(|m| {
+                    let message = format!("restore Claude OAuth tool name from response: {m}");
+                    req.usage.publish_failure(0, &message);
+                    capture.record(CaptureEvent::ResponseError(&message));
+                    wrap(crate::upstream::plain_error_after_response(message))
+                })?;
+                if let Some(scope) = replay {
+                    scope.store_response(&restored);
+                }
+                // reporter.Publish(ParseClaudeUsage(data)): native Execute always
+                // publishes, with whatever usage the body carried.
+                req.usage.publish();
+                ResponseBody::Buffered(restored)
             }
-            ResponseBody::Buffered(_) => unreachable!("send returns raw streams"),
         };
         let response = ExecResponse {
             status: response.status,
@@ -437,13 +429,6 @@ impl ClaudeExecutor {
             return Ok(response);
         }
         // Translated clients: framed events through the registered stream translator.
-        let response = match response.body {
-            ResponseBody::Buffered(_) => response,
-            ResponseBody::Stream(events) => ExecResponse {
-                body: ResponseBody::Stream(events),
-                ..response
-            },
-        };
         translate::response(req, translated, response).await
     }
 
@@ -476,10 +461,9 @@ impl ClaudeExecutor {
         let response = self
             .send(&ctx, &mut prepared, "/v1/messages/count_tokens", None, capture)
             .await?;
-        let body = match response.body {
-            ResponseBody::Stream(raw) => collect(raw).await.inspect_err(|e| capture_error(capture, e))?,
-            ResponseBody::Buffered(b) => b,
-        };
+        let body = collect(response.body)
+            .await
+            .inspect_err(|e| capture_error(capture, e))?;
         capture.record(CaptureEvent::ResponseChunk(&body));
         Ok(ExecResponse {
             status: response.status,
@@ -493,7 +477,8 @@ impl ClaudeExecutor {
     /// before decoding and for any status.
     // ponytail: Go's http.Client drains up to 2 KiB of a redirect response's body
     // through the tracked transport, so a redirect with a body marks the first byte at
-    // that hop; this marks it on the final response only.
+    // that hop; this marks it on the final response only. Mark it per hop in the
+    // exchange if redirect timing matters.
     async fn send(
         &self,
         ctx: &Ctx<'_>,
@@ -581,7 +566,8 @@ impl ClaudeExecutor {
         // from a Claude credential, whatever its status or body (Go records them before
         // reading the body); count_tokens results skip observation in Go's conductor.
         // ponytail: Go keys the model state by the conductor's state model; the executor
-        // sees the upstream base model, as Codex's observation does.
+        // sees the upstream base model, as Codex's observation does. Carry the state model on
+        // ExecRequest if aliases mapped to another upstream name need separate state.
         if path == "/v1/messages" && ctx.credential.provider.trim().eq_ignore_ascii_case("claude") {
             self.quota
                 .observe_model(&ctx.credential.id, &ctx.base_model, &upstream.headers);
@@ -631,16 +617,9 @@ async fn finish(
     if (200..300).contains(&status) {
         let body = body.map_err(|m| {
             capture.record(CaptureEvent::ResponseError(&m));
-            fast_request_error(
-                fast,
-                crate::upstream::body_read_error_after_response(status, plain_error(m)),
-            )
+            fast_request_error(fast, crate::upstream::plain_error_after_response(m))
         })?;
-        return Ok(RawResponse {
-            status,
-            headers,
-            body: ResponseBody::Stream(body),
-        });
+        return Ok(RawResponse { status, headers, body });
     }
     let data = match body {
         Err(m) => {
@@ -650,12 +629,16 @@ async fn finish(
             return Err(fast_request_error(fast, error));
         }
         Ok(mut body) => {
-            // ponytail: Go reads error bodies without a bound; 16 MiB covers any real
-            // provider error without letting a hostile upstream exhaust a small VPS.
+            // ponytail: Go reads error bodies without a bound; this keeps the
+            // [`crate::proxy::MAX_ERROR_BODY`] prefix. Raise that bound if a provider's
+            // error needs more.
+            let limit = crate::proxy::MAX_ERROR_BODY;
             let mut data = BytesMut::new();
             loop {
                 match body.next().await {
-                    Some(Ok(chunk)) if data.len() < crate::proxy::MAX_ERROR_BODY => data.extend_from_slice(&chunk),
+                    Some(Ok(chunk)) if data.len() < limit => {
+                        data.extend_from_slice(&chunk[..chunk.len().min(limit - data.len())]);
+                    }
                     Some(Ok(_)) | None => break data.freeze(),
                     Some(Err(e)) => {
                         let reason = if e.scope == FailureScope::Transport {
@@ -695,7 +678,8 @@ impl Completion {
 struct RawResponse {
     status: u16,
     headers: http::HeaderMap,
-    body: ResponseBody,
+    /// The decoded body of a 2xx answer.
+    body: cpa_core::exec::ExecStream,
 }
 
 fn header_value(headers: &http::HeaderMap, name: &str) -> String {
@@ -738,6 +722,7 @@ fn upstream_error(
             body,
             direct: true,
             addon: None,
+            after_accept: None,
         };
     }
     let error = ExecError {
@@ -752,14 +737,9 @@ fn upstream_error(
         },
         direct: false,
         addon: None,
+        after_accept: None,
     };
     quota::classify(error, model_level_cooling)
-}
-
-/// A Go error with no status or scope (`fmt.Errorf`): the handler answers 500, and the
-/// conductor neither cools the credential nor treats the request as unservable.
-pub(crate) fn plain_error(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Transport, message)
 }
 
 /// `wrapClaudeFastRequestError`: any other failure of a fast request stops at the
@@ -771,6 +751,12 @@ fn fast_request_error(fast: bool, mut error: ExecError) -> ExecError {
             error.scope == FailureScope::Credential && error.status == 429 && quota::shared_rejection(&error.headers);
         if !shared_window {
             error.scope = FailureScope::Request;
+            // Nor does a response that broke off before the client saw any of it.
+            error.after_accept = match error.after_accept {
+                Some(cpa_core::exec::AfterAccept::Interrupted) => Some(cpa_core::exec::AfterAccept::Unprocessed),
+                Some(cpa_core::exec::AfterAccept::Truncated) => None,
+                kept => kept,
+            };
         }
     }
     error
@@ -779,7 +765,10 @@ fn fast_request_error(fast: bool, mut error: ExecError) -> ExecError {
 /// Request facts shared by every stage.
 struct Ctx<'a> {
     credential: &'a Credential,
-    settings: Settings,
+    /// The Claude settings of this config snapshot (parsed once per snapshot).
+    settings: Arc<Settings>,
+    /// The `claude-api-key` entry of the credential, an index into `settings.keys`.
+    key: Option<usize>,
     api_key: String,
     base_url: String,
     first_party: bool,
@@ -811,7 +800,8 @@ struct Ctx<'a> {
     bearer: bool,
     /// Local date for the currentDate reminder, unless the session pinned one.
     // ponytail: only UTC and the process zone are resolvable without a tz database;
-    // other IANA names fall back to local time, as Go does for unknown zones.
+    // other IANA names fall back to local time, as Go does for unknown zones. Bundle a
+    // tz database if other zones must resolve.
     today: String,
     /// The thread continuation aliases of the executor serving the request.
     thread_aliases: Arc<thread::Aliases>,
@@ -849,15 +839,6 @@ fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// `helps.SetStringIfDifferent`.
-fn set_string_if_different(body: String, path: &str, value: &str) -> String {
-    let current = rawjson::get(&body, path);
-    if current.kind() == gjson::Kind::String && current.str() == value {
-        return body;
-    }
-    rawjson::set_str(&body, path, value)
-}
-
 /// `isKimiMessagesUpstream`: a Kimi credential, or Kimi's API host.
 fn kimi_upstream(provider: &str, base_url: &str) -> bool {
     let provider = provider.trim().to_lowercase();
@@ -871,7 +852,7 @@ fn kimi_upstream(provider: &str, base_url: &str) -> bool {
 }
 
 /// `helps.ClaudeCLIAuthIdentitySeed`.
-// ponytail: Go falls back to the auth index and file name when the ID is empty; every
+// Go falls back to the auth index and file name when the ID is empty; every
 // loaded or synthesized credential here has an ID.
 fn identity_seed(credential: &Credential) -> String {
     let id = credential.id.trim();
@@ -887,57 +868,6 @@ fn base_model(model: &str) -> String {
     cpa_common::thinking::parse_suffix(model).model_name
 }
 
-/// `sanitizeClaudeMessagesForClaudeUpstreamWithDebug`: Claude-family targets (and
-/// compat models, which keep empty thinking blocks) go through the shared Messages
-/// signature sanitizer; then empty web_search domain lists are removed.
-fn sanitize_for_upstream(mut body: String, base_model: &str, preserve_empty_thinking: bool) -> String {
-    use cpa_common::signature::{Provider, provider_from_model_name, sanitize_claude_messages_for_claude_upstream};
-    if (provider_from_model_name(base_model) == Provider::Claude || preserve_empty_thinking)
-        && let Some(sanitized) =
-            sanitize_claude_messages_for_claude_upstream(body.as_bytes(), base_model, preserve_empty_thinking).0
-    {
-        body = text(sanitized);
-    }
-    // sanitizeClaudeWebSearchDomains: one pass over the tools, then the deletes.
-    let mut empty = Vec::new();
-    for (t, tool) in rawjson::get(&body, "tools").array().iter().enumerate() {
-        if !tool.get("type").str().starts_with("web_search_") {
-            continue;
-        }
-        for field in ["allowed_domains", "blocked_domains"] {
-            let v = tool.get(field);
-            if v.kind() == gjson::Kind::Array && v.array().is_empty() {
-                empty.push(format!("tools.{t}.{field}"));
-            }
-        }
-    }
-    for path in empty {
-        body = rawjson::delete(&body, &path);
-    }
-    body
-}
-
-/// `extractAndRemoveBetas`.
-fn extract_betas(body: String) -> (Vec<String>, String) {
-    let v = rawjson::get(&body, "betas");
-    if !v.exists() {
-        return (Vec::new(), body);
-    }
-    let betas = if v.kind() == gjson::Kind::Array {
-        v.array()
-            .iter()
-            .map(|b| b.str().trim().to_owned())
-            .filter(|b| !b.is_empty())
-            .collect()
-    } else {
-        Some(v.str().trim().to_owned())
-            .filter(|b| !b.is_empty())
-            .into_iter()
-            .collect()
-    };
-    (betas, rawjson::delete(&body, "betas"))
-}
-
 impl<'a> Ctx<'a> {
     fn new(
         exec: &ClaudeExecutor,
@@ -946,7 +876,7 @@ impl<'a> Ctx<'a> {
         cfg: &Config,
         delegation: Delegation,
     ) -> Self {
-        let settings = Settings::from_config(cfg);
+        let settings = cfg.derived(Settings::from_config);
         let attr = |k: &str| credential.attributes.get(k).map(String::as_str).unwrap_or_default();
         let api_key = if attr("api_key").is_empty() {
             credential.str("access_token").unwrap_or_default().to_owned()
@@ -958,6 +888,7 @@ impl<'a> Ctx<'a> {
         } else {
             attr("base_url").trim_end_matches('/').to_owned()
         };
+        let key = settings.key_index(&api_key, attr("base_url"));
         let oauth_token = api_key.contains("sk-ant-oat");
         // claudeFingerprintProfileFromConfig: the credential's own value, else the key's.
         let own = Some(attr("fingerprint_profile"))
@@ -971,8 +902,7 @@ impl<'a> Ctx<'a> {
             .map(normalize_fingerprint_profile)
             .unwrap_or_default();
         let profile = if own.is_empty() {
-            settings
-                .key_for(&api_key, attr("base_url"))
+            key.and_then(|i| settings.keys.get(i))
                 .map(|k| normalize_fingerprint_profile(&k.fingerprint_profile))
                 .unwrap_or_default()
         } else {
@@ -1004,6 +934,7 @@ impl<'a> Ctx<'a> {
             oauth_token,
             bearer,
             settings,
+            key,
             api_key,
             base_url,
             today: String::new(),
@@ -1077,7 +1008,7 @@ impl<'a> Ctx<'a> {
             if e.code.is_some() {
                 ExecError::local(e.status(), FailureScope::Request, e.message)
             } else {
-                plain_error(e.message)
+                crate::upstream::plain_error(e.message)
             }
         })
     }
@@ -1108,13 +1039,7 @@ impl<'a> Ctx<'a> {
         if !attr_mode.is_empty() {
             mode = attr_mode.clone();
         }
-        let base = self
-            .credential
-            .attributes
-            .get("base_url")
-            .map(String::as_str)
-            .unwrap_or_default();
-        let key_cloak = self.settings.key_for(&self.api_key, base).and_then(|k| k.cloak.clone());
+        let key_cloak = self.key().and_then(|k| k.cloak.clone());
         if let Some(c) = &key_cloak {
             if !c.mode.trim().is_empty() {
                 mode = c.mode.trim().to_owned();
@@ -1177,7 +1102,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = translated;
-        body = set_string_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1254,7 +1181,7 @@ impl<'a> Ctx<'a> {
                         .await
                         .map(|session| cloak::fake_user_id(&session))
                 };
-                let user_id = user_id.map_err(|e| ExecError::local(500, FailureScope::Transport, e))?;
+                let user_id = user_id.map_err(crate::upstream::plain_error)?;
                 body = rawjson::set_str(&body, "metadata.user_id", &user_id);
             }
             cloaked = true;
@@ -1474,7 +1401,9 @@ impl<'a> Ctx<'a> {
             String::new()
         };
         let mut body = utf8(translated).into_owned();
-        body = set_string_if_different(body, "model", &self.upstream_model);
+        body = crate::codex_json::edit(body, |b| {
+            cpa_common::json::set_str_if_different(b, "model", &self.upstream_model)
+        });
         body = self.apply_thinking(req, body)?;
         if self.rebuild_mid_system() {
             body = rebuild_mid_system(&body);
@@ -1564,7 +1493,7 @@ impl<'a> Ctx<'a> {
         let device_profile = if self.settings.header_defaults.stabilize_device_profile && confirmed {
             let profile = profile::resolve_required(&self.credential.id, &self.api_key, &req.headers, &self.settings)
                 .await
-                .map_err(|e| ExecError::local(500, FailureScope::Transport, e))?;
+                .map_err(crate::upstream::plain_error)?;
             Some(profile)
         } else {
             None
@@ -1574,7 +1503,7 @@ impl<'a> Ctx<'a> {
         let cached_session_id = if headers::needs_cached_session(self.cli_profile || cloak, confirmed, session_id) {
             session::cached_session_id_required(&self.api_key)
                 .await
-                .map_err(|e| ExecError::local(500, FailureScope::Transport, e))?
+                .map_err(crate::upstream::plain_error)?
         } else {
             String::new()
         };
@@ -1606,17 +1535,12 @@ impl<'a> Ctx<'a> {
             .attributes
             .get("rebuild_mid_system_message")
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
-            || self
-                .settings
-                .key_for(
-                    &self.api_key,
-                    self.credential
-                        .attributes
-                        .get("base_url")
-                        .map(String::as_str)
-                        .unwrap_or_default(),
-                )
-                .is_some_and(|k| k.rebuild_mid_system_message)
+            || self.key().is_some_and(|k| k.rebuild_mid_system_message)
+    }
+
+    /// The `claude-api-key` entry of the credential.
+    fn key(&self) -> Option<&settings::ClaudeKey> {
+        self.key.and_then(|i| self.settings.keys.get(i))
     }
 
     /// `claudeDiagnosticsCredentialIdentity`.
@@ -1745,7 +1669,9 @@ impl<'a> Ctx<'a> {
         let (device, account) = identity::wire_identity(self.credential, &seed, synthesize);
         // applyClaudeCLIIdentity wraps every ApplyClaudeCredentialMetadata error once more.
         identity::apply(body, &device, &account, session_id).map_err(|e| match e {
-            identity::ApplyError::Plain(e) => plain_error(format!("apply Claude credential metadata: {e}")),
+            identity::ApplyError::Plain(e) => {
+                crate::upstream::plain_error(format!("apply Claude credential metadata: {e}"))
+            }
             identity::ApplyError::Request(e) => ExecError::local(
                 400,
                 FailureScope::Request,
@@ -1775,192 +1701,6 @@ impl<'a> Ctx<'a> {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_TOKENS);
         rawjson::set_raw(&body, "max_tokens", &max.to_string())
-    }
-}
-
-/// `defaultModelMaxTokens`.
-const DEFAULT_MAX_TOKENS: i64 = 1024;
-
-/// Fill `thinking.display: updates` for progress-display models with active thinking.
-fn cloak_thinking_display(body: String) -> String {
-    if rawjson::get(&body, "thinking.display").exists() || !betas::progress_display(&rawjson::string(&body, "model")) {
-        return body;
-    }
-    match rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str() {
-        "adaptive" | "enabled" => rawjson::set_str(&body, "thinking.display", "updates"),
-        _ => body,
-    }
-}
-
-/// `injectFakeUserID`: a caller's valid Claude Code user ID is kept.
-/// `injectFakeUserID`: a missing or invalid `metadata.user_id` is replaced.
-fn needs_fake_user_id(body: &str) -> bool {
-    let existing = rawjson::string(body, "metadata.user_id");
-    !rawjson::get(body, "metadata").exists() || existing.is_empty() || !detect::valid_user_id(&existing)
-}
-
-/// `injectClaudeDiagnosticsWithState`: after context_management when present.
-fn inject_diagnostics(body: &str, previous_message_id: &str) -> String {
-    let value = if previous_message_id.is_empty() {
-        r#"{"previous_message_id":null}"#.to_owned()
-    } else {
-        format!(
-            r#"{{"previous_message_id":{}}}"#,
-            rawjson::js_string(previous_message_id)
-        )
-    };
-    if rawjson::get(body, "diagnostics").exists() {
-        return rawjson::set_raw(body, "diagnostics", &value);
-    }
-    let cm = rawjson::get(body, "context_management");
-    if let Some(start) = rawjson::offset(body, &cm) {
-        let end = start + cm.json().len();
-        return format!("{},\"diagnostics\":{value}{}", &body[..end], &body[end..]);
-    }
-    rawjson::set_raw(body, "diagnostics", &value)
-}
-
-/// `disableThinkingIfToolChoiceForced`.
-fn disable_thinking_if_tool_choice_forced(body: String) -> String {
-    if !matches!(rawjson::get(&body, "tool_choice.type").str(), "any" | "tool") {
-        return body;
-    }
-    let mut body = rawjson::delete(&body, "thinking");
-    body = rawjson::delete(&body, "output_config.effort");
-    let oc = rawjson::get(&body, "output_config");
-    let mut members = 0;
-    oc.each(|_, _| {
-        members += 1;
-        true
-    });
-    if oc.kind() == gjson::Kind::Object && members == 0 {
-        body = rawjson::delete(&body, "output_config");
-    }
-    body
-}
-
-/// `normalizeClaudeSamplingForUpstream`.
-fn normalize_sampling(mut body: String, native: bool) -> String {
-    let thinking = matches!(
-        rawjson::string(&body, "thinking.type").trim().to_lowercase().as_str(),
-        "enabled" | "adaptive" | "auto"
-    );
-    if !native {
-        body = rawjson::delete_owned(body, "temperature");
-        body = rawjson::delete_owned(body, "top_p");
-        if thinking {
-            body = rawjson::delete_owned(body, "top_k");
-        }
-        return body;
-    }
-    if thinking {
-        let t = rawjson::get(&body, "temperature");
-        if t.exists() && t.f64() != 1.0 {
-            body = rawjson::delete(&body, "temperature");
-        }
-        let p = rawjson::get(&body, "top_p");
-        if p.exists() && p.f64() < 0.95 {
-            body = rawjson::delete(&body, "top_p");
-        }
-        return rawjson::delete_owned(body, "top_k");
-    }
-    if rawjson::get(&body, "temperature").exists() && rawjson::get(&body, "top_p").exists() {
-        body = rawjson::delete(&body, "top_p");
-    }
-    body
-}
-
-fn has_mid_system(body: &str) -> bool {
-    rawjson::get(body, "messages")
-        .array()
-        .iter()
-        .any(|m| m.get("role").str() == "system")
-}
-
-/// `validateClaudeMidSystemMessageModel`.
-fn validate_mid_system(body: &str, confirmed: bool, first_party: bool) -> Result<(), ExecError> {
-    if confirmed || !first_party || !cloak::legacy_system_reminder(body) || !has_mid_system(body) {
-        return Ok(());
-    }
-    let model = rawjson::string(body, "model");
-    let model = if model.is_empty() { "unknown".to_owned() } else { model };
-    Err(ExecError::local(
-        400,
-        FailureScope::Request,
-        format!(
-            "invalid_request_error: role 'system' is not supported on this model. Model {model:?} predates mid-conversation system turns, so system instructions must stay in the top-level system field for it."
-        ),
-    ))
-}
-
-/// `rebuildMidSystemMessagesToTopLevel`: fold role=system turns into `system`.
-fn rebuild_mid_system(body: &str) -> String {
-    let messages = rawjson::get(body, "messages");
-    if messages.kind() != gjson::Kind::Array {
-        return body.to_owned();
-    }
-    let mut moved = Vec::new();
-    let mut kept = Vec::new();
-    for m in messages.array() {
-        if m.get("role").str().trim().eq_ignore_ascii_case("system") {
-            moved.extend(system_text_parts(&m.get("content")));
-        } else {
-            kept.push(m.json().to_owned());
-        }
-    }
-    if moved.is_empty() {
-        return body.to_owned();
-    }
-    let mut parts = system_text_parts(&rawjson::get(body, "system"));
-    parts.extend(moved);
-    let body = rawjson::set_raw(body, "system", &format!("[{}]", parts.join(",")));
-    rawjson::set_raw(&body, "messages", &format!("[{}]", kept.join(",")))
-}
-
-/// `claudeSystemTextParts`: strings become text blocks, text objects stay raw.
-fn system_text_parts(content: &gjson::Value<'_>) -> Vec<String> {
-    let block = |text: &str| rawjson::set_str(r#"{"type":"text","text":""}"#, "text", text);
-    match content.kind() {
-        gjson::Kind::String if !content.str().trim().is_empty() => vec![block(content.str())],
-        gjson::Kind::Array => content
-            .array()
-            .iter()
-            .filter_map(|item| match item.kind() {
-                gjson::Kind::String if !item.str().trim().is_empty() => Some(block(item.str())),
-                gjson::Kind::Object
-                    if item.get("type").str() == "text" && !item.get("text").str().trim().is_empty() =>
-                {
-                    Some(item.json().to_owned())
-                }
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// `util.StripClaudeCodeAttributionSystem`.
-fn strip_attribution_system(body: &str) -> String {
-    let system = rawjson::get(body, "system");
-    let attribution = |t: &str| t.trim_start().starts_with(cloak::BILLING_PREFIX);
-    match system.kind() {
-        gjson::Kind::String if attribution(system.str()) => rawjson::delete(body, "system"),
-        gjson::Kind::Array => {
-            let blocks = system.array();
-            let kept: Vec<String> = blocks
-                .iter()
-                .filter(|b| !(b.get("type").str() == "text" && attribution(b.get("text").str())))
-                .map(|b| b.json().to_owned())
-                .collect();
-            if kept.len() == blocks.len() {
-                body.to_owned()
-            } else if kept.is_empty() {
-                rawjson::delete(body, "system")
-            } else {
-                rawjson::set_raw(body, "system", &format!("[{}]", kept.join(",")))
-            }
-        }
-        _ => body.to_owned(),
     }
 }
 

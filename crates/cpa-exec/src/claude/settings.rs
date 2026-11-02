@@ -81,13 +81,13 @@ impl Settings {
         s
     }
 
-    /// `resolveClaudeKeyConfig`: the config entry whose key (and base URL when both
-    /// are set) matches the credential, case-insensitively.
-    pub fn key_for(&self, api_key: &str, base_url: &str) -> Option<&ClaudeKey> {
+    /// `resolveClaudeKeyConfig`: the position of the config entry whose key (and base
+    /// URL when both are set) matches the credential, case-insensitively.
+    pub fn key_index(&self, api_key: &str, base_url: &str) -> Option<usize> {
         if api_key.is_empty() {
             return None;
         }
-        self.keys.iter().find(|k| {
+        self.keys.iter().position(|k| {
             k.api_key.trim().eq_ignore_ascii_case(api_key)
                 && (base_url.is_empty()
                     || k.base_url.trim().is_empty()

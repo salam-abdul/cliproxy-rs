@@ -25,11 +25,6 @@ pub(crate) mod view;
 /// Serializes v0 read-modify-write handlers, as Go's handler mutex does.
 static WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Go `strings.TrimSpace`.
-pub(crate) fn go_trim(s: &str) -> &str {
-    std::str::from_utf8(cpa_core::config::go_trim_space(s.as_bytes())).unwrap_or(s)
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Bool,
@@ -213,7 +208,7 @@ pub(crate) async fn config(State(state): State<Arc<Management>>) -> Response {
 
 /// Go `normalizeRoutingStrategy`.
 fn routing_strategy(s: &str) -> Option<&'static str> {
-    match go_trim(s).to_lowercase().as_str() {
+    match s.trim().to_lowercase().as_str() {
         "" | "round-robin" | "roundrobin" | "rr" => Some("round-robin"),
         "weighted-round-robin" | "weightedroundrobin" | "wrr" => Some("weighted-round-robin"),
         "fill-first" | "fillfirst" | "ff" => Some("fill-first"),
@@ -268,7 +263,8 @@ async fn write(state: Arc<Management>, v8: String, value: Value) -> Response {
 
 /// Saves one v8 path unchanged, as Go saves after a handler that changed nothing.
 /// ponytail: a path absent from the document is not saved at all; Go would still
-/// rewrite the file (and fail on a read-only disk).
+/// rewrite the file (and fail on a read-only disk). Save unconditionally if a caller
+/// depends on that rewrite.
 async fn touch(state: Arc<Management>, v8: String) -> Response {
     let cfg = state.rt.config();
     let current = v8
@@ -309,7 +305,7 @@ pub(crate) async fn field_route(
         let value = match f.route {
             "routing/strategy" => {
                 let raw = cfg["routing"]["strategy"].as_str().unwrap_or_default();
-                Value::from(routing_strategy(raw).unwrap_or(go_trim(raw)))
+                Value::from(routing_strategy(raw).unwrap_or(raw.trim()))
             }
             r if r.starts_with("quota-exceeded/") => cfg["quota-exceeded"][f.key].clone(),
             _ => cfg[f.key].clone(),
@@ -368,33 +364,10 @@ fn query_first(raw: Option<&str>, name: &str) -> Option<String> {
         .map(|(_, v)| v)
 }
 
-/// `url.ParseQuery` pairs (malformed pairs skipped).
+/// `url.ParseQuery` pairs (malformed and non-UTF-8 pairs skipped).
 fn url_pairs(raw: &str) -> impl Iterator<Item = (String, String)> + '_ {
-    raw.split('&')
-        .filter(|p| !p.is_empty() && !p.contains(';'))
-        .filter_map(|p| {
-            let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            Some((unescape(k)?, unescape(v)?))
-        })
-}
-
-fn unescape(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => out.push(b' '),
-            b'%' => {
-                let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    String::from_utf8(out).ok()
+    cpa_core::config::go_url::parse_query(raw)
+        .filter_map(|(k, v)| Some((String::from_utf8(k).ok()?, String::from_utf8(v).ok()?)))
 }
 
 /// Go's `api-keys` routes (`putStringList`, `patchStringList`, `deleteFromStringList`).
@@ -461,10 +434,10 @@ pub(crate) async fn api_keys(
                 return write(state, v8, Value::Array(keys)).await;
             }
             if let Some(value) = query_first(raw, "value")
-                .map(|v| go_trim(&v).to_owned())
+                .map(|v| v.trim().to_owned())
                 .filter(|v| !v.is_empty())
             {
-                keys.retain(|k| go_trim(k.as_str().unwrap_or_default()) != value);
+                keys.retain(|k| k.as_str().unwrap_or_default().trim() != value);
                 return write(state, v8, Value::Array(keys)).await;
             }
             bad("missing index or value")
@@ -611,7 +584,8 @@ fn weight_error_in(items: &serde_yaml_ng::Value, path: &str) -> Option<WeightErr
 /// key lists and OpenAI-compatible `api-key-entries` of the merge-expanded document, in
 /// document order, skipping lists a v8 family replaces. A weight that is neither a
 /// number nor null fails Go's decode into `*int` before that: 400.
-// ponytail: that 400 message names the value where yaml.v3 also names the line.
+// ponytail: that 400 message names the value where yaml.v3 also names the line; add
+// the line if a client depends on it.
 fn legacy_weight_error(root: &serde_yaml_ng::Value) -> Option<Response> {
     let v8 = root.get("api-keys").and_then(serde_yaml_ng::Value::as_mapping);
     // Go's flattenV8 replaces a legacy list with the v8 family when that is present.
@@ -671,7 +645,8 @@ fn legacy_weight_error(root: &serde_yaml_ng::Value) -> Option<Response> {
 /// Go answers 400 for what fails while decoding (syntax, shape, v8 key groups) and 422
 /// for `LoadConfig` validation. ponytail: a type mismatch (`port: abc`) is also a decode
 /// error in Go but only `Config::parse` finds it here, so it is 422; and syntax messages
-/// are this parser's, not yaml.v3's.
+/// are this parser's, not yaml.v3's. Decoding into the typed config in the first pass
+/// would answer 400 as Go does.
 pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, headers: HeaderMap, body: Bytes) -> Response {
     let if_match = super::if_match_values(&headers);
     let fail = |status: StatusCode, error: &str, message: String| {
@@ -688,10 +663,10 @@ pub(crate) async fn put_config_yaml(State(state): State<Arc<Management>>, header
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if !if_match.is_empty() {
-                    return super::error(412, "precondition_failed");
+                    return super::json_error(StatusCode::PRECONDITION_FAILED, "precondition_failed");
                 }
             }
-            Err(_) => return super::error(500, "read_failed"),
+            Err(_) => return super::json_error(StatusCode::INTERNAL_SERVER_ERROR, "read_failed"),
         }
         let Ok(text) = std::str::from_utf8(&body) else {
             return fail(

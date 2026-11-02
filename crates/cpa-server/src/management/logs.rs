@@ -802,6 +802,7 @@ pub(crate) async fn error_logs(State(state): State<Arc<Management>>) -> Response
 
 /// gin `FileAttachment` over `http.ServeFile` for a plain log file.
 // ponytail: no Range or conditional requests (the dashboard downloads whole files).
+// Serve through a range-aware file service if a client needs them.
 fn attachment(path: &Path, name: &str) -> Response {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -819,7 +820,7 @@ fn attachment(path: &Path, name: &str) -> Response {
             name.replace('\\', "\\\\").replace('"', "\\\"")
         )
     } else {
-        let encoded: String = url_query_escape(name);
+        let encoded: String = cpa_core::config::go_url::query_escape(name);
         format!("attachment; filename*=UTF-8''{encoded}")
     };
     let modified = std::fs::metadata(path)
@@ -854,7 +855,7 @@ fn content_type(name: &str, data: &[u8]) -> String {
     {
         return t.clone();
     }
-    // ponytail: Go's sniffer also recognises HTML, XML and binary signatures; log text
+    // Go's sniffer also recognises HTML, XML and binary signatures; log text
     // without binary bytes is text/plain, as there.
     let binary = data
         .iter()
@@ -918,17 +919,6 @@ fn system_log_type() -> Option<&'static String> {
         found
     })
     .as_ref()
-}
-
-/// Go `url.QueryEscape`.
-fn url_query_escape(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
-            b' ' => "+".to_owned(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }
 
 /// Go `DownloadRequestErrorLog`.

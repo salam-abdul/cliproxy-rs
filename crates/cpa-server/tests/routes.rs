@@ -160,7 +160,7 @@ async fn proxy(config: &str, credentials: Vec<Credential>) -> Proxy {
     for c in &mut credentials {
         c.attributes.insert("base_url".into(), upstream_url.clone());
     }
-    let config = Config::parse(&format!("access:\n  api-keys: [client-key]\n{config}")).unwrap();
+    let config = cpa_server::testing::config(&format!("access:\n  api-keys: [client-key]\n{config}"));
     let executors = Executors {
         claude: ClaudeExecutor::new(&upstream_url).unwrap(),
         codex: Default::default(),
@@ -220,7 +220,7 @@ async fn chat_completions_translate_and_stream_upstream_for_non_stream_clients()
     assert!(text.contains(r#""content":"hi""#));
 }
 
-/// Go `StartNonStreamingKeepAlive` (M2-0036), expectations from the Go golden
+/// Go `StartNonStreamingKeepAlive`, expectations from the Go golden
 /// `nonstream_keepalive` (tests/reference/server/main.go): a result within one interval
 /// is untouched; a slower one commits 200 `application/json` with a `\n` per interval,
 /// then the rendered body, even when it is an error.
@@ -739,7 +739,7 @@ async fn expired_token_is_used_then_refreshed_once_after_401() {
         openai: Default::default(),
         google: Default::default(),
     };
-    let config = Config::parse("access:\n  api-keys: [client-key]\n").unwrap();
+    let config = cpa_server::testing::config("access:\n  api-keys: [client-key]\n");
     let rt = Arc::new(cpa_server::testing::runtime(config, vec![credential], executors));
     let url = serve(router(rt.clone())).await;
     let (status, _, text) = post(
@@ -821,7 +821,7 @@ async fn scripted_proxy(config: &str, tokens: &[&str], replies: Vec<Reply>) -> (
             c
         })
         .collect();
-    let config = Config::parse(&format!("access:\n  api-keys: [client-key]\n{config}")).unwrap();
+    let config = cpa_server::testing::config(&format!("access:\n  api-keys: [client-key]\n{config}"));
     let executors = Executors {
         claude: ClaudeExecutor::new(&upstream_url).unwrap(),
         codex: Default::default(),
@@ -883,10 +883,11 @@ async fn empty_stream_fails_over_and_reports_empty_stream() {
     );
 }
 
-/// Go handlers_stream.go: `requests.streaming.bootstrap-retries` re-runs a stream that
-/// failed before its first payload, independently of request-retry.
+/// A stream that broke off before its first payload reached an upstream that had the
+/// request, so its account is tried once: `requests.streaming.bootstrap-retries` never
+/// reruns it, with or without the setting.
 #[tokio::test]
-async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() {
+async fn bootstrap_retries_never_rerun_an_account_whose_stream_broke_off() {
     let broken: Reply = Box::new(|| {
         // A reset before any body byte: the executor's first item is the error (Go: a
         // channel error before the first payload). Go's Claude stream flushes any bytes
@@ -909,8 +910,12 @@ async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() 
     let config = "requests:\n  streaming:\n    bootstrap-retries: 1\n";
     let (url, script, _) = scripted_proxy(config, &["fake-a"], vec![broken, sse_reply()]).await;
     let (status, _, text) = post(&url, "/v1/messages", &body).await;
-    assert_eq!(status, 200, "{text}");
-    assert_eq!(script.calls.lock().unwrap().len(), 2);
+    assert_eq!(status, 500, "{text}");
+    assert_eq!(
+        text,
+        r#"{"type":"error","error":{"type":"api_error","message":"unexpected EOF"}}"#
+    );
+    assert_eq!(script.calls.lock().unwrap().len(), 1);
 
     let broken: Reply = Box::new(|| {
         // A reset before any body byte: the executor's first item is the error (Go: a
@@ -932,8 +937,38 @@ async fn bootstrap_retries_rerun_a_stream_that_broke_before_its_first_payload() 
     });
     let (url, script, _) = scripted_proxy("", &["fake-a"], vec![broken, sse_reply()]).await;
     let (status, _, _) = post(&url, "/v1/messages", &body).await;
-    assert_eq!(status, 500, "without bootstrap retries the transport fault is final");
+    assert_eq!(status, 500, "without bootstrap retries the break is final too");
     assert_eq!(script.calls.lock().unwrap().len(), 1);
+}
+
+/// The failover rule for a buffered response: an upstream error event that is the
+/// first event says the upstream did no work, so another account answers; one that
+/// follows output ends the request, since the upstream already worked on it.
+#[tokio::test]
+async fn a_buffered_upstream_error_fails_over_only_before_any_output() {
+    let error = || {
+        event(
+            "error",
+            serde_json::json!({"type":"error","error":{"type":"overloaded_error","message":"synthetic overload"}}),
+        )
+    };
+    let body = format!(r#"{{"model":"{MODEL}","messages":[{{"role":"user","content":"hello"}}]}}"#);
+
+    let first: Reply = Box::new(move || ([("content-type", "text/event-stream")], error()).into_response());
+    let (url, script, _) = scripted_proxy("", &["fake-a", "fake-b"], vec![first, sse_reply()]).await;
+    let (status, _, text) = post(&url, "/v1/chat/completions", &body).await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(script.calls.lock().unwrap().len(), 2);
+
+    let after_output: Reply = Box::new(move || {
+        let start = sse().split("\n\n").take(3).collect::<Vec<_>>().join("\n\n") + "\n\n";
+        ([("content-type", "text/event-stream")], start + &error()).into_response()
+    });
+    let (url, script, _) = scripted_proxy("", &["fake-a", "fake-b"], vec![after_output, sse_reply()]).await;
+    let (status, _, text) = post(&url, "/v1/chat/completions", &body).await;
+    assert_ne!(status, 200, "{text}");
+    assert!(text.contains("synthetic overload"), "{text}");
+    assert_eq!(script.calls.lock().unwrap().len(), 1, "never resent");
 }
 
 /// Go net/http: no Content-Length set by the handler means chunked above 2048 bytes and

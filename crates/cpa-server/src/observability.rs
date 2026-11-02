@@ -342,7 +342,7 @@ pub(crate) fn mask_query(raw: &str) -> String {
     raw.split('&')
         .map(|part| {
             let (key, value) = part.split_once('=').unwrap_or((part, ""));
-            let decoded = crate::access::unescape(key).unwrap_or_else(|| key.as_bytes().to_owned());
+            let decoded = cpa_core::config::go_url::query_unescape(key).unwrap_or_else(|| key.as_bytes().to_owned());
             let lower = cpa_common::gostr::lower_bytes(cpa_core::config::go_trim_space(&decoded));
             let lower = lower.strip_suffix("[]").unwrap_or(&lower);
             if !(lower == "key"
@@ -353,16 +353,9 @@ pub(crate) fn mask_query(raw: &str) -> String {
             {
                 return part.to_owned();
             }
-            let value = crate::access::unescape(value).unwrap_or_else(|| value.as_bytes().to_owned());
+            let value = cpa_core::config::go_url::query_unescape(value).unwrap_or_else(|| value.as_bytes().to_owned());
             let value = hide_key(cpa_core::config::go_trim_space(&value));
-            let escaped: String = value
-                .iter()
-                .map(|b| match b {
-                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (*b as char).to_string(),
-                    b' ' => "+".to_owned(),
-                    _ => format!("%{b:02X}"),
-                })
-                .collect();
+            let escaped = cpa_core::config::go_url::query_escape(value);
             format!("{key}={escaped}")
         })
         .collect::<Vec<_>>()
@@ -401,7 +394,7 @@ mod tests {
 
     fn runtime() -> Arc<Runtime> {
         Arc::new(crate::testing::runtime(
-            cpa_core::config::Config::parse("server: {trusted-proxies: [127.0.0.1]}\n").unwrap(),
+            crate::testing::config("server: {trusted-proxies: [127.0.0.1]}\n"),
             Vec::new(),
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -548,7 +541,9 @@ mod tests {
 
     #[tokio::test]
     async fn real_dispatch_header_access_and_usage_share_identity() {
-        let config = cpa_core::config::Config::parse("claude-api-key:\n  - api-key: fake-observe-key\n    base-url: http://127.0.0.1:9\n    models: [{name: claude-sonnet-4-6}]\nobservability: {usage: {usage-statistics-enabled: true}}\n").unwrap();
+        let config = crate::testing::config(
+            "claude-api-key:\n  - api-key: fake-observe-key\n    base-url: http://127.0.0.1:9\n    models: [{name: claude-sonnet-4-6}]\nobservability: {usage: {usage-statistics-enabled: true}}\n",
+        );
         let credentials = cpa_core::config::credentials::from_config(&config);
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),

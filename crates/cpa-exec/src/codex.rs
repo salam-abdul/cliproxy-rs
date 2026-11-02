@@ -85,7 +85,7 @@ impl CodexExecutor {
         self
     }
 
-    /// Passive quota snapshots per credential (M4-0016), for the management API.
+    /// Passive quota snapshots per credential, for the management API.
     pub fn quota(&self) -> &QuotaSignals {
         &self.quota
     }
@@ -266,7 +266,8 @@ impl CodexExecutor {
             Ok(upstream) => upstream,
             Err(error) => {
                 // ponytail: the text is this executor's transport message, not net/http's
-                // `Post "<url>": ...`.
+                // `Post "<url>": ...`; keep the client error text on ExecError if callers
+                // need Go's.
                 wire.exec_error(&error);
                 return Err(error);
             }
@@ -666,7 +667,7 @@ impl CodexExecutor {
 /// `CountTokens` (codex_executor_tokens.go): the request shaped as for Codex, counted
 /// locally with the model's tiktoken encoding; nothing is sent upstream.
 fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecError> {
-    use crate::codex_json::{delete, set_bool_if_different, set_str, set_str_if_different};
+    use crate::codex_json::{delete, set_str};
     let model = request::base_model(&req.model);
     // Go reads is-compat only from the attempt's binding here (APIKeyModelIsCompat).
     let is_compat = req.resolved_model.as_ref().is_some_and(|r| r.is_compat());
@@ -695,7 +696,7 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
     })
     .map_err(|e| ExecError::local(e.status(), FailureScope::Request, e.message))?;
     let mut body = String::from_utf8_lossy(&body).into_owned();
-    body = set_str_if_different(body, "model", &model);
+    body = crate::codex_json::edit(body, |b| cpa_common::json::set_str_if_different(b, "model", &model));
     for key in [
         "previous_response_id",
         "generate",
@@ -705,7 +706,7 @@ fn count_tokens(req: &ExecRequest, cfg: &Config) -> Result<ExecResponse, ExecErr
     ] {
         body = delete(&body, key);
     }
-    body = set_bool_if_different(body, "stream", false);
+    body = crate::codex_json::edit(body, |b| cpa_common::json::set_bool_if_different(b, "stream", false));
     if !request::is_native(req) {
         let instructions = gjson::get(&body, "instructions");
         if !instructions.exists() || instructions.kind() == gjson::Kind::Null {
@@ -738,7 +739,8 @@ const ALPHA_SEARCH_MAX_RESPONSE: usize = 32 << 20;
 /// not cool ordinary Responses traffic. Request faults stop the request; other failures
 /// except auth/payment/quota fail over without cooldown.
 // ponytail: Go also exempts Cloudflare challenges and invalid_grant bodies from both rules;
-// those classifiers are not ported (M4-0024).
+// those classifiers are not ported, so a challenge answered 401-403 keeps its ordinary
+// scope and can cool the credential. Port them here if that starts to happen.
 fn compact_error(mut error: ExecError) -> ExecError {
     let credential_quota = error.status == 429 && error.scope == FailureScope::Credential;
     if credential_quota || matches!(error.status, 401 | 402 | 403 | 429) || error.scope == FailureScope::Transport {
@@ -775,7 +777,7 @@ fn rewrite_alpha_search_model(body: Vec<u8>, model: &str) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(&body) else {
         return body;
     };
-    let quoted = crate::codex_json::go_quote(model, true);
+    let quoted = cpa_common::json::marshal_string(model, true);
     crate::codex_json::go_remarshal_object(text, |members| match members.get_mut("model") {
         Some(current) if *current != quoted => {
             *current = quoted.clone();
@@ -875,11 +877,7 @@ fn non_stream_output(
         None => completed.as_bytes().to_vec(),
     };
     if out.is_empty() {
-        return Err(ExecError::local(
-            502,
-            FailureScope::Request,
-            cpa_translate::APPLY_PATCH_UPSTREAM_ERROR,
-        ));
+        return Err(crate::upstream::apply_patch_error());
     }
     let out = String::from_utf8_lossy(&out).into_owned();
     let out = if req.response_format == Format::OpenAIResponse {

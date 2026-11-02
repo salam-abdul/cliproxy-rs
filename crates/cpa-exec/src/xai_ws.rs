@@ -10,7 +10,8 @@
 //! fresh target, and a `compaction_trigger` turn compacts that transcript over HTTP.
 // ponytail: Go's branch for a WebSocket turn without a downstream WebSocket (SSE encoding
 // and client translation) is unreachable through `XAIAutoExecutor` and not ported, nor
-// are the sessionless ephemeral sockets or `CloseXAIWebsocketSessionsForAuthID`.
+// are the sessionless ephemeral sockets or `CloseXAIWebsocketSessionsForAuthID`. Port
+// them if a route starts reaching them.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -30,13 +31,14 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::{OwnedMutexGuard, mpsc};
 
 use crate::codex_ws::{self, Pool, Read, Session, Target, Upstream};
-use crate::openai_compat::status_err;
 use crate::openai_compat_payload::ensure_responses_usage_details;
-use crate::xai::{XaiExecutor, apply_patch_error, compaction_frames, compaction_item, compaction_response_id, creds};
+use crate::replay::text;
+use crate::upstream::{apply_patch_error, model_status_error};
+use crate::xai::{XaiExecutor, compaction_frames, compaction_item, compaction_response_id, creds};
 use crate::xai_auth::DEFAULT_API_BASE_URL;
 use crate::xai_replay::{self as replay, ReplayScope};
 use crate::xai_request as request;
-use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter, text};
+use crate::xai_response::{self as response, NamespaceRestorer, OutputItems, XSearchFilter};
 use cpa_translate::apply_patch_responses as apply_patch;
 
 /// The terminal events whose usage Go's WebSocket turn observes (completed and done).
@@ -98,7 +100,7 @@ impl Ws {
     }
 }
 
-// --- per-session ID state (xaiWebsocketIDState) --------------------------------------------
+// Per-session ID state (xaiWebsocketIDState)
 
 #[derive(Default)]
 struct IdState(Mutex<IdInner>);
@@ -187,7 +189,7 @@ impl IdState {
     fn replace(&self, items: &[&[u8]]) {
         let next: Vec<Vec<u8>> = items
             .iter()
-            .map(|item| cpa_common::gostr::trim_space(item))
+            .map(|item| cpa_core::config::go_trim_space(item))
             .filter(|item| !item.is_empty() && gj::std_valid(item))
             .map(<[u8]>::to_vec)
             .collect();
@@ -214,7 +216,7 @@ fn raw_items(value: &gj::Res<'_>) -> Vec<Vec<u8>> {
     value
         .array()
         .iter()
-        .map(|item| cpa_common::gostr::trim_space(item.raw()).to_vec())
+        .map(|item| cpa_core::config::go_trim_space(item.raw()).to_vec())
         .filter(|raw| !raw.is_empty() && gj::std_valid(raw))
         .collect()
 }
@@ -226,7 +228,7 @@ fn raw_array(items: &[Vec<u8>]) -> Vec<u8> {
         if i > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(cpa_common::gostr::trim_space(item));
+        out.extend_from_slice(cpa_core::config::go_trim_space(item));
     }
     out.push(b']');
     out
@@ -429,7 +431,7 @@ impl Ids<'_> {
     }
 }
 
-// --- request and frame helpers ----------------------------------------------------------
+// Request and frame helpers
 
 /// `xaiWebsocketsEnabled`: the `websockets` attribute when it parses, else the metadata
 /// value (a bool, or a string that parses).
@@ -452,12 +454,13 @@ pub(crate) fn websockets_enabled(credential: &Credential) -> bool {
 
 /// A plain Go error (`fmt.Errorf`), as the manager sees it.
 fn plain(message: impl Into<String>) -> ExecError {
-    crate::openai_compat::plain_err(message.into())
+    crate::upstream::plain_error(message.into())
 }
 
 /// `buildXAIResponsesWebsocketURL`.
 // ponytail: Go re-serializes the parsed URL (`URL.String()`); the text after the scheme is
-// kept as given, which differs only for escapes Go would normalize.
+// kept as given, which differs only for escapes Go would normalize. Re-serialize as Go
+// does if an upstream rejects such escapes.
 fn ws_url(http_url: &str) -> Result<String, ExecError> {
     let raw = http_url.trim();
     let parsed = crate::xai_url::parse(raw).map_err(plain)?;
@@ -593,7 +596,7 @@ fn go_atoi(s: &str) -> Option<i64> {
 /// other read or write failure is a plain Go error (500) under the xAI executor's name.
 // ponytail: Go's message for other closes is gorilla's ("websocket: close 1011 (internal
 // server error): internal"); the shared reader keeps no close details, so the text is
-// the pool's.
+// the pool's. Keep the close frame in the reader if the message must match.
 fn pool_error(mut error: ExecError) -> ExecError {
     const CODEX: &[u8] = b"codex websockets executor: ";
     if error.status == 413 && error.scope == FailureScope::Request {
@@ -638,7 +641,7 @@ fn handshake_headers(credential: &Credential, token: &str, session_id: &str, req
     headers
 }
 
-// --- compaction (executeCompactionTriggerFromWebsocketContext) ---------------------------
+// Compaction (executeCompactionTriggerFromWebsocketContext)
 
 /// `buildXAIWebsocketCompactionPayload`.
 fn compaction_payload(payload: &[u8], transcript: &[u8]) -> Vec<u8> {
@@ -659,9 +662,12 @@ fn compaction_payload(payload: &[u8], transcript: &[u8]) -> Vec<u8> {
 /// `validateXAIWebsocketCompactionResponse`: the normalized response ID and the
 /// compaction item to keep as the transcript.
 fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
-    let missing = || status_err(502, "xai websocket compaction response is missing compacted state");
+    let missing = || model_status_error(502, "xai websocket compaction response is missing compacted state");
     if data.is_empty() || !gj::std_valid(data) {
-        return Err(status_err(502, "xai websocket compaction returned invalid JSON"));
+        return Err(model_status_error(
+            502,
+            "xai websocket compaction returned invalid JSON",
+        ));
     }
     let id = gj::get(data, "id");
     let output = gj::get(data, "output");
@@ -687,7 +693,7 @@ fn validate_compaction(data: &[u8]) -> Result<(String, Vec<u8>), ExecError> {
     Ok((response_id, item))
 }
 
-// --- capture (RecordAPIWebsocket*) ------------------------------------------------------
+// Capture (RecordAPIWebsocket*)
 
 /// The upstream WebSocket's capture: the request log Go builds once per turn (`wsReqLog`)
 /// and the events of its socket. A no-op without an observer.
@@ -718,7 +724,7 @@ impl WsCapture {
                 auth_value: String::new(),
             };
         }
-        let (auth_type, auth_value) = crate::openai_compat_http::account_info(credential);
+        let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
         Self {
             headers: crate::openai_compat_http::header_pairs(headers),
             sink,
@@ -819,7 +825,7 @@ fn upgrade_url(raw: &str) -> String {
     }
 }
 
-// --- the turn --------------------------------------------------------------------------
+// The turn
 
 /// One turn on the session's socket, as a stream of downstream payloads. Dropping it
 /// releases the turn lock and the reader.
@@ -895,7 +901,7 @@ impl Turn {
 
     /// One upstream text message.
     fn message(&mut self, message: &str) {
-        let payload = cpa_common::gostr::trim_space(message.as_bytes());
+        let payload = cpa_core::config::go_trim_space(message.as_bytes());
         if payload.is_empty() {
             return;
         }
@@ -1057,7 +1063,10 @@ impl XaiExecutor {
     ) -> Result<ExecResponse, ExecError> {
         if req.alt.as_deref() == Some(crate::xai::COMPACT_ALT) {
             req.usage.discard();
-            return Err(status_err(400, "streaming not supported for /responses/compact"));
+            return Err(model_status_error(
+                400,
+                "streaming not supported for /responses/compact",
+            ));
         }
         let exec_id = exec_session.id.trim().to_owned();
         let mut state_id = request::execution_session_id(&req);
@@ -1273,7 +1282,7 @@ impl XaiExecutor {
 /// Capture: the first dial records a rejected upgrade (any handshake response, including
 /// a 101 gorilla refuses) as an HTTP attempt and any other failure as a `dial` error; a
 /// retry dial records every failure as `dial_retry`, with gorilla's text for a rejection.
-// ponytail: Go returns `xaiStatusErr(101, body)` for a 101 gorilla refuses; this keeps the
+// Go returns `xaiStatusErr(101, body)` for a 101 gorilla refuses; this keeps the
 // plain handshake error, since a 101 status error has no sensible client response.
 async fn dial(
     client: &wreq::Client,
@@ -1404,7 +1413,10 @@ impl XaiExecutor {
         // Go's context errors come before executeCompactRequest creates its reporter.
         let Some(mapper) = mapper else {
             req.usage.discard();
-            return Err(status_err(400, "xai websocket compaction context is unavailable"));
+            return Err(model_status_error(
+                400,
+                "xai websocket compaction context is unavailable",
+            ));
         };
         let payload = match mapper.state.snapshot() {
             Some(transcript) => compaction_payload(&req.body, &transcript),
@@ -1421,7 +1433,7 @@ impl XaiExecutor {
                     }
                     if previous.is_empty() {
                         req.usage.discard();
-                        return Err(status_err(400, "xai websocket compaction context is empty"));
+                        return Err(model_status_error(400, "xai websocket compaction context is empty"));
                     }
                     let mut out = crate::xai::remove_input_items(req.body.to_vec(), "compaction_trigger");
                     gj::set_str(&mut out, "previous_response_id", &previous);

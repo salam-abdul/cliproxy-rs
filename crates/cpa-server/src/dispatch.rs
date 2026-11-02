@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::http::HeaderMap;
 use bytes::{Bytes, BytesMut};
 use cpa_core::config::Config;
-use cpa_core::exec::{Caller, ExecError, ExecRequest, ExecStream, Operation, ResponseBody};
+use cpa_core::exec::{AfterAccept, Caller, ExecError, ExecRequest, ExecStream, Operation, ResponseBody};
 use cpa_core::format::Format;
 use futures_util::StreamExt;
 
@@ -236,10 +236,10 @@ impl Failure {
                 } else {
                     providers.join(",")
                 };
-                let model = if gojson::trim(model).is_empty() {
+                let model = if model.trim().is_empty() {
                     "unknown"
                 } else {
-                    gojson::trim(model)
+                    model.trim()
                 };
                 let mut detail = match cause.as_deref().map(upstream_summary).filter(|s| !s.is_empty()) {
                     Some(summary) => format!(
@@ -324,7 +324,7 @@ pub fn upstream_summary(raw: &str) -> String {
         _ => raw,
     };
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_part) {
-        let s = |v: Option<&serde_json::Value>| gojson::trim(&gojson::gjson_string(v)).to_owned();
+        let s = |v: Option<&serde_json::Value>| gojson::gjson_string(v).trim().to_owned();
         let (mut code, mut message) = (String::new(), String::new());
         match v.get("error") {
             Some(e @ serde_json::Value::Object(_)) => {
@@ -376,7 +376,7 @@ const IMAGE_ONLY: [&str; 8] = [
 /// Go `getRequestDetails`: resolve `auto`, find the providers, keep the suffix.
 fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>, String), RunError> {
     if let Some(provider) = &call.forced_provider {
-        return Ok((vec![provider.clone()], gojson::trim(&call.model).to_owned()));
+        return Ok((vec![provider.clone()], call.model.trim().to_owned()));
     }
     let model = call.model.as_str();
     let base = match model.rfind('(') {
@@ -393,7 +393,7 @@ fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>,
     } else {
         model.to_owned()
     };
-    let base = gojson::trim(canonical_model_raw(&resolved)).to_owned();
+    let base = canonical_model_raw(&resolved).trim().to_owned();
     let image = base
         .rsplit('/')
         .next()
@@ -627,7 +627,7 @@ async fn retry_bootstrap(
             Err(RunError {
                 failure: Failure::Exec(e),
                 bootstrap: true,
-            }) if bootstrap_eligible(classify::go_status(e)) => e.clone(),
+            }) if bootstrap_eligible(e.go_status()) => e.clone(),
             _ => break,
         };
         result = match run_routed(rt, call.clone(), trace, resolved.clone()).await {
@@ -787,9 +787,57 @@ impl From<Failure> for RunError {
 struct Fault {
     error: ExecError,
     bootstrap: Option<Box<HeaderMap>>,
+    reached: Reached,
+}
+
+/// How far an attempt's response got before it failed, as dispatch saw it. With the
+/// executor's [`AfterAccept`], it decides failover: only a response that broke off
+/// before any of it was consumed may move to another credential.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reached {
+    /// The executor failed without a response.
+    Executing,
+    /// An accepted response failed before any of it was consumed.
+    NoOutput,
+    /// Part of an accepted response was already consumed.
+    Output,
 }
 
 impl Fault {
+    fn executing(error: ExecError) -> Self {
+        Self {
+            error,
+            bootstrap: None,
+            reached: Reached::Executing,
+        }
+    }
+
+    /// Whether the failover rule ends the request here: output was consumed, an
+    /// accepted response broke off after the executor had it, or the executor reported
+    /// a request failure of its own. A response that broke off before any output may
+    /// fail over.
+    fn terminal(&self) -> bool {
+        let error = &self.error;
+        let broke = self.broke_off();
+        match self.reached {
+            Reached::Output => true,
+            Reached::NoOutput if broke => false,
+            _ => broke || (error.scope == cpa_core::exec::FailureScope::Request && error.headers.is_empty()),
+        }
+    }
+
+    /// The response broke off: as the executor reports it, or a connection fault once a
+    /// response was accepted.
+    fn broke_off(&self) -> bool {
+        self.error.after_accept.is_some_and(AfterAccept::broke_off)
+            || (self.reached != Reached::Executing && self.error.scope == cpa_core::exec::FailureScope::Transport)
+    }
+
+    /// A response that broke off before any of it was consumed.
+    fn broke_silently(&self) -> bool {
+        self.reached == Reached::NoOutput && self.broke_off()
+    }
+
     fn into_run_error(self) -> RunError {
         RunError {
             failure: Failure::Exec(self.error),
@@ -841,18 +889,14 @@ async fn run_routed(
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
     // A remote dispatcher receives the pinned ID itself.
-    let mut pinned_exclusion: Vec<String> = match call.pinned() {
-        Some(pinned) if !pinned.is_empty() && rt.remote_dispatch().is_none() => rt
-            .store()
-            .snapshot()
-            .iter()
-            .filter(|c| c.id != pinned)
-            .map(|c| c.id.clone())
-            .collect(),
-        _ => Vec::new(),
-    };
+    let pinned = call
+        .pinned()
+        .filter(|pinned| !pinned.is_empty() && rt.remote_dispatch().is_none())
+        .map(str::to_owned);
+    let mut always_excluded: Vec<String> = Vec::new();
     // `WithDisallowFreeAuth`: free-plan Codex credentials are ineligible in every round.
-    // ponytail: Home mode selects remotely and does not see this flag.
+    // ponytail: Home mode selects remotely and does not see this flag. Send the exclusion
+    // with the Home pick if Home mode serves routed images.
     if call.media.as_ref().is_some_and(|m| m.disallow_free) {
         for credential in rt.store().snapshot() {
             let free = credential.provider.trim().eq_ignore_ascii_case("codex")
@@ -860,8 +904,8 @@ async fn run_routed(
                     .attributes
                     .get("plan_type")
                     .is_some_and(|plan| plan.trim().eq_ignore_ascii_case("free"));
-            if free && !pinned_exclusion.contains(&credential.id) {
-                pinned_exclusion.push(credential.id.clone());
+            if free && !always_excluded.contains(&credential.id) {
+                always_excluded.push(credential.id.clone());
             }
         }
     }
@@ -871,7 +915,8 @@ async fn run_routed(
         session: session.id.clone(),
         session_parent: session.parent,
         session_fork: session.fork,
-        exclude: pinned_exclusion.clone(),
+        pinned,
+        exclude: always_excluded.clone(),
         ..Selection::default()
     };
     let request = ExecRequest {
@@ -907,6 +952,7 @@ async fn run_routed(
             compact,
             trace,
             user_key: Default::default(),
+            broke: Default::default(),
         };
         return run_remote(context, remote, selection).await;
     }
@@ -918,6 +964,9 @@ async fn run_routed(
     // Go `preferredExecutionAttemptError`: the latest failure that reached upstream wins
     // over later selection failures.
     let mut upstream: Option<Fault> = None;
+    // A response that broke off before any output fails over once per account: its
+    // account is never picked again, and it reruns neither the request nor a round.
+    let mut broke = false;
     loop {
         let mut last: Option<Fault> = None;
         let mut attempted: Vec<String> = Vec::new();
@@ -930,7 +979,7 @@ async fn run_routed(
                 Err(AcquireError::Prepare { id, error }) => {
                     attempted.push(id.clone());
                     selection.exclude.push(id);
-                    last = Some(Fault { error, bootstrap: None });
+                    last = Some(Fault::executing(error));
                     continue;
                 }
                 Err(AcquireError::Cooldown { wait, cause }) => {
@@ -987,6 +1036,7 @@ async fn run_routed(
                 continue;
             }
             attempted.push(lease.credential.id.clone());
+            let id = lease.credential.id.clone();
             let target = Target {
                 models: &models,
                 selection_model: &selection_model,
@@ -1000,6 +1050,10 @@ async fn run_routed(
                 Attempt::Done(done) => return Ok(done),
                 Attempt::Stop(fault) => return Err(fault.into_run_error()),
                 Attempt::Next(fault) => {
+                    if fault.broke_silently() {
+                        broke = true;
+                        always_excluded.push(id);
+                    }
                     if classify::upstream_attempted(&fault.error) {
                         upstream = Some(fault.clone());
                     }
@@ -1010,6 +1064,7 @@ async fn run_routed(
         // The round's error decides retries: an attempt error when there was one, else
         // the selection failure. The response reports the latest upstream attempt when
         // there was one (Go executeMixedOnce, preferredExecutionAttemptError).
+        let last_broke = last.as_ref().is_some_and(Fault::broke_silently);
         let round_error: RunError = match (last, pick_failure) {
             (Some(fault), _) => fault.into_run_error(),
             (None, Some(failure)) => failure.into(),
@@ -1025,8 +1080,8 @@ async fn run_routed(
         // Go `shouldRetryAfterErrorWithAttempted` / `isRequestRetryRoundError`.
         let (status, retry_round) = match &round_error.failure {
             Failure::Exec(e) => (
-                classify::go_status(e),
-                classify::is_retry_round(e) && !classify::is_request_invalid(e),
+                e.go_status(),
+                classify::is_retry_round(e) && !classify::is_request_invalid(e) && !last_broke,
             ),
             Failure::Cooldown { .. } => (429, true),
             Failure::Unavailable {
@@ -1034,7 +1089,11 @@ async fn run_routed(
             } => (503, true),
             _ => (0, false),
         };
-        let terminal = |round_error: RunError| upstream.clone().map(Fault::into_run_error).unwrap_or(round_error);
+        let terminal = |round_error: RunError| {
+            let mut error = upstream.clone().map(Fault::into_run_error).unwrap_or(round_error);
+            error.bootstrap &= !broke;
+            error
+        };
         let credits = Credits {
             providers: &providers,
             model: &model,
@@ -1076,7 +1135,7 @@ async fn run_routed(
             tokio::time::sleep(jitter(wait, policy.max_retry_interval)).await;
         }
         selection.retry_round += 1;
-        selection.exclude.clone_from(&pinned_exclusion);
+        selection.exclude.clone_from(&always_excluded);
     }
 }
 
@@ -1096,6 +1155,8 @@ struct RemoteContext<'a> {
     /// The client key Home authenticated on the latest pick that sent one (Go
     /// `setHomeUserAPIKeyOnGinContext`, which keeps it for the rest of the request).
     user_key: std::sync::Mutex<String>,
+    /// Credentials whose response broke off before any output: never picked again.
+    broke: std::sync::Mutex<Vec<String>>,
 }
 
 /// Go `homeRetryRoundExhaustedError`: the round ended; its timing decides the next.
@@ -1191,7 +1252,7 @@ impl RemoteFault {
     /// Go's status for retry decisions: transport faults have none.
     fn status(&self) -> u16 {
         match &self.failure {
-            Failure::Exec(e) | Failure::Remote { error: e, .. } => classify::go_status(e),
+            Failure::Exec(e) | Failure::Remote { error: e, .. } => e.go_status(),
             other => other.status(),
         }
     }
@@ -1411,8 +1472,14 @@ async fn remote_round(
         // may come back once. Buffered calls exclude everything tried.
         let stream = cx.call.stream;
         let websocket = cx.call.turn.is_some();
-        let mut tried: Vec<String> = Vec::new();
-        let mut excluded: Vec<String> = Vec::new();
+        // A credential whose response broke off before any output is tried once per
+        // request: it is excluded, and refused if Home hands it out again.
+        let mut tried = cx
+            .broke
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut excluded = tried.clone();
         let mut same_retries: std::collections::HashMap<String, u32> = Default::default();
         let mut last_id = String::new();
         let mut same_pending = false;
@@ -1628,33 +1695,46 @@ async fn remote_round(
             let cancelled = lease
                 .remote_cancelled()
                 .unwrap_or_else(|| Box::pin(std::future::pending()));
-            // Go: draining the registry cancels the attempt context; the execution stops
-            // and the round moves on (the registry then refuses new picks). A failed
+            // Go: draining the registry cancels the attempt context. A cancel before the
+            // attempt runs moves the round on (the registry then refuses new picks); one
+            // after it ends the request, which is never sent twice. A failed
             // preparation ends the attempt (Go reports it and redispatches), but it is
             // not an upstream error and does not advance the streaming count.
+            // ponytail: an attempt counts as sent once it starts executing, before the
+            // executor has written the request; an executor signal at the write would let
+            // a cancel during connection setup re-pick too.
+            let sent = std::sync::atomic::AtomicBool::new(false);
             let run = async {
                 let mut lease = lease;
                 match cx.rt.prepare_remote(&mut lease, cx.cfg).await {
-                    Ok(()) => (
-                        attempt(cx.rt, cx.cfg, cx.policy, cx.call, request, usage, lease, target).await,
-                        false,
-                    ),
+                    // Cancelled before the attempt ran: nothing was sent.
+                    Ok(()) if lease.remote_cancel_requested() => {
+                        drop(lease);
+                        (Attempt::Next(Fault::executing(crate::remote::cancelled_error())), false)
+                    }
+                    Ok(()) => {
+                        sent.store(true, std::sync::atomic::Ordering::Relaxed);
+                        (
+                            attempt(cx.rt, cx.cfg, cx.policy, cx.call, request, usage, lease, target).await,
+                            false,
+                        )
+                    }
                     Err(error) => {
                         lease.complete(Outcome::Failure(error.clone()));
-                        (Attempt::Next(Fault { error, bootstrap: None }), true)
+                        (Attempt::Next(Fault::executing(error)), true)
                     }
                 }
             };
             let (outcome, prepare_failed) = tokio::select! {
                 biased;
                 outcome = run => outcome,
-                _ = cancelled => (
-                    Attempt::Next(Fault {
-                        error: crate::remote::cancelled_error(),
-                        bootstrap: None,
-                    }),
-                    false,
-                ),
+                // A cancel after the send ends the request: the upstream may be running
+                // the inference, which another pick would run again.
+                _ = cancelled => {
+                    let fault = Fault::executing(crate::remote::cancelled_error());
+                    let sent = sent.load(std::sync::atomic::Ordering::Relaxed);
+                    (if sent { Attempt::Stop(fault) } else { Attempt::Next(fault) }, false)
+                }
             };
             match outcome {
                 Attempt::Done(done) => return Ok(done),
@@ -1667,10 +1747,19 @@ async fn remote_round(
                     return Err(RemoteFault::from_attempt(fault, true));
                 }
                 Attempt::Next(fault) => {
+                    let broke = fault.broke_silently();
+                    if broke {
+                        cx.broke
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(id.clone());
+                    }
                     if stream {
-                        // Go `shouldExcludeHomeAuthAfterStreamError`.
+                        // Go `shouldExcludeHomeAuthAfterStreamError`, except that a response
+                        // that broke off is never resent to the same credential.
                         let error = &fault.error;
-                        let exclude = !(lifecycle(error) || (websocket && error.status == 426))
+                        let exclude = broke
+                            || !(lifecycle(error) || (websocket && error.status == 426))
                             || same_retries.get(&id).copied().unwrap_or(0) > 0;
                         if exclude && !excluded.contains(&id) {
                             excluded.push(id.clone());
@@ -1699,7 +1788,7 @@ async fn remote_round(
 
 /// Go `isConnectionLifecycleError` for a statusless error's text.
 fn lifecycle(e: &ExecError) -> bool {
-    if classify::go_status(e) != 0 {
+    if e.go_status() != 0 {
         return false;
     }
     let lower = classify::error_text(e).trim().to_lowercase();
@@ -1795,7 +1884,7 @@ impl Credits<'_> {
             .any(|p| p.trim().eq_ignore_ascii_case("antigravity"))
             && cpa_exec::antigravity_credits::enabled(cfg)
             && match &error.failure {
-                Failure::Exec(e) => matches!(classify::go_status(e), 429 | 503),
+                Failure::Exec(e) => matches!(e.go_status(), 429 | 503),
                 Failure::Cooldown { .. } => true,
                 Failure::Unavailable { code, .. } => matches!(*code, "auth_not_found" | "auth_unavailable"),
                 _ => false,
@@ -1849,7 +1938,8 @@ impl Credits<'_> {
                 unauthorized: None,
             };
             // ponytail: a 401 inside a credits attempt retries with the refreshed
-            // credential, which no longer carries the credits flag.
+            // credential, which no longer carries the credits flag. Carry the flag onto the
+            // refreshed credential to keep the retry a credits attempt.
             if let Attempt::Done(done) = attempt(rt, cfg, policy, call, request, usage, lease, target).await {
                 return Ok(done);
             }
@@ -2032,7 +2122,7 @@ async fn attempt(
                 if let Some(t) = tracker.take() {
                     t.fail(&error);
                 }
-                Fault { error, bootstrap: None }
+                Fault::executing(error)
             }
         };
         let error = &fault.error;
@@ -2048,7 +2138,7 @@ async fn attempt(
                 &classify::error_text(error),
             );
         }
-        let action = policy.error_action(&lease.credential, error);
+        let action = rt.store().error_action(policy, &lease.credential, error);
         let neutral = (target.compact && classify::is_compact_neutral(error) && !action.force_cooldown)
             || (call.operation == Operation::CountTokens
                 && classify::is_count_endpoint_missing(error, upstream)
@@ -2058,19 +2148,21 @@ async fn attempt(
         } else {
             Outcome::Failure(error.clone())
         };
-        // A local request failure is terminal even when a custom rule says continue:
-        // stream truncation can represent inference already accepted upstream.
-        let local_terminal = error.scope == cpa_core::exec::FailureScope::Request && error.headers.is_empty();
-        let stop = local_terminal
+        // A local request failure, or a response that broke off after the executor had it
+        // or after output, is terminal even when a custom rule says continue: inference
+        // may already have run. One that broke off before any output may fail over.
+        let silent = fault.broke_silently();
+        let stop = fault.terminal()
             || if action.matched {
                 action.stop
             } else {
-                (target.compact && classify::is_compact_fault(error)) || classify::is_request_invalid(error)
+                (target.compact && classify::is_compact_fault(error))
+                    || (!silent && classify::is_request_invalid(error))
             };
         // Go returns stopping bootstrap failures directly, outside handler bootstrap retries.
         let last_here = stop || i + 1 == target.models.len() || classify::credential_scoped(error);
         let mut fault = fault;
-        if stop {
+        if stop || silent {
             fault.bootstrap = None;
         } else if let Some(headers) = &fault.bootstrap {
             fault.error.addon = Some(headers.clone());
@@ -2145,8 +2237,8 @@ fn usage_client(
 }
 
 /// The downstream peer's part of Go's client request metadata: addresses and agent.
-// ponytail: `server.trusted-proxies` is read from the request's config snapshot; Go
-// applies it at startup only.
+// `server.trusted-proxies` is read from the request's config snapshot, so a reload
+// applies it without a restart; Go applies it at startup only.
 pub(crate) fn request_client(
     cfg: &Config,
     headers: &axum::http::HeaderMap,
@@ -2282,6 +2374,7 @@ async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<D
             let fault = |error| Fault {
                 error,
                 bootstrap: Some(Box::new(response.headers.clone())),
+                reached: Reached::NoOutput,
             };
             let first = loop {
                 match stream.next().await {
@@ -2301,7 +2394,15 @@ async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<D
         ResponseBody::Stream(mut stream) => {
             let mut body = BytesMut::new();
             while let Some(event) = stream.next().await {
-                body.extend_from_slice(&event.map_err(|error| Fault { error, bootstrap: None })?);
+                body.extend_from_slice(&event.map_err(|error| Fault {
+                    error,
+                    bootstrap: None,
+                    reached: if body.is_empty() {
+                        Reached::NoOutput
+                    } else {
+                        Reached::Output
+                    },
+                })?);
             }
             Ok(Done::Buffered {
                 headers: response.headers,
@@ -2365,7 +2466,8 @@ fn rewrite_body(body: &Bytes, target: &str) -> Bytes {
 /// Go `StreamRewriter.RewriteChunk` for one complete event: a bare JSON chunk comes
 /// back trimmed and rewritten, SSE text line by line.
 // ponytail: executors emit whole events, so Go's buffering of partial and glued events
-// is not ported; an invalid `data:` JSON line passes through unchanged.
+// is not ported; an invalid `data:` JSON line passes through unchanged. Port the
+// buffering if an executor starts emitting partial events.
 fn rewrite_event(event: &Bytes, target: &str) -> Bytes {
     let trimmed = event.trim_ascii();
     if trimmed.starts_with(b"{") && cpa_common::json::valid(trimmed) {
@@ -2444,7 +2546,7 @@ mod tests {
                 self.0.upstream_stage(UpstreamStage::BodyRead { bytes: 42 });
             }
         }
-        let cfg = Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let cfg = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
             codex: Default::default(),
@@ -2775,7 +2877,7 @@ mod tests {
             retry_wait(&round, 1, 0, Duration::ZERO, -1, false),
             Some(Duration::ZERO)
         );
-        // ponytail: Go's negative-retry-after case (`homeRetryRoundTiming.invalid`) has no
+        // Go's negative-retry-after case (`homeRetryRoundTiming.invalid`) has no
         // Rust counterpart: Duration is unsigned, Home's `retry_after_ms` is kept only
         // when positive (as in Go `home_concurrency.go`), and the upstream Retry-After
         // parsers drop negative values; only Go's test-made errors carry one.
@@ -2847,5 +2949,283 @@ mod tests {
         assert_eq!(upstream_summary(r#"{"error":"flat"}"#), "flat");
         assert_eq!(upstream_summary("plain text"), "plain text");
         assert_eq!(upstream_summary("status 500: {\"message\":\"m\"}"), "m");
+    }
+
+    /// A stream buffered for a non-stream client: an upstream error before any event may
+    /// fail over like any status error, one after an event ends the request, since the
+    /// upstream already worked on it.
+    #[tokio::test]
+    async fn a_buffered_stream_error_after_an_event_is_terminal() {
+        let call = Call {
+            entry: Format::Claude,
+            response: Format::Claude,
+            operation: Operation::Generate,
+            model: "m".into(),
+            body: Bytes::new(),
+            stream: false,
+            alt: None,
+            headers: HeaderMap::new(),
+            caller: Caller {
+                principal: String::new(),
+                source: "authorization",
+            },
+            forced_provider: None,
+            selection_model: None,
+            execution_session: None,
+            request_path: "/v1/messages".into(),
+            peer: None,
+            turn: None,
+            media: None,
+        };
+        let overloaded = || ExecError::local(529, cpa_core::exec::FailureScope::Credential, "overloaded");
+        for (events, terminal) in [
+            (vec![Err(overloaded())], false),
+            (vec![Ok(Bytes::from_static(b"data: {}\n\n")), Err(overloaded())], true),
+        ] {
+            let response = cpa_core::exec::ExecResponse {
+                status: 200,
+                headers: HeaderMap::new(),
+                body: ResponseBody::Stream(futures_util::stream::iter(events).boxed()),
+            };
+            let Err(fault) = finish(&call, response).await else {
+                panic!("the stream failed")
+            };
+            assert_eq!(fault.terminal(), terminal);
+        }
+    }
+
+    /// A connection fault after a response was accepted is a break, so it fails over
+    /// once per account; before any response it is an ordinary transport fault.
+    #[test]
+    fn a_transport_fault_after_acceptance_broke_off() {
+        let error = ExecError::local(502, cpa_core::exec::FailureScope::Transport, "connection reset");
+        let mut fault = Fault::executing(error);
+        assert!(!fault.broke_silently());
+        assert!(!fault.terminal());
+        fault.reached = Reached::NoOutput;
+        assert!(fault.broke_silently());
+        assert!(!fault.terminal());
+        fault.reached = Reached::Output;
+        assert!(fault.terminal());
+    }
+
+    /// Hands out one grant per pick, in order, and counts the picks.
+    struct Grants {
+        grants: std::sync::Mutex<
+            std::collections::VecDeque<(cpa_core::credential::Credential, Option<crate::remote::CancelSignal>)>,
+        >,
+        picks: std::sync::atomic::AtomicUsize,
+        /// The credential IDs whose release was attempted, in order.
+        released: Arc<std::sync::Mutex<Vec<String>>>,
+        /// A credential whose release Home never acknowledges.
+        unacknowledged: Option<&'static str>,
+    }
+
+    impl crate::remote::RemoteDispatch for Grants {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn dispatch(
+            &self,
+            _: crate::remote::RemoteRequest,
+        ) -> futures_util::future::BoxFuture<'_, Result<crate::remote::RemoteGrant, crate::remote::RemoteError>>
+        {
+            Box::pin(async move {
+                self.picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let next = self.grants.lock().unwrap().pop_front();
+                let Some((credential, cancel)) = next else {
+                    let error = ExecError::local(503, cpa_core::exec::FailureScope::Credential, "auth_not_found");
+                    return Err(crate::remote::RemoteError::plain(error, "auth_not_found"));
+                };
+                Ok(crate::remote::RemoteGrant {
+                    end: {
+                        let (released, id) = (self.released.clone(), credential.id.clone());
+                        let refused = self.unacknowledged == Some(id.as_str());
+                        Box::new(move || {
+                            released.lock().unwrap().push(id);
+                            refused.then(|| {
+                                Box::pin(async { Err("release not acknowledged".to_owned()) })
+                                    as crate::remote::ReleaseWait
+                            })
+                        })
+                    },
+                    credential,
+                    cancel,
+                    request_retry: None,
+                    user_api_key: String::new(),
+                })
+            })
+        }
+
+        fn models(
+            &self,
+            _: Vec<(String, String)>,
+            _: Vec<(String, String)>,
+        ) -> futures_util::future::BoxFuture<'_, Result<Vec<u8>, crate::remote::ModelsError>> {
+            Box::pin(async { Err(crate::remote::ModelsError::Unavailable) })
+        }
+    }
+
+    /// A Claude API-key credential at a loopback upstream.
+    fn home_credential(id: &str, base_url: &str) -> cpa_core::credential::Credential {
+        let meta = serde_json::json!({"type": "claude", "api_key": format!("sk-{id}"), "base_url": base_url});
+        let mut credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/home-fixture"),
+            &std::path::Path::new("/home-fixture").join(format!("{id}.json")),
+            meta.as_object().unwrap().clone(),
+        )
+        .unwrap();
+        credential.id = id.into();
+        credential.attributes.insert("api_key".into(), format!("sk-{id}"));
+        credential.attributes.insert("base_url".into(), base_url.into());
+        crate::testing::local(credential)
+    }
+
+    /// Go's drain cancels a Home attempt: once the request reached the upstream, the
+    /// upstream may be running the inference, so the request ends instead of being sent
+    /// again on the next pick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_home_cancel_after_the_send_is_not_resent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let serve = |app: axum::Router| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            url
+        };
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let held = serve(axum::Router::new().fallback({
+            let reached = reached.clone();
+            move || async move {
+                reached.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }))
+        .await;
+        let resent = Arc::new(AtomicUsize::new(0));
+        let good = serve(axum::Router::new().fallback({
+            let resent = resent.clone();
+            move || async move {
+                resent.fetch_add(1, Ordering::SeqCst);
+                (
+                    [("content-type", "application/json")],
+                    r#"{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                )
+            }
+        }))
+        .await;
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
+        let home = Arc::new(Grants {
+            grants: std::sync::Mutex::new(
+                [
+                    (home_credential("held", &held), Some(cancel)),
+                    (home_credential("good", &good), None),
+                ]
+                .into(),
+            ),
+            picks: AtomicUsize::new(0),
+            released: Default::default(),
+            unacknowledged: None,
+        });
+        let dir = std::env::temp_dir().join(format!("cpa-home-cancel-{}", uuid::Uuid::new_v4()));
+        let cfg = Config::parse(&format!("auth-dir: '{}'\n", dir.display())).unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
+        rt.set_remote_dispatch(Some(home.clone() as Arc<dyn crate::remote::RemoteDispatch>));
+        let url = serve(crate::app(rt.clone(), axum::Router::new())).await;
+        let request = tokio::spawn(async move {
+            let response = wreq::Client::new()
+                .post(format!("{url}/v1/messages"))
+                .header("content-type", "application/json")
+                .body(r#"{"model":"claude-x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            (status, response.text().await.unwrap())
+        });
+        tokio::time::timeout(Duration::from_secs(10), reached.notified())
+            .await
+            .expect("the first pick reached its upstream");
+        cancel_tx.send(true).unwrap();
+        let (status, text) = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .expect("the cancelled request answered")
+            .unwrap();
+        assert_ne!(status, 200, "{text}");
+        assert!(text.contains("context canceled"), "{text}");
+        assert_eq!(resent.load(Ordering::SeqCst), 0, "the request was sent again");
+        assert_eq!(home.picks.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With `max-retry-credentials: 1`, a stream cancelled before its attempt ran leaves
+    /// one same-credential retry pending; a pick Home answers with another credential is
+    /// rejected and released, and without the release acknowledgement the request fails
+    /// with `home_unavailable` instead of going on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rejected_pick_waits_for_its_release_acknowledgement() {
+        use std::sync::atomic::AtomicUsize;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unused = format!("http://{}", listener.local_addr().unwrap());
+        let (cancel_tx, cancel) = tokio::sync::watch::channel(true);
+        let home = Arc::new(Grants {
+            grants: std::sync::Mutex::new(
+                [
+                    (home_credential("cred-a", &unused), Some(cancel)),
+                    (home_credential("cred-b", &unused), None),
+                ]
+                .into(),
+            ),
+            picks: AtomicUsize::new(0),
+            released: Default::default(),
+            unacknowledged: Some("cred-b"),
+        });
+        let dir = std::env::temp_dir().join(format!("cpa-home-release-{}", uuid::Uuid::new_v4()));
+        let cfg = Config::parse(&format!(
+            "auth-dir: '{}'\nmax-retry-credentials: 1\nrequest-retry: 0\n",
+            dir.display()
+        ))
+        .unwrap();
+        let executors = cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let rt = Arc::new(crate::testing::runtime(cfg, Vec::new(), executors));
+        rt.set_remote_dispatch(Some(home.clone() as Arc<dyn crate::remote::RemoteDispatch>));
+        let app = crate::app(rt.clone(), axum::Router::new());
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", proxy.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(proxy, app).await.unwrap() });
+        let response = wreq::Client::new()
+            .post(format!("{url}/v1/messages"))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"claude-x","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#)
+            .send()
+            .await
+            .unwrap();
+        let text = response.text().await.unwrap();
+        drop(cancel_tx);
+        assert_eq!(
+            *home.released.lock().unwrap(),
+            ["cred-a", "cred-b"],
+            "the rejected pick was released"
+        );
+        assert!(
+            text.contains("home_unavailable: Home did not acknowledge credential release"),
+            "{text}"
+        );
+        drop(listener);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

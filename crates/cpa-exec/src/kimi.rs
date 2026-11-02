@@ -24,6 +24,7 @@ use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind, Res};
 use cpa_common::thinking::{ModelCaps, RequestThinking, apply_request_thinking, parse_suffix};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, ExecRequest, ExecResponse, ExecStream, FailureScope, Operation, ResponseBody};
 use cpa_core::format::Format;
@@ -38,7 +39,6 @@ use crate::kimi_http::{
 };
 use crate::kimi_http::{DeferredUsage, UsageRule, apply_patch_requested, defer_usage, report_model};
 use crate::kimi_replay::{self, ReplayCache};
-use crate::meta_codex::go_trim_space;
 use crate::openai_compat_payload::ensure_responses_usage_details;
 use crate::proxy::{GoClients, GoHeaders, Proxy, Upstream, default_client, lines, read_all, send};
 
@@ -357,9 +357,9 @@ async fn post(
     headers: GoHeaders,
     body: Vec<u8>,
 ) -> Result<Upstream, ExecError> {
-    use crate::kimi_http::{account_info, capture_chunk, capture_error, capture_metadata, capture_request};
+    use crate::kimi_http::{capture_chunk, capture_error, capture_metadata, capture_request};
     let capture = req.capture();
-    let (auth_type, auth_value) = account_info(credential);
+    let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
     capture_request(
         capture,
         credential,
@@ -483,7 +483,7 @@ async fn execute_chat(
         let out = (response_pair.non_stream)(&ctx, &data)
             .ok()
             .filter(|out| !out.is_empty())
-            .ok_or_else(apply_patch_error)?;
+            .ok_or_else(crate::upstream::apply_patch_error)?;
         req.usage.response_body(Format::OpenAI, &data);
         ResponseBody::Buffered(Bytes::from(if req.response_format == Format::OpenAIResponse {
             ensure_responses_usage_details(&out)
@@ -505,11 +505,6 @@ enum StreamEnd {
     Chat,
     /// Native Responses translated for another client (executeResponsesStream): neither.
     Responses,
-}
-
-/// The 502 Go returns when a translator rejects upstream apply_patch input.
-fn apply_patch_error() -> ExecError {
-    ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
 /// Go's per-line stream loop: each non-empty scanned line goes through the translator.
@@ -562,7 +557,7 @@ fn translate_lines(
                 let finalized = self.translator.finalize_tool_input();
                 self.ready.extend(finalized.into_iter().map(Ok));
                 if self.translator.tool_input_failed() {
-                    return self.fail(apply_patch_error());
+                    return self.fail(crate::upstream::apply_patch_error());
                 }
             }
             if let Some(Err(mut error)) = end {
@@ -605,7 +600,7 @@ fn translate_lines(
                     Some(Ok(line)) if line.is_empty() => {}
                     Some(Ok(line)) => {
                         if st.translate(&line) && st.translator.tool_input_failed() {
-                            st.fail(apply_patch_error());
+                            st.fail(crate::upstream::apply_patch_error());
                         }
                     }
                     end => st.finish(end),
@@ -690,7 +685,7 @@ fn bridge_lines(lines: ExecStream, bridge: apply_patch_responses::State) -> Exec
                         ready.extend(out.into_iter().map(|l| Ok(Bytes::from(l))));
                         if error.is_some() {
                             done = true;
-                            ready.push_back(Err(apply_patch_error()));
+                            ready.push_back(Err(crate::upstream::apply_patch_error()));
                         }
                     }
                     end => {
@@ -698,7 +693,7 @@ fn bridge_lines(lines: ExecStream, bridge: apply_patch_responses::State) -> Exec
                         let (out, error) = bridge.finish_stream();
                         ready.extend(out.into_iter().map(|l| Ok(Bytes::from(l))));
                         if error.is_some() {
-                            ready.push_back(Err(apply_patch_error()));
+                            ready.push_back(Err(crate::upstream::apply_patch_error()));
                         } else if let Some(Err(error)) = end {
                             ready.push_back(Err(error));
                         }
@@ -728,16 +723,6 @@ fn native_usage_body(data: &[u8]) -> Option<Vec<u8>> {
     usage_has_tokens(&gj::get(data, "usage")).then(|| data.to_vec())
 }
 
-/// `SetBoolIfDifferent`.
-fn set_bool_if_different(mut body: Vec<u8>, path: &str, value: bool) -> Vec<u8> {
-    let kind = gj::get(&body, path).kind;
-    if (value && kind == Kind::True) || (!value && kind == Kind::False) {
-        return body;
-    }
-    gj::set_bool(&mut body, path, value);
-    body
-}
-
 /// Native Responses path (executeResponses / executeResponsesStream).
 async fn execute_responses(
     client: &wreq::Client,
@@ -764,7 +749,7 @@ async fn execute_responses(
     let upstream_model = normalize_upstream_model(&base_model);
     let mut body = gj::try_set_str(&req.body, "model", &upstream_model)
         .map_err(|e| internal_error(format!("kimi executor: failed to set model in payload: {e}")))?;
-    body = set_bool_if_different(body, "stream", req.stream);
+    gj::set_bool_if_different(&mut body, "stream", req.stream);
     body = thinking(&body, &req, "codex")?;
     // Go passes req.Payload as the original here, not OriginalRequest.
     body = payload_rules(cfg, &req, &base_model, "openai-response", body, &req.body);
@@ -821,13 +806,13 @@ async fn execute_responses(
         report_model(&req.usage, Format::Codex, &data);
         let out = match bridge.bridge.transform_non_stream(&data) {
             Ok(out) if !(out.is_empty() && apply_patch_requested(original_request)) => out,
-            _ => return Err(apply_patch_error()),
+            _ => return Err(crate::upstream::apply_patch_error()),
         };
         let out = match response_pair {
             Some(pair) => (pair.non_stream)(&ctx, &out)
                 .ok()
                 .filter(|out| !out.is_empty())
-                .ok_or_else(apply_patch_error)?,
+                .ok_or_else(crate::upstream::apply_patch_error)?,
             None => out,
         };
         if let Some(usage) = native_usage_body(&data) {

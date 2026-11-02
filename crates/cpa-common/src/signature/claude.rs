@@ -3,9 +3,11 @@
 //! double-layer CAQS `Q…` (base64 of a `C` form) (claude_validation.go,
 //! claude_antigravity_validation.go, claude.go).
 
+use cpa_core::config::go_trim_space;
+
 use super::wire::{self, BYTES, STD, STD_STRICT, VARINT, WireError};
 use super::{Error, ascii, err};
-use crate::gostr::{quote, trim_space};
+use crate::gostr::quote;
 use crate::json::{self, Res};
 
 pub const MAX_CLAUDE_THINKING_SIGNATURE_LEN: usize = 32 * 1024 * 1024;
@@ -87,9 +89,9 @@ pub fn has_claude_thinking_signature_prefix(raw: impl AsRef<[u8]>) -> bool {
 
 /// Everything after the first `#`, trimmed (any prefix, not only known providers).
 pub(crate) fn strip_cache_prefix(raw: &[u8]) -> &[u8] {
-    let sig = trim_space(raw);
+    let sig = go_trim_space(raw);
     match sig.iter().position(|b| *b == b'#') {
-        Some(i) => trim_space(&sig[i + 1..]),
+        Some(i) => go_trim_space(&sig[i + 1..]),
         None => sig,
     }
 }
@@ -110,7 +112,7 @@ pub fn validate_claude_thinking_signatures(body: &[u8], opt: ClaudeValidation) -
                 continue;
             }
             let raw = part.get("signature").bytes();
-            let raw = trim_space(&raw);
+            let raw = go_trim_space(&raw);
             if raw.is_empty() {
                 return err(format!("messages[{i}].content[{j}]: missing thinking signature"));
             }
@@ -699,7 +701,7 @@ fn should_strip(part: &Res<'_>, opt: ClaudeValidation) -> bool {
 }
 
 pub(crate) fn is_empty_thinking_placeholder(part: &Res<'_>) -> bool {
-    trim_space(&part.get("signature").bytes()).is_empty() && trim_space(&thinking_block_text(part)).is_empty()
+    go_trim_space(&part.get("signature").bytes()).is_empty() && go_trim_space(&thinking_block_text(part)).is_empty()
 }
 
 /// `claudeThinkingBlockText` (same rules as `thinking.GetThinkingText`).

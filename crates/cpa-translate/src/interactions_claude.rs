@@ -5,8 +5,9 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::common::{align_claude_tool_results, claude_message_system_reminder_text, go_lower, now_nanos, trim_space};
+use crate::common::{align_claude_tool_results, claude_message_system_reminder_text, go_lower, now_nanos};
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::first_nonblank;
 use crate::stream::GoStream;
@@ -29,7 +30,6 @@ fn string(res: &Res<'_>) -> Vec<u8> {
     res.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request
 
 /// convertClaudeRequestToInteractions.
@@ -73,7 +73,7 @@ fn convert(model: &str, raw: &[u8], stream: bool, preserve_empty_thinking: bool)
 fn copy_thinking(out: &mut Vec<u8>, root: &Res<'_>) {
     let thinking = root.get("thinking");
     if thinking.exists() {
-        match go_lower(trim_space(&thinking.get("type").bytes())).as_slice() {
+        match go_lower(go_trim_space(&thinking.get("type").bytes())).as_slice() {
             b"disabled" => {
                 gj::set_str(out, "generation_config.thinking_level", "none");
             }
@@ -96,7 +96,7 @@ fn copy_thinking(out: &mut Vec<u8>, root: &Res<'_>) {
         gj::set_str(
             out,
             "generation_config.thinking_level",
-            go_lower(trim_space(&effort.bytes())),
+            go_lower(go_trim_space(&effort.bytes())),
         );
     }
 }
@@ -104,8 +104,8 @@ fn copy_thinking(out: &mut Vec<u8>, root: &Res<'_>) {
 /// copyClaudeToolChoiceToInteractions.
 fn copy_tool_choice(out: &mut Vec<u8>, choice: &Res<'_>) {
     let kind = match choice.kind {
-        Kind::String => go_lower(trim_space(&choice.bytes())),
-        Kind::Json => go_lower(trim_space(&choice.get("type").bytes())),
+        Kind::String => go_lower(go_trim_space(&choice.bytes())),
+        Kind::Json => go_lower(go_trim_space(&choice.get("type").bytes())),
         _ => return,
     };
     match kind.as_slice() {
@@ -116,7 +116,7 @@ fn copy_tool_choice(out: &mut Vec<u8>, choice: &Res<'_>) {
             gj::set_str(out, "generation_config.tool_choice", "required");
         }
         b"tool" if choice.kind == Kind::Json => {
-            let name = trim_space(&choice.get("name").bytes()).to_vec();
+            let name = go_trim_space(&choice.get("name").bytes()).to_vec();
             if !name.is_empty() {
                 let mut tool = br#"{"type":"function","name":""}"#.to_vec();
                 gj::set_str(&mut tool, "name", &name);
@@ -173,7 +173,7 @@ impl Input {
             pending.clear();
         };
         for part in &parts {
-            let kind = go_lower(trim_space(&part.get("type").bytes()));
+            let kind = go_lower(go_trim_space(&part.get("type").bytes()));
             match kind.as_slice() {
                 b"text" => {
                     let text = part.get("text").bytes();
@@ -249,7 +249,7 @@ fn append_messages(out: &mut Vec<u8>, messages: &Res<'_>, preserve_empty_thinkin
         ..Input::default()
     };
     messages.each(|_, message| {
-        let role = go_lower(trim_space(&message.get("role").bytes()));
+        let role = go_lower(go_trim_space(&message.get("role").bytes()));
         let content = message.get("content");
         if role == b"system" {
             if let Some(reminder) = claude_message_system_reminder_text(&content) {
@@ -327,7 +327,7 @@ fn tool_result(part: &Res<'_>, names: &HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
     } else if result.is_array() {
         let mut items: Vec<Vec<u8>> = vec![];
         result.each(|_, item| {
-            let raw = trim_space(&item.raw).to_vec();
+            let raw = go_trim_space(&item.raw).to_vec();
             let kind = string(&item.get("type"));
             match kind.as_slice() {
                 b"text" => {
@@ -371,7 +371,7 @@ fn copy_tools(out: &mut Vec<u8>, root: &Res<'_>) {
     }
     let mut items = vec![];
     tools.each(|_, tool| {
-        let name = trim_space(&tool.get("name").bytes()).to_vec();
+        let name = go_trim_space(&tool.get("name").bytes()).to_vec();
         if name.is_empty() {
             return true;
         }
@@ -421,7 +421,6 @@ fn claude_text(value: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Responses
 
 /// `event: <event>\ndata: <payload>\n\n\n` (common.AppendSSEEventBytes with three newlines).
@@ -433,16 +432,16 @@ fn claude_event(event: &str, payload: &[u8]) -> Vec<u8> {
 
 /// interactionsSSEPayload.
 fn sse_payload(raw: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed.is_empty() || trimmed == b"[DONE]" {
         return trimmed.to_vec();
     }
     if let Some(rest) = trimmed.strip_prefix(b"data:") {
-        return trim_space(rest).to_vec();
+        return go_trim_space(rest).to_vec();
     }
     let lines: Vec<&[u8]> = trimmed
         .split(|&c| c == b'\n')
-        .filter_map(|line| trim_space(line).strip_prefix(b"data:").map(trim_space))
+        .filter_map(|line| go_trim_space(line).strip_prefix(b"data:").map(go_trim_space))
         .collect();
     if lines.is_empty() {
         trimmed.to_vec()

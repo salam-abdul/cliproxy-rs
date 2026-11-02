@@ -4,6 +4,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use cpa_core::config::go_url::query_escape;
 use serde_json::{Map, Value};
 
 /// A JSON object as Go decodes it into `map[string]any`.
@@ -24,29 +25,12 @@ pub fn normalize_base_url(raw: &str) -> String {
     base.trim_end_matches('/').to_owned()
 }
 
-/// Go `url.QueryEscape`.
-pub fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Go `json.Marshal` of a `map[string]any`: keys sorted, `<`, `>` and `&` escaped.
+/// Go `json.Marshal` of a `map[string]any`: keys sorted, HTML characters, U+2028 and
+/// U+2029 escaped.
 pub fn marshal_map(pairs: Vec<(&str, Value)>) -> String {
-    let mut pairs = pairs;
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-    let map: Object = pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
-    Value::Object(map)
-        .to_string()
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
+    let map: Map<String, Value> = pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+    let json = cpa_common::json::GoValue::from_json(&Value::Object(map)).marshal();
+    String::from_utf8_lossy(&json).into_owned()
 }
 
 pub struct Client {
@@ -91,6 +75,7 @@ impl Client {
     /// password in the URL shown as `***`.
     // ponytail: the transport cause is the OS error text ("Connection refused (os error
     // 111)") where Go prints its dialer's ("dial tcp ...: connect: connection refused").
+    // Format the dial error as Go does if a script parses this output.
     async fn request(&self, method: wreq::Method, path: &str, body: Option<String>) -> Result<(u16, Vec<u8>), String> {
         let url = format!("{}{path}", self.base_url);
         let mut op = method.as_str().to_lowercase();
@@ -216,7 +201,7 @@ impl Client {
     async fn checked(&self, method: wreq::Method, path: &str, body: Option<String>) -> Result<Vec<u8>, String> {
         let (code, data) = self.request(method, path, body).await?;
         if code >= 400 {
-            let text = String::from_utf8_lossy(cpa_common::gostr::trim_space(&data)).into_owned();
+            let text = String::from_utf8_lossy(cpa_core::config::go_trim_space(&data)).into_owned();
             return Err(format!("HTTP {code}: {text}"));
         }
         Ok(data)
@@ -460,7 +445,8 @@ fn eof_error(value: &[u8]) -> Option<String> {
 }
 
 /// encoding/json's syntax error text for the common cases.
-// ponytail: an error inside a document keeps serde's wording.
+// ponytail: an error inside a document keeps serde's wording; port encoding/json's
+// messages if a script parses them.
 fn json_error(data: &[u8], e: &serde_json::Error) -> String {
     let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
     let start = data.iter().position(|b| !space(b)).unwrap_or(data.len());
@@ -751,6 +737,14 @@ mod tests {
         assert_eq!(
             marshal_map(vec![("old", Value::Null), ("new", "k<&>".into())]),
             r#"{"new":"k\u003c\u0026\u003e","old":null}"#
+        );
+        // json.Marshal(map[string]any{"v": "a\u2028b\u2029", "m": map[string]any{"z": 1, "a": 2}}).
+        assert_eq!(
+            marshal_map(vec![
+                ("v", "a\u{2028}b\u{2029}".into()),
+                ("m", serde_json::json!({"z": 1, "a": 2}))
+            ]),
+            r#"{"m":{"a":2,"z":1},"v":"a\u2028b\u2029"}"#
         );
     }
 }

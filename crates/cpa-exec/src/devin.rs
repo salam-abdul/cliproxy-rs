@@ -137,29 +137,6 @@ fn go_uuid_parses(s: &str) -> bool {
     }
 }
 
-/// Go's statusErr scope conventions: a 429 cools the model, auth and server faults the
-/// credential, anything else is the request's.
-fn scope(status: u16) -> FailureScope {
-    match status {
-        429 => FailureScope::Model,
-        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
-        _ => FailureScope::Request,
-    }
-}
-
-fn status_error(status: u16, message: impl Into<String>) -> ExecError {
-    ExecError::local(status, scope(status), message)
-}
-
-/// A plain Go error (no status): the handler answers 500.
-fn plain_error(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Transport, message)
-}
-
-fn apply_patch_error() -> ExecError {
-    ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
-}
-
 /// `newDevinStatusError`: the upstream body, with a 429's `Retry-After` (seconds or an
 /// HTTP date) as the cooldown hint.
 fn upstream_error(status: u16, headers: http::HeaderMap, body: Bytes) -> ExecError {
@@ -184,12 +161,13 @@ fn upstream_error(status: u16, headers: http::HeaderMap, body: Bytes) -> ExecErr
     }
     ExecError {
         status,
-        scope: scope(status),
+        scope: crate::upstream::model_scope_for(status),
         body,
         headers: Box::new(headers),
         retry_after,
         direct: false,
         addon: None,
+        after_accept: None,
     }
 }
 
@@ -202,10 +180,11 @@ fn original(req: &ExecRequest) -> &Bytes {
     }
 }
 
-/// ponytail: adapter for `helps.ApplyPatchRequested` / `IsApplyPatchUpstreamTool`
-/// (owner: translators; cpa-translate's `reverse_identity_map` is crate-private).
-/// Minimal: a top-level custom `apply_patch` tool in the original Responses request (or
-/// its `request` wrapper); Go's full resolver also maps namespaced and sanitized names.
+/// ponytail: adapter for `helps.ApplyPatchRequested` / `IsApplyPatchUpstreamTool`,
+/// minimal because cpa-translate's `reverse_identity_map` is crate-private: a top-level
+/// custom `apply_patch` tool in the original Responses request (or its `request`
+/// wrapper). Go's full resolver also maps namespaced and sanitized names; export the
+/// resolver from cpa-translate to cover them.
 fn apply_patch_tool_names(original: &[u8]) -> Vec<Vec<u8>> {
     if original.is_empty() || !gj::valid(original) {
         return Vec::new();
@@ -224,7 +203,7 @@ fn apply_patch_tool_names(original: &[u8]) -> Vec<Vec<u8>> {
         .iter()
         .filter(|t| {
             *t.get("type").bytes() == *b"custom"
-                && cpa_common::gostr::trim_space(&t.get("name").bytes()) == b"apply_patch"
+                && cpa_core::config::go_trim_space(&t.get("name").bytes()) == b"apply_patch"
         })
         .map(|_| b"apply_patch".to_vec())
         .collect()
@@ -584,9 +563,13 @@ impl DevinExecutor {
                 }
                 json
             }
-            Err(_) if apply_patch_requested(&ctx_original) => return Err(apply_patch_error()),
-            Err(e) => {
+            Err(_) if apply_patch_requested(&ctx_original) => return Err(crate::upstream::apply_patch_error()),
+            Err((e, statusless)) => {
                 capture_error(&capture, &e);
+                if statusless {
+                    // Go's reporter records a plain error without a status.
+                    req.usage.publish_failure(0, &String::from_utf8_lossy(&e.body));
+                }
                 return Err(e);
             }
         };
@@ -594,7 +577,7 @@ impl DevinExecutor {
             Some(pair) => (pair.non_stream)(&ctx, &interactions)
                 .ok()
                 .filter(|out| !out.is_empty())
-                .ok_or_else(apply_patch_error)?,
+                .ok_or_else(crate::upstream::apply_patch_error)?,
             None => interactions.clone(),
         };
         if req.usage.enabled() {
@@ -731,12 +714,13 @@ struct ToolBuilder {
 }
 
 /// `consumeDevinFramesToInteractions`: one Interactions response from every frame.
-/// Also returns the upstream usage model name (empty when none was reported).
+/// Also returns the upstream usage model name (empty when none was reported). An error
+/// says whether it is statusless, as Go's plain read and truncation errors are.
 async fn consume_frames(
     mut reader: FrameReader,
     model: &str,
     original: &[u8],
-) -> (Result<(Vec<u8>, Vec<u8>), ExecError>, Option<ResponseLog>) {
+) -> (Result<(Vec<u8>, Vec<u8>), (ExecError, bool)>, Option<ResponseLog>) {
     let (mut pre_tool, mut post_tool, mut thinking) = (Vec::new(), Vec::new(), Vec::new());
     let (mut has_pre, mut has_post, mut has_thinking) = (false, false, false);
     let mut builders: Vec<ToolBuilder> = Vec::new();
@@ -800,7 +784,7 @@ async fn consume_frames(
             Err(FrameError::Eof) => break,
             Err(FrameError::Failed(message)) => {
                 return (
-                    Err(plain_error(message.clone())),
+                    Err((crate::upstream::interrupted_after_response(message.clone()), true)),
                     log_now!(format!("read_error: {message}")),
                 );
             }
@@ -809,7 +793,12 @@ async fn consume_frames(
         if flag & FLAG_END_STREAM != 0 {
             if let Some((code, message)) = parse_trailer_error(&payload) {
                 let status = format!("trailer_error({code}): {message}");
-                return (Err(status_error(code, message)), log_now!(status));
+                let mut error = crate::upstream::model_status_error(code, message);
+                // Frames before the trailer: the upstream worked on the request.
+                if frames > 1 {
+                    error = error.accepted(cpa_core::exec::AfterAccept::Truncated);
+                }
+                return (Err((error, false)), log_now!(status));
             }
             saw_eos = true;
             break;
@@ -897,12 +886,15 @@ async fn consume_frames(
         .iter()
         .any(|b| b.legacy && is_apply_patch_upstream_tool(original, &b.name))
     {
-        return (Err(apply_patch_error()), None);
+        return (Err((crate::upstream::apply_patch_error(), false)), None);
     }
     if !saw_eos {
         return (
-            Err(plain_error(
-                "devin upstream stream terminated prematurely before EOS trailer",
+            Err((
+                crate::upstream::interrupted_after_response(
+                    "devin upstream stream terminated prematurely before EOS trailer",
+                ),
+                true,
             )),
             log_now!("premature_eof_before_eos".into()),
         );
@@ -1155,7 +1147,7 @@ impl DevinStream {
         if raw.is_empty() {
             return true;
         }
-        let trimmed = cpa_common::gostr::trim_space(&raw).to_vec();
+        let trimmed = cpa_core::config::go_trim_space(&raw).to_vec();
         let kind = gj::get(&trimmed, "event_type").bytes().into_owned();
         let failed = kind == b"response.failed" || kind == b"interaction.failed";
         // A failure before anything started is answered as an HTTP error instead.
@@ -1202,7 +1194,7 @@ impl DevinStream {
         }
         if self.translator.as_ref().is_some_and(|t| t.tool_input_failed()) {
             self.translation_failed = true;
-            self.fail(apply_patch_error());
+            self.fail(crate::upstream::apply_patch_error());
             return false;
         }
         true
@@ -1219,7 +1211,7 @@ impl DevinStream {
         self.out.extend(chunks.into_iter().map(Ok));
         if failed {
             self.translation_failed = true;
-            self.fail(apply_patch_error());
+            self.fail(crate::upstream::apply_patch_error());
         }
         failed
     }
@@ -1527,7 +1519,7 @@ impl DevinStream {
         gj::set_str(&mut failed, "error.code", code.to_string());
         let _ = self.emit(failed);
         if !self.ended {
-            self.fail(status_error(code, message));
+            self.fail(crate::upstream::model_status_error(code, message));
         }
     }
 
@@ -1561,7 +1553,7 @@ impl DevinStream {
             gj::set_str(&mut failed, "error.message", &message);
             let _ = self.emit(failed);
             if !self.ended {
-                self.fail(plain_error(message));
+                self.fail(crate::upstream::interrupted_after_response(message));
             }
             return;
         }
@@ -1570,7 +1562,7 @@ impl DevinStream {
             let failed = br#"{"event_type":"response.failed","error":{"message":"devin stream terminated prematurely before EOS trailer","code":"stream_truncated"}}"#.to_vec();
             let _ = self.emit(failed);
             if !self.ended {
-                self.fail(plain_error(TRUNCATED));
+                self.fail(crate::upstream::interrupted_after_response(TRUNCATED));
             }
             return;
         }

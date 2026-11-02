@@ -106,7 +106,8 @@ pub fn parse_claims(raw: &str) -> Result<Claims> {
     if claims.ip.trim().is_empty() || claims.port <= 0 {
         return Err(other("home jwt target address is invalid"));
     }
-    // ponytail: Go accepts ports above 65535 and fails at dial; reject them here.
+    // Go accepts ports above 65535 and fails at dial; rejecting them while the JWT is
+    // checked reports the bad target before any dial.
     if claims.port > i64::from(u16::MAX) {
         return Err(other("home jwt target address is invalid"));
     }
@@ -161,7 +162,7 @@ async fn ensure_files(claims: &Claims, paths: &Paths) -> Result<()> {
         }
         return Ok(());
     }
-    crate::private_fs::create_dir_all(&paths.dir).map_err(|e| other(e.to_string()))?;
+    cpa_core::private_fs::create_dir_all(&paths.dir).map_err(|e| other(e.to_string()))?;
     let key = load_or_create_key(&paths.client_key)?;
     let csr = create_csr(&claims.certificate_id, &key)?;
     let response = request_certificate(claims, &csr).await?;
@@ -220,16 +221,16 @@ pub fn certificate_fingerprint(pem: &[u8]) -> Result<String> {
     if cert.to_der().map_err(|e| other(format!("x509: {e}")))? != der {
         return Err(other("x509: trailing data"));
     }
-    Ok(Sha256::digest(&der).iter().map(|b| format!("{b:02x}")).collect())
+    Ok(cpa_core::hex::encode(Sha256::digest(&der)))
 }
 
 fn chmod_0600(path: &Path) -> Result<()> {
-    crate::private_fs::restrict(path).map_err(|e| other(e.to_string()))
+    cpa_core::private_fs::restrict(path).map_err(|e| other(e.to_string()))
 }
 
 /// Go `writeFile0600`: create or truncate, then force 0600.
 fn write_0600(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = crate::private_fs::create_truncate(path).map_err(|e| other(e.to_string()))?;
+    let mut file = cpa_core::private_fs::create_truncate(path).map_err(|e| other(e.to_string()))?;
     file.write_all(bytes).map_err(|e| other(e.to_string()))?;
     chmod_0600(path)
 }

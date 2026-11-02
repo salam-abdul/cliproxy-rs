@@ -23,7 +23,7 @@
 //!
 //! ponytail: usage logging of live exchanges is not ported. Go also records a failed
 //! downstream write of the call's answer; the text is the socket's own error, which
-//! `TrackedBody` cannot see.
+//! `TrackedBody` cannot see. Port both if realtime calls need usage records.
 
 mod calls;
 #[cfg(test)]
@@ -182,11 +182,13 @@ async fn authenticate(
             Ok(crate::access::Access::Open) => Principal::default(),
             Ok(crate::access::Access::Granted { caller, provider }) => Principal {
                 key: caller.principal,
-                provider,
+                provider: provider.to_owned(),
                 secret: None,
             },
             Err(denied) if matches!(mode, Mode::Ordinary) => {
-                let body = crate::gojson::Obj::new().str("error", denied.message).finish();
+                let body = cpa_common::json::Object::new()
+                    .str("error", denied.message)
+                    .finish_string();
                 return crate::respond::gin_json(denied.status, body);
             }
             Err(denied) => {
@@ -200,19 +202,25 @@ async fn authenticate(
 
 /// `writeRealtimeError`: gin.H marshals with sorted keys.
 fn realtime_error(status: u16, message: &str, kind: &str, code: &str) -> Response {
-    let detail = crate::gojson::Obj::new()
+    let detail = cpa_common::json::Object::new()
         .str("code", code)
         .str("message", message)
         .raw("param", "null")
         .str("type", kind)
-        .finish();
-    crate::respond::gin_json(status, crate::gojson::Obj::new().raw("error", &detail).finish())
+        .finish_string();
+    crate::respond::gin_json(
+        status,
+        cpa_common::json::Object::new().raw("error", &detail).finish_string(),
+    )
 }
 
 /// `writeLiveError`: the OpenAI envelope under `/v1/realtime`, else `{"error": msg}`.
 fn live_error(realtime: bool, status: u16, message: &str) -> Response {
     if !realtime {
-        return crate::respond::gin_json(status, crate::gojson::Obj::new().str("error", message).finish());
+        return crate::respond::gin_json(
+            status,
+            cpa_common::json::Object::new().str("error", message).finish_string(),
+        );
     }
     let kind = match status {
         401 => "authentication_error",
@@ -300,14 +308,6 @@ async fn select_oauth(
             });
     }
     let policy = rt.policy();
-    let exclude = rt
-        .store()
-        .snapshot()
-        .iter()
-        .filter(|c| c.provider == "codex")
-        .filter(|c| cpa_core::registry::dynamic::auth_kind(c) != Some("oauth") || pinned.is_some_and(|id| id != c.id))
-        .map(|c| c.id.clone())
-        .collect();
     let (primary, parent, fork) = session_hierarchy(headers, body, execution_session);
     let bound = |s: String| (!s.is_empty()).then(|| cpa_common::session::bound_session_identity(&s));
     let selection = Selection {
@@ -315,7 +315,8 @@ async fn select_oauth(
         session: bound(primary),
         session_parent: bound(parent),
         session_fork: fork,
-        exclude,
+        pinned: pinned.map(str::to_owned),
+        accept: Some(|c| c.provider != "codex" || cpa_core::registry::dynamic::auth_kind(c) == Some("oauth")),
         ..Selection::default()
     };
     rt.acquire(selection, cfg, policy, &rt.registry())

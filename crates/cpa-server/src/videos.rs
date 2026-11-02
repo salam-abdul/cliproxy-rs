@@ -4,8 +4,6 @@
 //! A created video is bound to the credential that created it (and its routing model) for
 //! `multimedia.video-result-auth-cache-ttl`, so polling and downloads reach the same xAI
 //! account.
-// ponytail: the non-streaming keep-alive (`requests.nonstream-keepalive-interval`) and
-// upstream header passthrough are not applied, like the other Rust routes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -42,7 +40,7 @@ const DEFAULT_RESOLUTION: &str = "720p";
 const MAX_REFERENCES: usize = 7;
 const DEFAULT_BINDING_TTL: Duration = Duration::from_secs(3 * 3600);
 
-// --- credential bindings ------------------------------------------------------------------
+// Credential bindings
 
 struct Binding {
     auth: String,
@@ -109,7 +107,7 @@ fn binding_ttl(rt: &Runtime) -> Duration {
         .map_or(DEFAULT_BINDING_TTL, |n| Duration::from_nanos(n as u64))
 }
 
-// --- models -------------------------------------------------------------------------------
+// Models
 
 fn base(model: &str) -> String {
     model_parts(model).1.trim().go_lower()
@@ -154,7 +152,7 @@ fn routing(model: &str) -> &'static str {
     }
 }
 
-// --- request building ---------------------------------------------------------------------
+// Request building
 
 /// The OpenAI-shaped create request, as `xaiVideoCreateMetadata` remembers it.
 struct CreateMeta {
@@ -368,7 +366,7 @@ fn create_request_from_form(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
     let post_form = |key: &str| -> String {
         match &form {
             Some(form) => form.value(key),
-            None if urlencoded => crate::access::query_get(&encoded, key)
+            None if urlencoded => cpa_core::config::go_url::query_get(&encoded, key)
                 .map(|v| String::from_utf8_lossy(&v).into_owned())
                 .unwrap_or_default(),
             None => String::new(),
@@ -405,7 +403,7 @@ fn create_request_from_form(headers: &HeaderMap, body: &[u8]) -> Vec<u8> {
     out
 }
 
-// --- responses ----------------------------------------------------------------------------
+// Responses
 
 /// `openAIVideoStatus`.
 fn status(raw: &str) -> &'static str {
@@ -578,7 +576,7 @@ fn content_url(payload: &[u8]) -> Result<String, String> {
     Ok(raw)
 }
 
-// --- execution ----------------------------------------------------------------------------
+// Execution
 
 struct Request {
     rt: Arc<Runtime>,
@@ -782,7 +780,7 @@ async fn download(rt: &Runtime, video: &str, url: &str) -> Response {
     response
 }
 
-// --- routes -------------------------------------------------------------------------------
+// Routes
 
 fn request(
     rt: Arc<Runtime>,
@@ -958,7 +956,7 @@ pub async fn content(
         return bad_request("Invalid request: video_id is required");
     }
     let query = uri.query().unwrap_or_default();
-    let mut variant = crate::access::query_get(query, "variant")
+    let mut variant = cpa_core::config::go_url::query_get(query, "variant")
         .map(|v| String::from_utf8_lossy(&v).trim().to_owned())
         .unwrap_or_default();
     if variant.is_empty() {

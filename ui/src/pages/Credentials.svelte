@@ -1,34 +1,29 @@
 <script lang="ts">
-  import { store, every, Res } from "../store.svelte";
-  import { api, download } from "../api";
-  import { credName, provider, label, span, type Data } from "../core";
+  import { untrack } from "svelte";
+  import { store, every } from "../store.svelte";
+  import { api } from "../api";
+  import { credName, provider, label, type Data } from "../core";
   import { accountStatus } from "../accounts";
   import Load from "../Load.svelte";
-  import Missing from "../Missing.svelte";
+  import AccountDetail from "../AccountDetail.svelte";
   import ClaudePolicy from "../ClaudePolicy.svelte";
 
   $effect(() => every(15000, () => store.creds.load(true), true));
+  // The drawer shows the account's history; Overview keeps it current, this page reads it once.
+  $effect(() => {
+    if (store.native.data?.enabled) untrack(() => store.history.load(true));
+  });
 
   let query = $state(""),
-    filter = $state("all"),
-    open = $state(store.route.arg);
-  $effect(() => {
-    open = store.route.arg;
-  });
+    filter = $state("all");
   const key = (a: Data) => `${a.name}\u0000${a.auth_index}`;
-  // Go allows several credentials from one file; its ID is unique and every per-credential
+  // One file can hold several credentials; the ID is unique and every per-credential
   // route accepts it in place of the file name. Downloads and deletes still use the file.
   const id = (a: Data) => String(a.id || a.name);
   const rows = $derived(
     (store.creds.data || []).map((a) => ({
       a,
-      s: accountStatus(
-        a,
-        store.native.data,
-        store.native.error,
-        "claude",
-        store.now,
-      ),
+      s: accountStatus(a, store.native.data, store.native.error, "claude", store.now),
     })),
   );
   const matches = (r: (typeof rows)[number], f: string) =>
@@ -65,120 +60,7 @@
       rows: shown.filter((r) => provider(r.a) === p),
     })),
   );
-
-  // Detail panel state for the open credential.
-  const selected = $derived(rows.find((r) => id(r.a) === open)?.a);
-  let fields = $state({
-    note: "",
-    priority: "",
-    weight: "",
-    request_retry: "",
-  });
-  let baseline = $state("");
-  $effect(() => {
-    store.dirty =
-      !!selected && !!baseline && JSON.stringify(fields) !== baseline;
-  });
-  let models = $state<Res<Data[]> | null>(null);
-  // Fill the form when a credential is opened, not on every poll, so typing is not overwritten.
-  let formFor = "";
-  $effect(() => {
-    const a = selected;
-    const k = a ? id(a) : "";
-    if (k === formFor) return;
-    formFor = k;
-    if (!a) return;
-    fields = {
-      note: a.note || "",
-      priority: a.priority === undefined ? "" : String(a.priority),
-      weight: a.weight === undefined ? "" : String(a.weight),
-      request_retry:
-        a.request_retry === undefined ? "" : String(a.request_retry),
-    };
-    baseline = JSON.stringify(fields);
-    const name = id(a);
-    const res = new Res<Data[]>(
-      async () =>
-        (await api(`/credentials/models?name=${encodeURIComponent(name)}`))
-          .models || [],
-    );
-    models = res;
-    res.load();
-  });
-  function toggle(a: Data) {
-    store.go(
-      open === id(a)
-        ? "credentials"
-        : `credentials/${encodeURIComponent(id(a))}`,
-    );
-  }
-  const lookup = (a: Data) => ({
-    name: a.name,
-    ...(a.auth_index ? { auth_index: a.auth_index } : {}),
-  });
-  const fieldNames = [
-    ["note", "Note", ""],
-    ["priority", "Priority", "0"],
-    ["weight", "Weight", "1"],
-    ["request_retry", "Retries", "Global"],
-  ] as const;
-  const facts = (a: Data) =>
-    [
-      ["File", a.name, true],
-      ["Auth index", a.auth_index || "—", true],
-      ["Source", a.runtime_only ? "Configuration" : a.source || "file"],
-      [
-        "Lifetime",
-        a.success === undefined
-          ? "Not reported"
-          : `${a.success} ok · ${a.failed || 0} failed`,
-      ],
-      [
-        "Token refreshed",
-        a.last_refresh && new Date(a.last_refresh).toLocaleString(),
-      ],
-      ["Status", a.status_message],
-    ].filter((f) => f[1]);
-  const actions = (
-    a: Data,
-  ): [string, string, string, Data, string, string, boolean][] => [
-    [
-      a.disabled ? "Enable" : "Disable",
-      "PATCH",
-      "/credentials/status",
-      { ...lookup(a), disabled: !a.disabled },
-      a.disabled ? "Enabled." : "Disabled.",
-      "",
-      false,
-    ],
-    [
-      "Refresh token",
-      "POST",
-      "/credentials/refresh",
-      lookup(a),
-      "Token refreshed.",
-      "",
-      false,
-    ],
-    [
-      "Reset cooldown",
-      "POST",
-      "/routing/cooldown/reset",
-      { auth_index: a.auth_index },
-      "Cooldown cleared.",
-      "Clear the local cooldown? Provider quota is not restored.",
-      !a.auth_index,
-    ],
-    [
-      "Delete",
-      "DELETE",
-      "/credentials",
-      { names: [a.name] },
-      "Credential deleted.",
-      `Delete ${a.name}? The file is removed from the server.`,
-      !!a.runtime_only,
-    ],
-  ];
+  const selected = $derived(rows.find((r) => id(r.a) === store.route.arg)?.a);
   const reload = () => store.creds.load(true);
 
   async function upload(input: HTMLInputElement) {
@@ -196,9 +78,7 @@
             `${result.uploaded || 0} uploaded. Failed: ${result.failed.map((f: Data) => `${f.name} (${f.error})`).join(", ")}`,
           );
       },
-      files.length > 1
-        ? `${files.length} files uploaded.`
-        : "Credential uploaded.",
+      files.length > 1 ? `${files.length} files uploaded.` : "Account file uploaded.",
     );
   }
   function refreshAll() {
@@ -213,32 +93,9 @@
       store.notify(
         result.results?.length
           ? `${result.results.length} tokens refreshed.`
-          : "No credentials can refresh.",
+          : "No accounts can refresh.",
       );
     });
-  }
-  async function saveFields(a: Data) {
-    const submitted = JSON.stringify(fields);
-    const patch: Data = { name: id(a), note: fields.note.trim() };
-    for (const k of ["priority", "weight", "request_retry"] as const) {
-      const v = fields[k].trim();
-      // An emptied field clears the override (Go deletes the key on null).
-      if (v === "") {
-        if (a[k] !== undefined) patch[k] = null;
-        continue;
-      }
-      if (!/^-?\d+$/.test(v))
-        return store.notify(
-          `${k.replace("_", " ")} must be a whole number.`,
-          true,
-        );
-      patch[k] = Number(v);
-    }
-    if (
-      (await store.call("PATCH", "/credentials/fields", patch, "Saved.")) &&
-      formFor === id(a)
-    )
-      baseline = submitted;
   }
 </script>
 
@@ -252,23 +109,13 @@
   >
 </div>
 
-<Missing
-  actions={[
-    ["POST", "/credentials", "upload"],
-    ["POST", "/credentials/refresh", "token refresh"],
-    ["PATCH", "/credentials/fields", "editing fields"],
-    ["DELETE", "/credentials", "delete"],
-    ["POST", "/routing/cooldown/reset", "cooldown reset"],
-  ]}
-/>
-
-<Load res={store.creds} what="Credentials">
+<Load res={store.creds} what="Accounts">
   {#snippet children(list)}
     {#if !list.length}
       <div class="state">
-        <div class="row"><span class="lamp off"></span>No credentials yet</div>
+        <div class="row"><span class="lamp off"></span>No accounts yet</div>
         <p>
-          Connect an account with the provider’s sign-in, or upload credential
+          Connect an account with the provider’s sign-in, or upload account
           JSON files exported from another CLIProxyAPI server.
         </p>
       </div>
@@ -277,7 +124,7 @@
         <div class="row">
           <label class="search grow">
             <svg class="i" aria-hidden="true"><use href="#i-search" /></svg
-            ><span class="sr">Filter credentials</span>
+            ><span class="sr">Filter accounts</span>
             <input
               bind:value={query}
               placeholder="Filter by name, provider or note"
@@ -294,201 +141,54 @@
           {#each groups as g (g.p)}
             <li class="group">{label(g.p)}<span>{g.rows.length}</span></li>
             {#each g.rows as r (key(r.a))}
-              {@const isOpen = open === id(r.a)}
-              <li class:open={isOpen}>
-                <button
-                  class="item"
-                  aria-expanded={isOpen}
-                  onclick={() => toggle(r.a)}
-                >
+              {@const title = r.a.label || credName(r.a)}
+              <li>
+                <a class="item" href={`#credentials/${encodeURIComponent(id(r.a))}`}>
                   <span class="lamp {r.s.lamp}"></span>
                   <span class="name"
-                    ><strong>{r.a.label || credName(r.a)}</strong
-                    >{#if r.a.note || credName(r.a) !== r.a.name}<small
-                        >{r.a.note ? r.a.note : r.a.email || r.a.name}</small
+                    ><strong>{title}</strong
+                    >{#if r.a.note || r.a.name !== title}<small
+                        >{r.a.note || r.a.name}</small
                       >{/if}</span
                   >
                   <span class="state-label"
-                    >{r.s.label}{#if r.s.detail}<small title={r.s.detail}
-                        >{r.s.detail}</small
-                      >{/if}</span
+                    >{r.s.label}{#if r.s.detail}<small>{r.s.detail}</small>{/if}</span
                   >
-                </button>
-                {#if isOpen}
-                  {@const a = r.a}
-                  {@const routeAccount = store.native.data?.accounts?.find(
-                    (n: Data) => n.fileId === (a.id || a.name),
-                  )}
-                  <div class="detail window">
-                    <div class="row">
-                      <button
-                        class="key"
-                        disabled={store.busy ||
-                          !store.can("PATCH", "/credentials/status")}
-                        onclick={() =>
-                          store.call(
-                            "PATCH",
-                            "/credentials/status",
-                            { ...lookup(a), disabled: !a.disabled },
-                            a.disabled ? "Enabled." : "Disabled.",
-                            "",
-                            async () => {
-                              await reload();
-                              await store.native.load(true);
-                            },
-                          )}
-                        >{a.disabled
-                          ? "Enable account"
-                          : "Disable account"}</button
-                      >
-                      {#if r.s.label === "Sign in again"}<a
-                          class="key primary"
-                          href="#connect">Reconnect account</a
-                        >{/if}
-                    </div>
-                    {#if routeAccount}<p class="muted">
-                        {store.native.data?.affinity?.find(
-                          (n: Data) => n.account === routeAccount.id,
-                        )?.sessions || 0} bound conversations · not necessarily active
-                      </p>{/if}
-                    <details>
-                      <summary>Advanced account settings</summary>
-                      <dl class="facts">
-                        {#each facts(a) as [k, v, mono]}<div>
-                            <dt>{k}</dt>
-                            <dd class:mono>{v}</dd>
-                          </div>{/each}
-                      </dl>
-                      {#if a.cooldowns?.length || (a.quota?.signals && Object.keys(a.quota.signals).length)}
-                        <div class="chips">
-                          {#each a.cooldowns || [] as c}<span class="chip"
-                              ><span class="lamp warn"></span>{c.model_key ||
-                                "credential"} · {c.reason?.replaceAll(
-                                "_",
-                                " ",
-                              )}{c.http_status ? ` ${c.http_status}` : ""} · {span(
-                                Date.parse(c.retry_at) - Date.now(),
-                              )}</span
-                            >{/each}
-                          {#each Object.entries(a.quota?.signals || {}) as [k, v]}<span
-                              class="chip">{k}: {v}</span
-                            >{/each}
-                        </div>
-                      {/if}
-                      {#if !a.runtime_only}
-                        <form
-                          class="form"
-                          onsubmit={(e) => (e.preventDefault(), saveFields(a))}
-                          inert={!store.can("PATCH", "/credentials/fields")}
-                        >
-                          {#each fieldNames as [k, name, hint]}<label
-                              class="field"
-                              class:note-field={k === "note"}
-                              >{name}<input
-                                bind:value={fields[k]}
-                                placeholder={hint}
-                                inputmode={k === "note" ? undefined : "numeric"}
-                              /></label
-                            >{/each}
-                          <button
-                            class="key"
-                            disabled={store.busy ||
-                              !store.can("PATCH", "/credentials/fields")}
-                            >Save</button
-                          >
-                        </form>
-                      {/if}
-                      <div class="stack">
-                        <h3>Models</h3>
-                        {#if models}<Load res={models} what="Models">
-                            {#snippet children(list)}<div class="chips">
-                                {#each list as m}<span class="chip">{m.id}</span
-                                  >{:else}<span class="muted"
-                                    >No models reported.</span
-                                  >{/each}
-                              </div>{/snippet}
-                          </Load>{/if}
-                      </div>
-                      <div class="row">
-                        {#each actions(a).slice(1) as [name, method, path, body, done, ask, off]}<button
-                            class="key small"
-                            class:danger={method === "DELETE"}
-                            class:quiet={method === "DELETE"}
-                            disabled={store.busy ||
-                              off ||
-                              !store.can(method, path)}
-                            onclick={() =>
-                              store
-                                .call(method, path, body, done, ask)
-                                .then(
-                                  (ok) =>
-                                    ok &&
-                                    method === "DELETE" &&
-                                    store.go("credentials"),
-                                )}>{name}</button
-                          >{/each}
-                        <button
-                          class="key small"
-                          disabled={store.busy ||
-                            a.runtime_only ||
-                            !store.can("GET", "/credentials/download")}
-                          onclick={() =>
-                            store.act(async () =>
-                              download(
-                                await api(
-                                  `/credentials/download?name=${encodeURIComponent(a.name)}`,
-                                  "GET",
-                                  undefined,
-                                  "blob",
-                                ),
-                                a.name,
-                              ),
-                            )}
-                          ><svg class="i" aria-hidden="true"
-                            ><use href="#i-download" /></svg
-                          >Download</button
-                        >
-                      </div>
-                    </details>
-                  </div>
-                {/if}
+                </a>
               </li>
             {/each}
-            {#if g.p === "claude"}<li class="policy"><ClaudePolicy /></li>{/if}
           {:else}
-            <li class="state"><p>No credentials match.</p></li>
+            <li class="state"><p>No accounts match.</p></li>
           {/each}
         </ul>
       </section>
     {/if}
   {/snippet}
 </Load>
-<p class="legend">
-  <a href="#overview">View quotas and account order →</a>
-</p>
+<ClaudePolicy />
 
 <details class="section">
   <summary>Import and maintenance</summary>
   <div class="row">
-    <label class="key" aria-disabled={!store.can("POST", "/credentials")}>
+    <label class="key">
       <svg class="i" aria-hidden="true"><use href="#i-upload" /></svg>Upload
       <input
         class="file"
         type="file"
         accept=".json,application/json"
         multiple
-        disabled={store.busy || !store.can("POST", "/credentials")}
+        disabled={store.busy}
         onchange={(e) => upload(e.currentTarget)}
       />
     </label>
-    <button
-      class="key"
-      disabled={store.busy ||
-        !rows.length ||
-        !store.can("POST", "/credentials/refresh")}
-      onclick={refreshAll}
+    <button class="key" disabled={store.busy || !rows.length} onclick={refreshAll}
       ><svg class="i" aria-hidden="true"><use href="#i-refresh" /></svg>Refresh
       tokens</button
     >
   </div>
 </details>
+
+{#if selected}{#key store.route.arg}<AccountDetail
+      a={selected}
+      onclose={() => store.go("credentials")}
+    />{/key}{/if}

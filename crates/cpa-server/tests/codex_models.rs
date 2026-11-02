@@ -4,13 +4,12 @@
 
 use std::sync::Arc;
 
-use cpa_core::config::Config;
 use cpa_exec::Executors;
 use cpa_server::router;
 use serde_json::Value;
 
 async fn get(path: &str, cfg: &str) -> (u16, String, Value) {
-    let cfg = Config::parse(cfg).unwrap();
+    let cfg = cpa_server::testing::config(cfg);
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -52,7 +51,7 @@ async fn client_version_selects_the_codex_catalog() {
     let gpt = slug("gpt-5.5");
     assert_eq!(gpt["multi_agent_version"], "v2");
     assert!(gpt["base_instructions"].as_str().unwrap().len() > 1000);
-    // M1-0033: the Claude key's max-context-length is the advertised window of the
+    // The Claude key's max-context-length is the advertised window of the
     // synthesized entry, which carries compact instructions.
     let sonnet = slug("sonnet-long");
     assert_eq!(sonnet["context_window"], 150000);

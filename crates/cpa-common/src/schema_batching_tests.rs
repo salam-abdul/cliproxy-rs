@@ -188,7 +188,7 @@ fn schema_batching_handles_depth_on_a_small_stack() {
                     .count(),
                 2000
             );
-            assert!(output.windows(b"minLength: 1".len()).any(|v| v == b"minLength: 1"));
+            assert!(crate::gostr::contains(&output, b"minLength: 1"));
         })
         .unwrap()
         .join()

@@ -232,7 +232,7 @@ fn credentials_never_appear_in_errors() {
 /// blocking task would never complete.
 #[test]
 fn explicit_delete_needs_no_second_blocking_thread() {
-    use cpa_server::persist::StorePersister;
+    use cpa_core::store::StorePersister;
     let dir = scratch("delete-pool");
     let remote = bare_remote(&dir);
     let store = std::sync::Arc::new(GitStore::new(&remote, "", "", "main", &dir.join("a")));
@@ -257,7 +257,7 @@ fn explicit_delete_needs_no_second_blocking_thread() {
     assert!(remote_file(&remote, "main", "auths/a.json").is_none());
 }
 
-// ---- corruption recovery (Go gitstore_test.go TestGitTokenStoreCorruption*) ----------
+// Corruption recovery (Go gitstore_test.go TestGitTokenStoreCorruption*)
 
 /// Go `removeHeadFileObject`: commits `path` locally, then deletes its blob object.
 fn remove_head_file_object(repo: &Path, path: &str) {

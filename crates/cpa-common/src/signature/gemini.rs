@@ -1,10 +1,12 @@
 //! Gemini `thoughtSignature` validation (gemini_validation.go).
 
+use cpa_core::config::go_trim_space;
+
 use super::claude::is_valid_claude_cais_signature;
 use super::gemini_sanitize::{has_normalized_part_signature, part_thought_signature};
 use super::wire::{self, BYTES, FIXED32, FIXED64, RAW_STD, STD, VARINT};
 use super::{Error, err};
-use crate::gostr::{GoStr, lower_bytes, trim_space};
+use crate::gostr::{GoStr, lower_bytes};
 use crate::json::{self, Res};
 
 pub const MAX_GEMINI_THOUGHT_SIGNATURE_LEN: usize = 32 * 1024 * 1024;
@@ -54,7 +56,7 @@ pub struct GeminiSignatureInfo {
 
 /// `IsGeminiThoughtSignatureBypass`.
 pub fn is_gemini_bypass(raw: impl AsRef<[u8]>) -> bool {
-    let raw = trim_space(raw.as_ref());
+    let raw = go_trim_space(raw.as_ref());
     raw == GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR.as_bytes() || raw == GEMINI_CONTEXT_ENGINEERING_BYPASS.as_bytes()
 }
 
@@ -68,7 +70,7 @@ pub fn inspect_gemini_thought_signature(
     raw: impl AsRef<[u8]>,
     opt: GeminiValidation,
 ) -> Result<GeminiSignatureInfo, Error> {
-    let sig = trim_space(raw.as_ref());
+    let sig = go_trim_space(raw.as_ref());
     if sig.is_empty() {
         return err("empty Gemini thought signature");
     }
@@ -156,7 +158,7 @@ pub fn validate_gemini_thought_signatures(body: &[u8], opt: GeminiValidation) ->
         if !parts.is_array() {
             continue;
         }
-        let model_turn = String::from_utf8_lossy(trim_space(&content.get("role").bytes())).go_eq_fold("model");
+        let model_turn = String::from_utf8_lossy(go_trim_space(&content.get("role").bytes())).go_eq_fold("model");
         let mut first_call_seen = false;
         for (j, part) in parts.array().iter().enumerate() {
             let has_call = part.get("functionCall").exists();
@@ -169,7 +171,7 @@ pub fn validate_gemini_thought_signatures(body: &[u8], opt: GeminiValidation) ->
                 continue;
             }
             let part_path = format!("{path}[{i}].parts[{j}]");
-            let raw = trim_space(&raw);
+            let raw = go_trim_space(&raw);
             if part.get("functionResponse").exists() && has_sig {
                 return err(format!("{part_path}: functionResponse must not carry thoughtSignature"));
             }
@@ -272,7 +274,7 @@ pub fn validate_gemini_function_call_pairing(body: &[u8]) -> Result<(), Error> {
             return true;
         }
         if responses.is_empty() {
-            if !pending.is_empty() && lower_bytes(trim_space(&content.get("role").bytes())) == "model" {
+            if !pending.is_empty() && lower_bytes(go_trim_space(&content.get("role").bytes())) == "model" {
                 result = err(format!(
                     "{path}[{index}]: model content appears before {} pending functionResponse part(s)",
                     pending.len()

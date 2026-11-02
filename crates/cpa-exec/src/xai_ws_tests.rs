@@ -566,7 +566,7 @@ fn capture_problems(
             _ => {}
         }
     }
-    let (auth_type, auth_value) = crate::openai_compat_http::account_info(credential);
+    let (auth_type, auth_value) = cpa_core::registry::dynamic::account_info(credential);
     for event in events {
         if let Captured::Request {
             websocket,
@@ -704,7 +704,7 @@ async fn terminal_error_survives_a_full_queue() {
     server.abort();
 }
 
-// --- unit-level ports of xai_websockets_executor_test.go -------------------------------
+// Unit-level ports of xai_websockets_executor_test.go
 
 /// The server's `classify::upstream_attempted` (Go `UpstreamAttempted`).
 fn attempted(e: &ExecError) -> bool {

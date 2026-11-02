@@ -20,11 +20,11 @@
 use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use cpa_core::format::Format;
 
 use crate::apply_patch::{self, CallState, InputDecoder};
 use crate::claude_responses::qualify_namespace_name;
-use crate::common::trim_space;
 use crate::responses_tools;
 
 /// A transform result: zero or more payloads (or SSE lines) and, on failure, the error
@@ -77,7 +77,6 @@ fn str_of(r: &Res<'_>) -> Vec<u8> {
     r.bytes().into_owned()
 }
 
-// ---------------------------------------------------------------------------------------
 // Request normalization
 
 /// translator/common NormalizeApplyPatchResponsesRequest: the winning custom `apply_patch`
@@ -152,7 +151,8 @@ pub fn normalize_request(raw: &[u8]) -> Result<Vec<u8>, String> {
     let patch_history: HashSet<Vec<u8>> = input
         .iter()
         .filter(|item| {
-            &*item.get("type").bytes() == b"custom_tool_call" && trim_space(&item.get("name").bytes()) == b"apply_patch"
+            &*item.get("type").bytes() == b"custom_tool_call"
+                && go_trim_space(&item.get("name").bytes()) == b"apply_patch"
         })
         .map(|item| str_of(&item.get("call_id")))
         .collect();
@@ -166,7 +166,7 @@ pub fn normalize_request(raw: &[u8]) -> Result<Vec<u8>, String> {
                 }
             }
             b"custom_tool_call" => {
-                if trim_space(&item.get("name").bytes()) != b"apply_patch" {
+                if go_trim_space(&item.get("name").bytes()) != b"apply_patch" {
                     continue;
                 }
                 let patch = item.get("input");
@@ -261,7 +261,6 @@ fn prefer_chat_function_patch_tools(original: &[u8], declarations: &[u8]) -> Vec
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Bridge
 
 #[derive(Default)]
@@ -946,7 +945,6 @@ fn envelope_item(index: i64, item: &Res<'_>) -> Vec<u8> {
     out
 }
 
-// ---------------------------------------------------------------------------------------
 // Executor state
 
 #[derive(Default)]
@@ -1431,7 +1429,7 @@ impl State {
         if self.failed || self.transport_done {
             return (vec![], None);
         }
-        if self.active && trim_space(event) == b"[DONE]" {
+        if self.active && go_trim_space(event) == b"[DONE]" {
             if let Err(err) = self.finish() {
                 return self.fail(err);
             }
@@ -1556,7 +1554,7 @@ impl State {
         let Some(rest) = line.strip_prefix(b"data:") else {
             return (vec![line.to_vec()], None);
         };
-        let payload = trim_space(rest);
+        let payload = go_trim_space(rest);
         let (events, err) = if payload == b"[DONE]" {
             match self.finish() {
                 Err(err) => self.fail(err),

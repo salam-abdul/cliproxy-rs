@@ -11,7 +11,7 @@ use crate::Runtime;
 fn examples(keys: &[String]) -> Vec<&str> {
     let mut found = Vec::new();
     for key in keys {
-        let key = crate::gojson::trim(key);
+        let key = key.trim();
         if matches!(key, "your-api-key-1" | "your-api-key-2" | "your-api-key-3") && !found.contains(&key) {
             found.push(key);
         }
@@ -62,7 +62,7 @@ async fn guard(State(rt): State<Arc<Runtime>>, request: Request, next: Next) -> 
     }
     let path = crate::management::percent_decode(request.uri().path());
     if path == "/management.html"
-        && crate::access::query_get(request.uri().query().unwrap_or_default(), "safe-mode").as_deref()
+        && cpa_core::config::go_url::query_get(request.uri().query().unwrap_or_default(), "safe-mode").as_deref()
             == Some(b"configure")
     {
         return next.run(request).await;

@@ -138,7 +138,7 @@ async fn transform(
             .filter(|out| !out.is_empty())
             .ok_or_else(|| {
                 publish_apply_patch_failure(&req.usage);
-                apply_patch_error()
+                crate::upstream::apply_patch_error()
             })?;
         Ok(ResponseBody::Buffered(Bytes::from(if responses {
             ensure_responses_usage_details(&out)
@@ -152,16 +152,6 @@ async fn transform(
 /// rejection publishes no tokens, even after stream usage was seen.
 fn publish_apply_patch_failure(usage: &cpa_core::exec::UsageSink) {
     usage.publish_failure(502, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR);
-}
-
-/// helps.ApplyPatchUpstreamErrorMessage with Go's 502 `statusErr`: a plain status error,
-/// so the conductor classifies it by status (it is not request-scoped) and fails over.
-fn apply_patch_error() -> ExecError {
-    ExecError::local(
-        502,
-        crate::upstream::scope_for(502),
-        cpa_translate::APPLY_PATCH_UPSTREAM_ERROR,
-    )
 }
 
 /// Go's translated stream loop (claude_executor_stream.go): each upstream event goes
@@ -214,7 +204,7 @@ fn streaming(
             self.emit(finalized);
             if self.translator.tool_input_failed() {
                 publish_apply_patch_failure(&self.usage);
-                return self.fail(apply_patch_error());
+                return self.fail(crate::upstream::apply_patch_error());
             }
             if let Some(error) = transport {
                 return self.fail(error);
@@ -252,7 +242,7 @@ fn streaming(
                             state.emit(events);
                             if state.translator.tool_input_failed() {
                                 publish_apply_patch_failure(&state.usage);
-                                state.error = Some(apply_patch_error());
+                                state.error = Some(crate::upstream::apply_patch_error());
                                 state.done = true;
                             }
                         }
@@ -267,10 +257,10 @@ fn streaming(
     .boxed()
 }
 
-/// A response translator rejecting upstream data: a bad gateway, never the client's fault,
-/// classified by status like Go's plain `statusErr`.
+/// A response translator rejecting upstream data: a bad gateway, never the client's fault.
+/// The upstream already answered, so the error is request-scoped and never fails over.
 fn stream_error(error: cpa_translate::Error) -> ExecError {
-    ExecError::local(502, crate::upstream::scope_for(502), error.to_string())
+    ExecError::local(502, FailureScope::Request, error.to_string())
 }
 
 fn error(error: cpa_translate::Error) -> ExecError {
@@ -491,12 +481,12 @@ mod tests {
         }
     }
 
-    /// Go returns these as plain 502 `statusErr`s, not request-scoped errors: the
-    /// conductor fails over to the next credential instead of answering the caller.
+    /// Unlike Go's plain 502 `statusErr`s, these stream failures are request-scoped: the
+    /// upstream already answered, so a translator or apply_patch failure is terminal.
     /// Only the apply_patch rejection publishes its usage as empty
     /// (RecordApplyPatchStreamFailure); a transport error keeps the stream's usage.
     #[tokio::test]
-    async fn apply_patch_and_translator_failures_are_not_request_scoped() {
+    async fn apply_patch_and_translator_stream_failures_are_request_scoped() {
         let (failures, usage) = Failures::sink();
         let pending = stream(&[b"patch"]).chain(futures_util::stream::pending()).boxed();
         let result: Vec<_> = streaming(pending, Box::<PatchFail>::default(), false, usage)
@@ -506,14 +496,13 @@ mod tests {
         let error = result[1].as_ref().unwrap_err();
         assert_eq!(error.status, 502);
         assert_eq!(error.body, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR);
-        assert_eq!(error.scope, FailureScope::Credential);
+        assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(failures.count(), 1);
         let (failures, usage) = Failures::sink();
         let result: Vec<_> = streaming(stream(&[b"bad"]), Box::<PatchFail>::default(), false, usage)
             .collect()
             .await;
-        assert_eq!(result[0].as_ref().unwrap_err().scope, FailureScope::Credential);
-        assert_eq!(apply_patch_error().scope, FailureScope::Credential);
+        assert_eq!(result[0].as_ref().unwrap_err().scope, FailureScope::Request);
         assert_eq!(failures.count(), 0);
         let (failures, usage) = Failures::sink();
         let reset = futures_util::stream::iter(vec![
@@ -562,7 +551,7 @@ mod tests {
         assert_eq!(result[1].as_ref().unwrap(), "finalized");
         let error = result[2].as_ref().unwrap_err();
         assert_eq!(error.body, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR);
-        assert_eq!(error.scope, FailureScope::Credential);
+        assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(failures.count(), 1);
     }
 
@@ -587,7 +576,7 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.status, 502);
-        assert_eq!(error.scope, FailureScope::Credential);
+        assert_eq!(error.scope, FailureScope::Request);
         assert_eq!(failures.count(), 1);
     }
 

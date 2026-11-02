@@ -11,6 +11,7 @@ use cpa_common::json::{self as gj, Kind, Res};
 use cpa_core::exec::ExecError;
 
 use crate::openai_compat_payload::ensure_responses_usage_details;
+use crate::replay::text;
 
 pub(crate) const FUNCTION: &str = "function";
 pub(crate) const CUSTOM: &str = "custom";
@@ -34,11 +35,6 @@ pub(crate) struct ClientToolKey {
     pub namespace: String,
     pub name: String,
     pub tool_type: String,
-}
-
-/// gjson `Result.String()` trimmed like Go's `strings.TrimSpace`.
-pub(crate) fn text(r: &Res<'_>) -> String {
-    r.str().trim().to_owned()
 }
 
 /// `json.Marshal([]json.RawMessage)`: each item compacted with HTML escaping.
@@ -418,7 +414,7 @@ pub(crate) fn unwrap_dispatcher_arguments(
 
 /// `restoreXAIClientWebSearchName`: the client's `web_search` function back from its alias.
 pub(crate) fn restore_web_search_name(mut data: Vec<u8>, alias: &str) -> Vec<u8> {
-    if alias.is_empty() || !data.windows(alias.len()).any(|w| w == alias.as_bytes()) || !gj::valid(&data) {
+    if alias.is_empty() || !cpa_common::gostr::contains(&data, alias.as_bytes()) || !gj::valid(&data) {
         return data;
     }
     if text(&gj::get(&data, "item.namespace")).is_empty() {
@@ -808,12 +804,12 @@ const FREE_USAGE_COOLDOWN: Duration = Duration::from_secs(24 * 3600);
 pub(crate) fn status_error(status: u16, body: &[u8]) -> ExecError {
     let message = String::from_utf8_lossy(body).into_owned();
     if body.is_empty() {
-        return crate::openai_compat::status_err(status, message);
+        return crate::upstream::model_status_error(status, message);
     }
     if status == 403 && is_bad_credentials(body) {
-        return crate::openai_compat::status_err(401, message);
+        return crate::upstream::model_status_error(401, message);
     }
-    let mut error = crate::openai_compat::status_err(status, message);
+    let mut error = crate::upstream::model_status_error(status, message);
     if status != 429 {
         return error;
     }
@@ -854,7 +850,7 @@ pub(crate) fn is_bad_credentials(body: &[u8]) -> bool {
     raw.contains("bad-credentials") || raw.contains("access token could not be validated")
 }
 
-// --- usage observation (helps/usage_helpers.go) ------------------------------------------
+// Usage observation (helps/usage_helpers.go)
 
 /// `ParseCodexUsage`'s `ok`: `response.usage` carries OpenAI-style token fields
 /// (`hasOpenAIStyleUsageTokenFields`), or the event names a service tier.

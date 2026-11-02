@@ -32,6 +32,7 @@
 pub mod cache;
 pub mod codex_catalog;
 pub mod codex_client;
+pub mod devin_tools;
 pub mod gemini_schema;
 pub mod gostr;
 mod gostr_tables;

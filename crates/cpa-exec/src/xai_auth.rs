@@ -16,6 +16,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use cpa_common::gostr::{GoStr, quote};
 use cpa_common::json::{self as gj, GoValue, Kind};
 use cpa_core::config::Config;
+use cpa_core::config::go_url::values_encode;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{ExecError, FailureScope};
 use futures_util::FutureExt;
@@ -65,30 +66,6 @@ pub fn validate_endpoint(raw: &str, field: &str) -> Result<String, String> {
     Ok(raw.to_owned())
 }
 
-/// Go `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Go `url.Values.Encode`: keys sorted.
-fn form(pairs: &[(&str, &str)]) -> String {
-    let mut pairs = pairs.to_vec();
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     Str,
@@ -119,7 +96,7 @@ impl Decoded {
 /// field errors (empty for anonymous structs).
 // ponytail: syntax errors report a fixed text instead of Go's scanner message (for
 // example "invalid character 'o' in literal null"); only CLI login output and refresh
-// error messages differ.
+// error messages differ. Port the scanner messages if those must match.
 fn go_unmarshal(
     body: &[u8],
     fields: &[(&'static str, Field)],
@@ -173,7 +150,7 @@ fn go_unmarshal(
                 Some(n) => {
                     out.ints.insert(name, n);
                 }
-                // ponytail: Go quotes the number ("number 1.5 into ..."); the value is
+                // Go quotes the number ("number 1.5 into ..."); the value is
                 // response data that reaches logs and returned errors, so the message
                 // names only its kind.
                 None => {
@@ -344,7 +321,8 @@ impl XaiAuth {
     /// Where a request for `url` goes. Fails closed when the HTTP client would contact a
     /// different host than Go's `net/url` reads from the same string.
     // ponytail: the request target is the WHATWG form of the URL, so dot segments and
-    // backslashes in an accepted path are normalized where Go sends them as given.
+    // backslashes in an accepted path are normalized where Go sends them as given. Send the
+    // raw path if an accepted endpoint ever relies on them.
     fn target(&self, url: &str) -> Result<String, ()> {
         if !crate::xai_url::same_authority(url) {
             return Err(());
@@ -455,7 +433,10 @@ impl XaiAuth {
             ));
         }
         let (status, body) = self
-            .post_form(device_endpoint, form(&[("client_id", CLIENT_ID), ("scope", SCOPE)]))
+            .post_form(
+                device_endpoint,
+                values_encode(&[("client_id", CLIENT_ID), ("scope", SCOPE)]),
+            )
             .await
             .map_err(|_| fail("xai device code request failed".into()))?;
         if status != 200 {
@@ -508,7 +489,7 @@ impl XaiAuth {
         interval: &mut Duration,
     ) -> Result<Option<TokenData>, ExecError> {
         let fail = |m: String| auth_error(400, m);
-        let body = form(&[
+        let body = values_encode(&[
             ("client_id", CLIENT_ID),
             ("device_code", device_code.trim()),
             ("grant_type", DEVICE_GRANT),
@@ -622,7 +603,7 @@ impl XaiAuth {
 
     /// `refreshTokensSingleFlight` + `postTokenForm`.
     async fn refresh_once(&self, refresh_token: &str, token_endpoint: &str) -> Result<TokenData, ExecError> {
-        let body = form(&[
+        let body = values_encode(&[
             ("client_id", CLIENT_ID),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -632,7 +613,7 @@ impl XaiAuth {
             .await
             .map_err(|_| auth_error(502, "xai token request failed"))?;
         if status != 200 {
-            // ponytail: Go appends the response body; it is withheld because token
+            // Go appends the response body; it is withheld because token
             // endpoints may echo credentials and the message reaches management clients
             // (same choice as the Kimi refresh).
             return Err(auth_error(

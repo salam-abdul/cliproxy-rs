@@ -364,7 +364,7 @@ fn has_tokens(d: &Detail) -> bool {
         || d.breakdown.is_some_and(|b| b.total != 0)
 }
 
-// ---- parsers -------------------------------------------------------------------
+// Parsers
 
 /// Go `jsonPayload`: the JSON object of an SSE `data:` line or a bare JSON line.
 fn json_payload(line: &[u8]) -> Option<&[u8]> {
@@ -876,7 +876,7 @@ impl StreamUsage {
     /// Go `ObserveOpenAIStream`.
     fn observe_openai(&mut self, line: &[u8]) {
         let Some(payload) = json_payload(line) else { return };
-        let contains = |needle: &[u8]| payload.windows(needle.len()).any(|w| w == needle);
+        let contains = |needle: &[u8]| cpa_common::gostr::contains(payload, needle);
         let usage_candidate = contains(b"\"usage\"");
         let need_tier = self.detail.response_service_tier.is_empty() || usage_candidate;
         let tier_candidate = need_tier && contains(b"\"service_tier\"");
@@ -948,7 +948,7 @@ impl StreamUsage {
     }
 }
 
-// ---- response model ------------------------------------------------------------
+// Response model
 
 const MAX_RESPONSE_MODEL: usize = 128;
 
@@ -1232,7 +1232,7 @@ fn warn_model_substitution(record: &Record, upstream_model: &str, auth_id: &str)
     );
 }
 
-// ---- the queued record ---------------------------------------------------------
+// The queued record
 
 /// Downstream request facts (Go `ClientRequestMetadata`, request ID, endpoint).
 #[derive(Debug, Clone, Default)]
@@ -1249,7 +1249,8 @@ pub struct Client {
     pub node_kind: String,
     pub is_compaction: bool,
     /// Where `session_id` came from (`crate::session::Session::source`), `lcp` for an
-    /// LCP pick's session or `home` for Home's. Not in Go.
+    /// LCP pick's session or `home` for Home's. Not in Go; it shows which source session
+    /// affinity used.
     pub session_source: &'static str,
     pub request_id: String,
     /// `METHOD /route/template`.
@@ -1286,7 +1287,8 @@ pub struct Record {
     pub response_model: String,
     /// Upstream response headers, names as received.
     pub response_headers: Vec<(String, Vec<String>)>,
-    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go.
+    /// [`prompt_prefix`] of the client request; empty when it has none. Not in Go; it
+    /// shows which requests share a cacheable prefix.
     pub prompt_prefix_hash: String,
     pub claude_cache: Option<cpa_core::exec::ClaudeCacheTelemetry>,
     /// Present only for additional telemetry-only records that Go omits.
@@ -1567,7 +1569,7 @@ pub fn queued(record: &Record, client: &Client) -> Vec<u8> {
     w.0
 }
 
-// ---- per-attempt tracking ------------------------------------------------------
+// Per-attempt tracking
 
 /// Request-level facts shared by every attempt of one request (Go's handler context:
 /// client metadata, requested alias, reasoning effort, service tier, generate, stream).
@@ -1667,7 +1669,8 @@ pub(crate) fn prompt_prefix(format: Format, body: &[u8]) -> String {
 /// Go executor identity for a credential's provider: `Identifier()` and the
 /// executor's type name (both reach the record and pick the token semantics).
 // ponytail: Codex attempts over the upstream WebSocket report `CodexExecutor`; Go
-// names them `CodexWebsocketsExecutor`.
+// names them `CodexWebsocketsExecutor`. Report the WebSocket name if usage views
+// need Go's split.
 fn executor_identity(c: &cpa_core::credential::Credential) -> (String, &'static str) {
     let provider = c.provider.trim().to_lowercase();
     let executor = match provider.as_str() {
@@ -2000,7 +2003,7 @@ impl Tracker {
         let (provider, executor_type) = executor_identity(credential);
         let now = chrono::Local::now();
         let record = Record {
-            timestamp: go_timestamp(&now),
+            timestamp: cpa_core::gotime::rfc3339_nano(&now),
             execution_id: uuid::Uuid::new_v4().to_string(),
             executor_type: executor_type.to_owned(),
             model: cpa_common::thinking::parse_suffix(upstream_model).model_name,
@@ -2143,7 +2146,7 @@ impl Tracker {
                 Ending::Done => usage.unwrap_or_default(),
                 Ending::Failed(error) => {
                     record.failed = true;
-                    record.fail_status = i64::from(crate::classify::go_status(error));
+                    record.fail_status = i64::from(error.go_status());
                     record.fail_body = crate::classify::error_text(error);
                     if record.response_headers.is_empty() {
                         record.response_headers = go_headers(&error.headers);
@@ -2385,7 +2388,7 @@ pub fn publish_home_unauthorized(
         alias => alias,
     };
     let record = Record {
-        timestamp: go_timestamp(&chrono::Local::now()),
+        timestamp: cpa_core::gotime::rfc3339_nano(&chrono::Local::now()),
         provider: provider.to_owned(),
         executor_type: "home-result".into(),
         model: model.to_owned(),
@@ -2413,50 +2416,12 @@ pub fn publish_home_unauthorized(
     queue.enqueue(queued(&record, &client));
 }
 
-/// Go `time.Time.MarshalJSON` (RFC 3339 with trailing-zero-trimmed nanoseconds).
-pub fn go_timestamp<Tz: chrono::TimeZone>(t: &chrono::DateTime<Tz>) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    use chrono::{Offset, Timelike};
-    let mut out = t.format("%Y-%m-%dT%H:%M:%S").to_string();
-    let nanos = t.nanosecond() % 1_000_000_000;
-    if nanos != 0 {
-        let frac = format!("{nanos:09}");
-        out.push('.');
-        out.push_str(frac.trim_end_matches('0'));
-    }
-    let offset = t.offset().fix().local_minus_utc();
-    if offset == 0 {
-        out.push('Z');
-    } else {
-        let sign = if offset < 0 { '-' } else { '+' };
-        let abs = offset.abs();
-        out.push_str(&format!("{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/server_go.json");
-
-    #[test]
-    fn go_timestamps() {
-        use chrono::TimeZone;
-        let t = chrono::Utc.with_ymd_and_hms(2026, 10, 3, 8, 0, 0).unwrap();
-        assert_eq!(go_timestamp(&t), "2026-10-03T08:00:00Z");
-        let t = t + chrono::Duration::nanoseconds(123_456_000);
-        assert_eq!(go_timestamp(&t), "2026-10-03T08:00:00.123456Z");
-        let east = chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
-        assert_eq!(
-            go_timestamp(&t.with_timezone(&east)),
-            "2026-10-03T13:30:00.123456+05:30"
-        );
-    }
 
     /// Claude's executor-published outcomes through the queue: an apply_patch
     /// rejection is Go's `reporter.PublishFailure(err)` after usage was observed (no
@@ -2701,8 +2666,7 @@ mod tests {
 
     /// A runtime whose usage queue keeps records.
     fn usage_runtime() -> std::sync::Arc<crate::Runtime> {
-        let cfg =
-            cpa_core::config::Config::parse("observability:\n  usage:\n    usage-statistics-enabled: true\n").unwrap();
+        let cfg = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
         let executors = cpa_exec::Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
             codex: Default::default(),

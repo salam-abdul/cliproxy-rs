@@ -8,9 +8,11 @@
 use std::collections::{HashMap, HashSet};
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::codex_claude::{short_to_original, shorten_call_id};
-use crate::common::{sanitize_claude_tool_id, sse_event, trim_space};
+use crate::codex_claude::short_to_original;
+use crate::codex_names::claude_visible_call_id;
+use crate::common::sse_event;
 use crate::stream::GoStream;
 use crate::{Error, ResponseCtx};
 
@@ -121,17 +123,17 @@ fn call_keys(root: &Res<'_>, item: &Res<'_>) -> Vec<Vec<u8>> {
 /// codexStreamErrorToClaudeError.
 fn stream_error(root: &Res<'_>) -> Vec<u8> {
     let error = root.get("error");
-    let mut kind = trim_space(&error.get("type").bytes()).to_vec();
+    let mut kind = go_trim_space(&error.get("type").bytes()).to_vec();
     if kind.is_empty() {
-        kind = trim_space(&root.get("error_type").bytes()).to_vec();
+        kind = go_trim_space(&root.get("error_type").bytes()).to_vec();
     }
     if kind.is_empty() {
         kind = b"api_error".to_vec();
     }
-    let code = trim_space(&error.get("code").bytes()).to_vec();
-    let mut message = trim_space(&error.get("message").bytes()).to_vec();
+    let code = go_trim_space(&error.get("code").bytes()).to_vec();
+    let mut message = go_trim_space(&error.get("message").bytes()).to_vec();
     if message.is_empty() {
-        message = trim_space(&root.get("message").bytes()).to_vec();
+        message = go_trim_space(&root.get("message").bytes()).to_vec();
     }
     if message.is_empty() {
         message = code.clone();
@@ -358,11 +360,7 @@ impl State {
                 br#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}"#,
                 c.block_index,
             );
-            gj::set_str(
-                &mut start,
-                "content_block.id",
-                shorten_call_id(&sanitize_claude_tool_id(&c.call_id)),
-            );
+            gj::set_str(&mut start, "content_block.id", claude_visible_call_id(&c.call_id));
             let names = self.names.get_or_insert_with(|| short_to_original(&self.original));
             let name = names.get(&c.name).cloned().unwrap_or_else(|| c.name.clone());
             gj::set_str(&mut start, "content_block.name", &name);
@@ -440,7 +438,7 @@ impl State {
     fn web_search_id(&mut self, root: &Res<'_>, item: &Res<'_>) -> Vec<u8> {
         for path in ["id", "output_item_id", "call_id"] {
             for source in [item, root] {
-                let value = trim_space(&source.get(path).bytes()).to_vec();
+                let value = go_trim_space(&source.get(path).bytes()).to_vec();
                 if !value.is_empty() {
                     return value;
                 }
@@ -450,7 +448,7 @@ impl State {
             return self.last_web_search_id.clone();
         }
         for source in [item, root] {
-            let value = trim_space(&source.get("item_id").bytes()).to_vec();
+            let value = go_trim_space(&source.get("item_id").bytes()).to_vec();
             if !value.is_empty() {
                 return value;
             }
@@ -535,7 +533,7 @@ impl State {
             return vec![];
         };
         let raw_event = line.to_vec();
-        let root = gj::parse(trim_space(rest));
+        let root = gj::parse(go_trim_space(rest));
         let kind = root.get("type").bytes().into_owned();
         if self.active.is_some() && should_defer(&kind, &root) {
             self.deferred.push(raw_event);
@@ -708,7 +706,7 @@ impl State {
 fn web_search_query(root: &Res<'_>, item: &Res<'_>) -> Vec<u8> {
     for path in ["action.query", "query", "input.query"] {
         for source in [item, root] {
-            let value = trim_space(&source.get(path).bytes()).to_vec();
+            let value = go_trim_space(&source.get(path).bytes()).to_vec();
             if !value.is_empty() {
                 return value;
             }
@@ -733,13 +731,13 @@ fn web_search_results(root: &Res<'_>, item: &Res<'_>) -> Option<Vec<u8>> {
     }
     let mut blocks = vec![];
     results.each(|_, result| {
-        let url = trim_space(&result.get("url").bytes()).to_vec();
+        let url = go_trim_space(&result.get("url").bytes()).to_vec();
         if url.is_empty() {
             return true;
         }
         let mut block = br#"{"type":"web_search_result","title":"","url":"","page_age":null}"#.to_vec();
         gj::set_str(&mut block, "url", &url);
-        let mut title = trim_space(&result.get("title").bytes()).to_vec();
+        let mut title = go_trim_space(&result.get("title").bytes()).to_vec();
         if title.is_empty() {
             title = url;
         }
@@ -943,11 +941,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                     let name = item.get("name").bytes().into_owned();
                     let name = names.get(&name).cloned().unwrap_or(name);
                     let mut block = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
-                    gj::set_str(
-                        &mut block,
-                        "id",
-                        shorten_call_id(&sanitize_claude_tool_id(&item.get("call_id").bytes())),
-                    );
+                    gj::set_str(&mut block, "id", claude_visible_call_id(&item.get("call_id").bytes()));
                     gj::set_str(&mut block, "name", &name);
                     let arguments = item.get("arguments").bytes();
                     let mut input: Vec<u8> = b"{}".to_vec();
@@ -977,7 +971,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
 
 /// appendCodexWebSearchNonStreamBlocks: a server_tool_use and its web_search_tool_result.
 fn web_search_blocks(blocks: &mut Vec<Vec<u8>>, item: &Res<'_>, seen: &mut HashSet<Vec<u8>>) {
-    let id = trim_space(&item.get("id").bytes()).to_vec();
+    let id = go_trim_space(&item.get("id").bytes()).to_vec();
     if id.is_empty() || seen.contains(&id) {
         return;
     }

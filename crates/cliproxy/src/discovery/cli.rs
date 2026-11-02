@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use serde_yaml_ng::Value as Yaml;
 
-use super::{DEFAULT_SERVICE_TYPE, DiscoveredService, go_trim};
+use super::{DEFAULT_SERVICE_TYPE, DiscoveredService};
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -24,7 +24,7 @@ pub fn parse_interface_list<S: AsRef<str>>(values: &[S]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in values {
         for part in raw.as_ref().split(',') {
-            let part = go_trim(part);
+            let part = part.trim();
             if !part.is_empty() && !out.iter().any(|o| o == part) {
                 out.push(part.to_owned());
             }
@@ -46,7 +46,7 @@ pub fn resolve_filters(cli: (Vec<String>, Vec<String>), cfg: (Vec<String>, Vec<S
 /// only (Go's scan does not read `server.discovery`). Missing or undecodable files
 /// give no filters.
 pub fn load_scan_filters(path: &str) -> (Vec<String>, Vec<String>) {
-    let path = match go_trim(path) {
+    let path = match path.trim() {
         "" => std::env::current_dir()
             .map(|d| d.join("config.yaml"))
             .unwrap_or_else(|_| "config.yaml".into()),
@@ -121,19 +121,8 @@ fn fraction(n: u128, div: u128) -> String {
 
 /// Go `json.MarshalIndent(v, "", "  ")`, including its HTML-safe escapes.
 pub fn go_indent(v: &Value) -> String {
-    let text = serde_json::to_string_pretty(v).expect("JSON values serialize");
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '<' => out.push_str("\\u003c"),
-            '>' => out.push_str("\\u003e"),
-            '&' => out.push_str("\\u0026"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
-    }
-    out
+    let compact = serde_json::to_vec(v).expect("JSON values serialize");
+    String::from_utf8_lossy(&cpa_common::json::marshal_indent(&compact)).into_owned()
 }
 
 /// Go `sanitizeTerminal`: printable characters only, tabs become spaces; bidi
@@ -160,7 +149,7 @@ pub fn sanitize_terminal(s: &str) -> String {
 
 /// Go `sanitizeDisplayHost`: a plain DNS host name or empty.
 pub fn sanitize_display_host(host: &str) -> String {
-    let host = sanitize_terminal(go_trim(host.strip_suffix('.').unwrap_or(host)));
+    let host = sanitize_terminal(host.strip_suffix('.').unwrap_or(host).trim());
     let valid = !host.is_empty()
         && !host.eq_ignore_ascii_case("localhost")
         && host
@@ -235,7 +224,7 @@ where
     } else {
         opts.timeout.min(Duration::from_secs(60))
     };
-    let service_type = match go_trim(&opts.service_type) {
+    let service_type = match opts.service_type.trim() {
         "" => DEFAULT_SERVICE_TYPE.to_owned(),
         st => st.to_owned(),
     };

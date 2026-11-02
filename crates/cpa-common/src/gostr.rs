@@ -104,30 +104,6 @@ impl GoStr for str {
     }
 }
 
-/// `strings.TrimSpace` on a Go byte string: Unicode white space at both ends; invalid
-/// UTF-8 is never space.
-pub fn trim_space(b: &[u8]) -> &[u8] {
-    let mut start = 0;
-    while start < b.len() {
-        match decode_rune(&b[start..]) {
-            (Some(c), n) if c.is_whitespace() => start += n,
-            _ => break,
-        }
-    }
-    let mut end = b.len();
-    while end > start {
-        let mut i = end - 1;
-        while i > start && end - i < 4 && b[i] & 0xC0 == 0x80 {
-            i -= 1;
-        }
-        match decode_rune(&b[i..end]) {
-            (Some(c), n) if i + n == end && c.is_whitespace() => end = i,
-            _ => break,
-        }
-    }
-    &b[start..end]
-}
-
 /// `strings.ToLower` on a Go byte string. Invalid bytes become U+FFFD as in Go.
 pub fn lower_bytes(b: &[u8]) -> String {
     String::from_utf8_lossy(b).go_lower()
@@ -185,38 +161,33 @@ pub fn quote(s: impl AsRef<[u8]>) -> String {
     out
 }
 
-/// Go `url.QueryEscape`: unreserved bytes kept, space as `+`, everything else `%XX`.
-pub fn query_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(char::from(b)),
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+/// Go `bytes.Index`: the first `sep` in `s`; an empty `sep` is at 0.
+pub fn index(s: &[u8], sep: &[u8]) -> Option<usize> {
+    memchr::memmem::find(s, sep)
 }
 
-/// Go `url.Values.Encode` for single-valued pairs: sorted by key, `key=value` joined with
-/// `&`, both query-escaped.
-pub fn values_encode(pairs: &[(&str, &str)]) -> String {
-    let mut sorted: Vec<&(&str, &str)> = pairs.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    sorted
-        .iter()
-        .map(|(k, v)| format!("{}={}", query_escape(k), query_escape(v)))
-        .collect::<Vec<_>>()
-        .join("&")
+/// Go `bytes.LastIndex`: the last `sep` in `s`; an empty `sep` is at `s.len()`.
+pub fn last_index(s: &[u8], sep: &[u8]) -> Option<usize> {
+    memchr::memmem::rfind(s, sep)
+}
+
+/// Go `bytes.Contains`.
+pub fn contains(s: &[u8], sep: &[u8]) -> bool {
+    index(s, sep).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn query_escape_and_values_encode_follow_go() {
-        // url.QueryEscape("a b/c?d=é~") and url.Values{"z": {"1"}, "a b": {"x&y"}}.Encode().
-        assert_eq!(super::query_escape("a b/c?d=\u{e9}~"), "a+b%2Fc%3Fd%3D%C3%A9~");
-        assert_eq!(super::values_encode(&[("z", "1"), ("a b", "x&y")]), "a+b=x%26y&z=1");
+    fn byte_search_follows_go_for_empty_and_missing_needles() {
+        use super::{contains, index, last_index};
+        assert_eq!(
+            (index(b"abcab", b"ab"), last_index(b"abcab", b"ab")),
+            (Some(0), Some(3))
+        );
+        assert_eq!((index(b"abc", b""), last_index(b"abc", b"")), (Some(0), Some(3)));
+        assert_eq!((index(b"", b"a"), last_index(b"ab", b"abc")), (None, None));
+        assert!(contains(b"", b"") && !contains(b"a", b"b"));
     }
 
     use super::*;
@@ -238,8 +209,5 @@ mod tests {
         assert_eq!(quote("\u{e0000}"), r#""\U000e0000""#);
         assert_eq!(quote("\u{1f600}"), "\"\u{1f600}\"");
         assert_eq!(quote(b"a\xffb\xef\xbf\xbd"), "\"a\\xffb\u{fffd}\"");
-        assert_eq!(trim_space(b"\xc2\xa0 a b\t\xe3\x80\x80"), b"a b");
-        assert_eq!(trim_space(b" \xff "), b"\xff");
-        assert_eq!(trim_space(b"\xe3\x80"), b"\xe3\x80", "a truncated rune is not space");
     }
 }

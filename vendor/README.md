@@ -1,6 +1,6 @@
 # Patched third-party crates
 
-Each directory here is a copy of a published crate with the changes listed below. The root `Cargo.toml` and `harness/rust/Cargo.toml` point `[patch.crates-io]` at them. They are not workspace members, so `cargo fmt`, clippy and `cargo test --workspace` leave them alone; CI runs each crate's own tests after the workspace tests, in the same network-denied step:
+Each directory here is a copy of a published crate with the changes listed below. The root `Cargo.toml` points `[patch.crates-io]` at them. They are not workspace members, so `cargo fmt`, clippy and `cargo test --workspace` leave them alone; CI runs each crate's own tests after the workspace tests, in the same network-denied step:
 
 ```sh
 cargo test --locked --manifest-path vendor/gjson/Cargo.toml

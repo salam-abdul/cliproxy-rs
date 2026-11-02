@@ -23,10 +23,6 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The Go-built frame for `remote:local` signed with `remote-password`.
 fn valid_frame() -> Vec<u8> {
     let frames = golden()["frames"].as_array().unwrap().clone();
@@ -115,7 +111,7 @@ async fn answers_are_rewritten_like_go() {
         let result = prepare_answer(answer, offer, Arc::new(Never), quiet());
         if let Some(want) = case["error"].as_str() {
             let got = result.err().unwrap_or_else(|| panic!("{name}: expected {want}"));
-            // ponytail: pion's SDP lexer words its syntax errors differently; the step matches.
+            // Pion's SDP lexer words its syntax errors differently; the step matches.
             match want.split_once(" for TCP proxy: sdp: ") {
                 Some((step, _)) => assert!(got.starts_with(&format!("{step} for TCP proxy: ")), "{name}: {got}"),
                 None => assert_eq!(got, want, "{name}"),
@@ -129,7 +125,7 @@ async fn answers_are_rewritten_like_go() {
             masked = masked.replace(&at, &format!("LISTEN{i} "));
             assert!(tunnel.candidate.contains(&at), "{name}: {}", tunnel.candidate);
         }
-        // ponytail: rtc-sdp drops whitespace at the end of an attribute value; pion keeps
+        // rtc-sdp drops whitespace at the end of an attribute value; pion keeps
         // it. The answer only feeds the relay's own peer, and credentials are trimmed.
         let lines = |sdp: &str| sdp.split("\r\n").map(str::trim_end).collect::<Vec<_>>().join("\r\n");
         assert_eq!(lines(&masked), lines(case["sdp"].as_str().unwrap()), "{name}");
@@ -185,7 +181,7 @@ async fn binding_frames_are_validated_like_go() {
         let got = read_validated_frame(&mut reader, user, password).await;
         match case["error"].as_str() {
             None => assert_eq!(
-                hex(&got.unwrap_or_else(|e| panic!("{name}: {e}"))),
+                cpa_core::hex::encode(&got.unwrap_or_else(|e| panic!("{name}: {e}"))),
                 case["returned"].as_str().unwrap(),
                 "{name}"
             ),
@@ -343,7 +339,7 @@ async fn proxy_dialers_speak_like_go() {
         }
         let sent = server.await.unwrap();
         let sent = if case["kind"] == "socks" {
-            hex(&sent)
+            cpa_core::hex::encode(&sent)
         } else {
             String::from_utf8(sent).unwrap()
         };
@@ -616,7 +612,7 @@ async fn unauthenticated_connections_never_dial() {
     // A frame for another session (Go: `attacker:local`).
     let mut client = TcpStream::connect(tunnel.0).await.unwrap();
     let mut frame = valid_frame();
-    let at = frame.windows(12).position(|w| w == b"remote:local").unwrap();
+    let at = cpa_common::gostr::index(&frame, b"remote:local").unwrap();
     frame[at..at + 6].copy_from_slice(b"attack");
     client.write_all(&frame).await.unwrap();
     assert!(

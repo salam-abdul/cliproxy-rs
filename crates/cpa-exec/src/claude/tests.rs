@@ -468,7 +468,7 @@ const GO_EXECUTOR: &str = include_str!("testdata/go_executor.json");
 #[tokio::test]
 async fn executor_scenarios_match_go() {
     // Sequenced through execute(): compat_replay_sequence_matches_go; config keys:
-    // m1_0041_to_m1_0056_config_keys_match_go.
+    // config_keys_match_go.
     scenarios_match_go(GO_EXECUTOR, "all", |name| {
         !name.starts_with("replay-") && !is_config_scenario(name) && !FOLLOWS_V8_0_27.contains(&name)
     })
@@ -484,8 +484,9 @@ const FOLLOWS_V8_0_27: &[&str] = &[
 ];
 
 /// v8.0.27 scenarios where Go keeps an API key's caller system text top-level and
-/// cliproxy-rs moves it after the leading user run, as it does for every request
-///. Rust's body is compared with Go's after
+/// cliproxy-rs moves it after the leading user run, as it does for every request, so
+/// the cached prefix stays stable across turns (`cloak::install_system`). Rust's body is
+/// compared with Go's after
 /// [`with_relocated_system`].
 const RELOCATES_API_KEY_SYSTEM: &[&str] = &[
     "apikey-cloak-system-single-user",
@@ -563,12 +564,11 @@ fn is_config_scenario(name: &str) -> bool {
     name.starts_with("config-") || name == "apikey-cloak-config-strict-sensitive"
 }
 
-/// M1-0041 rebuild-mid-system-message, M1-0043 cloak.strict-mode, M1-0044
-/// cloak.sensitive-words, M1-0048..M1-0055 every header-defaults key (stabilized and
-/// not) and M1-0056 disable-claude-cloak-mode, each set in config.yaml and run through
-/// Go's executor by the scenario generator.
+/// rebuild-mid-system-message, cloak.strict-mode, cloak.sensitive-words, every
+/// header-defaults key (stabilized and not) and disable-claude-cloak-mode, each set in
+/// config.yaml and run through Go's executor by the scenario generator.
 #[tokio::test]
-async fn m1_0041_to_m1_0056_config_keys_match_go() {
+async fn config_keys_match_go() {
     let fixture: Value = serde_json::from_str(include_str!("testdata/go_executor.json")).unwrap();
     let count = fixture["scenarios"]
         .as_array()
@@ -748,11 +748,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             continue;
         }
         if scenario["reply"]["body_b64"].is_string() {
-            let Ok(RawResponse {
-                body: ResponseBody::Stream(raw),
-                ..
-            }) = finished
-            else {
+            let Ok(RawResponse { body: raw, .. }) = finished else {
                 panic!("{name}: Rust failed where Go succeeded");
             };
             let decoded = collect(raw).await.unwrap();
@@ -782,8 +778,13 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             .await;
             assert_eq!(events, output, "{name}: SSE events");
         } else {
-            let restored = alias::restore_response(reply, &prepared.reverse).unwrap();
-            assert_eq!([restored], output.as_slice(), "{name}: restored response");
+            let restored =
+                alias::restore_response(Bytes::copy_from_slice(reply.as_bytes()), &prepared.reverse).unwrap();
+            assert_eq!(
+                [std::str::from_utf8(&restored).unwrap()],
+                output.as_slice(),
+                "{name}: restored response"
+            );
             let mut prepared = prepared;
             ctx.completion(&mut prepared)
                 .complete(&rawjson::string(reply, "id"), &request_id);
@@ -1114,6 +1115,41 @@ async fn declassified_probes_keep_their_own_date() {
 /// even though the upstream body (and its model) was observed.
 #[tokio::test]
 async fn unrestorable_tool_alias_publishes_no_tokens() {
+    let (error, usage) = unrestorable_tool_alias_error().await;
+    let message = String::from_utf8_lossy(&error.body).into_owned();
+    assert!(
+        message.starts_with("restore Claude OAuth tool name from response: "),
+        "{message}"
+    );
+    assert_eq!(
+        usage.kinds(),
+        ["request", "round_trip_started", "first_byte", "body", "publish_failure"]
+    );
+    let reports = usage.0.lock().unwrap();
+    assert_eq!(
+        reports.last().unwrap().2,
+        format!("0 {message}"),
+        "Go's plain error has no status"
+    );
+}
+
+/// The restore fails after a complete 2xx reply the upstream billed, and fails the same
+/// way on every cloaked account, so the error is request-scoped and never resent.
+#[tokio::test]
+async fn unrestorable_tool_alias_after_a_billed_reply_is_not_replayed() {
+    let (error, _) = unrestorable_tool_alias_error().await;
+    assert!(
+        error
+            .body
+            .starts_with(b"restore Claude OAuth tool name from response: "),
+        "{error}"
+    );
+    assert_eq!(error.scope, FailureScope::Request);
+}
+
+/// A non-stream request whose 2xx reply names a tool alias that matches two passthrough
+/// MCP tools, and the usage reports it produced.
+async fn unrestorable_tool_alias_error() -> (ExecError, Arc<Usage>) {
     use axum::response::IntoResponse;
     let router = axum::Router::new().fallback(|body: String| async move {
         // The client tool `other` went upstream as mcp__<virtual server>__<word>_other;
@@ -1169,21 +1205,79 @@ async fn unrestorable_tool_alias_publishes_no_tokens() {
     });
     let cfg = Config::parse("").unwrap();
     let error = executor.execute(&credential, req, &cfg).await.err().unwrap();
-    let message = String::from_utf8_lossy(&error.body).into_owned();
-    assert!(
-        message.starts_with("restore Claude OAuth tool name from response: "),
-        "{message}"
-    );
-    assert_eq!(
-        usage.kinds(),
-        ["request", "round_trip_started", "first_byte", "body", "publish_failure"]
-    );
-    let reports = usage.0.lock().unwrap();
-    assert_eq!(
-        reports.last().unwrap().2,
-        format!("0 {message}"),
-        "Go's plain error has no status"
-    );
+    (error, usage)
+}
+
+/// A non-stream reply reaches the client byte for byte, invalid UTF-8 included: as sent
+/// when no tool alias needs restoring, and with only the alias replaced when one does.
+#[tokio::test]
+async fn non_stream_replies_keep_their_bytes_around_restored_aliases() {
+    use axum::response::IntoResponse;
+    fn reply(name: &str) -> Vec<u8> {
+        [
+            br#"{"id":"msg_b","type":"message","role":"assistant","model":"claude-upstream","content":[{"type":"text","text":"a"#.as_slice(),
+            b"\xff\xfe",
+            br#" b"},{"type":"tool_use","id":"toolu_1","name":""#,
+            name.as_bytes(),
+            br#"","input":{}}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]
+        .concat()
+    }
+    let router = axum::Router::new().fallback(|body: String| async move {
+        // Echo the alias the request declared upstream; with no tools, no alias exists.
+        let name = match gjson::get(&body, "tools.0.name").str() {
+            "" => "Read".to_owned(),
+            alias => alias.to_owned(),
+        };
+        ([(http::header::CONTENT_TYPE, "application/json")], reply(&name)).into_response()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let mut credential = harness_credential();
+    credential.attributes.insert("base_url".into(), base);
+    let cfg = Config::parse("").unwrap();
+    // Without tools the request has no aliases; the client tool `other` goes upstream
+    // as an MCP alias.
+    for (tool, tools) in [
+        ("Read", ""),
+        (
+            "other",
+            r#","tools":[{"name":"other","input_schema":{"type":"object"}}]"#,
+        ),
+    ] {
+        let body = Bytes::from(format!(
+            r#"{{"model":"claude-sonnet-4-6","max_tokens":8,"messages":[{{"role":"user","content":"hi"}}]{tools}}}"#
+        ));
+        let req = enrich(ExecRequest {
+            operation: Operation::Generate,
+            source_format: Format::Claude,
+            response_format: Format::Claude,
+            requested_model: "claude-sonnet-4-6".into(),
+            model: "claude-sonnet-4-6".into(),
+            original_body: body.clone(),
+            body,
+            stream: false,
+            alt: None,
+            session: None,
+            execution_session: None,
+            derived_session: None,
+            resolved_model: None,
+            usage: Default::default(),
+            request_path: String::new(),
+            headers: Default::default(),
+            caller: Caller {
+                principal: "fake-client".into(),
+                source: "authorization",
+            },
+        });
+        let response = executor.execute(&credential, req, &cfg).await.unwrap();
+        let ResponseBody::Buffered(bytes) = response.body else {
+            panic!("non-stream reply is buffered");
+        };
+        assert_eq!(bytes.as_ref(), reply(tool).as_slice(), "{tool}");
+    }
 }
 
 /// Go's reporter calls on each Claude path (claude_executor_execute.go and
@@ -1818,7 +1912,7 @@ async fn translating_request_reads_connection_setup_bound_from_config_snapshot()
         let mut bytes = Vec::new();
         socket.read_to_end(&mut bytes).await.unwrap();
         assert!(bytes.starts_with(b"CONNECT api.anthropic.com:443 "));
-        assert!(!bytes.windows(9).any(|bytes| bytes == b"synthetic"));
+        assert!(!cpa_common::gostr::contains(&bytes, b"synthetic"));
     });
     let executor = ClaudeExecutor::new("https://api.anthropic.com").unwrap();
     let config = Config::parse(&format!("oauth: {{auth-dir: /synthetic-isolated-auth}}\nrequests: {{tls-handshake-timeout-seconds: 1, proxy-url: 'http://{address}'}}\n")).unwrap();
@@ -1836,4 +1930,51 @@ async fn translating_request_reads_connection_setup_bound_from_config_snapshot()
     assert!(error.retry_after.is_none());
     assert!(error.headers.is_empty());
     server.await.unwrap();
+}
+
+/// A fast request stops at the caller instead of failing over, also when its response
+/// broke off before the client saw any of it; a read failure stays statusless.
+#[test]
+fn a_fast_request_never_fails_over_a_broken_response() {
+    use cpa_core::exec::AfterAccept;
+    let interrupted = crate::upstream::interrupted_after_response("unexpected EOF");
+    let truncated = ExecError::local(502, FailureScope::Request, "closed early").accepted(AfterAccept::Truncated);
+    for (error, kept) in [
+        (interrupted.clone(), Some(AfterAccept::Unprocessed)),
+        (truncated.clone(), None),
+    ] {
+        let wrapped = fast_request_error(true, error);
+        assert_eq!(wrapped.scope, FailureScope::Request);
+        assert_eq!(wrapped.after_accept, kept, "{wrapped}");
+    }
+    assert_eq!(
+        fast_request_error(false, truncated).after_accept,
+        Some(AfterAccept::Truncated)
+    );
+    assert_eq!(
+        fast_request_error(false, interrupted).after_accept,
+        Some(AfterAccept::Interrupted)
+    );
+}
+
+#[tokio::test]
+async fn an_error_body_keeps_exactly_the_bounded_prefix() {
+    let chunk = Bytes::from(vec![b'e'; (1 << 20) + 1]);
+    let chunks = (crate::proxy::MAX_ERROR_BODY >> 20) + 1;
+    let body = futures_util::stream::iter((0..chunks).map(move |_| Ok(chunk.clone()))).boxed();
+    let error = finish(
+        Decoded {
+            status: 400,
+            headers: http::HeaderMap::new(),
+            body: Ok(body),
+        },
+        false,
+        false,
+        &Default::default(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.body.len(), crate::proxy::MAX_ERROR_BODY);
 }

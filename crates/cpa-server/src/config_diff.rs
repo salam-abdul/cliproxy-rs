@@ -13,7 +13,7 @@ fn text(v: &Value) -> &str {
     v.as_str().unwrap_or_default()
 }
 fn trim(v: &Value) -> &str {
-    crate::gojson::trim(text(v))
+    text(v).trim()
 }
 fn lower(s: &str) -> String {
     cpa_common::gostr::lower_bytes(s.as_bytes())
@@ -28,10 +28,7 @@ fn boolean(v: &Value) -> bool {
     v.as_bool().unwrap_or_default()
 }
 fn hash(s: &str) -> String {
-    Sha256::digest(s.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    cpa_core::hex::encode(Sha256::digest(s.as_bytes()))
 }
 
 fn url(v: &Value) -> String {
@@ -39,19 +36,20 @@ fn url(v: &Value) -> String {
     if raw.is_empty() {
         return "<none>".into();
     }
-    let Some(parsed) = cpa_core::config::go_url::parse(raw) else {
+    let Ok(parsed) = cpa_core::config::go_url::parse(raw) else {
         return "<redacted>".into();
     };
-    if parsed.host().is_empty() {
+    if parsed.host.is_empty() {
         return cpa_core::config::go_url::parse(&format!("http://{raw}"))
-            .filter(|p| !p.host().is_empty())
-            .map(|p| p.host().to_owned())
+            .ok()
+            .filter(|p| !p.host.is_empty())
+            .map(|p| p.host)
             .unwrap_or_else(|| "<redacted>".into());
     }
     if parsed.scheme.is_empty() {
-        parsed.host().to_owned()
+        parsed.host.clone()
     } else {
-        format!("{}://{}", parsed.scheme, parsed.host())
+        format!("{}://{}", parsed.scheme, parsed.host)
     }
 }
 
@@ -61,7 +59,7 @@ fn scalar(v: &Value, kind: char) -> String {
         'i' => number(v).to_string(),
         't' => trim(v).to_owned(),
         'u' => url(v),
-        'q' => crate::gojson::string(text(v)),
+        'q' => cpa_common::json::marshal_string(text(v), true),
         'o' if v.is_null() => "inherit".into(),
         'p' if v.is_null() => "<unset>".into(),
         'n' if v.is_null() => "<nil>".into(),
@@ -141,7 +139,7 @@ fn model_summary(v: &Value, family: &str) -> Vec<String> {
 fn map_summary(v: &Value, section: &str) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
     for (channel, entries) in v.as_object().into_iter().flatten() {
-        let channel = lower(crate::gojson::trim(channel));
+        let channel = lower(channel.trim());
         if channel.is_empty() {
             continue;
         }
@@ -271,7 +269,7 @@ fn compat_keys(entries: &Value) -> BTreeMap<String, (String, &Value)> {
                 .as_object()
                 .into_iter()
                 .flatten()
-                .map(|(k, _)| lower(crate::gojson::trim(k)))
+                .map(|(k, _)| lower(k.trim()))
                 .filter(|s| !s.is_empty())
                 .collect();
             headers.sort();
@@ -379,7 +377,7 @@ pub(crate) fn details(old_cfg: &Config, new_cfg: &Config) -> Vec<String> {
             "allow-remote": m.allow_remote,
             "disable-control-panel": m.disable_control_panel,
             "disable-auto-update-panel": m.disable_auto_update_panel,
-            "panel-github-repository": if crate::gojson::trim(&m.panel_github_repository).is_empty() { "https://github.com/router-for-me/Cli-Proxy-API-Management-Center" } else { crate::gojson::trim(&m.panel_github_repository) },
+            "panel-github-repository": if m.panel_github_repository.trim().is_empty() { "https://github.com/router-for-me/Cli-Proxy-API-Management-Center" } else { m.panel_github_repository.trim() },
             "base-url": cfg.document.get("management").and_then(|m| m.get("base-url")).and_then(serde_yaml_ng::Value::as_str).unwrap_or_default(),
         });
         view

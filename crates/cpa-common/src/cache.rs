@@ -10,17 +10,18 @@
 //! background purge runs lazily at the nominal tick times on the next cache access
 //! (`Caches::sweep`).
 // ponytail: Go's Home KV backends of both caches are not ported (Rust Home mode keeps
-// these stores in process). Branch identifiers come from a process counter instead of
-// crypto/rand: they are only compared within this process.
+// these stores in process); port them if several instances must share the caches.
+// Branch identifiers come from a process counter instead of crypto/rand because they
+// are only compared within this process.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 
-use crate::gostr::trim_space;
 use crate::json::{self as gj, Kind};
 
 const TTL: Duration = Duration::from_secs(3600);
@@ -273,7 +274,7 @@ fn key(model: &str, session: &str) -> Option<String> {
 }
 
 fn trimmed(r: &gj::Res<'_>) -> Vec<u8> {
-    trim_space(&r.bytes()).to_vec()
+    go_trim_space(&r.bytes()).to_vec()
 }
 
 /// The position and context fields both item kinds keep.
@@ -445,7 +446,6 @@ pub fn replay_delete_if_unchanged(model: &str, session: &str, snapshot: &ReplayS
     caches().delete_if_unchanged(key, snapshot, Instant::now())
 }
 
-// ---------------------------------------------------------------------------------------
 // Thinking signature cache (signature_cache.go)
 
 const SIGNATURE_TTL: Duration = Duration::from_secs(3 * 3600);
@@ -488,7 +488,7 @@ pub fn model_group(model: &str) -> &str {
 
 fn text_hash(text: &[u8]) -> String {
     let sum = Sha256::digest(text);
-    sum[..8].iter().map(|b| format!("{b:02x}")).collect()
+    cpa_core::hex::encode(&sum[..8])
 }
 
 /// `CacheSignatureBestEffort`.

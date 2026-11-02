@@ -62,11 +62,6 @@ enum Auth {
     },
 }
 
-/// A Go error without a status code: the handler answers it with 500.
-fn plain_error(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Credential, message)
-}
-
 /// `vertexAPICreds`: the `api_key` and `base_url` attributes as stored, else the file's
 /// `access_token`.
 fn api_creds(credential: &Credential) -> (String, String) {
@@ -87,17 +82,21 @@ fn service_account(credential: &Credential) -> Result<Auth, ExecError> {
         project = text("project");
     }
     if project.is_empty() {
-        return Err(plain_error("vertex executor: missing project_id in credentials"));
+        return Err(crate::upstream::credential_error(
+            "vertex executor: missing project_id in credentials",
+        ));
     }
     let mut location = text("location");
     if location.is_empty() {
         location = DEFAULT_LOCATION.into();
     }
     let Some(Value::Object(account)) = credential.metadata.get("service_account") else {
-        return Err(plain_error("vertex executor: missing service_account in credentials"));
+        return Err(crate::upstream::credential_error(
+            "vertex executor: missing service_account in credentials",
+        ));
     };
-    let account =
-        vertex_auth::normalize_service_account(account).map_err(|e| plain_error(format!("vertex executor: {e}")))?;
+    let account = vertex_auth::normalize_service_account(account)
+        .map_err(|e| crate::upstream::credential_error(format!("vertex executor: {e}")))?;
     Ok(Auth::ServiceAccount {
         project,
         location,
@@ -138,7 +137,7 @@ fn endpoint(auth: &Auth, model: &str, action: &str) -> String {
 /// `http.NewRequestWithContext`'s URL parse. Go builds the request before the token
 /// exchange, so a URL it rejects fails without contacting the token endpoint.
 fn check_url(url: &str) -> Result<(), ExecError> {
-    crate::xai_url::parse(url).map_err(plain_error)?;
+    crate::xai_url::parse(url).map_err(crate::upstream::credential_error)?;
     // The shared client's own URL check (`proxy::send`), before the token exchange too.
     url::Url::parse(url).map_err(|_| ExecError::local(500, FailureScope::Request, "invalid upstream URL"))?;
     Ok(())
@@ -185,7 +184,7 @@ fn imagen_request(body: &[u8]) -> Result<Vec<u8>, ExecError> {
         }
     }
     if prompt.is_empty() {
-        return Err(plain_error("imagen: no prompt found in request"));
+        return Err(crate::upstream::credential_error("imagen: no prompt found in request"));
     }
     let mut instance = BTreeMap::new();
     instance.insert("prompt".to_owned(), GoValue::String(prompt));
@@ -370,7 +369,7 @@ impl VertexExecutor {
             return self.count_tokens(credential, &req, cfg).await;
         }
         if req.alt.as_deref() == Some(g::COMPACT_ALT) {
-            return Err(g::status_err(501, "/responses/compact not supported"));
+            return Err(crate::upstream::status_error(501, "/responses/compact not supported"));
         }
         let auth = auth_for(credential)?;
         self.generate(credential, &req, cfg, &auth).await
@@ -395,7 +394,7 @@ impl VertexExecutor {
                     .await
                     .map_err(|error| {
                         tracing::error!(%error, "vertex executor: access token error");
-                        g::status_err(500, "internal server error")
+                        crate::upstream::status_error(500, "internal server error")
                     })?;
                 if !token.is_empty() {
                     headers.set("Authorization", format!("Bearer {token}"));
@@ -414,9 +413,9 @@ impl VertexExecutor {
         let body = g::translate(req, cfg, to, base_model, &req.body, req.stream, false)?;
         let mut body = g::apply_thinking(req, body, from, to, PROVIDER, resolved.as_ref())?;
         body = payload::fix_image_aspect_ratio(base_model, body);
-        let rules = cpa_common::payload::Rules::from_config(cfg);
+        let rules = cpa_common::payload::Rules::of(cfg);
         body = g::apply_payload_rules(&rules, base_model, to.as_str(), body, &original, req);
-        body = payload::set_str_if_different(body, "model", base_model);
+        gj::set_str_if_different(&mut body, "model", base_model);
         body = strip_tool_call_ids(body, from);
         Ok(cpa_common::signature::sanitize_gemini_request_thought_signatures(
             &body, "contents",
@@ -478,7 +477,7 @@ impl VertexExecutor {
         if !req.stream {
             // Go logs the raw body, before any Imagen conversion.
             let mut data = g::read_captured(capture, upstream, usize::MAX).await?.to_vec();
-            // ponytail: Go observes the response model on the raw body but parses usage
+            // Go observes the response model on the raw body but parses usage
             // after the Imagen conversion, whose usageMetadata is all zeros; Imagen
             // predict responses carry no usageMetadata, so the raw body gives the same.
             req.usage.response_body(Format::Gemini, &data);

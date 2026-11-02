@@ -6,15 +6,18 @@ use std::time::Duration;
 
 use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use bytes::{Bytes, BytesMut};
-use cpa_core::exec::{ExecError, ExecResponse, ExecStream, FailureScope, ResponseBody};
+use cpa_core::exec::{AfterAccept, ExecError, ExecResponse, ExecStream, FailureScope, ResponseBody};
 use cpa_translate::sse::Framer;
 use futures_util::{Stream, StreamExt};
 use http::HeaderMap;
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-/// Largest upstream error body read; the rest is never pulled off the socket.
-pub(crate) const MAX_ERROR_BODY: usize = 64 * 1024;
+/// Largest error body [`into_response`] reads; the rest is never pulled off the socket.
+/// Its callers are control-plane requests that never show the body to a client, so the
+/// bound only limits the read. Inference errors reach clients and keep up to
+/// [`crate::proxy::MAX_ERROR_BODY`].
+pub(crate) const MAX_CONTROL_ERROR_BODY: usize = 64 * 1024;
 
 pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
     // wreq errors may include a URL with credential-bearing query parameters.
@@ -28,16 +31,74 @@ pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
 }
 
 /// A failed response body read cannot establish whether inference completed.
-pub(crate) fn body_read_error_after_response(_status: u16, mut error: ExecError) -> ExecError {
+pub(crate) fn body_read_error_after_response(mut error: ExecError) -> ExecError {
     if error.scope == FailureScope::Transport && error.headers.is_empty() {
         error.scope = FailureScope::Request;
+        error.after_accept = Some(AfterAccept::Interrupted);
     }
     error
 }
 
-pub(crate) fn body_after_response(status: u16, body: ExecStream) -> ExecStream {
-    body.map(move |item| item.map_err(|error| body_read_error_after_response(status, error)))
-        .boxed()
+/// A statusless failure before the request was sent (a plain Go error, answered 500):
+/// nothing reached the upstream, so dispatch may try another credential.
+pub(crate) fn plain_error(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Transport, message)
+}
+
+/// A statusless failure before the send that the provider charges to the credential,
+/// such as missing or unusable credential fields.
+pub(crate) fn credential_error(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Credential, message)
+}
+
+/// A statusless failure after the upstream response started: inference may have run,
+/// so the error is request-scoped and dispatch never resends it.
+pub(crate) fn plain_error_after_response(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Request, message).accepted(AfterAccept::Unprocessed)
+}
+
+/// A statusless read failure or early end of an accepted response. Dispatch may fail it
+/// over only while the client has received nothing.
+pub(crate) fn interrupted_after_response(message: impl Into<String>) -> ExecError {
+    ExecError::local(500, FailureScope::Request, message).accepted(AfterAccept::Interrupted)
+}
+
+/// Go's `statusErr{code, msg}` classified by [`scope_for`]; an empty message reads
+/// `status N`.
+pub(crate) fn status_error(status: u16, message: impl Into<Bytes>) -> ExecError {
+    status_error_scoped(status, scope_for(status), message.into())
+}
+
+/// Go's `statusErr{code, msg}` classified by [`model_scope_for`]; an empty message reads
+/// `status N`.
+pub(crate) fn model_status_error(status: u16, message: impl Into<Bytes>) -> ExecError {
+    status_error_scoped(status, model_scope_for(status), message.into())
+}
+
+fn status_error_scoped(status: u16, scope: FailureScope, mut body: Bytes) -> ExecError {
+    if body.is_empty() {
+        body = Bytes::from(format!("status {status}"));
+    }
+    ExecError {
+        status,
+        scope,
+        body,
+        headers: Box::default(),
+        retry_after: None,
+        direct: false,
+        addon: None,
+        after_accept: None,
+    }
+}
+
+/// The 502 for apply_patch tool input or a response translation the proxy cannot
+/// deliver. The upstream already answered, so the error is request-scoped.
+pub(crate) fn apply_patch_error() -> ExecError {
+    ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
+}
+
+pub(crate) fn body_after_response(body: ExecStream) -> ExecStream {
+    body.map(|item| item.map_err(body_read_error_after_response)).boxed()
 }
 
 /// A response whose body went through Go's Claude `decodeResponseBody`. `body` is
@@ -57,7 +118,7 @@ pub(crate) async fn decode_upstream(upstream: crate::proxy::Upstream) -> Decoded
     headers.remove(http::header::CONTENT_LENGTH);
     let body = decode_body(upstream.body.map(|r| r.map_err(std::io::Error::other)), &encoding)
         .await
-        .map(|body| body_after_response(upstream.status, body));
+        .map(body_after_response);
     Decoded {
         status: upstream.status,
         headers,
@@ -84,11 +145,11 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
     let body = decode_body(res.bytes_stream().map(|r| r.map_err(std::io::Error::other)), &encoding)
         .await
         .map_err(|_| decode_error())?;
-    let body = body_after_response(status, body);
+    let body = body_after_response(body);
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::CONTENT_LENGTH);
     if !(200..300).contains(&status) {
-        let body = read_bounded(body, MAX_ERROR_BODY).await?;
+        let body = read_bounded(body, MAX_CONTROL_ERROR_BODY).await?;
         return Err(ExecError {
             status,
             scope: scope_for(status),
@@ -97,6 +158,7 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
             body,
             direct: false,
             addon: None,
+            after_accept: None,
         });
     }
     let is_sse = headers
@@ -230,7 +292,8 @@ where
 }
 
 /// Go's text for a body read failure: a truncated or reset body is `unexpected EOF`.
-// ponytail: decoder failures keep the Rust decoder's wording, not compress/*'s.
+// ponytail: decoder failures keep the Rust decoder's wording, not compress/*'s; port
+// Go's wording if a client depends on it.
 pub(crate) fn io_text(error: &std::io::Error) -> String {
     match error.get_ref() {
         Some(inner) if inner.is::<wreq::Error>() || inner.is::<ExecError>() => "unexpected EOF".into(),
@@ -319,11 +382,22 @@ where
     .boxed()
 }
 
-// ponytail: status-only classification. The scheduler port (sdk/cliproxy/auth, custom
-// request-error rules) replaces this with per-provider and per-credential rules.
+// ponytail: status-only classification; Go's per-provider and per-credential
+// request-error rules (sdk/cliproxy/auth) are not ported. Classify here by provider
+// and credential if a provider's status needs another scope.
 pub(crate) fn scope_for(status: u16) -> FailureScope {
     match status {
         401 | 402 | 403 | 408 | 429 | 500.. => FailureScope::Credential,
+        _ => FailureScope::Request,
+    }
+}
+
+/// Go's plain `statusErr` in the API-key executors: never credential-scoped, so a 429
+/// cools only the model; other failures by status.
+pub(crate) fn model_scope_for(status: u16) -> FailureScope {
+    match status {
+        429 => FailureScope::Model,
+        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
         _ => FailureScope::Request,
     }
 }

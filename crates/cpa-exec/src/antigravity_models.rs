@@ -9,16 +9,17 @@
 // ponytail: Go probes on each registration, which also resets the flags until the probe
 // lands; here a credential is probed when the registry first sees a new revision of it,
 // and its previous hints stay until the new probe finishes. Config reloads alone do not
-// re-probe.
+// re-probe; probe on reload too if a config change must refresh the flags.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use cpa_common::gostr::{GoStr, trim_space};
+use cpa_common::gostr::GoStr;
 use cpa_common::json::{self as gj, Kind};
 use cpa_core::config::Config;
+use cpa_core::config::go_trim_space;
 use cpa_core::credential::Credential;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -106,10 +107,7 @@ impl Capabilities {
         let failure_key = format!(
             "{}#{}",
             credential.id,
-            Sha256::digest(token.as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            cpa_core::hex::encode(Sha256::digest(token.as_bytes()))
         );
         loop {
             let now = self.now();
@@ -294,7 +292,7 @@ fn parse(body: &[u8]) -> Option<Hints> {
     });
     ok.then(|| {
         ids.iter()
-            .map(|id| String::from_utf8_lossy(trim_space(id)).go_lower())
+            .map(|id| String::from_utf8_lossy(go_trim_space(id)).go_lower())
             .filter(|id| !id.is_empty())
             .collect()
     })

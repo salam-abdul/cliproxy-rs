@@ -850,3 +850,81 @@ fn sensitive_words_drop_matching_lines_then_obfuscate() {
     // A line containing a word is dropped; nothing is left to obfuscate.
     assert_eq!(sanitize_system_prompt(b"keep\nhas secret\nend", Some(&m)), b"keep\nend");
 }
+
+/// A body that ends before the EOS trailer, or whose read fails, may follow inference the
+/// upstream already ran: both the buffered and the streamed error are request-scoped, so
+/// dispatch never resends the request to another account.
+#[tokio::test]
+async fn a_truncated_or_failed_devin_body_is_not_replayed() {
+    let truncated = || futures_util::stream::iter(Vec::<Result<Bytes, ExecError>>::new()).boxed();
+    let failed = || {
+        futures_util::stream::iter([Err(ExecError::local(
+            502,
+            FailureScope::Transport,
+            "synthetic connection reset",
+        ))])
+        .boxed()
+    };
+    for (name, body) in [("truncated", truncated()), ("failed read", failed())] {
+        let (consumed, _) = consume_frames(FrameReader::new(body), "swe-2", b"{}").await;
+        let (error, statusless) = consumed
+            .err()
+            .unwrap_or_else(|| panic!("{name}: buffered body succeeded"));
+        assert_eq!(error.scope, FailureScope::Request, "{name}: buffered {error}");
+        assert!(statusless, "{name}: buffered error is a plain Go error");
+    }
+    for (name, body) in [("truncated", truncated()), ("failed read", failed())] {
+        let claude = ClaudeInputTokens::new(Format::OpenAI, Format::Interactions, Format::Interactions, Bytes::new());
+        let items: Vec<_> = DevinStream::new(
+            "swe-2".into(),
+            Format::Interactions,
+            None,
+            claude,
+            FrameReader::new(body),
+            Default::default(),
+            Default::default(),
+        )
+        .run()
+        .collect()
+        .await;
+        let error = items
+            .iter()
+            .find_map(|item| item.as_ref().err())
+            .unwrap_or_else(|| panic!("{name}: stream ended without an error"));
+        assert_eq!(error.scope, FailureScope::Request, "{name}: streamed {error}");
+    }
+}
+
+/// A trailer error alone says the upstream did no work, so dispatch may try another
+/// account; after other frames the upstream worked on the request, so the buffered
+/// error marks a response that broke off and dispatch never resends it.
+#[tokio::test]
+async fn a_trailer_error_after_frames_marks_the_response_broken() {
+    let frame = |flag: u8, payload: &[u8]| {
+        let mut bytes = vec![flag];
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        Bytes::from(bytes)
+    };
+    let trailer = frame(
+        0x02,
+        br#"{"error":{"code":"invalid_argument","message":"An Internal Error"}}"#,
+    );
+    for (name, frames, after) in [
+        ("alone", vec![trailer.clone()], None),
+        (
+            "after a frame",
+            vec![frame(0, b""), trailer.clone()],
+            Some(cpa_core::exec::AfterAccept::Truncated),
+        ),
+    ] {
+        let body = futures_util::stream::iter(frames.into_iter().map(Ok)).boxed();
+        let (consumed, _) = consume_frames(FrameReader::new(body), "swe-2", b"{}").await;
+        let (error, statusless) = consumed
+            .err()
+            .unwrap_or_else(|| panic!("{name}: the trailer error was lost"));
+        assert_eq!(error.status, 502, "{name}: {error}");
+        assert!(!statusless, "{name}");
+        assert_eq!(error.after_accept, after, "{name}");
+    }
+}

@@ -1,8 +1,9 @@
 //! Gemini -> Gemini (internal/translator/gemini/gemini): a request normalizer, passthrough
 //! responses and Gemini's token-count shape.
 
-use crate::{Error, Registered, ResponseCtx, common::trim_space, stream};
+use crate::{Error, Registered, ResponseCtx, stream};
 use cpa_common::json::{self as gj, Res};
+use cpa_core::config::go_trim_space;
 
 pub static PAIR: Registered = registered!(
     Gemini -> Gemini,
@@ -189,7 +190,7 @@ fn call_names(content: &Res<'_>) -> Vec<Vec<u8>> {
 }
 
 fn blank_response_name(part: &Res<'_>) -> bool {
-    trim_space(&part.get("functionResponse.name").bytes()).is_empty()
+    go_trim_space(&part.get("functionResponse.name").bytes()).is_empty()
 }
 
 /// backfillEmptyFunctionResponseNames: an empty functionResponse.name takes the name of
@@ -323,7 +324,7 @@ struct Passthrough;
 impl stream::GoStream for Passthrough {
     fn line(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         let payload = match line.strip_prefix(b"data:") {
-            Some(rest) => trim_space(rest),
+            Some(rest) => go_trim_space(rest),
             None => line,
         };
         if payload == b"[DONE]" {
@@ -333,7 +334,6 @@ impl stream::GoStream for Passthrough {
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Shared Gemini content helpers (translator/common/gemini.go, util/claude_tool_result.go)
 
 /// common.ReorderGeminiUserParts: when text follows a function response, text parts move
@@ -425,7 +425,7 @@ pub(crate) fn set_function_response_result(part: &mut Vec<u8>, path: &str, resul
 
 /// common.SetGeminiFunctionResponseRaw.
 pub(crate) fn set_function_response_raw(part: &mut Vec<u8>, path: &str, raw: &[u8]) {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed.is_empty() {
         gj::set_str(part, path, "");
         return;

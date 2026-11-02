@@ -4,17 +4,19 @@
 use crate::{
     Error, ResponseCtx, apply_patch,
     claude_responses::{qualify_namespace_name, tool_descriptors, tool_winners},
-    codex_chat_request::{request_tool_names, short_name_map},
-    common::{now_unix, trim_space},
+    codex_chat_request::{request_tool_names, shorten_name},
+    codex_names::short_name_map,
+    common::now_unix,
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 /// buildReverseMapFromOriginalOpenAI: short name -> declared name.
 fn reverse_names(original: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
-    short_name_map(&request_tool_names(original))
+    short_name_map(request_tool_names(original), shorten_name)
         .into_iter()
         .map(|(name, short)| (short, name))
         .collect()
@@ -42,7 +44,7 @@ fn response_tier(response: &Res<'_>) -> Vec<u8> {
     if tier.kind != Kind::String {
         return vec![];
     }
-    trim_space(&tier.s).to_vec()
+    go_trim_space(&tier.s).to_vec()
 }
 
 /// setCodexCacheWriteTokens: copies an all-digit integer as is.
@@ -476,7 +478,7 @@ impl GoStream for State {
         let Some(payload) = line.strip_prefix(b"data:") else {
             return Ok(vec![]);
         };
-        Ok(self.convert(trim_space(payload)).into_iter().collect())
+        Ok(self.convert(go_trim_space(payload)).into_iter().collect())
     }
 }
 

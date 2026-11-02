@@ -19,16 +19,15 @@
   let review = $state(false),
     saving = $state(false),
     error = $state("");
-  const after = $derived(draft);
-  const dirty = $derived(after !== before);
-  const diff = $derived(review ? lineDiff(before, after) : []);
+  const dirty = $derived(draft !== before);
+  const diff = $derived(review ? lineDiff(before, draft) : []);
   $effect(() => {
     store.dirty = dirty;
   });
 
   function check() {
     try {
-      if (!yaml) JSON.parse(after);
+      if (!yaml) JSON.parse(draft);
       review = true;
       error = "";
     } catch {
@@ -40,7 +39,7 @@
   $effect(() => () => (alive = false));
   async function save() {
     // Write exactly what was reviewed, even if the draft changes while the reread runs.
-    const body = yaml ? after : JSON.parse(after);
+    const body = yaml ? draft : JSON.parse(draft);
     saving = true;
     error = "";
     try {

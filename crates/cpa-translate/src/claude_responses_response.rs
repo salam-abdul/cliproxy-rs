@@ -3,17 +3,18 @@
 //! including the apply_patch bridge: a declared `apply_patch` custom tool streams its
 //! decoded patch input, and invalid or conflicting input fails the response.
 //
-// ponytail: Go finalizes pending tool items in map order, which is random when several
+// Go finalizes pending tool items in map order, which is random when several
 // are open at once; this port uses ascending block index.
 
 use crate::apply_patch::CallState;
 use crate::{
     Error, Registered, RequestCtx, ResponseCtx,
     claude_responses::{REDACTED_THINKING_PREFIX, ToolNames, tool_descriptors, tool_winners, web_search_call_id},
-    common::{self, now_unix, sse_event, trim_space},
+    common::{self, now_unix, sse_event},
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub static PAIR: Registered = registered!(
@@ -131,7 +132,7 @@ pub(crate) fn pick_request<'a>(original: &'a [u8], translated: &'a [u8]) -> &'a 
 
 /// common.SetResponsesToolCallIdentity with the request's namespace split.
 fn with_identity(mut item: Vec<u8>, tools: &Tools, qualified: &[u8], path: &str) -> Vec<u8> {
-    let identity = tools.names.identity(trim_space(qualified));
+    let identity = tools.names.identity(go_trim_space(qualified));
     let (name, namespace) = match tools.winners.get(&identity) {
         Some(w) => (w.local_name.clone(), w.namespace.clone()),
         None => (identity, vec![]),
@@ -199,7 +200,7 @@ impl Usage {
 }
 
 fn incomplete(stop: &[u8]) -> bool {
-    let stop = trim_space(stop);
+    let stop = go_trim_space(stop);
     stop.eq_ignore_ascii_case(b"max_tokens") || stop.eq_ignore_ascii_case(b"model_context_window_exceeded")
 }
 
@@ -211,7 +212,7 @@ fn web_search_query(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
         return vec![];
     }
-    trim_space(&gj::get(input, "query").bytes()).to_vec()
+    go_trim_space(&gj::get(input, "query").bytes()).to_vec()
 }
 
 fn web_search_results(content: &Res<'_>) -> Option<Vec<u8>> {
@@ -224,7 +225,7 @@ fn web_search_results(content: &Res<'_>) -> Option<Vec<u8>> {
     let mut results = vec![];
     content.each(|_, entry| {
         if entry.get("type").str() == "web_search_tool_result_error"
-            || !trim_space(&entry.get("url").bytes()).is_empty()
+            || !go_trim_space(&entry.get("url").bytes()).is_empty()
         {
             results.push(entry.raw.to_vec());
         }
@@ -252,7 +253,7 @@ fn annotations_json(values: &[Vec<u8>]) -> Vec<u8> {
 /// unwrapCustomToolInput: the `input` string of the tool arguments, tolerating
 /// truncated JSON.
 pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(arguments);
+    let trimmed = go_trim_space(arguments);
     let v = gj::get(trimmed, "input");
     if v.exists() {
         return if v.kind == Kind::String {
@@ -261,14 +262,14 @@ pub(crate) fn unwrap_custom_tool_input(arguments: &[u8]) -> Vec<u8> {
             v.raw.to_vec()
         };
     }
-    let Some(idx) = trimmed.windows(7).position(|w| w == b"\"input\"") else {
+    let Some(idx) = cpa_common::gostr::index(trimmed, b"\"input\"") else {
         return arguments.to_vec();
     };
-    let rest = trim_space(&trimmed[idx + 7..]);
+    let rest = go_trim_space(&trimmed[idx + 7..]);
     let Some(rest) = rest.strip_prefix(b":") else {
         return arguments.to_vec();
     };
-    let rest = trim_space(rest);
+    let rest = go_trim_space(rest);
     let Some(content) = rest.strip_prefix(b"\"") else {
         return arguments.to_vec();
     };
@@ -886,7 +887,7 @@ impl State {
         let Some(rest) = line.strip_prefix(b"data:") else {
             return Ok(vec![]);
         };
-        let payload = trim_space(rest).to_vec();
+        let payload = go_trim_space(rest).to_vec();
         let root = gj::parse(&payload);
         let mut out = vec![];
         match &*root.get("type").bytes() {
@@ -1463,7 +1464,7 @@ fn set_value(out: &mut Vec<u8>, path: &str, v: &Res<'_>) {
             gj::set_raw(out, path, "null");
         }
         // ponytail: Go's sjson leaves the document nil when Marshal fails (NaN inside);
-        // that case keeps the previous document here.
+        // that case keeps the previous document here. Clear it if a client relies on Go's result.
         Kind::Json => {
             if let Some(json) = v.value_json() {
                 gj::set_raw(out, path, json);

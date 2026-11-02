@@ -10,31 +10,16 @@ let local = false;
 export let requests = new Lifetime();
 let hooks: {
   unauthorized(): void;
-  missing(method: string, path: string): void;
   meta(h: Headers | null): void;
-} = { unauthorized() {}, missing() {}, meta() {} };
+} = { unauthorized() {}, meta() {} };
 
 export class ApiError extends Error {
   status: number;
   code: string;
-  method: string;
-  path: string;
-  constructor(
-    message: string,
-    status: number,
-    code: string,
-    method: string,
-    path: string,
-  ) {
+  constructor(message: string, status: number, code: string) {
     super(message);
     this.status = status;
     this.code = code;
-    this.method = method;
-    this.path = path;
-  }
-  /** The server does not implement this route or method (Rust 501/405, Go's empty 404). */
-  get missing() {
-    return this.status === 501 || this.status === 405 || (this.status === 404 && !this.code);
   }
 }
 
@@ -52,7 +37,6 @@ export function disconnect() {
   requests = new Lifetime();
 }
 export const endpoint = () => `${base}/v8/management`;
-export const route = (path: string) => path.split("?")[0];
 
 async function send(path: string, method: string, body?: unknown) {
   if (!key && !local) throw new Error("Sign in with your management key.");
@@ -110,21 +94,12 @@ export async function api(
   if (!lifetime.active) throw new Error("Connection changed.");
   if (ok) return value;
   if (response.status === 401) hooks.unauthorized();
-  const error = new ApiError(
+  throw new ApiError(
     String(value.message || value.error || `HTTP ${response.status}`),
     response.status,
     String(value.code || value.error || ""),
-    method,
-    route(path),
   );
-  if (error.missing) {
-    error.message = `Not available on this server (${method} ${route(path)} → ${response.status}).`;
-    hooks.missing(method, route(path));
-  }
-  throw error;
 }
-/** True when the server lacks the route; other errors are real failures. */
-export const missing = (e: unknown) => e instanceof ApiError && e.missing;
 export const text = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Asks this proxy for its model list with a client key, as a tool would. No upstream call. */

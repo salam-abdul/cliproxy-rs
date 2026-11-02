@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 
 use cpa_common::json::{self as gj, Kind, Res};
+use cpa_core::config::go_trim_space;
 
-use crate::common::{format_rfc3339_utc, now_nanos, now_unix, sse_event, trim_space};
+use crate::common::{format_rfc3339_utc, now_nanos, now_unix, sse_event};
 use crate::gemini_interactions::first_existing;
 use crate::openai_interactions::{
     antigravity_name_to_client, antigravity_name_to_upstream, first_nonblank, is_antigravity, json_string_value,
@@ -23,16 +24,16 @@ fn string(res: &Res<'_>) -> Vec<u8> {
 /// openAIChatSSEPayload / openAIChatInteractionsPayload: the payload of one line or
 /// frame (`data:` stripped, several data lines joined).
 fn sse_payload(raw: &[u8]) -> Vec<u8> {
-    let trimmed = trim_space(raw);
+    let trimmed = go_trim_space(raw);
     if trimmed.is_empty() || trimmed == b"[DONE]" {
         return trimmed.to_vec();
     }
     if let Some(rest) = trimmed.strip_prefix(b"data:") {
-        return trim_space(rest).to_vec();
+        return go_trim_space(rest).to_vec();
     }
     let lines: Vec<&[u8]> = trimmed
         .split(|&c| c == b'\n')
-        .filter_map(|line| trim_space(line).strip_prefix(b"data:").map(trim_space))
+        .filter_map(|line| go_trim_space(line).strip_prefix(b"data:").map(go_trim_space))
         .collect();
     if lines.is_empty() {
         trimmed.to_vec()
@@ -85,7 +86,6 @@ fn finish_reason(interaction: &Res<'_>, root: &Res<'_>, default: &'static str) -
     }
 }
 
-// ---------------------------------------------------------------------------------------
 // Interactions -> OpenAI Chat
 
 /// interactionsUsageInt.
@@ -405,7 +405,6 @@ pub(crate) fn interactions_to_openai_non_stream(ctx: &ResponseCtx<'_>, body: &[u
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------
 // OpenAI Chat -> Interactions
 
 /// setInteractionsUsageFromOpenAIChat.

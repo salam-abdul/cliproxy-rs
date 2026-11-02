@@ -1,10 +1,14 @@
-//! Helpers shared by the Kimi, Meta and Devin executors: Go runtime facts, per-credential
-//! custom headers and Go's credential expiry rules. Clients and Go net/http wire
-//! behaviour live in crate::proxy.
+//! Helpers for the Kimi, Meta and Devin executors, some also used by Gemini, Antigravity
+//! and xAI: Go runtime facts, per-credential custom headers, upstream capture and Go's
+//! credential expiry rules. Clients and Go net/http wire behaviour live in crate::proxy.
 //!
-//! ponytail: provider-neutral (M4-0030 custom headers, M4-0027 refresh timing); hoist
-//! when the shared executor helpers land. TLS is wreq's default profile, not Go
-//! crypto/tls; these upstreams are not known to fingerprint ClientHello.
+//! ponytail: the custom-header and refresh-timing helpers are provider-neutral but live
+//! in this Kimi-named module; move them to a neutral executor module when another
+//! provider needs them. TLS is wreq's default profile, not Go crypto/tls, because these
+//! upstreams are not known to fingerprint ClientHello; switch to a pinned profile as
+//! `codex_tls.rs` does if one starts to.
+
+use cpa_core::config::go_trim_space;
 
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use cpa_core::credential::Credential;
@@ -92,8 +96,6 @@ fn platform_hostname() -> Option<String> {
 /// Go `ApplyPayloadConfigWithRequest` (no target executor) for the device providers:
 /// `requests.payload` rules for `model`, `protocol` the target format, `original` the
 /// client's original request translated to that target.
-// ponytail: the rules are parsed per request (the runtime has no per-snapshot slot), and
-// ExecRequest has no inbound route path, so path-gated image-generation rules see "".
 pub(crate) fn payload_rules(
     cfg: &cpa_core::config::Config,
     req: &cpa_core::exec::ExecRequest,
@@ -103,7 +105,7 @@ pub(crate) fn payload_rules(
     original: &[u8],
 ) -> Vec<u8> {
     use cpa_common::payload;
-    let rules = payload::Rules::from_config(cfg);
+    let rules = payload::Rules::of(cfg);
     // PayloadRequestedModel: the client's model, else req.Model.
     let requested = match req.requested_model.trim() {
         "" => req.model.trim(),
@@ -160,6 +162,7 @@ pub(crate) async fn status_error(upstream: crate::proxy::Upstream) -> ExecError 
         retry_after: None,
         direct: false,
         addon: None,
+        after_accept: None,
     }
 }
 
@@ -457,9 +460,8 @@ impl DeferredUsage {
 /// Go `jsonPayload`: the JSON payload of a `data:` line (or a bare JSON line), trimmed
 /// with `bytes.TrimSpace`.
 fn line_payload(line: &[u8]) -> Option<&[u8]> {
-    use cpa_common::gostr::trim_space;
-    let trimmed = trim_space(line);
-    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, trim_space);
+    let trimmed = go_trim_space(line);
+    let payload = trimmed.strip_prefix(b"data:").map_or(trimmed, go_trim_space);
     (payload.first() == Some(&b'{')).then_some(payload)
 }
 
@@ -576,7 +578,7 @@ pub(crate) fn response_tier(payload: &[u8]) -> String {
     ["response.service_tier", "service_tier", "interaction.service_tier"]
         .iter()
         .map(|p| cpa_common::json::get(payload, p).str().into_owned())
-        .map(|t| String::from_utf8_lossy(cpa_common::gostr::trim_space(t.as_bytes())).into_owned())
+        .map(|t| String::from_utf8_lossy(cpa_core::config::go_trim_space(t.as_bytes())).into_owned())
         .find(|t| !t.is_empty())
         .unwrap_or_default()
 }
@@ -642,7 +644,7 @@ pub(crate) fn defer_usage(
             let kind = cpa_common::json::get(payload, "type").bytes().into_owned();
             match rule {
                 UsageRule::OpenAIStream => {
-                    let has = |n: &[u8]| payload.windows(n.len()).any(|w| w == n);
+                    let has = |n: &[u8]| cpa_common::gostr::contains(payload, n);
                     if has(b"\"usage\"") || has(b"\"service_tier\"") {
                         let payload = if cpa_common::json::valid(payload) {
                             strip_paths(payload, &MODEL_PATHS)
@@ -737,30 +739,13 @@ pub(crate) fn track_first_byte(
     .boxed()
 }
 
-/// Go `Auth.AccountInfo()`: the credential kind and its loggable value, the email for
-/// OAuth and the API key for API-key credentials (masked by the capture sink).
-pub(crate) fn account_info(credential: &Credential) -> (&'static str, String) {
-    match cpa_core::registry::dynamic::auth_kind(credential) {
-        Some("oauth") => ("oauth", credential.str("email").unwrap_or_default().trim().to_owned()),
-        Some("apikey") => (
-            "api_key",
-            credential
-                .attributes
-                .get("api_key")
-                .map(|k| k.trim().to_owned())
-                .unwrap_or_default(),
-        ),
-        _ => ("", String::new()),
-    }
-}
-
 /// Go `http.Response.Header` for an HTTP/1.1 upstream response (net/http
 /// `ReadResponse`): canonical names, every value in order, with `Transfer-Encoding`
 /// moved out; `Connection` dropped when it carries `close`; `Trailer` and
 /// `Content-Length` dropped from chunked responses (Content-Length kept for statuses
 /// without a body); identical duplicate `Content-Length` values collapsed; and
 /// `Cache-Control: no-cache` added for `Pragma: no-cache`.
-// ponytail: the capture's view only; proxy::Upstream keeps the transport's headers for
+// The capture's view only; proxy::Upstream keeps the transport's headers for
 // every other use.
 pub(crate) fn go_response_headers(status: u16, headers: &http::HeaderMap) -> Vec<(String, String)> {
     use http::header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, PRAGMA, TRAILER, TRANSFER_ENCODING};
@@ -849,7 +834,7 @@ pub(crate) fn capture_error(capture: &cpa_core::exec::CaptureSink, error: &ExecE
 /// it records after the loop.
 // ponytail: the scan error is recorded when the line reader reports it; Go skips the
 // record when an apply_patch end check already failed the stream (both failures in one
-// stream).
+// stream). Skip the record after a failed end check if logs must match.
 pub(crate) fn capture_lines(
     lines: cpa_core::exec::ExecStream,
     capture: &cpa_core::exec::CaptureSink,

@@ -28,8 +28,6 @@ const IMAGES_GENERATIONS: &str = "/images/generations";
 const IMAGES_EDITS: &str = "/images/edits";
 /// `scanner.Buffer(nil, 52_428_800)`.
 const MAX_LINE: usize = 52_428_800;
-/// helps.ApplyPatchUpstreamErrorMessage: Go's error for an empty or rejected translation.
-const EMPTY_TRANSLATION: &str = cpa_translate::APPLY_PATCH_UPSTREAM_ERROR;
 
 /// Providers this executor serves: `openai-compatibility` and `openai-compatible-<name>`
 /// (util.OpenAICompatibleProviderKey).
@@ -40,33 +38,6 @@ pub fn handles(provider: &str) -> bool {
 #[derive(Default)]
 pub struct OpenAICompatExecutor {
     clients: Clients,
-}
-
-/// Go's plain `statusErr`: never credential-scoped, so a 429 cools only the model
-/// (`IsCredentialScoped` is false); other failures by status.
-pub(crate) fn scope_for(status: u16) -> FailureScope {
-    match status {
-        429 => FailureScope::Model,
-        401 | 402 | 403 | 408 | 500.. => FailureScope::Credential,
-        _ => FailureScope::Request,
-    }
-}
-
-/// A plain Go error (no status code): no status, scope or retry semantics, which the
-/// server models as a transport fault; Go's handler answers 500 with its text.
-pub(crate) fn plain_err(message: impl Into<String>) -> ExecError {
-    ExecError::local(500, FailureScope::Transport, message)
-}
-
-/// `statusErr{code, msg}`: an empty message reads `status N`.
-pub(crate) fn status_err(status: u16, message: impl Into<String>) -> ExecError {
-    let message = message.into();
-    let message = if message.is_empty() {
-        format!("status {status}")
-    } else {
-        message
-    };
-    ExecError::local(status, scope_for(status), message)
 }
 
 /// A chat non-2xx response: `newOpenAICompatStatusError` over the error body, which is
@@ -92,7 +63,7 @@ async fn images_error(upstream: wire::Upstream, with_retry: bool, capture: &wire
 }
 
 fn status_error(status: u16, headers: http::HeaderMap, body: &[u8], with_retry: bool) -> ExecError {
-    let mut error = status_err(status, String::from_utf8_lossy(body));
+    let mut error = crate::upstream::model_status_error(status, String::from_utf8_lossy(body).into_owned());
     if with_retry {
         error.retry_after = payload::retry_after(status, &headers, body, SystemTime::now());
     }
@@ -134,8 +105,9 @@ fn not_registered(what: &str, from: Format, to: Format) -> ExecError {
 
 /// `helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent` for this executor
 /// (no target executor): Codex-client rewrites, then the pair or its compat variant.
-// ponytail: the configuration-update intent is not exposed by crate::codex_client
-// (owner: Codex), so thinking always sees `updates_changed: false`.
+// ponytail: crate::codex_client does not expose the configuration-update intent, so
+// thinking always sees `updates_changed: false`. Expose it there if thinking must see
+// a translated update.
 fn translate_body(
     req: &ExecRequest,
     cfg: &Config,
@@ -169,7 +141,7 @@ fn apply_payload_rules(
     original: &[u8],
     body: Vec<u8>,
 ) -> Vec<u8> {
-    let rules = cpa_common::payload::Rules::from_config(cfg);
+    let rules = cpa_common::payload::Rules::of(cfg);
     cpa_common::payload::apply(
         &rules,
         &cpa_common::payload::Request {
@@ -295,7 +267,7 @@ impl OpenAICompatExecutor {
             body = payload::sanitize_reasoning_encrypted_content(body);
         }
         if req.stream {
-            payload::set_bool_if_different(&mut body, "stream_options.include_usage", true);
+            gj::set_bool_if_different(&mut body, "stream_options.include_usage", true);
         }
         if req.usage.enabled() {
             req.usage.request(target, &body);
@@ -373,11 +345,11 @@ impl OpenAICompatExecutor {
                 },
                 &raw,
             )
-            .map_err(|_| ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION))?,
+            .map_err(|_| crate::upstream::apply_patch_error())?,
             None => raw.to_vec(),
         };
         if out.is_empty() {
-            return Err(ExecError::local(502, FailureScope::Request, EMPTY_TRANSLATION));
+            return Err(crate::upstream::apply_patch_error());
         }
         if req.response_format == Format::OpenAIResponse {
             out = payload::ensure_responses_usage_details(&out);
@@ -492,10 +464,10 @@ pub(crate) fn prepare_images_payload(
     if go::json_valid(body) {
         let mut body = body.to_vec();
         if !model.is_empty() {
-            payload::set_str_if_different(&mut body, "model", model);
+            gj::set_str_if_different(&mut body, "model", model);
         }
         if stream {
-            payload::set_bool_if_different(&mut body, "stream", true);
+            gj::set_bool_if_different(&mut body, "stream", true);
         } else {
             gj::delete(&mut body, "stream");
         }
@@ -505,9 +477,9 @@ pub(crate) fn prepare_images_payload(
         return Ok((Bytes::copy_from_slice(body), content_type.to_owned()));
     };
     // Go returns a plain error here; the handler answers 500.
-    let boundary = boundary.map_err(plain_err)?;
-    let form =
-        multipart::read_form(body, &boundary).map_err(|e| plain_err(format!("read multipart form failed: {e}")))?;
+    let boundary = boundary.map_err(crate::upstream::plain_error)?;
+    let form = multipart::read_form(body, &boundary)
+        .map_err(|e| crate::upstream::plain_error(format!("read multipart form failed: {e}")))?;
     let (out, content_type) = multipart::rewrite_images_form(&form, model, stream, false);
     Ok((Bytes::from(out), content_type))
 }
@@ -537,7 +509,7 @@ fn prompt_cache_key(
         .map(|source| gj::get(source, "prompt_cache_key").str().trim().to_owned())
         .find(|key| !key.is_empty());
     if let Some(key) = explicit {
-        payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+        gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
         return body;
     }
     let model = gj::get(&body, "model").str().trim().to_owned();
@@ -545,7 +517,7 @@ fn prompt_cache_key(
     if req.source_format == Format::Claude
         && let Some(key) = payload::claude_code_prompt_cache(&model, &req.body, &req.headers)
     {
-        payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+        gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
         return body;
     }
     let Some(session) = provider_session_uuid(provider, req) else {
@@ -558,7 +530,7 @@ fn prompt_cache_key(
         req.source_format.as_str().trim().go_lower()
     );
     let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, identity.as_bytes()).to_string();
-    payload::set_str_if_different(&mut body, "prompt_cache_key", &key);
+    gj::set_str_if_different(&mut body, "prompt_cache_key", &key);
     body
 }
 
@@ -618,10 +590,6 @@ impl StreamTranslator for Identity {
     }
 }
 
-fn trim(bytes: &[u8]) -> &[u8] {
-    go::trim_space(bytes)
-}
-
 /// The ExecuteStream scan loop: SSE lines grouped into frames, Go's error detection on
 /// every frame, and the terminal rules for `[DONE]` and EOF.
 struct Frames {
@@ -641,7 +609,11 @@ impl Frames {
     /// `publishStreamError(err, false)`: the error is logged and published as a failure
     /// before the client gets it.
     fn fail(&mut self, status: u16, message: impl Into<String>) -> bool {
-        let error = status_err(status, message);
+        self.fail_with(crate::upstream::model_status_error(status, message.into()))
+    }
+
+    /// [`Self::fail`] with an error built by the caller.
+    fn fail_with(&mut self, error: ExecError) -> bool {
         self.capture.error(&error);
         wire::publish_failure(&self.usage, &error);
         self.terminal(error);
@@ -651,10 +623,10 @@ impl Frames {
     /// `publishStreamError(err, true)`: the upstream's error payload is neither logged nor
     /// published; a fixed text stands in for it.
     fn fail_payload(&mut self, status: u16, message: impl Into<String>) -> bool {
-        let logged = status_err(status, "upstream stream returned an error payload");
+        let logged = crate::upstream::model_status_error(status, "upstream stream returned an error payload");
         self.capture.error(&logged);
         wire::publish_failure(&self.usage, &logged);
-        self.terminal(status_err(status, message));
+        self.terminal(crate::upstream::model_status_error(status, message.into()));
         true
     }
 
@@ -675,7 +647,7 @@ impl Frames {
                 self.ready.extend(out.into_iter().map(Ok));
                 false
             }
-            Err(e) => self.fail(502, e.to_string()),
+            Err(e) => self.fail_with(ExecError::local(502, FailureScope::Request, e.to_string())),
         }
     }
 
@@ -686,11 +658,11 @@ impl Frames {
         if data.is_empty() {
             return payload::error_event(&event) && self.fail(502, "upstream error event ended without data");
         }
-        if data.len() > 1 && data.iter().any(|d| trim(d) == b"[DONE]") {
+        if data.len() > 1 && data.iter().any(|d| cpa_core::config::go_trim_space(d) == b"[DONE]") {
             return self.fail(502, "upstream stream ended with incomplete data before [DONE]");
         }
         let joined = data.join(&b"\n"[..]);
-        let payload_bytes = trim(&joined);
+        let payload_bytes = cpa_core::config::go_trim_space(&joined);
         let done = payload_bytes == b"[DONE]";
         if done && payload::error_event(&event) {
             return self.fail(502, "upstream error event ended before [DONE]");
@@ -705,7 +677,7 @@ impl Frames {
             self.saw_finish_reason |= gj::get(payload_bytes, "choices")
                 .array()
                 .iter()
-                .any(|choice| !trim(&choice.get("finish_reason").bytes()).is_empty());
+                .any(|choice| !cpa_core::config::go_trim_space(&choice.get("finish_reason").bytes()).is_empty());
         }
         let mut line = b"data: ".to_vec();
         line.extend_from_slice(payload_bytes);
@@ -714,7 +686,7 @@ impl Frames {
         }
         // helps.ApplyPatchTranslationError: the frame's chunks go out, then the 502.
         if self.translator.tool_input_failed() {
-            return self.fail(502, EMPTY_TRANSLATION);
+            return self.fail_with(crate::upstream::apply_patch_error());
         }
         if done {
             self.seen_done = true;
@@ -724,14 +696,14 @@ impl Frames {
 
     /// One scanned line; true ends the scan.
     fn line(&mut self, line: &[u8]) -> bool {
-        let line = trim(line);
+        let line = cpa_core::config::go_trim_space(line);
         if line.is_empty() {
             return self.frame();
         }
         if let Some(rest) = line.strip_prefix(b"data:") {
-            self.data.push(trim(rest).to_vec());
+            self.data.push(cpa_core::config::go_trim_space(rest).to_vec());
         } else if let Some(rest) = line.strip_prefix(b"event:") {
-            self.event = String::from_utf8_lossy(trim(rest)).into_owned();
+            self.event = String::from_utf8_lossy(cpa_core::config::go_trim_space(rest)).into_owned();
         } else if line.starts_with(b":") || line.starts_with(b"id:") || line.starts_with(b"retry:") {
         } else if line.starts_with(b"{") || line.starts_with(b"[") {
             return self.fail_payload(502, String::from_utf8_lossy(line));
@@ -746,7 +718,7 @@ impl Frames {
         self.ready.extend(out.into_iter().map(Ok));
         if self.translator.tool_input_failed() {
             // RecordApplyPatchStreamFailure publishes; nothing is logged.
-            let error = status_err(502, EMPTY_TRANSLATION);
+            let error = crate::upstream::apply_patch_error();
             wire::publish_failure(&self.usage, &error);
             self.terminal(error);
             return true;
@@ -764,7 +736,8 @@ impl Frames {
         }
         if !self.seen_done {
             if self.client == Format::OpenAIResponse || (self.client == Format::Claude && !self.saw_finish_reason) {
-                let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before [DONE]");
+                let error = ExecError::local(502, FailureScope::Request, "upstream stream closed before [DONE]")
+                    .accepted(cpa_core::exec::AfterAccept::Truncated);
                 self.capture.error(&error);
                 wire::publish_failure(&self.usage, &error);
                 self.terminal(error);
@@ -781,7 +754,7 @@ impl Frames {
         match self.translator.finish() {
             Ok(out) => self.ready.extend(out.into_iter().map(Ok)),
             Err(e) => {
-                self.fail(502, e.to_string());
+                self.fail_with(ExecError::local(502, FailureScope::Request, e.to_string()));
             }
         }
     }

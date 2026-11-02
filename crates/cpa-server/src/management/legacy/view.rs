@@ -184,6 +184,7 @@ fn duration_nanos(v: &Yaml) -> Value {
 /// sorted at every level, and a float with no fraction printed as an integer.
 /// ponytail: other floats use serde's shortest form, which differs from Go's
 /// `strconv` form only for exponents (`1e21` vs `1e+21`, `1e16` vs `10000000000000000`).
+/// Format exponents as strconv does if a client compares the text.
 fn any_json(v: &Yaml) -> Value {
     fn go(v: Value) -> Value {
         match v {
@@ -567,7 +568,7 @@ fn load_normalize(cfg: &mut Value) {
     ] {
         if let Some(s) = c.get_mut(section).and_then(Value::as_object_mut) {
             for k in keys {
-                if let Some(v) = s.get(*k).and_then(Value::as_str).map(|v| super::go_trim(v).to_owned()) {
+                if let Some(v) = s.get(*k).and_then(Value::as_str).map(|v| v.trim().to_owned()) {
                     s.insert((*k).into(), v.into());
                 }
             }
@@ -583,7 +584,7 @@ fn payload_raw_rule_valid(rule: &Value) -> bool {
     };
     params.values().all(|v| match v.as_str() {
         Some(raw) => {
-            let trimmed = super::go_trim(raw);
+            let trimmed = raw.trim();
             !trimmed.is_empty() && serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok()
         }
         None => true,
@@ -614,7 +615,7 @@ fn go_clean(p: &str) -> String {
 
 /// Go `ResolvePluginsDir`: trimmed, `plugins` when empty, `~` expanded, cleaned.
 fn plugins_dir(dir: &str) -> String {
-    let dir = super::go_trim(dir);
+    let dir = dir.trim();
     let dir = if dir.is_empty() { "plugins" } else { dir };
     match dir.strip_prefix('~') {
         Some(rest) => {

@@ -5,7 +5,7 @@
 //! the error text (`err.Error()`, which is the upstream body or `status N`). Both feed
 //! retry, failover and cooldown decisions here so they cannot drift apart.
 
-use cpa_core::exec::{ExecError, FailureScope};
+use cpa_core::exec::{AfterAccept, ExecError, FailureScope};
 use serde_json::Value;
 
 /// Go `err.Error()` of an executor status error: the body, or `status N` when empty.
@@ -38,29 +38,23 @@ fn explicit_request_scoped(e: &ExecError) -> bool {
     e.scope == FailureScope::Request && e.headers.is_empty()
 }
 
-/// The Go status of an error: transport faults have none.
-pub fn go_status(e: &ExecError) -> u16 {
-    if e.scope == FailureScope::Transport {
-        0
-    } else {
-        e.status
-    }
-}
-
-/// An accepted stream without a first payload is ambiguous inference. Keep Go's
-/// statusless 500 response, but make the failure terminal without account cooldown.
+/// Go's `empty_stream`: an accepted stream that ended before its first payload. It is
+/// statusless (answered 500) and cools no account; dispatch fails it over once per
+/// account, as a response that broke off before any output.
 pub fn empty_stream() -> ExecError {
     ExecError::local(
         0,
         FailureScope::Request,
         "empty_stream: upstream stream closed before first payload",
     )
+    .accepted(AfterAccept::Interrupted)
 }
 
 /// Whether the failure came from an upstream attempt (Go `UpstreamAttempted`): an
-/// upstream response, a connection fault, or a stream that ended empty.
+/// upstream response, a connection fault, a stream that ended empty, or any failure
+/// after the upstream accepted the request.
 pub fn upstream_attempted(e: &ExecError) -> bool {
-    !e.headers.is_empty() || e.scope == FailureScope::Transport || e.status == 0
+    !e.headers.is_empty() || e.scope == FailureScope::Transport || e.status == 0 || e.after_accept.is_some()
 }
 
 /// Go `isUnauthorizedError` for an attempt that was not an explicit request fault.
@@ -69,12 +63,12 @@ pub fn is_unauthorized(e: &ExecError) -> bool {
         return false;
     }
     let raw = error_text(e).to_lowercase();
-    go_status(e) == 401 || raw.contains("status 401") || raw.contains("401 unauthorized")
+    e.go_status() == 401 || raw.contains("status 401") || raw.contains("401 unauthorized")
 }
 
 /// Downstream status for a terminal error. Go answers status-less errors with 500.
 pub fn response_status(e: &ExecError) -> u16 {
-    match go_status(e) {
+    match e.go_status() {
         0 => 500,
         s => s,
     }
@@ -281,7 +275,7 @@ pub fn is_request_invalid(e: &ExecError) -> bool {
     if explicit_request_scoped(e) {
         return true;
     }
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     if is_cloudflare(status, &text) || is_invalid_grant(status, &text) || is_model_support(status, &text) {
         return false;
@@ -291,7 +285,7 @@ pub fn is_request_invalid(e: &ExecError) -> bool {
 
 /// Faults that stop a `responses/compact` request without failover.
 pub fn is_compact_fault(e: &ExecError) -> bool {
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     if credential_scoped(e) || is_cloudflare(status, &text) || is_invalid_grant(status, &text) {
         return false;
@@ -301,7 +295,7 @@ pub fn is_compact_fault(e: &ExecError) -> bool {
 
 /// Compact failures that must not change credential availability.
 pub fn is_compact_neutral(e: &ExecError) -> bool {
-    let status = go_status(e);
+    let status = e.go_status();
     let text = error_text(e);
     !(credential_scoped(e)
         || is_cloudflare(status, &text)
@@ -312,7 +306,7 @@ pub fn is_compact_neutral(e: &ExecError) -> bool {
 /// A count_tokens 404 that names no model: the endpoint is missing, not the model.
 pub fn is_count_endpoint_missing(e: &ExecError, requested_model: &str) -> bool {
     let base = crate::scheduler::canonical_model(requested_model);
-    go_status(e) == 404 && !explicit_model_not_found(&error_text(e), base)
+    e.go_status() == 404 && !explicit_model_not_found(&error_text(e), base)
 }
 
 /// Executor-reported credential-wide quota (`IsCredentialScoped`).
@@ -326,7 +320,8 @@ pub fn is_transport(e: &ExecError) -> bool {
         return true;
     }
     let lower = error_text(e).trim().to_lowercase();
-    // ponytail: compatibility for executors that report transport faults untyped.
+    // ponytail: compatibility for executors that report transport faults untyped. Remove
+    // it once every executor sets `FailureScope::Transport`.
     e.headers.is_empty() && lower.starts_with("upstream request failed")
 }
 
@@ -507,12 +502,56 @@ fn missing_phrase(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A Go error without a status after the response started (a read failure, an
+    /// unprocessable response) has no status for Go's rules, while a truncation the
+    /// executor gives a status keeps it. A status-matching error rule therefore never
+    /// stops on the statusless one; the client still gets 500.
     #[test]
-    fn successful_empty_stream_is_terminal_without_account_cooldown() {
+    fn statusless_failures_after_the_response_have_no_go_status() {
+        let local = |status, after| ExecError::local(status, FailureScope::Request, "restore failed").accepted(after);
+        let credential = cpa_core::credential::Credential::from_file(
+            std::path::Path::new("/mock"),
+            std::path::Path::new("/mock/credential.json"),
+            serde_json::json!({"type": "claude", "request_scoped_errors": [
+                {"status": 500, "match": ["restore failed"], "action": "stop-and-cooldown"},
+                {"status": 502, "match": ["restore failed"], "action": "stop-and-cooldown"},
+            ]})
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap();
+        let policy = crate::scheduler::Policy::default();
+        for after in [AfterAccept::Interrupted, AfterAccept::Unprocessed] {
+            let error = local(500, after);
+            assert_eq!(error.go_status(), 0, "{after:?}");
+            assert_eq!(response_status(&error), 500, "{after:?}");
+            assert!(!policy.error_action(&credential, &error).matched, "{after:?}");
+        }
+        let truncated = local(502, AfterAccept::Truncated);
+        assert_eq!(truncated.go_status(), 502);
+        assert!(policy.error_action(&credential, &truncated).matched);
+    }
+
+    #[test]
+    fn a_failure_after_the_upstream_accepted_the_request_was_an_upstream_attempt() {
+        let local = ExecError::local(502, FailureScope::Request, "closed early");
+        assert!(!upstream_attempted(&local));
+        for after in [
+            AfterAccept::Interrupted,
+            AfterAccept::Truncated,
+            AfterAccept::Unprocessed,
+        ] {
+            assert!(upstream_attempted(&local.clone().accepted(after)), "{after:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_stream_is_statusless_and_cools_no_account() {
         let error = empty_stream();
         assert_eq!(error.scope, FailureScope::Request);
         assert!(error.headers.is_empty());
-        assert_eq!(go_status(&error), 0);
+        assert_eq!(error.go_status(), 0);
         assert_eq!(response_status(&error), 500);
         assert!(is_request_invalid(&error));
         let credential = cpa_core::credential::Credential::from_file(

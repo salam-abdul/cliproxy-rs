@@ -372,7 +372,7 @@ async fn large_requests_stay_within_their_heap_budget() {
     };
     let check = |status: axum::http::StatusCode, text: &[u8], done: &[u8]| {
         assert_eq!(status, 200, "{text:?}");
-        assert!(text.windows(done.len()).any(|w| w == done), "{text:?}");
+        assert!(cpa_common::gostr::contains(text, done), "{text:?}");
     };
     let send = |route: &'static str, body: Bytes| {
         let app = if route == "cloak" { logged.clone() } else { app.clone() };

@@ -3,10 +3,11 @@
 
 use crate::{
     Error, Registered, RequestCtx,
-    common::{self, go_lower, trim_space},
+    common::{self, go_lower},
     openai_claude_response as response,
 };
 use cpa_common::json::{self as gj, AnyValue, Kind, Res};
+use cpa_core::config::go_trim_space;
 use std::collections::HashMap;
 
 pub static PAIR: Registered = registered!(
@@ -165,7 +166,7 @@ fn convert(model: &str, raw: &[u8], stream: bool, preserve_thinking: bool) -> Ve
 }
 
 /// Claude `thinking` (with `output_config.effort`) -> `reasoning_effort`.
-// ponytail: thinking.ConvertBudgetToLevel and the level constants come from
+// Go's thinking.ConvertBudgetToLevel and the level constants come from
 // cpa_common::thinking; the branch logic stays here because it reads raw bytes.
 fn reasoning_effort(out: &mut Vec<u8>, root: &Res<'_>) {
     use cpa_common::thinking::convert_budget_to_level;
@@ -178,7 +179,7 @@ fn reasoning_effort(out: &mut Vec<u8>, root: &Res<'_>) {
         return;
     }
     let explicit = root.get("output_config.effort");
-    let explicit = (explicit.kind == Kind::String).then(|| go_lower(trim_space(&explicit.s)));
+    let explicit = (explicit.kind == Kind::String).then(|| go_lower(go_trim_space(&explicit.s)));
     match kind.bytes().as_ref() {
         b"enabled" => {
             let budget = config.get("budget_tokens");
@@ -266,7 +267,7 @@ impl Turns {
                         continue;
                     }
                     let text = common::thinking_text(part);
-                    if !trim_space(&text).is_empty() {
+                    if !go_trim_space(&text).is_empty() {
                         reasoning.push(text);
                     }
                 }
@@ -360,7 +361,7 @@ impl Turns {
             return true;
         }
         let signature = part.get("signature").bytes().into_owned();
-        if trim_space(&signature).is_empty() {
+        if go_trim_space(&signature).is_empty() {
             return false;
         }
         gpt_compatible_signature(&signature)
@@ -379,7 +380,7 @@ fn content_part(part: &Res<'_>) -> Option<Vec<u8>> {
     match part.get("type").bytes().as_ref() {
         b"text" => {
             let text = part.get("text").bytes();
-            if trim_space(&text).is_empty() || common::is_claude_code_attribution_text(&text) {
+            if go_trim_space(&text).is_empty() || common::is_claude_code_attribution_text(&text) {
                 return None;
             }
             let mut item = br#"{"type":"text","text":""}"#.to_vec();
@@ -449,7 +450,7 @@ fn tool_result_content(content: &Res<'_>) -> (Vec<u8>, Vec<Vec<u8>>) {
             true
         });
         let joined = parts.join(&b"\n\n"[..]);
-        if trim_space(&joined).is_empty() {
+        if go_trim_space(&joined).is_empty() {
             if !images.is_empty() {
                 return (TOOL_RESULT_IMAGE_PLACEHOLDER.to_vec(), images);
             }

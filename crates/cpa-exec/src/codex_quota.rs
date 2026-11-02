@@ -394,7 +394,8 @@ impl QuotaSignals {
     /// (`canonicalModelKey`): replaced when `headers` carry any Codex quota signal,
     /// untouched otherwise.
     // ponytail: Go keys model state by the conductor's state model; executors see the
-    // upstream model, which differs only for aliases mapped to another upstream name.
+    // upstream model, which differs only for aliases mapped to another upstream name. Carry
+    // the state model on ExecRequest if those aliases need separate state.
     pub fn observe(&self, credential_id: &str, model: &str, headers: &HeaderMap) {
         self.record(credential_id, model, collect_signals(headers), SystemTime::now());
     }
@@ -429,6 +430,16 @@ impl QuotaSignals {
             .expect("quota snapshots")
             .get(credential_id)
             .and_then(|e| e.credential.clone())
+    }
+
+    /// `f` of the credential's latest snapshot, read in place without a copy.
+    pub fn with_snapshot<R>(&self, credential_id: &str, f: impl FnOnce(&Snapshot) -> R) -> Option<R> {
+        self.snapshots
+            .lock()
+            .expect("quota snapshots")
+            .get(credential_id)
+            .and_then(|e| e.credential.as_ref())
+            .map(f)
     }
 
     /// The latest snapshot per model (`model_quotas`), empty when none was observed.
