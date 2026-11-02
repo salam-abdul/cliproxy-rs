@@ -748,11 +748,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
             continue;
         }
         if scenario["reply"]["body_b64"].is_string() {
-            let Ok(RawResponse {
-                body: ResponseBody::Stream(raw),
-                ..
-            }) = finished
-            else {
+            let Ok(RawResponse { body: raw, .. }) = finished else {
                 panic!("{name}: Rust failed where Go succeeded");
             };
             let decoded = collect(raw).await.unwrap();
@@ -1959,4 +1955,26 @@ fn a_fast_request_never_fails_over_a_broken_response() {
         fast_request_error(false, interrupted).after_accept,
         Some(AfterAccept::Interrupted)
     );
+}
+
+#[tokio::test]
+async fn an_error_body_keeps_exactly_the_bounded_prefix() {
+    let chunk = Bytes::from(vec![b'e'; (1 << 20) + 1]);
+    let chunks = (crate::proxy::MAX_ERROR_BODY >> 20) + 1;
+    let body = futures_util::stream::iter((0..chunks).map(move |_| Ok(chunk.clone()))).boxed();
+    let error = finish(
+        Decoded {
+            status: 400,
+            headers: http::HeaderMap::new(),
+            body: Ok(body),
+        },
+        false,
+        false,
+        &Default::default(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.body.len(), crate::proxy::MAX_ERROR_BODY);
 }

@@ -13,8 +13,11 @@ use http::HeaderMap;
 use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-/// Largest upstream error body read; the rest is never pulled off the socket.
-pub(crate) const MAX_ERROR_BODY: usize = 64 * 1024;
+/// Largest error body [`into_response`] reads; the rest is never pulled off the socket.
+/// Its callers are control-plane requests that never show the body to a client, so the
+/// bound only limits the read. Inference errors reach clients and keep up to
+/// [`crate::proxy::MAX_ERROR_BODY`].
+pub(crate) const MAX_CONTROL_ERROR_BODY: usize = 64 * 1024;
 
 pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
     // wreq errors may include a URL with credential-bearing query parameters.
@@ -28,7 +31,7 @@ pub(crate) fn transport_error(e: wreq::Error) -> ExecError {
 }
 
 /// A failed response body read cannot establish whether inference completed.
-pub(crate) fn body_read_error_after_response(_status: u16, mut error: ExecError) -> ExecError {
+pub(crate) fn body_read_error_after_response(mut error: ExecError) -> ExecError {
     if error.scope == FailureScope::Transport && error.headers.is_empty() {
         error.scope = FailureScope::Request;
         error.after_accept = Some(AfterAccept::Interrupted);
@@ -94,9 +97,8 @@ pub(crate) fn apply_patch_error() -> ExecError {
     ExecError::local(502, FailureScope::Request, cpa_translate::APPLY_PATCH_UPSTREAM_ERROR)
 }
 
-pub(crate) fn body_after_response(status: u16, body: ExecStream) -> ExecStream {
-    body.map(move |item| item.map_err(|error| body_read_error_after_response(status, error)))
-        .boxed()
+pub(crate) fn body_after_response(body: ExecStream) -> ExecStream {
+    body.map(|item| item.map_err(body_read_error_after_response)).boxed()
 }
 
 /// A response whose body went through Go's Claude `decodeResponseBody`. `body` is
@@ -116,7 +118,7 @@ pub(crate) async fn decode_upstream(upstream: crate::proxy::Upstream) -> Decoded
     headers.remove(http::header::CONTENT_LENGTH);
     let body = decode_body(upstream.body.map(|r| r.map_err(std::io::Error::other)), &encoding)
         .await
-        .map(|body| body_after_response(upstream.status, body));
+        .map(body_after_response);
     Decoded {
         status: upstream.status,
         headers,
@@ -143,11 +145,11 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
     let body = decode_body(res.bytes_stream().map(|r| r.map_err(std::io::Error::other)), &encoding)
         .await
         .map_err(|_| decode_error())?;
-    let body = body_after_response(status, body);
+    let body = body_after_response(body);
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::CONTENT_LENGTH);
     if !(200..300).contains(&status) {
-        let body = read_bounded(body, MAX_ERROR_BODY).await?;
+        let body = read_bounded(body, MAX_CONTROL_ERROR_BODY).await?;
         return Err(ExecError {
             status,
             scope: scope_for(status),

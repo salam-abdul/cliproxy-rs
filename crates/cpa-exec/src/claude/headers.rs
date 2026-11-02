@@ -331,7 +331,7 @@ pub(crate) fn build(p: &Plan<'_>) -> GoHeader {
             ("application/json", "gzip, deflate, br, zstd")
         };
         copy_caller_fingerprint(&mut h, p.incoming, p.confirmed);
-        ensure(&mut h, p.incoming, "Anthropic-Version", "2023-06-01");
+        ensure(&mut h, p.incoming, "Anthropic-Version", super::ANTHROPIC_VERSION);
         ensure(&mut h, p.incoming, "Accept", accept);
         ensure(&mut h, p.incoming, "Accept-Encoding", encoding);
         ensure(
@@ -372,7 +372,7 @@ pub(crate) fn build(p: &Plan<'_>) -> GoHeader {
             h.set(name, fallback);
         }
     };
-    identity(&mut h, "Anthropic-Version", "2023-06-01");
+    identity(&mut h, "Anthropic-Version", super::ANTHROPIC_VERSION);
     identity(&mut h, "Anthropic-Dangerous-Direct-Browser-Access", "true");
     identity(&mut h, "X-App", "cli");
     identity(&mut h, "X-Stainless-Retry-Count", "0");

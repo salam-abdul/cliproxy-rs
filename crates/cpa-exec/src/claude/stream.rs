@@ -262,7 +262,7 @@ impl Relay {
             });
             if read_error {
                 error.body = Bytes::from_static(b"unexpected EOF");
-                error = crate::upstream::body_read_error_after_response(200, error);
+                error = crate::upstream::body_read_error_after_response(error);
                 if error.scope == FailureScope::Request && error.headers.is_empty() {
                     error.after_accept.get_or_insert(AfterAccept::Interrupted);
                 }
