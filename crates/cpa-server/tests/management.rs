@@ -469,10 +469,14 @@ async fn management_bodies_are_unbounded_but_the_open_callback_is_not() {
         .unwrap();
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
     assert!(f.dir.join("auth/large.json").metadata().unwrap().len() > 3 * 1024 * 1024);
+    // Just over the 64 KiB callback limit: the server answers 413 and closes without
+    // reading the body, so a body larger than the socket buffers can reset the client
+    // before it reads the response.
+    let code = "x".repeat(64 * 1024);
     let r = client
         .post(format!("{base}/v8/management/oauth/callback"))
         .header("Content-Type", "application/json")
-        .body(format!(r#"{{"state":"s","code":"{note}"}}"#))
+        .body(format!(r#"{{"state":"s","code":"{code}"}}"#))
         .send()
         .await
         .unwrap();
