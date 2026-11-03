@@ -23,9 +23,13 @@
 #
 #   cold     the first turn: writes the prefix.
 #   warm     the next turn at once: reads everything the cold turn wrote, writes its tail.
-#   changed  the warm turn with an edited caller system prompt: reads up to the first
-#            user message, writes the rest (an OAuth login moves the caller prompt
-#            after it).
+#   changed  the warm turn with an edited caller system prompt: reads nothing and writes
+#            the whole prefix again. An OAuth login moves the caller prompt to a system
+#            turn after the first user message, and the bytes before that turn stay
+#            the same. In two runs on claude-opus-5-5 on 2 November 2026, Anthropic still
+#            read none of them, as if it keyed a system turn with the system prompt,
+#            ahead of the messages, so editing it invalidates the first user message's
+#            entry.
 #   idle     the turn after warm, IDLE_SECONDS later (default 330, past the 5-minute
 #            TTL): still reads everything warm cached, because an OAuth login's
 #            breakpoints are written to the 1-hour pool.
@@ -152,8 +156,8 @@ printf '%s\n' "${results[@]}" | jq -rse --argjson idle "$IDLE_SECONDS" '
       ["cold writes its prefix to the 1-hour pool", $r.cold.cache_write_1h > 0],
       ["warm reads everything cold cached", $r.warm.cache_read >= $cold],
       ["warm writes its new tail", $r.warm.cache_write > 0],
-      ["changed reads the shared prefix only", $r.changed.cache_read > 0 and $r.changed.cache_read < $cold],
-      ["changed writes the new tail", $r.changed.cache_write > 0],
+      ["changed reads nothing", $r.changed.cache_read == 0],
+      ["changed writes the whole prefix again", $r.changed.cache_write >= $cold],
       ["idle reads everything warm cached after \($idle)s", $r.idle.cache_read >= $warm],
       ["no 5-minute writes", all(.[]; .cache_write_5m == 0)]
     ]
