@@ -352,6 +352,7 @@ pub(super) struct Observation {
     writer: Option<tokio::io::DuplexStream>,
     decoder: Option<JoinHandle<()>>,
     published: bool,
+    finalizer: bool,
     first_byte_ms: Option<u128>,
 }
 impl Observation {
@@ -392,6 +393,7 @@ impl Observation {
             writer: Some(writer),
             decoder: Some(decoder),
             published: false,
+            finalizer: false,
             first_byte_ms: None,
         }
     }
@@ -486,10 +488,13 @@ impl Observation {
 impl Drop for Observation {
     fn drop(&mut self) {
         self.writer.take();
-        if self.published {
+        // A finalizer dropped before it ran was cancelled by a runtime shutting down, which
+        // cancels every task spawned from here at once, so it publishes in place instead.
+        if self.published || self.finalizer {
             if let Some(task) = self.decoder.take() {
                 task.abort();
             }
+            self.publish("client_cancelled");
             return;
         }
         self.published = true;
@@ -500,6 +505,7 @@ impl Drop for Observation {
             writer: None,
             decoder: self.decoder.take(),
             published: false,
+            finalizer: true,
             first_byte_ms: self.first_byte_ms,
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
