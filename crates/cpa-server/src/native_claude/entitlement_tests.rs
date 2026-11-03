@@ -336,3 +336,52 @@ async fn native_routing_survives_a_panic_under_its_locks() {
         2
     );
 }
+
+#[test]
+fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let fixture = runtime.block_on(async {
+        let fixture = Fixture::new(Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        })
+        .await;
+        let account = fixture.state.accounts().await.unwrap().remove(0);
+        let facts = Exchange {
+            request_id: "in-flight".into(),
+            sse: true,
+            timing: json!({}),
+            headers_at: std::time::Instant::now(),
+            attempts: 1,
+            a: account,
+            model: "claude-opus-test".into(),
+            sid: "synthetic-session".into(),
+            status: 200,
+            digest: String::new(),
+            body_bytes: 0,
+            started: std::time::Instant::now(),
+        };
+        let observation = Observation::new(fixture.state.clone(), facts, "identity");
+        tokio::spawn(async move {
+            let _streaming = observation;
+            std::future::pending::<()>().await;
+        });
+        fixture
+    });
+    drop(runtime);
+    let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+    let recorded: Vec<_> = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["requestId"] == "in-flight")
+        .collect();
+    assert_eq!(recorded.len(), 1, "{events}");
+    assert_eq!(recorded[0]["outcome"], "client_cancelled");
+    assert_eq!(recorded[0]["status"], 499);
+}
