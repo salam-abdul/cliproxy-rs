@@ -5,17 +5,17 @@
   import Editor from "../Editor.svelte";
   import Load from "../Load.svelte";
 
-  const about: Record<string, string> = {
-    server: "Listener and TLS. Some changes need a restart.",
-    management: "Remote access and the management key.",
-    access: "Client keys.",
-    routing: "Strategy, retries and cooldowns.",
-    requests: "Outbound proxy, streaming and payload rules.",
-    "api-keys": "Provider API keys.",
-    oauth: "Auth directory, aliases and exclusions.",
-    client: "Per-client tweaks.",
-    multimedia: "Image and video generation.",
-    observability: "Logs and usage statistics.",
+  const about: Record<string, [title: string, help: string]> = {
+    server: ["Server", "Listener and TLS. Some changes need a restart."],
+    management: ["Management", "Remote access and the management key."],
+    access: ["Client keys", "Keys your tools send to this proxy."],
+    routing: ["Routing", "Strategy, retries and cooldowns."],
+    requests: ["Requests", "Outbound proxy, streaming and payload rules."],
+    "api-keys": ["Provider keys", "Provider API keys."],
+    oauth: ["Accounts", "Auth directory, aliases and exclusions."],
+    client: ["Clients", "Per-client tweaks."],
+    multimedia: ["Multimedia", "Image and video generation."],
+    observability: ["Logs and statistics", "Logs and usage statistics."],
   };
   let edit = $state<{ path: string; value: unknown; title: string; yaml: boolean } | null>(null);
   const saved = $derived(readPath(store.config.data || {}, "routing/strategy", "") as string);
@@ -49,6 +49,10 @@
             >{/each}
         </div>
         <p class="muted">{current.help}</p>
+        <p class="muted">
+          Applies to the translating proxy. Native Claude routing for Claude Code, Desktop and Zed keeps its own
+          new-session order, shown on Overview.
+        </p>
       </section>
       {@const sections = [...new Set([...Object.keys(about), ...Object.keys(config)])].filter((k) => k !== "config-version" && k !== "plugins")}
       <ul class="list">
@@ -56,7 +60,7 @@
           {@const v = config[k]}
           <li>
             <button class="item config-row" onclick={() => open(k)} disabled={store.busy}>
-              <span class="name grow"><strong class="mono">{k}</strong><small>{about[k] || "Persisted section."}</small></span>
+              <span class="name grow"><strong>{about[k]?.[0] || k}</strong><small><code>{k}</code> · {about[k]?.[1] || "Persisted section."}</small></span>
               <span class="legend"
                 >{v === undefined ? "Server defaults" : v && typeof v === "object" ? `${Object.keys(v).length} set` : String(v)}</span
               >

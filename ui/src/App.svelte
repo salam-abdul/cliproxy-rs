@@ -44,6 +44,12 @@
   const section = $derived(
     sections.find((s) => s[1].some((p) => p[0] === current))!,
   );
+  // On a phone the section tabs scroll sideways; keep the current one in view.
+  let tabs = $state<HTMLElement>();
+  $effect(() => {
+    const a = current && tabs?.querySelector<HTMLElement>("[aria-current]");
+    if (tabs && a) tabs.scrollLeft = a.offsetLeft - tabs.offsetLeft - (tabs.clientWidth - a.offsetWidth) / 2;
+  });
   const title = $derived(
     store.route.page === "connect"
       ? "Connect an account"
@@ -196,7 +202,7 @@
     </header>
     <div class="main">
       <main class="page" id="main" tabindex="-1">
-        {#if section[1].length > 1}<nav class="nav section-tabs" aria-label={section[0]}>
+        {#if section[1].length > 1}<nav class="nav section-tabs" aria-label={section[0]} bind:this={tabs}>
             {#each section[1] as [id, name]}<a
                 href={`#${id}`}
                 aria-current={current === id ? "page" : undefined}>{name}</a

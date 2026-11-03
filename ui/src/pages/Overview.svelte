@@ -143,20 +143,22 @@
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">
-          {#if !native?.enabled || !n?.id}<span class="muted small">Not tracked</span>
-          {:else if recent.length}<div class="account-history" aria-hidden="true">
+          {#if !native?.enabled || !n?.id}<span class="muted account-history-note">Not tracked</span>
+          {:else if recent.length}<span class="quota-caption"
+              ><span>Last {store.historyRange}</span><strong class="num"
+                >{recent.reduce((sum, b) => sum + b.requests, 0)} requests</strong
+              ></span
+            >
+            <div class="account-history" aria-hidden="true">
               {#each recent as bucket}<span
                   class:unknown={!bucket.known}
                   class:failed={bucket.failures > 0}
                   class:served={bucket.requests > 0}
                 ></span>{/each}
             </div>
-            <span class="muted small"
-              >{recent.reduce((sum, b) => sum + b.requests, 0)} requests · {recent.reduce(
-                (sum, b) => sum + b.failures,
-                0,
-              )} failed in {store.historyRange}</span
-            >{:else}<span class="muted small">{historyData ? "No history" : store.history.error ? "History unavailable" : "Loading history…"}</span>{/if}
+            <span class="muted"
+              >{recent.reduce((sum, b) => sum + b.failures, 0)} failed</span
+            >{:else}<span class="muted account-history-note">{historyData ? "No history" : store.history.error ? "History unavailable" : "Loading history…"}</span>{/if}
         </div>
       </article>
     {:else}<div class="state">
@@ -173,7 +175,6 @@
   .account-history {
     display: flex;
     gap: 2px;
-    max-width: 180px;
   }
   .account-history span {
     height: 4px;

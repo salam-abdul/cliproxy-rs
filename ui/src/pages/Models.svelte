@@ -35,7 +35,7 @@
 </script>
 
 <div class="head"><h1>Models</h1></div>
-<div class="seg" role="group" aria-label="Channel">
+<div class="seg tabs" role="group" aria-label="Channel">
   {#each channels as c}<button aria-pressed={channel === c} onclick={() => (channel = c)}>{label(c)}</button>{/each}
 </div>
 
@@ -88,7 +88,7 @@
 </Load>
 
 <section class="section">
-  <div class="section-head"><h2>Catalog</h2>{#if catalog?.data}<span class="legend">{catalog.data.length} models</span>{/if}</div>
+  <div class="section-head"><h2>Catalog</h2>{#if catalog?.data}<span class="legend">{catalog.data.length} {catalog.data.length === 1 ? "model" : "models"}</span>{/if}</div>
   {#if catalog}<Load res={catalog} what="The model catalog">
     {#snippet children(list)}
       {#if list.length}

@@ -35,6 +35,12 @@
 
 {#if native}
   <section class="section">
+    <div class="section-head">
+      <h2>Native Claude routing</h2>
+      <span class="legend"
+        >{visible.length} of {events.length} recent requests</span
+      >
+    </div>
     <div class="request-toolbar">
       <div class="seg" role="group" aria-label="Request outcome">
         {#each [["all", "All"], ["failed", "Failed"], ["switched", "Account switches"]] as [value, name]}
@@ -52,9 +58,6 @@
             >{/each}</select
         ></label
       >
-      <span class="muted small"
-        >{visible.length} of {events.length} recent requests</span
-      >
     </div>
     {#if activity.error}<p class="note error">{text(activity.error)}</p>{/if}
     {#if activity.data?.lostEvents}<p class="note error">
@@ -64,6 +67,9 @@
     {#if !visible.length}<p class="muted">
         {activity.data ? "No matching events." : "Loading…"}
       </p>{/if}
+    {#if visible.length}<div class="request-columns eyebrow" aria-hidden="true">
+        <span>Time</span><span>Model</span><span>Account</span><span>Outcome</span>
+      </div>{/if}
     {#each visible as e}
       <details class="native-event">
         <summary>
@@ -90,7 +96,7 @@
                   ? 'warn'
                   : 'ok'}"
             ></span><span>{outcomeLabel(e)}</span>{#if e.status}<span
-                class="legend">{e.status}</span
+                class="legend">HTTP {e.status}</span
               >{/if}</span
           >
         </summary>
@@ -153,21 +159,22 @@
     align-items: center;
     gap: var(--s3);
     flex-wrap: wrap;
-    margin-bottom: var(--s3);
-  }
-  .request-toolbar > span {
-    margin-left: auto;
+    margin-top: var(--s3);
   }
   .native-event {
     border-bottom: 1px solid var(--line);
   }
-  summary {
+  summary,
+  .request-columns {
     display: grid;
-    grid-template-columns: 72px minmax(0, 1.2fr) minmax(72px, 0.6fr) minmax(0, 1.4fr) 12px;
+    grid-template-columns: 72px repeat(3, minmax(0, 1fr)) 12px;
     gap: var(--s3);
     align-items: center;
     padding: var(--s3) 0;
     font-size: var(--t-xs);
+  }
+  .request-columns {
+    border-bottom: 1px solid var(--line);
   }
   summary::after {
     content: "›";
@@ -210,19 +217,22 @@
     overflow-wrap: anywhere;
   }
   @media (max-width: 600px) {
+    .request-columns {
+      display: none;
+    }
     summary {
       grid-template-columns: 60px minmax(0, 1fr) 12px;
-      gap: var(--s2) var(--s3);
+      gap: var(--s1) var(--s3);
     }
     summary::after {
       grid-column: 3;
-      grid-row: 1 / 3;
-    }
-    .request-account {
-      grid-column: 1;
+      grid-row: 1 / 4;
     }
     .request-result {
-      grid-column: 2;
+      grid-area: 2 / 2;
+    }
+    .request-account {
+      grid-area: 3 / 2;
     }
   }
 </style>

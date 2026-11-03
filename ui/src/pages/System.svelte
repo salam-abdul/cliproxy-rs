@@ -11,7 +11,7 @@
       ["Commit", store.meta.commit !== "none" && store.meta.commit],
       ["Built", !isNaN(Date.parse(store.meta.built)) && new Date(store.meta.built).toLocaleString()],
       ["Config layout", c["config-version"] ? `v${c["config-version"]}` : "Legacy (migrated on save)"],
-      ["Routing strategy", readPath(c, "routing/strategy", "Server default")],
+      ["Proxy routing strategy", readPath(c, "routing/strategy", "Server default")],
       ["Auth directory", readPath(c, "oauth/auth-dir", "Server default")],
       // The config cannot show the effective policy: MANAGEMENT_PASSWORD allows remote access too.
       ["Remote management", readPath(c, "management/allow-remote", false) ? "Allowed" : "Local only, unless MANAGEMENT_PASSWORD is set"],
@@ -24,7 +24,7 @@
 
 <section class="section">
   <dl class="facts">
-    {#each facts as [k, v]}<div><dt>{k}</dt><dd class:mono={k === "Management API" || k === "Commit"}>{v}</dd></div>{/each}
+    {#each facts as [k, v]}<div><dt>{k}</dt><dd>{v}</dd></div>{/each}
   </dl>
   <p class="note">
     The management API does not expose process uptime, CPU or memory, so they are not shown here.

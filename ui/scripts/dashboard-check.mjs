@@ -307,6 +307,9 @@ try {
   assert.equal(await page.getByText(/API equivalent/).count(),0);
   assert.ok(await page.getByRole("button",{name:"Check quotas",exact:true}).evaluate(el => el.getBoundingClientRect().height) <= 32,"desktop controls stay compact");
   assert.equal(await page.locator(".account-columns span").count(),4,"quota and recent request columns stay together");
+  const centers = await page.locator(".account-row").first().evaluate(row => [".account-title",".quota-unreported",".account-history-wrap > :first-child"]
+    .map(s => { const r = row.querySelector(s).getBoundingClientRect(); return r.top + r.height / 2; }));
+  assert.ok(Math.max(...centers) - Math.min(...centers) <= 1,`account columns start on the title line: ${centers}`);
   assert.equal(await page.getByText(/cost/i).count(),0,"Overview does not imply token pricing");
   credsFailure = true;
   await page.reload();

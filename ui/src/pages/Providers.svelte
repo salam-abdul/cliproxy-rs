@@ -40,7 +40,7 @@
   <a class="key" href="#config"><svg class="i" aria-hidden="true"><use href="#i-edit" /></svg>Edit in Configuration</a>
 </div>
 
-<div class="seg" role="group" aria-label="Provider">
+<div class="seg tabs" role="group" aria-label="Provider">
   {#each families as f}<button aria-pressed={family === f} onclick={() => (family = f)}
       >{label(f)}<b>{readPath(store.config.data || {}, `api-keys/${f}`, []).length || ""}</b></button
     >{/each}

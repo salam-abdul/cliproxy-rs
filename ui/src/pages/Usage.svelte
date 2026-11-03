@@ -5,8 +5,8 @@
 </script>
 
 <p class="muted">
-  Account request totals reported by the server. Use OpenUsage for usage
-  analysis.
+  Request totals per account through the translating proxy, such as Codex. The
+  list above covers native Claude routing only. Use OpenUsage for usage analysis.
 </p>
 <ul class="list">
   {#each store.creds.data || [] as a}<li class="item account-summary">
