@@ -621,12 +621,24 @@ impl Runtime {
                             }
                             let ineffective =
                                 result.is_ok() && rt.executors.readiness(&current, &cfg) != Readiness::Ready;
-                            rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner).finish(
+                            let backoff = rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner).finish(
                                 &current,
                                 result.as_ref().err(),
                                 ineffective,
                                 Instant::now(),
                             );
+                            // The error body can echo request fields, so only its classification is logged.
+                            if let Err(error) = &result {
+                                tracing::warn!(
+                                    "credential refresh failed: {} ({}) status={} scope={:?} invalid_grant={} retry_in={}s",
+                                    current.id,
+                                    current.provider,
+                                    error.status,
+                                    error.scope,
+                                    crate::refresh::invalid_grant(error),
+                                    backoff.as_secs(),
+                                );
+                            }
                         }
                     })
                     .await;

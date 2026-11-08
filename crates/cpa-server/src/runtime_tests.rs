@@ -858,9 +858,30 @@ async fn preparation_waiter_observes_deletion_and_refresh_loop_is_replaceable() 
 }
 
 /// The loop sets no timer while nothing can come due, and a credential added later
-/// is tried after the store change, not on a schedule.
+/// is tried after the store change, not on a schedule. Its failure is logged without
+/// the refresh token.
 #[tokio::test]
 async fn refresh_loop_sleeps_until_the_store_changes() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let capture = Capture::default();
+    let writer = capture.clone();
+    let _log = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
     let rt = Arc::new(crate::testing::runtime(
         crate::testing::config(""),
         Vec::new(),
@@ -896,6 +917,12 @@ async fn refresh_loop_sleeps_until_the_store_changes() {
     .await
     .expect("the added credential was tried and backed off");
     rt.stop_auto_refresh();
+    let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        log.contains("credential refresh failed: a.json (claude)") && log.contains("retry_in=300s"),
+        "{log}"
+    );
+    assert!(!log.contains("fake-refresh"), "{log}");
 }
 
 #[tokio::test]
