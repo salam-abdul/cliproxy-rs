@@ -38,16 +38,14 @@ impl RefreshState {
         true
     }
 
-    pub fn finish(&mut self, c: &Credential, error: Option<&ExecError>, ineffective: bool, now: Instant) {
+    /// Records the outcome and returns how long the credential now waits before another try.
+    pub fn finish(&mut self, c: &Credential, error: Option<&ExecError>, ineffective: bool, now: Instant) -> Duration {
         let Some(entry) = self.entries.get_mut(&c.id) else {
-            return;
+            return Duration::ZERO;
         };
         entry.revision = c.revision;
         let seconds = if let Some(error) = error {
-            if String::from_utf8_lossy(&error.body)
-                .to_ascii_lowercase()
-                .contains("invalid_grant")
-            {
+            if invalid_grant(error) {
                 let seconds = (60u64 << entry.invalid_grants.min(5)).min(1800);
                 entry.invalid_grants += u32::from(seconds < 1800);
                 seconds
@@ -60,6 +58,7 @@ impl RefreshState {
             if ineffective { 30 } else { 0 }
         };
         entry.next = now + Duration::from_secs(seconds);
+        Duration::from_secs(seconds)
     }
 
     /// When a reserved or backed-off credential may be tried again.
@@ -71,6 +70,13 @@ impl RefreshState {
         let ids: std::collections::HashSet<&str> = credentials.iter().map(|c| c.id.as_str()).collect();
         self.entries.retain(|id, _| ids.contains(id.as_str()));
     }
+}
+
+/// A refresh token the provider no longer accepts, which backs off exponentially.
+pub(crate) fn invalid_grant(error: &ExecError) -> bool {
+    String::from_utf8_lossy(&error.body)
+        .to_ascii_lowercase()
+        .contains("invalid_grant")
 }
 
 #[cfg(test)]
