@@ -31,17 +31,12 @@ impl Settings {
         if section.get("enable").and_then(serde_yaml_ng::Value::as_bool) != Some(true) || super::commercial_mode(cfg) {
             return None;
         }
-        let dir = section
-            .get("dir")
-            .and_then(serde_yaml_ng::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        if dir.is_empty() {
+        let Some(dir) = configured_dir(cfg) else {
             tracing::error!(
                 "observability.history.enable is true but observability.history.dir is empty; history stays off"
             );
             return None;
-        }
+        };
         let mb = section
             .get("max-total-size-mb")
             .and_then(serde_yaml_ng::Value::as_i64)
@@ -49,10 +44,23 @@ impl Settings {
                 u64::try_from(mb).unwrap_or(DEFAULT_MAX_TOTAL_MB)
             });
         Some(Settings {
-            dir: cpa_core::config::expand_home(dir),
+            dir,
             max_total_bytes: (mb > 0).then(|| mb.saturating_mul(1 << 20)),
         })
     }
+}
+
+/// `observability.history.dir`, whether or not recording is on, so history can be
+/// managed after it was turned off.
+pub fn configured_dir(cfg: &Config) -> Option<PathBuf> {
+    let dir = cfg
+        .document
+        .get("observability")?
+        .get("history")?
+        .get("dir")?
+        .as_str()?
+        .trim();
+    (!dir.is_empty()).then(|| cpa_core::config::expand_home(dir))
 }
 
 /// Whether model traffic is recorded under `cfg`. Cached per config snapshot, so the
