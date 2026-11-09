@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use cpa_core::config::Config;
 
+pub(crate) mod capture;
 pub mod delete;
 pub(crate) mod file;
 pub mod writer;

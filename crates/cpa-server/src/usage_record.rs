@@ -1589,6 +1589,9 @@ pub struct Facts {
     pub prompt_prefix_hash: String,
     /// Shared by failover/refresh attempts, independent of credential changes.
     pub attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// History's send numbering, from the request's trace.
+    pub history_sends: std::sync::Arc<std::sync::atomic::AtomicI32>,
+    pub history_turn: i32,
 }
 
 impl Facts {
@@ -1618,6 +1621,8 @@ impl Facts {
             clock: trace.clock(),
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
             attempts: Default::default(),
+            history_sends: trace.history_sends().0,
+            history_turn: trace.history_sends().1,
         }
     }
 }
@@ -1945,9 +1950,11 @@ impl cpa_core::exec::UsageObserver for Observer {
 
 /// How the attempt ended for the server.
 enum Ending<'a> {
-    /// Success, or a stream the client dropped (Go's deferred publish).
     Done,
     Failed(&'a cpa_core::exec::ExecError),
+    /// Dropped without an ending: the client went away (Go's deferred publish). The
+    /// usage queue records it as done; history as cancelled.
+    Dropped,
 }
 
 /// One upstream attempt's record in progress. It publishes at most once: what the
@@ -1971,6 +1978,8 @@ pub struct Tracker {
     /// Attempt start time for queue telemetry.
     requested_at: chrono::DateTime<chrono::FixedOffset>,
     attempt: usize,
+    /// This attempt's sends and account, while history is on.
+    history: Option<(std::sync::Arc<crate::request_logging::history::capture::Sends>, String)>,
 }
 
 impl Tracker {
@@ -2046,7 +2055,20 @@ impl Tracker {
             client: home_client,
             requested_at: now.fixed_offset(),
             attempt: facts.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            history: None,
         }
+    }
+
+    /// Records this attempt's sends in history when it publishes.
+    pub(crate) fn history(
+        &mut self,
+        sends: std::sync::Arc<crate::request_logging::history::capture::Sends>,
+        credential: &cpa_core::credential::Credential,
+    ) {
+        self.history = Some((
+            sends,
+            crate::request_logging::history::capture::account_label(credential),
+        ));
     }
 
     /// The sink to hand the executor.
@@ -2107,14 +2129,15 @@ impl Tracker {
         if std::mem::replace(&mut self.published, true) {
             return;
         }
+        let history = self.history.take();
         let queue = self.queue.usage_queue();
-        if !queue.accepts() {
+        if !queue.accepts() && history.is_none() {
             return;
         }
         let reported = std::mem::take(&mut *self.observer.lock());
-        if reported.discarded {
-            return;
-        }
+        // History records every send; these conditions only decide the usage record.
+        let mut enqueue = queue.accepts() && !reported.discarded;
+        let cancelled = matches!(ending, Ending::Dropped) && reported.outcome.is_none();
         // Go can publish a tokenless failure after observing a Claude response.
         // Keep the returned TTL buckets as observations, not inferred accounting.
         let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
@@ -2134,16 +2157,16 @@ impl Tracker {
                 self.body.take().or_else(|| self.stream.detail().cloned())
             };
             let detail = match ending {
-                Ending::Done if reported.usage_required && usage.is_none() => {
+                Ending::Done | Ending::Dropped if reported.usage_required && usage.is_none() => {
                     if reported.claude_cache.is_none() {
-                        return;
+                        enqueue = false;
                     }
                     // Keep activity and timestamps even when a Claude stream never
                     // returns usage.
                     record.usage_observed = Some(false);
                     Detail::default()
                 }
-                Ending::Done => usage.unwrap_or_default(),
+                Ending::Done | Ending::Dropped => usage.unwrap_or_default(),
                 Ending::Failed(error) => {
                     record.failed = true;
                     record.fail_status = i64::from(error.go_status());
@@ -2205,10 +2228,45 @@ impl Tracker {
         if let Some(effort) = reported.effort {
             record.reasoning_effort = effort;
         }
-        if queue.accepts() {
-            queue.enqueue(queued(&record, self.client.as_ref().unwrap_or(&self.facts.client)));
+        let client = self.client.as_ref().unwrap_or(&self.facts.client);
+        if let Some((sends, account)) = history {
+            use crate::request_logging::history::file::Outcome;
+            sends.emit(
+                &self.queue,
+                crate::request_logging::history::capture::AttemptFacts {
+                    endpoint: client.endpoint.clone(),
+                    provider: record.provider.clone(),
+                    model_requested: record.alias.clone(),
+                    model: record.model.clone(),
+                    response_model: record.response_model.clone(),
+                    account,
+                    auth_index: record.auth_index.clone(),
+                    session_id: client.session_id.clone(),
+                    user_agent: client.user_agent.clone(),
+                    stream: record.stream,
+                    detail: record.detail.clone(),
+                    latency_ms: record.latency_ms,
+                    ttft_ms: record.ttft_ms,
+                    outcome: if cancelled {
+                        Outcome::Cancelled
+                    } else if record.failed {
+                        Outcome::Failed
+                    } else {
+                        Outcome::Complete
+                    },
+                    status: record
+                        .failed
+                        .then(|| i32::try_from(record.fail_status).unwrap_or_default()),
+                    error: Some(record.fail_body.clone()).filter(|e| record.failed && !e.is_empty()),
+                },
+            );
         }
-        warn_model_substitution(&record, &reported.upstream_model, &self.auth_id);
+        if enqueue {
+            if queue.accepts() {
+                queue.enqueue(queued(&record, client));
+            }
+            warn_model_substitution(&record, &reported.upstream_model, &self.auth_id);
+        }
     }
 }
 
@@ -2240,7 +2298,7 @@ impl Tracker {
 
 impl Drop for Tracker {
     fn drop(&mut self) {
-        self.publish(Ending::Done);
+        self.publish(Ending::Dropped);
     }
 }
 
@@ -2943,6 +3001,8 @@ mod tests {
                 clock: Default::default(),
                 prompt_prefix_hash: String::new(),
                 attempts: Default::default(),
+                history_sends: Default::default(),
+                history_turn: 0,
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

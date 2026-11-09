@@ -666,6 +666,11 @@ pub struct Trace(
     Arc<crate::observability::Clock>,
     /// The client's prompt prefix (`crate::usage_record::prompt_prefix`).
     std::sync::OnceLock<String>,
+    /// Numbers the exchange's upstream sends for history, across attempts and
+    /// bootstrap retries.
+    Arc<std::sync::atomic::AtomicI32>,
+    /// The websocket turn this trace runs; 0 for HTTP.
+    i32,
 );
 
 impl Trace {
@@ -680,6 +685,8 @@ impl Trace {
                 .unwrap_or_default(),
             crate::observability::current_clock(),
             Default::default(),
+            Default::default(),
+            0,
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -697,6 +704,16 @@ impl Trace {
     pub fn with_capture(mut self, capture: cpa_core::exec::CaptureSink) -> Self {
         self.2 = capture;
         self
+    }
+
+    /// Marks this trace as websocket turn `turn` of its connection.
+    pub fn with_turn(mut self, turn: i32) -> Self {
+        self.6 = turn;
+        self
+    }
+
+    pub(crate) fn history_sends(&self) -> (Arc<std::sync::atomic::AtomicI32>, i32) {
+        (self.5.clone(), self.6)
     }
 
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
@@ -906,7 +923,8 @@ async fn run_attempts(
     // Go's usage reporter: one record per Generate attempt while the queue accepts.
     // Home count-tokens attempts record only their upstream 401s (`reportHomeUnauthorized`).
     let home_count = call.operation == Operation::CountTokens && rt.remote_dispatch().is_some();
-    let facts = ((call.operation == Operation::Generate && rt.usage_queue().accepts())
+    let facts = ((call.operation == Operation::Generate
+        && (rt.usage_queue().accepts() || crate::request_logging::history::on(&cfg)))
         || (home_count && rt.usage_queue().accepts()))
     .then(|| {
         Arc::new(crate::usage_record::Facts::new(
@@ -2072,13 +2090,29 @@ async fn attempt(
         if let Some(on_selected) = call.on_selected() {
             on_selected(&lease.credential);
         }
+        // The request's own capture, before any attempt wraps it: a refresh retry reuses
+        // `req`, and its tee must not wrap the previous one.
+        let capture = req.capture().clone();
         let start = |credential: &cpa_core::credential::Credential, req: &mut ExecRequest| {
             usage.map(|facts| {
                 let mut tracker = crate::usage_record::Tracker::start(rt, facts, credential, upstream);
                 if let Some(m) = &lcp {
                     tracker.lcp_session(m);
                 }
-                req.usage = tracker.sink().with_capture(req.capture().clone());
+                let capture = match crate::request_logging::history::on(cfg) {
+                    true => {
+                        let sends = crate::request_logging::history::capture::Sends::new(
+                            facts.client.request_id.clone(),
+                            facts.history_turn,
+                            facts.history_sends.clone(),
+                            rt.history().budget(),
+                        );
+                        tracker.history(sends.clone(), credential);
+                        crate::request_logging::history::capture::tee(capture.clone(), sends)
+                    }
+                    false => capture.clone(),
+                };
+                req.usage = tracker.sink().with_capture(capture);
                 tracker
             })
         };
