@@ -188,13 +188,6 @@ fn body_columns_keep_utf8_as_text_and_the_rest_as_bytes() {
 }
 
 #[test]
-fn partial_names_carry_the_writer_pid() {
-    assert_eq!(partial_pid("081530-4242-0007.partial"), Some(4242));
-    assert_eq!(partial_pid("081530-4242-0007.parquet"), None);
-    assert_eq!(partial_pid("notes.partial"), None);
-}
-
-#[test]
 fn a_failed_finish_leaves_no_partial() {
     let dir = TempDir::new();
     let target = write_dir_target(&dir.0);

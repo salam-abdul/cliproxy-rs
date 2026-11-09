@@ -1,6 +1,6 @@
 use super::*;
 use crate::request_logging::history::file::tests::TempDir;
-use crate::request_logging::history::file::{ParquetFile, Source};
+use crate::request_logging::history::file::{ParquetFile, Source, read_rows};
 use crate::request_logging::history::writer::{Limits, PendingRow, Writer};
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -125,12 +125,12 @@ fn a_row_in_a_later_partition_still_matches_its_start_time() {
     // A send that started before midnight and finished after it lands in the next day's file.
     let file = write_file(
         &dir.0,
-        "2026-11-10T00:00:05Z",
+        "2026-11-02T00:00:05Z",
         0,
-        &[row("late", "s", "2026-11-09T23:59:58Z")],
+        &[row("late", "s", "2026-11-01T23:59:58Z")],
     );
     let selector = Selector {
-        to: Some(at("2026-11-10T00:00:00Z")),
+        to: Some(at("2026-11-02T00:00:00Z")),
         ..Selector::default()
     };
     assert_eq!(delete(&dir.0, &selector, false).unwrap().rows_deleted, 1);
@@ -234,9 +234,9 @@ fn delete_refuses_while_another_live_process_holds_the_lock() {
         0,
         &[row("a", "s1", "2026-11-09T08:00:00Z")],
     );
-    // PID 1 is always alive on Unix; on Windows the System process is PID 4.
-    let holder = if cfg!(windows) { 4 } else { 1 };
-    std::fs::write(dir.0.join(".lock"), holder.to_string()).unwrap();
+    let _held = crate::request_logging::history::lock::DirLock::try_acquire(&dir.0)
+        .unwrap()
+        .unwrap();
     let error = delete(&dir.0, &session("s1"), false).unwrap_err();
     assert!(error.to_string().contains(".lock"), "{error}");
 }
@@ -259,7 +259,6 @@ fn a_stale_lock_is_taken_over() {
     std::fs::write(dir.0.join(".lock"), dead.to_string()).unwrap();
     assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
     assert!(!file.exists());
-    assert!(!dir.0.join(".lock").exists());
 }
 
 #[test]
@@ -358,11 +357,12 @@ fn the_writer_rewrites_a_file_only_under_the_lock() {
     );
     writer.tick();
     delete(&dir.0, &session("s1"), false).unwrap();
-    let holder = if cfg!(windows) { 4 } else { 1 };
-    std::fs::write(dir.0.join(".lock"), holder.to_string()).unwrap();
+    let held = crate::request_logging::history::lock::DirLock::try_acquire(&dir.0)
+        .unwrap()
+        .unwrap();
     writer.flush();
     assert_eq!(left_ids(&dir.0), ["a"], "rewritten without the lock");
-    std::fs::remove_file(dir.0.join(".lock")).unwrap();
+    drop(held);
     writer.tick();
     assert!(left_ids(&dir.0).is_empty());
 }
@@ -396,4 +396,69 @@ fn expired_tombstones_are_removed() {
     assert_eq!(pending_tombstones(&dir.0).len(), 1);
     expire_tombstones(&dir.0, Utc::now() + chrono::Duration::hours(25));
     assert!(pending_tombstones(&dir.0).is_empty());
+}
+
+#[test]
+fn a_delete_the_server_could_not_apply_is_applied_after_a_restart() {
+    let dir = TempDir::new();
+    let cfg = on(&dir.0);
+    let writer = Writer::with_limits(Limits {
+        group_rows: 1,
+        ..Limits::default()
+    });
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
+    );
+    writer.tick();
+    delete(&dir.0, &session("s1"), false).unwrap();
+    // A delete holds the lock while the server shuts down, so it cannot rewrite.
+    let held = crate::request_logging::history::lock::DirLock::try_acquire(&dir.0)
+        .unwrap()
+        .unwrap();
+    writer.shutdown(std::time::Duration::from_secs(5));
+    assert_eq!(left_ids(&dir.0), ["a"]);
+    drop(held);
+    let restarted = Writer::with_limits(Limits::default());
+    restarted.submit(
+        &cfg,
+        PendingRow::new(row("b", "s2", "2026-11-09T09:00:00Z"), restarted.budget()),
+    );
+    restarted.flush();
+    assert_eq!(left_ids(&dir.0), ["b"]);
+}
+
+#[test]
+fn a_rewrite_keeps_the_other_row_groups() {
+    use parquet::file::reader::FileReader;
+    let dir = TempDir::new();
+    let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:00:00Z"), 0).unwrap();
+    file.write_group(&[row("a", "s2", "2026-11-09T08:00:00Z")]).unwrap();
+    file.write_group(&[
+        row("b", "s1", "2026-11-09T08:00:01Z"),
+        row("c", "s2", "2026-11-09T08:00:02Z"),
+    ])
+    .unwrap();
+    file.write_group(&[row("d", "s2", "2026-11-09T08:00:03Z")]).unwrap();
+    let path = file.finish().unwrap();
+    assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
+    assert_eq!(ids(&path), ["a", "c", "d"]);
+    let reader =
+        parquet::file::serialized_reader::SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(reader.metadata().num_row_groups(), 3);
+}
+
+#[test]
+fn the_command_spares_rows_that_started_after_it() {
+    let dir = TempDir::new();
+    let mut later = row("later", "s1", "2026-11-09T08:00:00Z");
+    later.started_at_us = (Utc::now() + chrono::Duration::hours(1)).timestamp_micros();
+    let file = write_file(
+        &dir.0,
+        "2026-11-09T08:00:00Z",
+        0,
+        &[row("a", "s1", "2026-11-09T08:00:00Z"), later],
+    );
+    assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
+    assert_eq!(ids(&file), ["later"]);
 }

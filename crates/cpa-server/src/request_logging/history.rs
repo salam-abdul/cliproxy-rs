@@ -9,6 +9,7 @@ use cpa_core::config::Config;
 pub(crate) mod capture;
 pub mod delete;
 pub(crate) mod file;
+pub(crate) mod lock;
 pub(crate) mod native;
 pub mod writer;
 

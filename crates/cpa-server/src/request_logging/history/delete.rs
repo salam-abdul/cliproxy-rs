@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::file::{ParquetFile, Row, is_history_file, read_rows};
-use super::writer::pid_alive;
+use super::file::{Row, history_files, read_keys, remove_empty_partitions, rewrite_without};
+use super::lock::DirLock;
 
 /// Which rows to delete: every given condition must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -80,7 +80,8 @@ impl std::fmt::Display for Report {
     }
 }
 
-/// Deletes the rows `selector` matches from the history under `dir`.
+/// Deletes the rows `selector` matches from the history under `dir`, among rows that
+/// started before this call.
 pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<Report> {
     if selector.is_empty() {
         bail!("history delete needs at least one of --from, --to, --session, --account or --model");
@@ -89,6 +90,9 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
     if dry_run && !dir.exists() {
         return Ok(report);
     }
+    let asked = Utc::now();
+    let cutoff = asked.timestamp_micros();
+    let matches = |row: &Row| row.started_at_us < cutoff && selector.matches(row);
     // A server may be buffering its first rows with nothing on disk yet.
     super::file::private_dir(dir)?;
     let _lock = if dry_run {
@@ -96,43 +100,42 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
     } else {
         Some(
             DirLock::try_acquire(dir)?
-                .with_context(|| format!("{} is held by another process; try again", dir.join(LOCK).display()))?,
+                .with_context(|| format!("{} is held by another process; try again", dir.join(".lock").display()))?,
         )
     };
     if !dry_run {
         // Always: a server may hold matching rows in memory, or have sends in flight,
         // with no file on disk yet.
-        expire_tombstones(dir, Utc::now());
-        write_tombstone(dir, selector)?;
+        expire_tombstones(dir, asked);
+        write_tombstone(dir, selector, cutoff)?;
         report.pending_for_writer = true;
     }
-    for (partition, path) in history_files(dir)? {
+    for file in history_files(dir)? {
         // A row lands in the partition of the file's first row, never an earlier one.
-        if let (Some(from), Some(date)) = (selector.from, partition_date(&partition))
+        if let (Some(from), Some(date)) = (selector.from, partition_date(&file.partition))
             && date
                 .succ_opt()
                 .is_some_and(|next| next.and_time(chrono::NaiveTime::MIN).and_utc() <= from)
         {
             continue;
         }
-        let rows = read_rows(&path).with_context(|| format!("read {}", path.display()))?;
-        let (gone, keep): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| selector.matches(r));
-        if gone.is_empty() {
+        let keys = read_keys(&file.path).with_context(|| format!("read {}", file.path.display()))?;
+        let gone = keys.iter().filter(|row| matches(row)).count() as u64;
+        if gone == 0 {
             continue;
         }
-        report.rows_deleted += gone.len() as u64;
-        let size = std::fs::metadata(&path)?.len();
-        if keep.is_empty() {
+        report.rows_deleted += gone;
+        if gone == keys.len() as u64 {
             report.files_deleted += 1;
-            report.bytes_freed += size;
+            report.bytes_freed += file.len;
             if !dry_run {
-                std::fs::remove_file(&path)?;
+                std::fs::remove_file(&file.path)?;
             }
         } else {
             report.files_rewritten += 1;
             if !dry_run {
-                rewrite(&path, &keep).with_context(|| format!("rewrite {}", path.display()))?;
-                report.bytes_freed += size.saturating_sub(std::fs::metadata(&path)?.len());
+                rewrite_without(&file.path, matches).with_context(|| format!("rewrite {}", file.path.display()))?;
+                report.bytes_freed += file.len.saturating_sub(std::fs::metadata(&file.path)?.len());
             }
         }
     }
@@ -146,61 +149,16 @@ fn partition_date(name: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(name.strip_prefix("date=")?, "%Y-%m-%d").ok()
 }
 
-/// Finished history files as (partition name, path), oldest first.
-fn history_files(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
-    let mut out = Vec::new();
-    for partition in std::fs::read_dir(dir)? {
-        let partition = partition?;
-        let name = partition.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("date=") || !partition.file_type()?.is_dir() {
-            continue;
-        }
-        for file in std::fs::read_dir(partition.path())? {
-            let file = file?;
-            if is_history_file(&file.file_name().to_string_lossy()) {
-                out.push((name.clone(), file.path()));
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-pub(crate) fn remove_empty_partitions(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with("date=") {
-            // Fails while the partition still holds anything, which is the point.
-            let _ = std::fs::remove_dir(entry.path());
-        }
-    }
-}
-
-/// Replaces `path` with a file holding only `keep`.
-fn rewrite(path: &Path, keep: &[Row]) -> io::Result<()> {
-    let mut file = ParquetFile::replacing(path)?;
-    file.write_group(keep)?;
-    file.finish().map(drop)
-}
-
-/// Removes the rows `stones` match from the finished file at `path`.
+/// Removes the rows `stones` match from the finished file at `path`, reading only the
+/// match columns unless a row matches.
 pub(crate) fn apply_tombstones(path: &Path, stones: &[Tombstone]) -> io::Result<()> {
-    let rows = read_rows(path)?;
-    let before = rows.len();
-    let keep: Vec<Row> = rows
-        .into_iter()
-        .filter(|r| !stones.iter().any(|s| s.matches(r)))
-        .collect();
-    if keep.len() == before {
-        Ok(())
-    } else if keep.is_empty() {
-        std::fs::remove_file(path)
-    } else {
-        rewrite(path, &keep)
+    let matches = |row: &Row| stones.iter().any(|stone| stone.matches(row));
+    if read_keys(path)?.iter().any(matches) {
+        rewrite_without(path, matches)?;
     }
+    Ok(())
 }
 
-const LOCK: &str = ".lock";
 const TOMBSTONES: &str = ".deletes";
 /// Longer than any send can take to start, finish and wait in a writer's buffer.
 const TOMBSTONE_TTL: chrono::TimeDelta = chrono::TimeDelta::hours(24);
@@ -219,12 +177,13 @@ impl Tombstone {
     }
 }
 
-fn write_tombstone(dir: &Path, selector: &Selector) -> anyhow::Result<()> {
+fn write_tombstone(dir: &Path, selector: &Selector, created_us: i64) -> anyhow::Result<()> {
     let folder = dir.join(TOMBSTONES);
-    std::fs::create_dir_all(&folder)?;
+    // Tombstones name sessions and accounts: as private as the history itself.
+    super::file::private_dir(&folder)?;
     let time = |t: Option<DateTime<Utc>>| t.map(|t| t.timestamp_micros());
     let body = serde_json::json!({
-        "created": Utc::now().timestamp_micros(),
+        "created": created_us,
         "from": time(selector.from),
         "to": time(selector.to),
         "session": selector.session,
@@ -233,7 +192,11 @@ fn write_tombstone(dir: &Path, selector: &Selector) -> anyhow::Result<()> {
     });
     let path = folder.join(format!("{}.json", uuid::Uuid::new_v4()));
     let partial = path.with_extension("tmp");
-    std::fs::write(&partial, serde_json::to_vec(&body)?)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(&partial)?, &serde_json::to_vec(&body)?)?;
     std::fs::rename(&partial, &path)?;
     Ok(())
 }
@@ -284,55 +247,6 @@ pub(crate) fn pending_tombstones(dir: &Path) -> Vec<Tombstone> {
         }
     }
     out
-}
-
-/// `<dir>/.lock` holding the owner's PID: serializes deletes with the writer's size
-/// retention. A lock whose owner is gone is taken over.
-pub(crate) struct DirLock(PathBuf);
-
-impl DirLock {
-    pub(crate) fn try_acquire(dir: &Path) -> io::Result<Option<Self>> {
-        let path = dir.join(LOCK);
-        for _ in 0..2 {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            match options.open(&path) {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(std::process::id().to_string().as_bytes())?;
-                    return Ok(Some(Self(path)));
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if !stale(&path) {
-                        return Ok(None);
-                    }
-                    let _ = std::fs::remove_file(&path);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// A lock is stale when its PID is gone. One without a readable PID is stale only
-/// after a minute, so a lock whose owner is still writing its PID is kept.
-fn stale(path: &Path) -> bool {
-    match std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-    {
-        Some(pid) => !pid_alive(pid),
-        None => std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age.as_secs() > 60)),
-    }
-}
-
-impl Drop for DirLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 
 #[cfg(test)]

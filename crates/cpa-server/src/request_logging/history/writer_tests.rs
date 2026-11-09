@@ -193,12 +193,20 @@ fn a_live_processes_partial_survives_startup_cleanup() {
     let dir = TempDir::new();
     let partition = dir.0.join("date=2026-11-01");
     std::fs::create_dir_all(&partition).unwrap();
-    let live = partition.join(format!("081530-{}-9999.partial", std::process::id()));
-    std::fs::write(&live, b"PAR1").unwrap();
+    // Another writer's file: any PID, held open with its lock.
+    let live = partition.join("081530-1-9999.partial");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&live)
+        .unwrap();
+    assert!(crate::request_logging::history::lock::try_lock(&held).unwrap());
     let writer = Writer::with_limits(Limits::default());
     writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
     writer.flush();
     assert!(live.exists());
+    drop(held);
 }
 
 #[test]

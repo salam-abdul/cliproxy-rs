@@ -14,8 +14,9 @@ use chrono::{DateTime, Utc};
 use cpa_core::config::Config;
 
 use super::Settings;
-use super::delete::{DirLock, apply_tombstones, expire_tombstones, pending_tombstones};
-use super::file::{ParquetFile, Row, body_columns, is_history_file, partial_pid};
+use super::delete::{apply_tombstones, expire_tombstones, pending_tombstones};
+use super::file::{ParquetFile, Row, body_columns, history_files, remove_empty_partitions};
+use super::lock::{DirLock, is_abandoned};
 
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
 // spool-backed body if longer bodies need keeping.
@@ -24,6 +25,7 @@ pub(crate) const BODY_CAP: u64 = 32 << 20;
 const IN_FLIGHT_CAP: u64 = 512 << 20;
 pub(crate) const CHANNEL: usize = 256;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
+const DELETE_RETRY: Duration = Duration::from_secs(10);
 
 /// A byte budget shared by every [`Body`] that reserves from it.
 #[derive(Clone)]
@@ -392,9 +394,9 @@ struct Worker {
     seq: u32,
     maintained: Option<Instant>,
     decoder: Option<tokio::runtime::Runtime>,
-    /// Finished files that may hold rows a delete asked for while they were open, with
-    /// their history folder. Rewritten under the history lock, retried while it is busy.
-    rewrites: Vec<(PathBuf, PathBuf)>,
+    /// When to try pending deletes again after the history lock was busy or a rewrite
+    /// failed.
+    retry_deletes: Option<Instant>,
 }
 
 impl Worker {
@@ -411,7 +413,7 @@ impl Worker {
             seq: 0,
             maintained: None,
             decoder: None,
-            rewrites: Vec::new(),
+            retry_deletes: None,
         }
     }
 
@@ -435,6 +437,10 @@ impl Worker {
                 }
                 #[cfg(test)]
                 Ok(Command::Tick(ack)) => {
+                    // As if every deadline had passed.
+                    if self.retry_deletes.is_some() {
+                        self.retry_deletes = Some(Instant::now());
+                    }
                     self.timers();
                     let _ = ack.send(());
                 }
@@ -461,13 +467,17 @@ impl Worker {
     }
 
     fn next_deadline(&self) -> Duration {
-        match &self.window {
+        let rotation = match &self.window {
             Some(window) => {
                 let due = window.started + self.limits.rotate_after;
                 (due - self.now()).to_std().unwrap_or(Duration::ZERO)
             }
             None => MAINTENANCE,
-        }
+        };
+        let retry = self
+            .retry_deletes
+            .map_or(MAINTENANCE, |at| at.saturating_duration_since(Instant::now()));
+        rotation.min(retry)
     }
 
     fn timers(&mut self) {
@@ -481,23 +491,46 @@ impl Worker {
         if self.maintained.is_some_and(|at| at.elapsed() >= MAINTENANCE) {
             self.maintain();
         }
-        self.apply_rewrites();
+        if self.retry_deletes.is_some_and(|at| at <= Instant::now()) {
+            self.apply_deletes();
+        }
     }
 
-    fn apply_rewrites(&mut self) {
-        self.rewrites.retain(|(dir, path)| {
-            let Ok(Some(_lock)) = DirLock::try_acquire(dir) else {
-                return true;
-            };
-            match apply_tombstones(path, &pending_tombstones(dir)) {
-                Ok(()) => false,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+    /// Applies pending deletes to files finished since the oldest of them was asked
+    /// for: a file that was open during a delete may hold rows the delete covers. The
+    /// tombstones stay on disk, so a delete this cannot apply now, because the lock is
+    /// busy or the server stops, is applied on a retry or after the next start.
+    fn apply_deletes(&mut self) {
+        self.retry_deletes = None;
+        let Some(dir) = self.settings.as_ref().map(|s| s.dir.clone()) else {
+            return;
+        };
+        let stones = pending_tombstones(&dir);
+        let Some(since) = stones.iter().map(|stone| stone.created_us).min() else {
+            return;
+        };
+        let retry = Some(Instant::now() + DELETE_RETRY);
+        let Ok(Some(_lock)) = DirLock::try_acquire(&dir) else {
+            self.retry_deletes = retry;
+            return;
+        };
+        let Ok(files) = history_files(&dir) else {
+            self.retry_deletes = retry;
+            return;
+        };
+        for file in files.iter().filter(|file| file.modified_us >= since) {
+            match apply_tombstones(&file.path, &stones) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    tracing::warn!("history: cannot apply a pending delete to {}: {error}", path.display());
-                    true
+                    tracing::warn!(
+                        "history: cannot apply a pending delete to {}: {error}",
+                        file.path.display()
+                    );
+                    self.retry_deletes = retry;
                 }
             }
-        });
+        }
     }
 
     fn row(&mut self, pending: PendingRow, settings: &Settings) {
@@ -646,15 +679,7 @@ impl Worker {
             && let Some(file) = window.file
         {
             match file.finish() {
-                Ok(path) => {
-                    let opened = window.started.timestamp_micros();
-                    if pending_tombstones(&window.dir)
-                        .iter()
-                        .any(|stone| stone.created_us > opened)
-                    {
-                        self.rewrites.push((window.dir.clone(), path));
-                    }
-                }
+                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!("history: cannot finish a file: {error}");
                     self.lost.fetch_add(window.rows, Ordering::Relaxed);
@@ -664,7 +689,7 @@ impl Worker {
                 apply_cap(&window.dir, cap);
             }
         }
-        self.apply_rewrites();
+        self.apply_deletes();
         let lost = self.lost.load(Ordering::Relaxed);
         if lost > self.reported {
             tracing::warn!("history: {} row(s) were not written", lost - self.reported);
@@ -681,6 +706,7 @@ impl Worker {
         if let Some(cap) = settings.max_total_bytes {
             apply_cap(&settings.dir, cap);
         }
+        self.apply_deletes();
     }
 }
 
@@ -747,39 +773,19 @@ async fn decode(raw: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
 /// Deletes the oldest history files, by partition date then name, until the files
 /// under `dir` total at most `cap` bytes. Returns the bytes freed.
 pub(crate) fn enforce_cap(dir: &Path, cap: u64) -> std::io::Result<u64> {
-    let mut files = Vec::new();
-    let mut partitions = Vec::new();
-    for partition in std::fs::read_dir(dir)? {
-        let partition = partition?;
-        let name = partition.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("date=") || !partition.file_type()?.is_dir() {
-            continue;
-        }
-        for file in std::fs::read_dir(partition.path())? {
-            let file = file?;
-            let file_name = file.file_name().to_string_lossy().into_owned();
-            if is_history_file(&file_name) {
-                files.push((name.clone(), file_name, file.path(), file.metadata()?.len()));
-            }
-        }
-        partitions.push(partition.path());
-    }
-    files.sort();
-    let mut total: u64 = files.iter().map(|f| f.3).sum();
+    let files = history_files(dir)?;
+    let mut total: u64 = files.iter().map(|f| f.len).sum();
     let mut freed = 0;
-    for (_, _, path, len) in files {
+    for file in files {
         if total <= cap {
             break;
         }
-        if std::fs::remove_file(&path).is_ok() {
-            total -= len;
-            freed += len;
+        if std::fs::remove_file(&file.path).is_ok() {
+            total -= file.len;
+            freed += file.len;
         }
     }
-    for partition in partitions {
-        // Fails while the partition still holds anything, which is the point.
-        let _ = std::fs::remove_dir(partition);
-    }
+    remove_empty_partitions(dir);
     Ok(freed)
 }
 
@@ -794,8 +800,8 @@ fn remove_dead_partials(dir: &Path) {
             continue;
         };
         for file in files.flatten() {
-            if let Some(pid) = partial_pid(&file.file_name().to_string_lossy())
-                && !pid_alive(pid)
+            if file.file_name().to_string_lossy().ends_with(".partial")
+                && is_abandoned(&file.path()).unwrap_or(false)
                 && std::fs::remove_file(file.path()).is_ok()
             {
                 removed += 1;
@@ -804,44 +810,6 @@ fn remove_dead_partials(dir: &Path) {
     }
     if removed > 0 {
         tracing::warn!("history: removed {removed} unfinished file(s) left by a writer that stopped");
-    }
-}
-
-/// Whether process `pid` may still be writing. Unsure answers are "alive", so a live
-/// writer's file is never removed.
-pub(crate) fn pid_alive(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        let Ok(pid) = libc::pid_t::try_from(pid) else {
-            return true;
-        };
-        if pid <= 0 {
-            return true;
-        }
-        // SAFETY: signal 0 performs only the existence and permission check.
-        let result = unsafe { libc::kill(pid, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        // SAFETY: the handle is checked before use and closed once.
-        unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                return GetLastError() != ERROR_INVALID_PARAMETER;
-            }
-            let mut code = 0u32;
-            let ok = GetExitCodeProcess(handle, &mut code) != 0;
-            CloseHandle(handle);
-            !ok || code == STILL_ACTIVE as u32
-        }
     }
 }
 

@@ -388,8 +388,17 @@ const UNINDEXED: [&[&str]; 6] = [
 ];
 
 fn schema() -> parquet::errors::Result<parquet::schema::types::TypePtr> {
+    schema_of(COLUMNS.iter())
+}
+
+/// The columns a delete matches on: enough to decide without reading bodies.
+const KEY_COLUMNS: [&str; 5] = ["started_at", "session_id", "account", "model", "model_requested"];
+
+fn schema_of<'a>(
+    columns: impl Iterator<Item = &'a Column>,
+) -> parquet::errors::Result<parquet::schema::types::TypePtr> {
     let mut text = String::from("message history {\n");
-    for column in &COLUMNS {
+    for column in columns {
         let name = column.name;
         let line = match column.get {
             Get::Str(_) => format!("optional binary {name} (STRING);"),
@@ -577,6 +586,11 @@ impl ParquetFile {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let file = options.open(&partial)?;
+        // Held until the file is published: startup cleanup removes only unlocked
+        // `.partial` files, whatever process wrote them.
+        if !super::lock::try_lock(&file)? {
+            return Err(io::Error::other(format!("{} is locked", partial.display())));
+        }
         let writer = SerializedFileWriter::new(
             file,
             schema().map_err(io_error)?,
@@ -631,7 +645,7 @@ impl ParquetFile {
     fn publish(&mut self, writer: SerializedFileWriter<File>) -> io::Result<PathBuf> {
         let file = writer.into_inner().map_err(io_error)?;
         file.sync_all()?;
-        drop(file);
+        // Published while still open, so still locked: no cleanup sees it unowned.
         let target = match self.replaces.take() {
             Some(target) => {
                 std::fs::rename(&self.partial, &target)?;
@@ -640,12 +654,14 @@ impl ParquetFile {
             None => self.link_free_name()?,
         };
         sync_dir(&self.partition)?;
+        drop(file);
         Ok(target)
     }
 
     /// Links the finished file under the first free `.parquet` name and drops the
     /// `.partial` name. A link never replaces an existing file, so another writer that
-    /// took the same name in the meantime keeps its file.
+    /// took the same name in the meantime keeps its file. A filesystem without links
+    /// gets a rename to a name that was free a moment before.
     fn link_free_name(&self) -> io::Result<PathBuf> {
         loop {
             let target = free_name(&self.partition, &self.stem, ".parquet");
@@ -655,7 +671,10 @@ impl ParquetFile {
                     return Ok(target);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
+                Err(_) => {
+                    std::fs::rename(&self.partial, &target)?;
+                    return Ok(target);
+                }
             }
         }
     }
@@ -674,25 +693,125 @@ impl Drop for ParquetFile {
 /// Every row of a history file, in order.
 pub(crate) fn read_rows(path: &Path) -> io::Result<Vec<Row>> {
     let reader = SerializedFileReader::new(File::open(path)?).map_err(io_error)?;
-    let mut rows = Vec::new();
-    for record in reader.get_row_iter(None).map_err(io_error)? {
-        let record = record.map_err(io_error)?;
-        let mut row = Row::default();
-        for (name, field) in record.into_columns() {
-            let column = COLUMNS
-                .iter()
-                .find(|c| c.name == name)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown history column {name}")))?;
-            (column.set)(&mut row, field)?;
-        }
-        rows.push(row);
-    }
-    Ok(rows)
+    reader
+        .get_row_iter(None)
+        .map_err(io_error)?
+        .map(|record| to_row(record.map_err(io_error)?))
+        .collect()
 }
 
-/// `<HHMMSS>-<pid>-<seq>...` names; the PID of an in-progress file's writer.
-pub(crate) fn partial_pid(name: &str) -> Option<u32> {
-    parse_name(name.strip_suffix(".partial")?)
+/// Every row of a history file with only the columns a delete matches on set.
+pub(crate) fn read_keys(path: &Path) -> io::Result<Vec<Row>> {
+    let reader = SerializedFileReader::new(File::open(path)?).map_err(io_error)?;
+    let projection = schema_of(COLUMNS.iter().filter(|c| KEY_COLUMNS.contains(&c.name))).map_err(io_error)?;
+    reader
+        .get_row_iter(Some((*projection).clone()))
+        .map_err(io_error)?
+        .map(|record| to_row(record.map_err(io_error)?))
+        .collect()
+}
+
+fn to_row(record: parquet::record::Row) -> io::Result<Row> {
+    let mut row = Row::default();
+    for (name, field) in record.into_columns() {
+        let column = COLUMNS
+            .iter()
+            .find(|c| c.name == name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unknown history column {name}")))?;
+        (column.set)(&mut row, field)?;
+    }
+    Ok(row)
+}
+
+/// Rewrites the file at `path` without the rows `remove` matches, one row group at a
+/// time, so memory stays near one group whatever the file's size. Returns the rows
+/// removed; the file is left untouched when there are none and deleted when nothing
+/// is left.
+pub(crate) fn rewrite_without(path: &Path, remove: impl Fn(&Row) -> bool) -> io::Result<u64> {
+    let reader = SerializedFileReader::new(File::open(path)?).map_err(io_error)?;
+    let mut out = ParquetFile::replacing(path)?;
+    let (mut removed, mut kept) = (0u64, 0u64);
+    for group in 0..reader.num_row_groups() {
+        let rows = reader
+            .get_row_group(group)
+            .map_err(io_error)?
+            .get_row_iter(None)
+            .map_err(io_error)?
+            .map(|record| to_row(record.map_err(io_error)?))
+            .collect::<io::Result<Vec<Row>>>()?;
+        let before = rows.len();
+        let rows: Vec<Row> = rows.into_iter().filter(|row| !remove(row)).collect();
+        removed += (before - rows.len()) as u64;
+        kept += rows.len() as u64;
+        if !rows.is_empty() {
+            out.write_group(&rows)?;
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    if kept == 0 {
+        drop(out);
+        std::fs::remove_file(path)?;
+    } else {
+        out.finish()?;
+    }
+    Ok(removed)
+}
+
+/// A finished history file under a history folder.
+pub(crate) struct HistoryFile {
+    pub(crate) partition: String,
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) len: u64,
+    /// When it was last written, in microseconds since the epoch.
+    pub(crate) modified_us: i64,
+}
+
+/// The finished history files under `dir`, oldest first by partition date and name.
+pub(crate) fn history_files(dir: &Path) -> io::Result<Vec<HistoryFile>> {
+    let mut out = Vec::new();
+    for partition in std::fs::read_dir(dir)? {
+        let partition = partition?;
+        let partition_name = partition.file_name().to_string_lossy().into_owned();
+        if !partition_name.starts_with("date=") || !partition.file_type()?.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(partition.path())? {
+            let file = file?;
+            let name = file.file_name().to_string_lossy().into_owned();
+            if !is_history_file(&name) {
+                continue;
+            }
+            let meta = file.metadata()?;
+            let modified_us = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+            out.push(HistoryFile {
+                partition: partition_name.clone(),
+                name,
+                path: file.path(),
+                len: meta.len(),
+                modified_us,
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.partition, &a.name).cmp(&(&b.partition, &b.name)));
+    Ok(out)
+}
+
+/// Removes `date=` partitions under `dir` that hold nothing.
+pub(crate) fn remove_empty_partitions(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("date=") {
+            // Fails while the partition still holds anything, which is the point.
+            let _ = std::fs::remove_dir(entry.path());
+        }
+    }
 }
 
 /// Whether `name` is a finished history file this module wrote.
