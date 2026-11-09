@@ -344,8 +344,6 @@ pub(super) struct Exchange {
     pub(super) digest: String,
     pub(super) body_bytes: usize,
     pub(super) started: Instant,
-    /// The account as history names it.
-    pub(super) history_account: String,
 }
 pub(super) struct Observation {
     s: Arc<State>,
@@ -470,25 +468,19 @@ impl Observation {
         let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
         if let Some(history) = history {
             use crate::request_logging::history::file::Outcome;
-            history.finish(
-                &self.s.rt,
-                crate::request_logging::history::native::NativeFacts {
-                    account: &f.history_account,
-                    model: &f.model,
-                    session_id: &f.sid,
-                    stream: f.sse,
-                    outcome: match (end, success) {
-                        ("client_cancelled", _) => Outcome::Cancelled,
-                        ("upstream_stream_error", _) => Outcome::StreamError,
-                        (_, true) => Outcome::Complete,
-                        _ => Outcome::Failed,
-                    },
-                    latency_ms: f.started.elapsed().as_millis() as i64,
-                    ttft_ms: self.first_byte_ms.map(|ms| ms as i64),
-                    detail: Some(&detail),
-                    error: (!success).then(|| outcome.to_owned()),
+            history.finish(crate::request_logging::history::native::NativeEnd {
+                stream: f.sse,
+                outcome: match (end, success) {
+                    ("client_cancelled", _) => Outcome::Cancelled,
+                    ("upstream_stream_error", _) => Outcome::StreamError,
+                    (_, true) => Outcome::Complete,
+                    _ => Outcome::Failed,
                 },
-            );
+                latency_ms: f.started.elapsed().as_millis() as i64,
+                ttft_ms: self.first_byte_ms.map(|ms| ms as i64),
+                detail: Some(&detail),
+                error: (!success).then(|| outcome.to_owned()),
+            });
         }
         let record = crate::usage_record::Record {
             timestamp: chrono::Utc::now().to_rfc3339(),

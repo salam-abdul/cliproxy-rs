@@ -157,6 +157,10 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
 }
 fn session(body: &Value, headers: &HeaderMap) -> Option<String> {
+    client_session(body, headers).map(hash)
+}
+/// The client's own session ID, validated; routing uses its hash.
+fn client_session(body: &Value, headers: &HeaderMap) -> Option<String> {
     let m = &body["metadata"];
     let mut id = m["session_id"].as_str().or(m["sessionId"].as_str()).map(str::to_owned);
     if id.is_none()
@@ -174,7 +178,6 @@ fn session(body: &Value, headers: &HeaderMap) -> Option<String> {
             .map(str::to_owned)
     })
     .filter(|id| valid_id(id))
-    .map(hash)
 }
 fn available(v: &Value) -> bool {
     v["utilization"]
@@ -634,12 +637,13 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         Ok(b) => b,
         Err(_) => return Ok(error(400, "Invalid native JSON")),
     };
-    let Some(sid) = session(&body, &parts.headers) else {
+    let Some(client_sid) = client_session(&body, &parts.headers) else {
         return Ok(error(
             400,
             "Native Claude session identity required; request was not routed",
         ));
     };
+    let sid = hash(&client_sid);
     let Some(model) = body["model"]
         .as_str()
         .filter(|m| m.starts_with("claude-") && m.len() <= 256)
@@ -720,17 +724,29 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             }
         };
         let started = Instant::now();
+        // History names the account as the translating proxy does: the credential's
+        // email, else its ID.
+        let account = if crate::request_logging::history::on(&s.rt.config()) {
+            s.rt.store()
+                .snapshot()
+                .into_iter()
+                .find(|c| c.id == a.file_id)
+                .map(|c| crate::request_logging::history::capture::account_label(&c))
+                .unwrap_or_else(|| a.id.clone())
+        } else {
+            String::new()
+        };
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
             &s.rt,
-            &request_id,
-            tried.len().saturating_sub(1),
+            crate::request_logging::history::native::NativeSend {
+                exchange_id: &request_id,
+                send: tried.len().saturating_sub(1),
+                account: &account,
+                model: &model,
+                session_id: &client_sid,
+            },
             &raw,
         );
-        let account = if a.name.is_empty() {
-            a.id.clone()
-        } else {
-            a.name.clone()
-        };
         let result = s
             .client
             .request(parts.method.clone(), format!("{target}{path}"))
@@ -742,8 +758,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         let r = match result {
             Ok(r) => r,
             Err(upstream_error) => {
-                s.cool(&a, &model, 0, None, false).await?;
-                s.rt.store().note_activity(&a.file_id, false);
                 // Log only classifications, never error Display strings containing URLs or credentials.
                 let failure_kind = if upstream_error.is_timeout() {
                     "timeout"
@@ -754,23 +768,19 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 } else {
                     "transport"
                 };
-                s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 if let Some(capture) = capture.take() {
-                    capture.finish(
-                        &s.rt,
-                        crate::request_logging::history::native::NativeFacts {
-                            account: &account,
-                            model: &model,
-                            session_id: &sid,
-                            stream: false,
-                            outcome: crate::request_logging::history::file::Outcome::TransportLost,
-                            latency_ms: started.elapsed().as_millis() as i64,
-                            ttft_ms: None,
-                            detail: None,
-                            error: Some(failure_kind.to_owned()),
-                        },
-                    );
+                    capture.finish(crate::request_logging::history::native::NativeEnd {
+                        stream: false,
+                        outcome: crate::request_logging::history::file::Outcome::TransportLost,
+                        latency_ms: started.elapsed().as_millis() as i64,
+                        ttft_ms: None,
+                        detail: None,
+                        error: Some(failure_kind.to_owned()),
+                    });
                 }
+                s.cool(&a, &model, 0, None, false).await?;
+                s.rt.store().note_activity(&a.file_id, false);
+                s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 return Ok(error(
                     422,
                     "Upstream response was lost; request was not replayed to avoid duplicate inference. Check the session before explicitly retrying.",
@@ -804,32 +814,26 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
                 rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
             }
-            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
-            if !entitlement {
-                s.rt.claude_usage.invalidate(&a.token).await;
-            }
             let outcome = if entitlement {
                 "model_entitlement"
             } else {
                 "retryable_rejection"
             };
-            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
             if let Some(capture) = capture.take() {
-                capture.finish(
-                    &s.rt,
-                    crate::request_logging::history::native::NativeFacts {
-                        account: &account,
-                        model: &model,
-                        session_id: &sid,
-                        stream: false,
-                        outcome: crate::request_logging::history::file::Outcome::Failover,
-                        latency_ms: started.elapsed().as_millis() as i64,
-                        ttft_ms: None,
-                        detail: None,
-                        error: Some(outcome.to_owned()),
-                    },
-                );
+                capture.finish(crate::request_logging::history::native::NativeEnd {
+                    stream: false,
+                    outcome: crate::request_logging::history::file::Outcome::Failover,
+                    latency_ms: started.elapsed().as_millis() as i64,
+                    ttft_ms: None,
+                    detail: None,
+                    error: Some(outcome.to_owned()),
+                });
             }
+            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
+            if !entitlement {
+                s.rt.claude_usage.invalidate(&a.token).await;
+            }
+            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
             continue;
         }
         let facts = Exchange {
@@ -849,7 +853,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             digest: hash(&raw),
             body_bytes: raw.len(),
             started: request_started,
-            history_account: account,
         };
         let record = Observation::new(s.clone(), facts, &encoding, capture);
         let stream = futures_util::stream::unfold(

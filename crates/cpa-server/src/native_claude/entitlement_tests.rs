@@ -89,6 +89,9 @@ impl Fixture {
                             let token = req.headers()["authorization"].to_str().unwrap().to_owned();
                             let body = axum::body::to_bytes(Body::new(req.into_body()), 65536).await.unwrap();
                             seen.lock().unwrap().push((token.clone(), body.to_vec()));
+                            if cpa_common::gostr::contains(&body, b"MODE_STALL") {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
                             let response = if token == "Bearer token-a"
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
@@ -381,7 +384,6 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
             digest: String::new(),
             body_bytes: 0,
             started: std::time::Instant::now(),
-            history_account: String::new(),
         };
         let observation = Observation::new(fixture.state.clone(), facts, "identity", None);
         tokio::spawn(async move {
@@ -463,8 +465,8 @@ async fn a_native_exchange_is_recorded_decoded() {
     assert_eq!(row.status, Some(200));
     assert_eq!(row.endpoint.as_deref(), Some("POST /v1/messages"));
     assert_eq!(row.model.as_deref(), Some("claude-opus-test"));
-    // Native routing names sessions by a hash of the client's session ID.
-    assert_eq!(row.session_id, Some(hash("synthetic-session")));
+    // The client's own session ID, so `history delete --session` finds native rows.
+    assert_eq!(row.session_id.as_deref(), Some("synthetic-session"));
     assert_eq!(row.account.as_deref(), Some("a"));
     assert_eq!(row.upstream_request_id.as_deref(), Some("synthetic-id"));
     assert_eq!(row.input_tokens, Some(4));
@@ -517,4 +519,58 @@ async fn a_broken_native_stream_is_a_stream_error_row() {
     let rows = flushed_rows(&fixture, &dir.0, 1).await;
     assert_eq!(rows[0].outcome, Outcome::StreamError);
     assert_eq!(rows[0].response_body.as_deref(), Some(r#"{"content":["#));
+}
+
+#[tokio::test]
+async fn a_native_error_response_is_a_failed_row() {
+    use crate::request_logging::history::file::Outcome;
+    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 400,
+            body: br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 400);
+    response.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!((rows[0].status, rows[0].outcome), (Some(400), Outcome::Failed));
+}
+
+#[tokio::test]
+async fn a_client_that_leaves_before_the_headers_still_leaves_a_row() {
+    use crate::request_logging::history::file::Outcome;
+    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let stalled = br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[{"role":"user","content":"MODE_STALL"}]}"#;
+    let request = wreq::Client::builder()
+        .no_proxy()
+        .retry(wreq::retry::Policy::never())
+        .build()
+        .unwrap()
+        .post(format!("{}/v1/messages", fixture.url))
+        .body(&stalled[..])
+        .send();
+    assert!(tokio::time::timeout(Duration::from_millis(500), request).await.is_err());
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].outcome, Outcome::Cancelled);
+    assert_eq!(rows[0].status, None);
+    assert!(
+        rows[0]
+            .request_body
+            .as_deref()
+            .is_some_and(|b| b.contains("MODE_STALL"))
+    );
 }
