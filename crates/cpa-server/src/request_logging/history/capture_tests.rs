@@ -361,3 +361,69 @@ fn facts_rebuilt_for_a_bootstrap_retry_keep_counting_sends() {
     first.history_sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(retry.history_sends.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
+
+#[tokio::test]
+async fn websocket_frames_are_kept_per_send() {
+    use cpa_core::exec::{CaptureEvent, UpstreamRequest};
+    let _registry = REGISTRY.lock().await;
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &[], 1).await;
+    let sends = super::Sends::new("conn".into(), 3, Default::default(), proxy.rt.history().budget());
+    let sink = super::tee(cpa_core::exec::CaptureSink::default(), sends.clone());
+    let frame = |body: &'static [u8]| UpstreamRequest {
+        url: "wss://upstream.invalid/responses",
+        method: "WEBSOCKET",
+        body,
+        ..UpstreamRequest::default()
+    };
+    // A dial without a payload opens no send.
+    sink.record(CaptureEvent::WebsocketRequest(frame(b"")));
+    sink.record(CaptureEvent::WebsocketRequest(frame(b"{\"input\":\"a\nb\"}")));
+    sink.record(CaptureEvent::WebsocketHandshake(
+        101,
+        &[("X-Request-Id".into(), "ws_1".into())],
+    ));
+    sink.record(CaptureEvent::WebsocketResponse(b"{\"type\":\"response.created\"}"));
+    sink.record(CaptureEvent::WebsocketResponse(b"{\"type\":\"response.completed\"}"));
+    sends.emit(
+        &proxy.rt,
+        super::AttemptFacts {
+            endpoint: "GET /v1/responses".into(),
+            provider: "codex".into(),
+            model_requested: String::new(),
+            model: "gpt-fixture".into(),
+            response_model: String::new(),
+            account: "acct".into(),
+            auth_index: String::new(),
+            session_id: String::new(),
+            user_agent: String::new(),
+            stream: true,
+            detail: Default::default(),
+            latency_ms: 5,
+            ttft_ms: 0,
+            outcome: Outcome::Complete,
+            status: None,
+            error: None,
+        },
+    );
+    let rows = rows(&proxy, &dir.0, 1).await;
+    let row = &rows[0];
+    assert_eq!((row.exchange_id.as_str(), row.turn, row.send), ("conn", 3, 0));
+    assert_eq!(row.transport.as_deref(), Some("websocket"));
+    assert_eq!(
+        row.request_frames.as_deref(),
+        Some(&["{\"input\":\"a\nb\"}".to_owned()][..])
+    );
+    assert_eq!(
+        row.response_frames.as_deref(),
+        Some(
+            &[
+                "{\"type\":\"response.created\"}".to_owned(),
+                "{\"type\":\"response.completed\"}".to_owned()
+            ][..]
+        )
+    );
+    assert_eq!(row.status, Some(101));
+    assert_eq!(row.upstream_request_id.as_deref(), Some("ws_1"));
+    assert_eq!(row.request_body, None);
+}

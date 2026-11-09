@@ -1591,7 +1591,8 @@ pub struct Facts {
     pub attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// History's send numbering, from the request's trace.
     pub history_sends: std::sync::Arc<std::sync::atomic::AtomicI32>,
-    pub history_turn: i32,
+    /// A websocket turn's connection ID and turn index.
+    pub history_turn: Option<(String, i32)>,
 }
 
 impl Facts {
@@ -1621,8 +1622,8 @@ impl Facts {
             clock: trace.clock(),
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
             attempts: Default::default(),
-            history_sends: trace.history_sends().0,
-            history_turn: trace.history_sends().1,
+            history_sends: trace.history().0,
+            history_turn: trace.history().1,
         }
     }
 }
@@ -3002,7 +3003,7 @@ mod tests {
                 prompt_prefix_hash: String::new(),
                 attempts: Default::default(),
                 history_sends: Default::default(),
-                history_turn: 0,
+                history_turn: None,
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

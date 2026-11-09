@@ -353,6 +353,11 @@ struct Connection {
     /// The upgrade request's log: upstream capture for every turn and its middleware ID.
     capture: cpa_core::exec::CaptureSink,
     request_id: Option<String>,
+    /// History groups the connection's turns under one ID: the upgrade's request ID,
+    /// else one made for the connection.
+    history_id: String,
+    /// The turn in progress, counted from 0.
+    history_turn: i32,
     /// The upgrade request's WebSocket timeline, detached before the 101 (None when
     /// request logging is off).
     timeline: Option<crate::request_logging::WebsocketLog>,
@@ -532,6 +537,8 @@ impl Connection {
             replays: Arc::default(),
             capture: Default::default(),
             request_id: None,
+            history_id: uuid::Uuid::new_v4().to_string(),
+            history_turn: -1,
             timeline: None,
             home: Arc::default(),
         }
@@ -636,6 +643,7 @@ impl Connection {
     }
 
     async fn turn(&mut self, socket: &mut Sink, payload: String) -> Flow {
+        self.history_turn = self.history_turn.saturating_add(1);
         let cfg = self.rt.config();
         let explicit_model = field(&payload, "model");
         let mut request_model = explicit_model.clone();
@@ -1033,7 +1041,12 @@ impl Connection {
             media: None,
         };
         // The upgrade's log captures every turn's upstream traffic under its request ID.
-        let trace = dispatch::Trace::with_request_id(self.request_id.clone()).with_capture(self.capture.clone());
+        let trace = dispatch::Trace::with_request_id(self.request_id.clone())
+            .with_capture(self.capture.clone())
+            .with_turn(
+                self.request_id.clone().unwrap_or_else(|| self.history_id.clone()),
+                self.history_turn,
+            );
         let result = dispatch::run_with_bootstrap_retries(&self.rt, call, &trace).await;
         {
             let s = selected.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

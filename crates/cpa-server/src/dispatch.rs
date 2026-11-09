@@ -669,8 +669,8 @@ pub struct Trace(
     /// Numbers the exchange's upstream sends for history, across attempts and
     /// bootstrap retries.
     Arc<std::sync::atomic::AtomicI32>,
-    /// The websocket turn this trace runs; 0 for HTTP.
-    i32,
+    /// A websocket turn's connection ID and turn index, for history.
+    Option<(String, i32)>,
 );
 
 impl Trace {
@@ -686,7 +686,7 @@ impl Trace {
             crate::observability::current_clock(),
             Default::default(),
             Default::default(),
-            0,
+            None,
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -706,14 +706,15 @@ impl Trace {
         self
     }
 
-    /// Marks this trace as websocket turn `turn` of its connection.
-    pub fn with_turn(mut self, turn: i32) -> Self {
-        self.6 = turn;
+    /// Marks this trace as turn `turn` of websocket connection `connection`.
+    pub fn with_turn(mut self, connection: String, turn: i32) -> Self {
+        self.6 = Some((connection, turn));
         self
     }
 
-    pub(crate) fn history_sends(&self) -> (Arc<std::sync::atomic::AtomicI32>, i32) {
-        (self.5.clone(), self.6)
+    /// History's send counter, and the connection and turn of a websocket turn.
+    pub(crate) fn history(&self) -> (Arc<std::sync::atomic::AtomicI32>, Option<(String, i32)>) {
+        (self.5.clone(), self.6.clone())
     }
 
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
@@ -2101,9 +2102,13 @@ async fn attempt(
                 }
                 let capture = match crate::request_logging::history::on(cfg) {
                     true => {
+                        let (exchange, turn) = facts
+                            .history_turn
+                            .clone()
+                            .unwrap_or_else(|| (facts.client.request_id.clone(), 0));
                         let sends = crate::request_logging::history::capture::Sends::new(
-                            facts.client.request_id.clone(),
-                            facts.history_turn,
+                            exchange,
+                            turn,
                             facts.history_sends.clone(),
                             rt.history().budget(),
                         );
