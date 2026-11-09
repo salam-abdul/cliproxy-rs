@@ -2140,13 +2140,31 @@ impl Tracker {
             return;
         }
         let history = self.history.take();
-        let queue = self.queue.usage_queue();
+        let rt = self.queue.clone();
+        let queue = rt.usage_queue();
         if !queue.accepts() && history.is_none() {
             return;
         }
+        let settled = self.settle(ending, queue.accepts());
+        if let Some(sends) = history {
+            sends.finish(&self.queue, settled.history_end());
+        }
+        if settled.enqueue {
+            if queue.accepts() {
+                queue.enqueue(queued(
+                    &settled.record,
+                    self.client.as_ref().unwrap_or(&self.facts.client),
+                ));
+            }
+            warn_model_substitution(&settled.record, &settled.upstream_model, &self.auth_id);
+        }
+    }
+
+    /// Works out how the attempt ended, once, for both of its consumers.
+    fn settle(&mut self, ending: Ending<'_>, accepts: bool) -> Settled {
         let reported = std::mem::take(&mut *self.observer.lock());
         // History records every send; these conditions only decide the usage record.
-        let mut enqueue = queue.accepts() && !reported.discarded;
+        let mut enqueue = accepts && !reported.discarded;
         let cancelled = matches!(ending, Ending::Dropped) && reported.outcome.is_none();
         // Go can publish a tokenless failure after observing a Claude response.
         // Keep the returned TTL buckets as observations, not inferred accounting.
@@ -2238,36 +2256,46 @@ impl Tracker {
         if let Some(effort) = reported.effort {
             record.reasoning_effort = effort;
         }
-        let client = self.client.as_ref().unwrap_or(&self.facts.client);
-        if let Some(sends) = history {
-            use crate::request_logging::history::row::Outcome;
-            sends.finish(
-                &self.queue,
-                crate::request_logging::history::capture::AttemptEnd {
-                    response_model: record.response_model.clone(),
-                    detail: record.detail.clone(),
-                    latency_ms: record.latency_ms,
-                    // 0: no first byte was seen.
-                    ttft_ms: (record.ttft_ms > 0).then_some(record.ttft_ms),
-                    outcome: if cancelled {
-                        Outcome::Cancelled
-                    } else if record.failed {
-                        Outcome::Failed
-                    } else {
-                        Outcome::Complete
-                    },
-                    status: record
-                        .failed
-                        .then(|| i32::try_from(record.fail_status).unwrap_or_default()),
-                    error: Some(record.fail_body.clone()).filter(|e| record.failed && !e.is_empty()),
-                },
-            );
+        Settled {
+            record,
+            enqueue,
+            cancelled,
+            upstream_model: reported.upstream_model,
         }
-        if enqueue {
-            if queue.accepts() {
-                queue.enqueue(queued(&record, client));
-            }
-            warn_model_substitution(&record, &reported.upstream_model, &self.auth_id);
+    }
+}
+
+/// How one attempt ended: the usage record and whether the usage queue takes it, and
+/// what history needs beyond the record.
+struct Settled {
+    record: Record,
+    enqueue: bool,
+    /// The client went away before the attempt ended.
+    cancelled: bool,
+    upstream_model: String,
+}
+
+impl Settled {
+    fn history_end(&self) -> crate::request_logging::history::capture::AttemptEnd {
+        use crate::request_logging::history::row::Outcome;
+        let record = &self.record;
+        crate::request_logging::history::capture::AttemptEnd {
+            response_model: record.response_model.clone(),
+            detail: record.detail.clone(),
+            latency_ms: record.latency_ms,
+            // 0: no first byte was seen.
+            ttft_ms: (record.ttft_ms > 0).then_some(record.ttft_ms),
+            outcome: if self.cancelled {
+                Outcome::Cancelled
+            } else if record.failed {
+                Outcome::Failed
+            } else {
+                Outcome::Complete
+            },
+            status: record
+                .failed
+                .then(|| i32::try_from(record.fail_status).unwrap_or_default()),
+            error: Some(record.fail_body.clone()).filter(|e| record.failed && !e.is_empty()),
         }
     }
 }
