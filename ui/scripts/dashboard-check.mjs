@@ -66,7 +66,9 @@ await page.route("**/*", async route => {
     return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
   if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
-  if (path === "/v8/management/observability/logs/errors") return send({files: []});
+  if (path === "/v8/management/observability/logs/errors") return send({files: [{name: "error-small.log", modified: 1893456000}, {name: "error-large.log", modified: 1893456000}]});
+  if (path === "/v8/management/observability/logs/errors/error-small.log") return route.fulfill({body: "upstream status 502"});
+  if (path === "/v8/management/observability/logs/errors/error-large.log") return route.fulfill({body: "x".repeat(256 * 1024) + "TAIL"});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
   assert.match(asset, /^(index\.html|favicon\.svg|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
@@ -351,8 +353,17 @@ try {
   await page.getByRole("button",{name:"Full screen",exact:true}).click();
   await page.getByRole("button",{name:"Exit full screen",exact:true}).click();
   await page.getByRole("button",{name:"Full screen",exact:true}).waitFor();
+  const errorRow = name => page.locator(".list .item").filter({hasText:name});
+  await errorRow("error-small.log").getByRole("button",{name:"Open",exact:true}).click();
+  assert.equal(await page.getByLabel("error-small.log").innerText(), "upstream status 502");
+  assert.equal(await page.getByText("Showing the first 256 KB.",{exact:false}).count(), 0);
+  await errorRow("error-large.log").getByRole("button",{name:"Open",exact:true}).click();
+  await page.getByText("Showing the first 256 KB. Download the file for the rest.",{exact:true}).waitFor();
+  assert.equal((await page.getByLabel("error-large.log").innerText()).includes("TAIL"), false, "a large file is cut at 256 KB");
+  await page.getByRole("button",{name:"Close",exact:true}).click();
+  assert.equal(await page.getByLabel("error-large.log").count(), 0);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }

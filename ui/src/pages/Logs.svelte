@@ -20,7 +20,8 @@
     f = $state<Filter>({ method: "", status: "", path: "" }),
     wrap = $state(true),
     box = $state<HTMLElement>(),
-    full = $state(false);
+    full = $state(false),
+    errLog = $state<{ name: string; text: string; cut: boolean } | null>(null);
   const logs: Res<string[]> = new Res(async (): Promise<string[]> => {
     const follow = !pane || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40,
       at = epoch;
@@ -55,6 +56,12 @@
     document.addEventListener("fullscreenchange", on);
     return () => document.removeEventListener("fullscreenchange", on);
   });
+  const VIEW = 256 * 1024;
+  const openError = (name: string) =>
+    store.act(async () => {
+      const blob: Blob = await api(`/observability/logs/errors/${encodeURIComponent(name)}`, "GET", undefined, "blob");
+      errLog = { name, text: await blob.slice(0, VIEW).text(), cut: blob.size > VIEW };
+    });
   async function inspect(id: string) {
     reqId = id;
     reqText = reqError = "";
@@ -155,6 +162,7 @@
             <li class="item">
               <code class="grow ellipsis">{f.name}</code>
               <span class="legend">{f.modified ? new Date(f.modified * 1000).toLocaleString() : ""}</span>
+              <button class="key" disabled={store.busy} onclick={() => openError(f.name)}>Open</button>
               <button
                 class="key"
                 onclick={() =>
@@ -166,6 +174,14 @@
           {/each}
         </ul>
       {:else}<p class="muted">No error logs.</p>{/if}
+      {#if errLog}
+        <div class="row">
+          <code class="grow ellipsis">{errLog.name}</code>
+          <button class="key quiet" onclick={() => (errLog = null)}>Close</button>
+        </div>
+        {#if errLog.cut}<p class="note">Showing the first 256 KB. Download the file for the rest.</p>{/if}
+        <pre class="code-window request" aria-label={errLog.name}>{errLog.text}</pre>
+      {/if}
     {/snippet}
   </Load>
 </section>
