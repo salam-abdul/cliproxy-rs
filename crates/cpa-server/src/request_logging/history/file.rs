@@ -561,14 +561,6 @@ fn free_name(partition: &Path, stem: &str, ext: &str) -> PathBuf {
     path
 }
 
-pub(crate) fn private_dir(dir: &Path) -> io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)
-}
-
 fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
@@ -588,10 +580,15 @@ pub(crate) struct ParquetFile {
 }
 
 impl ParquetFile {
+    /// The in-progress path, until the file is finished.
+    pub(crate) fn partial(&self) -> &Path {
+        &self.partial
+    }
+
     pub(crate) fn create(dir: &Path, now: DateTime<Utc>, seq: u32) -> io::Result<Self> {
-        private_dir(dir)?;
+        cpa_core::private_fs::create_dir_all(dir)?;
         let partition = dir.join(format!("date={}", now.format("%Y-%m-%d")));
-        private_dir(&partition)?;
+        cpa_core::private_fs::create_dir_all(&partition)?;
         let stem = format!("{}-{}-{seq:04}", now.format("%H%M%S"), std::process::id());
         Self::open(partition, stem, None)
     }
@@ -846,27 +843,27 @@ pub(crate) fn remove_empty_partitions(dir: &Path) {
     }
 }
 
-/// The PID in an in-progress file's name.
-pub(crate) fn partial_pid(name: &str) -> Option<u32> {
-    parse_name(name.strip_suffix(".partial")?)
+/// Whether `name` is an in-progress history file this module wrote.
+pub(crate) fn is_partial_file(name: &str) -> bool {
+    name.strip_suffix(".partial").is_some_and(is_stem)
 }
 
 /// Whether `name` is a finished history file this module wrote.
 pub(crate) fn is_history_file(name: &str) -> bool {
-    name.strip_suffix(".parquet").and_then(parse_name).is_some()
+    name.strip_suffix(".parquet").is_some_and(is_stem)
 }
 
-fn parse_name(stem: &str) -> Option<u32> {
+/// `HHMMSS-<pid>-<seq>`, with an optional `-<n>` suffix from a name collision.
+fn is_stem(stem: &str) -> bool {
     let mut parts = stem.split('-');
-    let time = parts.next()?;
-    let pid = parts.next()?.parse().ok()?;
-    let seq = parts.next()?;
-    let ok = time.len() == 6
-        && time.bytes().all(|b| b.is_ascii_digit())
-        && !seq.is_empty()
-        && seq.bytes().all(|b| b.is_ascii_digit())
-        && parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    ok.then_some(pid)
+    let (Some(time), Some(pid), Some(seq)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    time.len() == 6
+        && [time, pid, seq]
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]

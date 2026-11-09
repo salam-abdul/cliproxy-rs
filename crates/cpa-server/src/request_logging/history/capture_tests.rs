@@ -579,6 +579,25 @@ async fn pipelined_turns_keep_their_own_requests_and_responses() {
 }
 
 #[tokio::test]
+async fn a_steer_behind_a_pipelined_turn_joins_the_turn_in_progress() {
+    let _registry = REGISTRY.lock().await;
+    let (a, b, done_a, done_b) = (create("a"), create("b"), terminal("ra", 10), terminal("rb", 20));
+    let (proxy, dir, _sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketRequest(frame(Box::leak(b.into_boxed_slice()))));
+        sink.record(E::WebsocketRequest(frame(
+            br#"{"type":"response.steer","input":"faster"}"#,
+        )));
+        sink.record(E::WebsocketResponse(&done_a));
+        sink.record(E::WebsocketResponse(&done_b));
+    })
+    .await;
+    let rows = rows(&proxy, &dir.0, 2).await;
+    assert_eq!(rows[0].request_frames.as_ref().map(Vec::len), Some(2));
+    assert_eq!(rows[1].request_frames.as_ref().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
 async fn an_automatic_successor_response_gets_its_own_row() {
     let _registry = REGISTRY.lock().await;
     let a = create("a");
@@ -654,7 +673,8 @@ async fn a_websocket_turn_records_time_to_first_frame() {
     })
     .await;
     let rows = rows(&proxy, &dir.0, 1).await;
-    assert!(rows[0].ttft_ms.is_some());
+    let (ttft, latency) = (rows[0].ttft_ms, rows[0].latency_ms);
+    assert!(ttft.is_some() && ttft <= latency, "ttft {ttft:?}, latency {latency:?}");
 }
 
 #[test]

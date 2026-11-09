@@ -4,8 +4,8 @@
 //! and counts it, so inference never waits on the disk.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use cpa_core::config::Config;
 
 use super::Settings;
 use super::delete::{apply_tombstones, expire_tombstones, pending_tombstones};
-use super::file::{ParquetFile, Row, body_columns, history_files, partial_pid, remove_empty_partitions};
+use super::file::{ParquetFile, Row, body_columns, history_files, is_partial_file, remove_empty_partitions};
 use super::lock::{DirLock, is_abandoned};
 
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
@@ -228,6 +228,8 @@ enum State {
 pub struct Writer {
     state: Mutex<State>,
     lost: Arc<AtomicU64>,
+    /// A row arrived after the writer stopped, and that was logged.
+    stop_reported: AtomicBool,
     limits: Limits,
     budget: Budget,
 }
@@ -237,6 +239,7 @@ impl Default for Writer {
         Self {
             state: Mutex::new(State::Idle),
             lost: Arc::default(),
+            stop_reported: AtomicBool::new(false),
             limits: Limits::default(),
             budget: Budget::global().clone(),
         }
@@ -265,29 +268,23 @@ impl Writer {
 
     /// Queues `row` when history is on under `cfg`. Never blocks: a full queue drops it.
     pub(crate) fn submit(&self, cfg: &Config, row: PendingRow) {
-        let settings = super::settings(cfg);
-        if settings.is_none() {
-            return;
-        }
-        let Some(settings) = settings.as_ref().clone() else {
+        let Some(settings) = super::settings(cfg).as_ref().clone() else {
             return;
         };
-        let Some(tx) = self.sender() else {
-            if self.lost.fetch_add(1, Ordering::Relaxed) == 0 || self.closed() {
-                tracing::warn!("history: a row arrived after the writer stopped and was not written");
-            }
+        let sent = self
+            .sender()
+            .map(|tx| tx.try_send(Command::Row(Box::new(row), settings)));
+        if matches!(sent, Some(Ok(()))) {
             return;
-        };
-        if tx.try_send(Command::Row(Box::new(row), settings)).is_err() {
-            self.lost.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    fn closed(&self) -> bool {
-        matches!(
-            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
-            State::Closed
-        )
+        self.lost.fetch_add(1, Ordering::Relaxed);
+        // A full queue is reported with the next file; a stopped writer never writes
+        // again, so it is reported once here.
+        if matches!(sent, None | Some(Err(TrySendError::Disconnected(_))))
+            && !self.stop_reported.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!("history: a row arrived after the writer stopped and was not written");
+        }
     }
 
     fn sender(&self) -> Option<SyncSender<Command>> {
@@ -633,19 +630,20 @@ impl Worker {
             }
             (row.response_body, row.response_body_raw) = body_columns(body, row.response_truncated);
         }
-        let frames = |bodies: Option<Vec<Body>>, truncated: &mut bool| {
+        let frames = |bodies: Option<Vec<Body>>, bytes: &mut i64, truncated: &mut bool| {
             bodies.map(|bodies| {
                 bodies
                     .into_iter()
                     .map(|body| {
+                        *bytes = bytes.saturating_add(i64::try_from(body.total()).unwrap_or(i64::MAX));
                         *truncated |= body.truncated();
                         String::from_utf8_lossy(&body.into_vec()).into_owned()
                     })
                     .collect()
             })
         };
-        row.request_frames = frames(request_frames, &mut row.request_truncated);
-        row.response_frames = frames(response_frames, &mut row.response_truncated);
+        row.request_frames = frames(request_frames, &mut row.request_bytes, &mut row.request_truncated);
+        row.response_frames = frames(response_frames, &mut row.response_bytes, &mut row.response_truncated);
         row
     }
 
@@ -734,7 +732,12 @@ impl Worker {
         let Some(settings) = &self.settings else { return };
         let dir = settings.dir.clone();
         let cap = settings.max_total_bytes;
-        remove_dead_partials(&dir);
+        let open = self
+            .window
+            .as_ref()
+            .and_then(|w| w.file.as_ref())
+            .map(ParquetFile::partial);
+        remove_dead_partials(&dir, open);
         // Applied before any expires, so a delete waiting since the last run counts.
         self.apply_deletes();
         expire_tombstones(&dir, Utc::now());
@@ -823,7 +826,9 @@ pub(crate) fn enforce_cap(dir: &Path, cap: u64) -> std::io::Result<u64> {
     Ok(freed)
 }
 
-fn remove_dead_partials(dir: &Path) {
+/// Removes in-progress files no writer holds, except `open`, this writer's own: probing
+/// it would release its lock where the OS emulates flock with process-wide locks.
+fn remove_dead_partials(dir: &Path, open: Option<&Path>) {
     let Ok(partitions) = std::fs::read_dir(dir) else { return };
     let mut removed = 0u64;
     for partition in partitions.flatten() {
@@ -834,12 +839,11 @@ fn remove_dead_partials(dir: &Path) {
             continue;
         };
         for file in files.flatten() {
-            let name = file.file_name().to_string_lossy().into_owned();
-            // This process's own files are open and locked here; probing them would
-            // release that lock where the OS emulates flock with process-wide locks.
-            if partial_pid(&name).is_some_and(|pid| pid != std::process::id())
-                && is_abandoned(&file.path()).unwrap_or(false)
-                && std::fs::remove_file(file.path()).is_ok()
+            let path = file.path();
+            if is_partial_file(&file.file_name().to_string_lossy())
+                && open != Some(path.as_path())
+                && is_abandoned(&path).unwrap_or(false)
+                && std::fs::remove_file(&path).is_ok()
             {
                 removed += 1;
             }

@@ -104,7 +104,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         (row.started_at_us < cutoff && selector.matches(row)) || pending.iter().any(|stone| stone.matches(row))
     };
     // A server may be buffering its first rows with nothing on disk yet.
-    super::file::private_dir(dir)?;
+    cpa_core::private_fs::create_dir_all(dir)?;
     let _lock = if dry_run {
         None
     } else {
@@ -190,7 +190,7 @@ impl Tombstone {
 fn write_tombstone(dir: &Path, selector: &Selector, created_us: i64) -> anyhow::Result<()> {
     let folder = dir.join(TOMBSTONES);
     // Tombstones name sessions and accounts: as private as the history itself.
-    super::file::private_dir(&folder)?;
+    cpa_core::private_fs::create_dir_all(&folder)?;
     #[cfg(unix)]
     std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let time = |t: Option<DateTime<Utc>>| t.map(|t| t.timestamp_micros());

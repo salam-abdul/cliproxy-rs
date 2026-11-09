@@ -166,6 +166,38 @@ fn shutdown_flushes_buffered_rows_within_the_wait() {
     assert_eq!(writer.lost(), 1, "a row after shutdown is counted");
 }
 
+#[test]
+fn rows_after_shutdown_warn_once() {
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let capture = Capture::default();
+    let sink = capture.clone();
+    let _log = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish(),
+    );
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    writer.shutdown(Duration::from_secs(5));
+    for id in ["a", "b", "c"] {
+        writer.submit(&on(&dir.0), pending(&writer, id, b"x", &[]));
+    }
+    assert_eq!(writer.lost(), 3);
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(logs.matches("was not written").count(), 1, "{logs}");
+}
+
 fn dead_pid() -> u32 {
     let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
         .args(if cfg!(windows) { &["/C", "exit"][..] } else { &[][..] })
@@ -190,6 +222,21 @@ fn a_dead_processes_partial_is_removed_at_start() {
 }
 
 #[test]
+fn an_abandoned_partial_named_with_this_processes_pid_is_removed() {
+    // A container's server is always PID 1, so a crashed run's files carry the PID
+    // of the run that follows it.
+    let dir = TempDir::new();
+    let partition = dir.0.join("date=2026-11-01");
+    std::fs::create_dir_all(&partition).unwrap();
+    let stale = partition.join(format!("081530-{}-0000.partial", std::process::id()));
+    std::fs::write(&stale, b"PAR1").unwrap();
+    let writer = Writer::with_limits(Limits::default());
+    writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
+    writer.flush();
+    assert!(!stale.exists());
+}
+
+#[test]
 fn a_live_processes_partial_survives_startup_cleanup() {
     let dir = TempDir::new();
     let partition = dir.0.join("date=2026-11-01");
@@ -209,6 +256,29 @@ fn a_live_processes_partial_survives_startup_cleanup() {
     writer.flush();
     assert!(live.exists());
     drop(held);
+}
+
+#[test]
+fn websocket_byte_counts_add_up_every_frame() {
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    let mut p = PendingRow::new(row("a"), writer.budget());
+    let frames = |bodies: &[&[u8]]| {
+        bodies
+            .iter()
+            .map(|b| {
+                let mut body = Body::new(writer.budget());
+                body.push_slice(b);
+                body
+            })
+            .collect::<Vec<_>>()
+    };
+    p.request_frames = Some(frames(&[b"abc"]));
+    p.response_frames = Some(frames(&[b"de", b"fghi"]));
+    writer.submit(&on(&dir.0), p);
+    writer.flush();
+    let rows = all_rows(&dir.0);
+    assert_eq!((rows[0].request_bytes, rows[0].response_bytes), (3, 6));
 }
 
 #[test]

@@ -154,11 +154,20 @@ impl Sends {
             let mut frame = Body::new(&self.budget);
             frame.push_slice(info.body);
             // On a steered connection a steer or append frame belongs to the turn in
-            // progress; only a create starts one.
-            let creates = frame_type(info.body) == "response.create";
-            match state.sends.last_mut() {
-                Some(current) if current.websocket && !creates => current.request_frames.push(frame),
-                _ => {
+            // progress, the oldest still waiting, as responses are matched; only a
+            // create starts one.
+            let joins = (frame_type(info.body) != "response.create")
+                .then(|| {
+                    let sends = &state.sends;
+                    sends
+                        .iter()
+                        .position(|send| send.websocket && !send.dead)
+                        .or_else(|| sends.len().checked_sub(1).filter(|&last| sends[last].websocket))
+                })
+                .flatten();
+            match joins {
+                Some(index) => state.sends[index].request_frames.push(frame),
+                None => {
                     let mut send = self.open(true);
                     send.request_frames.push(frame);
                     state.sends.push(send);
