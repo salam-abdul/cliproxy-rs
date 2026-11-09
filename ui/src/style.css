@@ -286,6 +286,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 
 /* Page exceptions */
 .accounts .item { width: 100%; }
+.accounts .pick { display: flex; align-items: center; gap: var(--s3); }
 .accounts .name { flex: 1; }
 .accounts .name strong, .accounts .name small { white-space: normal; overflow-wrap: anywhere; }
 .accounts .state-label { max-width: 21rem; text-align: right; }

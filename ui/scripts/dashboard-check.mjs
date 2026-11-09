@@ -12,7 +12,8 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
-let historyHold, historyRelease, historyFailure = false, credsFailure = false;
+let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false;
+const statusCalls = [], deleteBodies = [];
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
@@ -55,6 +56,14 @@ await page.route("**/*", async route => {
       errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
+  if (path === "/v8/management/credentials/status") {
+    const body = request.postDataJSON();
+    statusCalls.push(body);
+    if (!body.disabled && body.name === "disabled.json") return route.fulfill({status:409,json:{error:"Locked"}});
+    creds.find(a => a.name === body.name).disabled = body.disabled;
+    return send({});
+  }
+  if (path === "/v8/management/credentials" && request.method() === "DELETE") { deleteBodies.push(request.postDataJSON()); return send({status:"ok"}); }
   if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds });
   if (path === "/v8/management/observability/claude/usage") {
     assert.equal(request.method(), "GET");
@@ -220,7 +229,7 @@ try {
   await page.getByText("Advanced account settings", {exact:true}).click();
   await page.getByLabel("Note",{exact:true}).fill("Synthetic draft");
   let dialogs = 0;
-  page.on("dialog", async dialog => {dialogs++; await dialog.dismiss();});
+  page.on("dialog", async dialog => {dialogs++; await (acceptDialogs ? dialog.accept() : dialog.dismiss());});
   await page.keyboard.press("Escape");
   await settle();
   assert.equal(dialogs, 1, "unsaved account fields guard closing the details");
@@ -329,6 +338,25 @@ try {
   assert.equal(await page.getByText("No accounts connected.").count(),0,"a failed first read is not an empty account list");
   assert.equal(await page.getByText("Refresh failed. Showing the last readings.",{exact:true}).count(),0,"a failed account read reports one error");
   credsFailure = false;
+  await page.goto("http://dashboard.test/management.html#credentials");
+  await page.getByRole("button",{name:"Select shown",exact:true}).click();
+  await page.getByText("2 selected",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"Disable",exact:true}).click();
+  await page.getByText("2 accounts disabled.",{exact:true}).waitFor();
+  assert.deepEqual(statusCalls.splice(0), [{name:"account-a.json",auth_index:"a",disabled:true},{name:"disabled.json",auth_index:"b",disabled:true}]);
+  await page.getByRole("button",{name:"Enable",exact:true}).click();
+  await page.getByText("1 failed: disabled.json (Locked)",{exact:true}).waitFor();
+  assert.equal(statusCalls.splice(0).length, 2, "one failure does not stop the others");
+  assert.equal(creds[0].disabled, false);
+  await page.getByLabel("Select account-a.json",{exact:true}).uncheck();
+  await page.getByText("1 selected",{exact:true}).waitFor();
+  acceptDialogs = true;
+  await page.getByRole("button",{name:"Delete",exact:true}).click();
+  await page.getByText("1 account file deleted.",{exact:true}).waitFor();
+  acceptDialogs = false;
+  assert.deepEqual(deleteBodies, [{names:["disabled.json"]}]);
+  await page.getByText(/^Select accounts to enable/).waitFor();
+  delete creds[0].disabled; creds[1].disabled = true;
   await page.goto("http://dashboard.test/management.html#logs");
   const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
   await status.waitFor();
@@ -370,5 +398,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
