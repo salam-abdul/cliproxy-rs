@@ -86,13 +86,23 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
     if selector.is_empty() {
         bail!("history delete needs at least one of --from, --to, --session, --account or --model");
     }
+    if let (Some(from), Some(to)) = (selector.from, selector.to)
+        && from >= to
+    {
+        bail!("history delete needs --from earlier than --to");
+    }
     let mut report = Report::default();
     if dry_run && !dir.exists() {
         return Ok(report);
     }
     let asked = Utc::now();
     let cutoff = asked.timestamp_micros();
-    let matches = |row: &Row| row.started_at_us < cutoff && selector.matches(row);
+    // Earlier deletes still pending go too: a server that could not apply them may
+    // have stopped since.
+    let pending = pending_tombstones(dir);
+    let matches = |row: &Row| {
+        (row.started_at_us < cutoff && selector.matches(row)) || pending.iter().any(|stone| stone.matches(row))
+    };
     // A server may be buffering its first rows with nothing on disk yet.
     super::file::private_dir(dir)?;
     let _lock = if dry_run {
@@ -181,6 +191,8 @@ fn write_tombstone(dir: &Path, selector: &Selector, created_us: i64) -> anyhow::
     let folder = dir.join(TOMBSTONES);
     // Tombstones name sessions and accounts: as private as the history itself.
     super::file::private_dir(&folder)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     let time = |t: Option<DateTime<Utc>>| t.map(|t| t.timestamp_micros());
     let body = serde_json::json!({
         "created": created_us,

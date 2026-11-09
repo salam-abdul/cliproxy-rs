@@ -15,7 +15,7 @@ use cpa_core::config::Config;
 
 use super::Settings;
 use super::delete::{apply_tombstones, expire_tombstones, pending_tombstones};
-use super::file::{ParquetFile, Row, body_columns, history_files, remove_empty_partitions};
+use super::file::{ParquetFile, Row, body_columns, history_files, partial_pid, remove_empty_partitions};
 use super::lock::{DirLock, is_abandoned};
 
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
@@ -108,7 +108,7 @@ impl Body {
     /// Appends one scanned line, with `\n` between lines.
     pub(crate) fn push_line(&mut self, line: &[u8]) {
         if std::mem::replace(&mut self.lines, true) {
-            self.push_slice(b"\n");
+            self.push_bytes(&Bytes::from_static(b"\n"));
         }
         self.push_slice(line);
     }
@@ -205,7 +205,7 @@ impl Default for Limits {
 }
 
 enum Command {
-    Row(Box<PendingRow>, Arc<Option<Settings>>),
+    Row(Box<PendingRow>, Settings),
     Shutdown(SyncSender<()>),
     #[cfg(test)]
     Flush(SyncSender<()>),
@@ -258,7 +258,8 @@ impl Writer {
     }
 
     /// Rows dropped or not written since start.
-    pub fn lost(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn lost(&self) -> u64 {
         self.lost.load(Ordering::Relaxed)
     }
 
@@ -268,10 +269,25 @@ impl Writer {
         if settings.is_none() {
             return;
         }
-        let Some(tx) = self.sender() else { return };
+        let Some(settings) = settings.as_ref().clone() else {
+            return;
+        };
+        let Some(tx) = self.sender() else {
+            if self.lost.fetch_add(1, Ordering::Relaxed) == 0 || self.closed() {
+                tracing::warn!("history: a row arrived after the writer stopped and was not written");
+            }
+            return;
+        };
         if tx.try_send(Command::Row(Box::new(row), settings)).is_err() {
             self.lost.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn closed(&self) -> bool {
+        matches!(
+            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            State::Closed
+        )
     }
 
     fn sender(&self) -> Option<SyncSender<Command>> {
@@ -367,7 +383,7 @@ impl Writer {
 
     /// Blocks the writer thread until the returned sender is dropped.
     #[cfg(test)]
-    pub(crate) fn pause(&self, _cfg: &Config) -> SyncSender<()> {
+    pub(crate) fn pause(&self) -> SyncSender<()> {
         let (release, wait) = sync_channel(1);
         self.call(|ack| Command::Pause(ack, wait));
         release
@@ -397,6 +413,8 @@ struct Worker {
     /// When to try pending deletes again after the history lock was busy or a rewrite
     /// failed.
     retry_deletes: Option<Instant>,
+    /// The last attempt to apply pending deletes failed; its warning was logged.
+    delete_failed: bool,
 }
 
 impl Worker {
@@ -414,17 +432,14 @@ impl Worker {
             maintained: None,
             decoder: None,
             retry_deletes: None,
+            delete_failed: false,
         }
     }
 
     fn run(mut self) {
         loop {
             match self.rx.recv_timeout(self.next_deadline()) {
-                Ok(Command::Row(row, settings)) => {
-                    if let Some(settings) = settings.as_ref() {
-                        self.row(*row, settings);
-                    }
-                }
+                Ok(Command::Row(row, settings)) => self.row(*row, &settings),
                 Ok(Command::Shutdown(ack)) => {
                     self.rotate();
                     let _ = ack.send(());
@@ -518,18 +533,34 @@ impl Worker {
             self.retry_deletes = retry;
             return;
         };
-        for file in files.iter().filter(|file| file.modified_us >= since) {
+        // A file open during a delete started that day or the day before: rotation
+        // closes every file at UTC midnight. Dates, not timestamps, so a file synced
+        // before the delete but published after it is still covered.
+        let first_day = DateTime::from_timestamp_micros(since)
+            .map(|at| at.date_naive() - chrono::Days::new(1))
+            .map(|day| format!("date={}", day.format("%Y-%m-%d")));
+        let mut failed = false;
+        for file in files
+            .iter()
+            .filter(|file| first_day.as_ref().is_none_or(|day| file.partition >= *day))
+        {
             match apply_tombstones(&file.path, &stones) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    tracing::warn!(
-                        "history: cannot apply a pending delete to {}: {error}",
-                        file.path.display()
-                    );
-                    self.retry_deletes = retry;
+                    if !self.delete_failed {
+                        tracing::warn!(
+                            "history: cannot apply a pending delete to {}: {error}; retrying",
+                            file.path.display()
+                        );
+                    }
+                    failed = true;
                 }
             }
+        }
+        self.delete_failed = failed;
+        if failed {
+            self.retry_deletes = retry;
         }
     }
 
@@ -589,7 +620,7 @@ impl Worker {
         row.request_bytes = i64::try_from(request.total()).unwrap_or(i64::MAX);
         row.request_truncated = request.truncated();
         if request.total() > 0 {
-            (row.request_body, row.request_body_raw) = body_columns(request.into_vec());
+            (row.request_body, row.request_body_raw) = body_columns(request.into_vec(), row.request_truncated);
         }
         row.response_bytes = i64::try_from(response.total()).unwrap_or(i64::MAX);
         row.response_truncated = response.truncated();
@@ -600,7 +631,7 @@ impl Worker {
                 (body, failed) = self.decode(body, &encoding);
                 row.response_truncated |= failed;
             }
-            (row.response_body, row.response_body_raw) = body_columns(body);
+            (row.response_body, row.response_body_raw) = body_columns(body, row.response_truncated);
         }
         let frames = |bodies: Option<Vec<Body>>, truncated: &mut bool| {
             bodies.map(|bodies| {
@@ -701,12 +732,15 @@ impl Worker {
     fn maintain(&mut self) {
         self.maintained = Some(Instant::now());
         let Some(settings) = &self.settings else { return };
-        remove_dead_partials(&settings.dir);
-        expire_tombstones(&settings.dir, Utc::now());
-        if let Some(cap) = settings.max_total_bytes {
-            apply_cap(&settings.dir, cap);
-        }
+        let dir = settings.dir.clone();
+        let cap = settings.max_total_bytes;
+        remove_dead_partials(&dir);
+        // Applied before any expires, so a delete waiting since the last run counts.
         self.apply_deletes();
+        expire_tombstones(&dir, Utc::now());
+        if let Some(cap) = cap {
+            apply_cap(&dir, cap);
+        }
     }
 }
 
@@ -800,7 +834,10 @@ fn remove_dead_partials(dir: &Path) {
             continue;
         };
         for file in files.flatten() {
-            if file.file_name().to_string_lossy().ends_with(".partial")
+            let name = file.file_name().to_string_lossy().into_owned();
+            // This process's own files are open and locked here; probing them would
+            // release that lock where the OS emulates flock with process-wide locks.
+            if partial_pid(&name).is_some_and(|pid| pid != std::process::id())
                 && is_abandoned(&file.path()).unwrap_or(false)
                 && std::fs::remove_file(file.path()).is_ok()
             {

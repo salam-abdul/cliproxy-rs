@@ -139,14 +139,14 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
 | `usage.claude-cache-telemetry` | `false` by default. With usage collection and management on, `true` adds content-free cache observations of the final request bytes to the usage queue and RESP channel. It costs parsing and hashing per request, sends no extra requests and changes no cache markers or request bytes. |
 | `history.enable` | `false` by default. `true` records every request sent to a model and its response in Parquet files under `history.dir`. See [history](#history). |
-| `history.dir` | The history folder. Required: with `enable: true` and no `dir`, history stays off and the log says so. Use an absolute path outside any repository or synced folder; a relative path resolves against the working directory. `~` is the home directory. |
+| `history.dir` | The history folder, an absolute path outside any repository or synced folder; `~` is the home directory. Required: with `enable: true` and no `dir` or a relative one, history stays off and the log says so. |
 | `history.max-total-size-mb` | `10240` by default. When the files exceed it, the oldest are deleted. `0` keeps everything. There is no age limit. |
 
 ### History
 
-History keeps one row per upstream send: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.
+History keeps one row per upstream send, except in commercial mode, which turns it off: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.
 
-Each row has the exchange's request ID, the WebSocket turn and send number, start and end times, provider, requested, upstream and reported model, account (its email, or its credential ID), session, user agent, stream flag, upstream status, outcome (`complete`, `failed`, `failover`, `stream_error`, `transport_lost`, `cancelled`), error text, token counts including cache reads and writes, latency, time to first byte, the provider's request ID, and both bodies.
+Each row has the exchange's request ID, the WebSocket turn and send number, start and end times, provider, requested, upstream and reported model, account (its email, or its credential ID), session, user agent, stream flag, upstream status, outcome (`complete`, `failed` or `cancelled`; native rows also use `failover`, `stream_error` and `transport_lost`, where the translating proxy records `failed`), error text, token counts including cache reads and writes, latency, time to first byte, the provider's request ID, and both bodies.
 
 | Body | What is stored |
 | --- | --- |
@@ -154,7 +154,8 @@ Each row has the exchange's request ID, the WebSocket turn and send number, star
 | Buffered response | The body as received, decoded from its content encoding. |
 | Streamed response, translating proxy | Each line the executor read, joined with `\n`. For Claude this is the event stream as received, without its last line ending; line endings, and any line an executor does not read, can differ from the bytes received. |
 | Native response | The bytes received, decoded from their content encoding. |
-| WebSocket frames | One list entry per frame in `request_frames` and `response_frames`. |
+| WebSocket frames | One list entry per frame, as text, in `request_frames` and `response_frames`. A turn starts at its `response.create` frame; steering frames join the turn in progress, and the row is written as soon as the turn's response ends. |
+| Native failover | No response body: the router does not read the body of a response it fails over from. |
 
 `request_bytes` and `response_bytes` are the full sizes as received, before the cap; for a native response that is its encoded size. Text bodies are in `request_body` and `response_body`; a body that is not UTF-8 goes in `request_body_raw` or `response_body_raw` instead. A body keeps its first 32 MiB, and `request_truncated` or `response_truncated` marks one that was cut.
 
@@ -186,7 +187,7 @@ sends.filter(pl.col("outcome") == "complete").select("started_at", "model", "req
 | Flag | Rows deleted |
 | --- | --- |
 | `--from TIME` | Started at or after `TIME` (`YYYY-MM-DD` in UTC, or RFC 3339). |
-| `--to TIME` | Started before `TIME`. |
+| `--to TIME` | Started before `TIME`, which must be later than `--from`. |
 | `--session ID` | Of this session. |
 | `--account LABEL` | Of this account. |
 | `--model NAME` | For this upstream model or the model the client asked for. |

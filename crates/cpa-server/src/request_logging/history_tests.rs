@@ -29,3 +29,9 @@ fn history_dir_expands_the_home_directory() {
     let on = settings("observability: {history: {enable: true, dir: ~/h}}").unwrap();
     assert_eq!(on.dir, std::path::PathBuf::from(home).join("h"));
 }
+
+#[test]
+fn a_relative_history_dir_keeps_history_off() {
+    assert!(settings("observability: {history: {enable: true, dir: history}}").is_none());
+    assert!(configured_dir(&crate::testing::config("observability: {history: {dir: history}}")).is_none());
+}

@@ -358,72 +358,311 @@ fn facts_rebuilt_for_a_bootstrap_retry_keep_counting_sends() {
         )
     };
     let (first, retry) = (facts(), facts());
-    first.history_sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(retry.history_sends.load(std::sync::atomic::Ordering::Relaxed), 1);
+    first.history.sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(retry.history.sends.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+fn exchange(connection: &str, turn: i32) -> super::HistoryExchange {
+    super::HistoryExchange {
+        sends: Default::default(),
+        turn: Some((connection.into(), turn)),
+    }
+}
+
+fn base(stream: bool) -> super::AttemptBase {
+    super::AttemptBase {
+        endpoint: "GET /v1/responses".into(),
+        provider: "codex".into(),
+        model_requested: "gpt-fixture".into(),
+        model: "gpt-fixture".into(),
+        account: "acct".into(),
+        auth_index: String::new(),
+        session_id: String::new(),
+        user_agent: String::new(),
+        stream,
+    }
+}
+
+fn dropped() -> super::AttemptEnd {
+    super::AttemptEnd {
+        response_model: String::new(),
+        detail: Default::default(),
+        latency_ms: 5,
+        ttft_ms: None,
+        outcome: Outcome::Cancelled,
+        status: None,
+        error: None,
+    }
+}
+
+fn frame(body: &'static [u8]) -> cpa_core::exec::UpstreamRequest<'static> {
+    cpa_core::exec::UpstreamRequest {
+        url: "wss://upstream.invalid/responses",
+        method: "WEBSOCKET",
+        body,
+        ..cpa_core::exec::UpstreamRequest::default()
+    }
 }
 
 #[tokio::test]
 async fn websocket_frames_are_kept_per_send() {
-    use cpa_core::exec::{CaptureEvent, UpstreamRequest};
+    use cpa_core::exec::CaptureEvent;
     let _registry = REGISTRY.lock().await;
     let dir = TempDir::new();
     let proxy = proxy(Some(&dir.0), &[], 1).await;
-    let sends = super::Sends::new("conn".into(), 3, Default::default(), proxy.rt.history().budget());
+    let sends = super::Sends::new(&exchange("conn", 3), "", proxy.rt.history().budget());
+    sends.set_base(proxy.rt.clone(), base(true));
     let sink = super::tee(cpa_core::exec::CaptureSink::default(), sends.clone());
-    let frame = |body: &'static [u8]| UpstreamRequest {
-        url: "wss://upstream.invalid/responses",
-        method: "WEBSOCKET",
-        body,
-        ..UpstreamRequest::default()
-    };
     // A dial without a payload opens no send.
     sink.record(CaptureEvent::WebsocketRequest(frame(b"")));
-    sink.record(CaptureEvent::WebsocketRequest(frame(b"{\"input\":\"a\nb\"}")));
+    sink.record(CaptureEvent::WebsocketRequest(frame(
+        b"{\"type\":\"response.create\",\"input\":\"a\nb\"}",
+    )));
     sink.record(CaptureEvent::WebsocketHandshake(
         101,
         &[("X-Request-Id".into(), "ws_1".into())],
     ));
     sink.record(CaptureEvent::WebsocketResponse(b"{\"type\":\"response.created\"}"));
-    sink.record(CaptureEvent::WebsocketResponse(b"{\"type\":\"response.completed\"}"));
-    sends.emit(
-        &proxy.rt,
-        super::AttemptFacts {
-            endpoint: "GET /v1/responses".into(),
-            provider: "codex".into(),
-            model_requested: String::new(),
-            model: "gpt-fixture".into(),
-            response_model: String::new(),
-            account: "acct".into(),
-            auth_index: String::new(),
-            session_id: String::new(),
-            user_agent: String::new(),
-            stream: true,
-            detail: Default::default(),
-            latency_ms: 5,
-            ttft_ms: 0,
-            outcome: Outcome::Complete,
-            status: None,
-            error: None,
-        },
-    );
+    sink.record(CaptureEvent::WebsocketResponse(b"{\"type\":\"response.in_progress\"}"));
+    sends.finish(&proxy.rt, dropped());
     let rows = rows(&proxy, &dir.0, 1).await;
     let row = &rows[0];
     assert_eq!((row.exchange_id.as_str(), row.turn, row.send), ("conn", 3, 0));
     assert_eq!(row.transport.as_deref(), Some("websocket"));
     assert_eq!(
         row.request_frames.as_deref(),
-        Some(&["{\"input\":\"a\nb\"}".to_owned()][..])
+        Some(&["{\"type\":\"response.create\",\"input\":\"a\nb\"}".to_owned()][..])
     );
     assert_eq!(
         row.response_frames.as_deref(),
         Some(
             &[
                 "{\"type\":\"response.created\"}".to_owned(),
-                "{\"type\":\"response.completed\"}".to_owned()
+                "{\"type\":\"response.in_progress\"}".to_owned()
             ][..]
         )
     );
     assert_eq!(row.status, Some(101));
+    assert_eq!(row.outcome, Outcome::Cancelled);
     assert_eq!(row.upstream_request_id.as_deref(), Some("ws_1"));
     assert_eq!(row.request_body, None);
+}
+
+#[tokio::test]
+async fn duplex_turns_become_rows_as_their_responses_complete() {
+    use cpa_core::exec::CaptureEvent;
+    const DONE_1: &[u8] = br#"{"type":"response.completed","response":{"id":"r1","model":"gpt-fixture-1","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}"#;
+    const DONE_2: &[u8] = br#"{"type":"response.failed","response":{"id":"r2"}}"#;
+    let _registry = REGISTRY.lock().await;
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &[], 1).await;
+    let sends = super::Sends::new(&exchange("conn", 0), "", proxy.rt.history().budget());
+    sends.set_base(proxy.rt.clone(), base(true));
+    let sink = super::tee(cpa_core::exec::CaptureSink::default(), sends.clone());
+    sink.record(CaptureEvent::WebsocketRequest(frame(
+        br#"{"type":"response.create","input":"one"}"#,
+    )));
+    sink.record(CaptureEvent::WebsocketResponse(br#"{"type":"response.created"}"#));
+    sink.record(CaptureEvent::WebsocketResponse(DONE_1));
+    sink.record(CaptureEvent::WebsocketRequest(frame(
+        br#"{"type":"response.create","input":"two"}"#,
+    )));
+    sink.record(CaptureEvent::WebsocketResponse(br#"{"type":"response.created"}"#));
+    sink.record(CaptureEvent::WebsocketRequest(frame(
+        br#"{"type":"response.steer","input":"faster"}"#,
+    )));
+    sink.record(CaptureEvent::WebsocketResponse(DONE_2));
+    // Both turns are written while the connection is still open.
+    let rows = rows(&proxy, &dir.0, 2).await;
+    assert_eq!((rows[0].send, rows[1].send), (0, 1));
+    assert_eq!(rows[0].outcome, Outcome::Complete);
+    assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (Some(3), Some(2)));
+    assert_eq!(rows[0].response_model.as_deref(), Some("gpt-fixture-1"));
+    assert_eq!(rows[1].outcome, Outcome::Failed);
+    assert_eq!(
+        rows[1].request_frames.as_ref().map(Vec::len),
+        Some(2),
+        "the steer joins its turn"
+    );
+    assert_eq!(rows[1].response_frames.as_ref().map(Vec::len), Some(2));
+    // The attempt ends with no turn open: nothing more is written.
+    sends.finish(&proxy.rt, dropped());
+    let history = proxy.rt.clone();
+    tokio::task::spawn_blocking(move || history.history().flush())
+        .await
+        .unwrap();
+    assert_eq!(rows_in(&dir.0).len(), 2);
+}
+
+#[tokio::test]
+async fn events_without_an_open_send_are_ignored() {
+    use cpa_core::exec::CaptureEvent;
+    let _registry = REGISTRY.lock().await;
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &[], 1).await;
+    let sends = super::Sends::new(&exchange("conn", 0), "", proxy.rt.history().budget());
+    sends.set_base(proxy.rt.clone(), base(false));
+    let sink = super::tee(cpa_core::exec::CaptureSink::default(), sends.clone());
+    sink.record(CaptureEvent::ResponseError("dial failed"));
+    sink.record(CaptureEvent::ResponseChunk(b"late"));
+    sends.finish(&proxy.rt, dropped());
+    let history = proxy.rt.clone();
+    tokio::task::spawn_blocking(move || history.history().flush())
+        .await
+        .unwrap();
+    assert!(rows_in(&dir.0).is_empty());
+}
+
+#[tokio::test]
+async fn a_stream_stopped_at_its_error_event_is_a_failed_row() {
+    use cpa_core::exec::CaptureEvent;
+    let _registry = REGISTRY.lock().await;
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &[], 1).await;
+    let sends = super::Sends::new(&exchange("ex", 0), "", proxy.rt.history().budget());
+    sends.set_base(proxy.rt.clone(), base(true));
+    let sink = super::tee(cpa_core::exec::CaptureSink::default(), sends.clone());
+    sink.record(CaptureEvent::Request(cpa_core::exec::UpstreamRequest {
+        body: b"{}",
+        ..cpa_core::exec::UpstreamRequest::default()
+    }));
+    sink.record(CaptureEvent::ResponseMetadata(200, &[]));
+    sink.record(CaptureEvent::ResponseChunk(b"event: error"));
+    sink.record(CaptureEvent::ResponseChunk(
+        br#"data: {"type":"error","error":{"message":"overloaded"}}"#,
+    ));
+    // The tracker sees the stream dropped, not failed.
+    sends.finish(&proxy.rt, dropped());
+    let rows = rows(&proxy, &dir.0, 1).await;
+    assert_eq!(rows[0].outcome, Outcome::Failed);
+}
+
+fn create(input: &str) -> Vec<u8> {
+    format!(r#"{{"type":"response.create","input":"{input}"}}"#).into_bytes()
+}
+
+fn terminal(id: &str, tokens: i64) -> Vec<u8> {
+    format!(
+        r#"{{"type":"response.completed","response":{{"id":"{id}","usage":{{"input_tokens":{tokens},"output_tokens":1,"total_tokens":{}}}}}}}"#,
+        tokens + 1
+    )
+    .into_bytes()
+}
+
+async fn steered(events: impl FnOnce(&CaptureSink)) -> (Proxy, TempDir, std::sync::Arc<super::Sends>) {
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &[], 1).await;
+    let sends = super::Sends::new(&exchange("conn", 0), "", proxy.rt.history().budget());
+    sends.set_base(proxy.rt.clone(), base(true));
+    events(&super::tee(CaptureSink::default(), sends.clone()));
+    (proxy, dir, sends)
+}
+
+use cpa_core::exec::{CaptureEvent as E, CaptureSink};
+
+#[tokio::test]
+async fn pipelined_turns_keep_their_own_requests_and_responses() {
+    let _registry = REGISTRY.lock().await;
+    let (a, b, done_a, done_b) = (create("a"), create("b"), terminal("ra", 10), terminal("rb", 20));
+    let (proxy, dir, _sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketRequest(frame(Box::leak(b.into_boxed_slice()))));
+        sink.record(E::WebsocketResponse(&done_a));
+        sink.record(E::WebsocketResponse(&done_b));
+    })
+    .await;
+    let rows = rows(&proxy, &dir.0, 2).await;
+    assert!(rows[0].request_frames.as_ref().unwrap()[0].contains("\"a\""));
+    assert_eq!(rows[0].input_tokens, Some(10));
+    assert!(rows[1].request_frames.as_ref().unwrap()[0].contains("\"b\""));
+    assert_eq!(rows[1].input_tokens, Some(20));
+}
+
+#[tokio::test]
+async fn an_automatic_successor_response_gets_its_own_row() {
+    let _registry = REGISTRY.lock().await;
+    let a = create("a");
+    let (done_a, done_next) = (terminal("ra", 10), terminal("rnext", 30));
+    let (proxy, dir, _sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketRequest(frame(
+            br#"{"type":"response.steer","input":"more"}"#,
+        )));
+        sink.record(E::WebsocketResponse(&done_a));
+        sink.record(E::WebsocketResponse(
+            br#"{"type":"response.created","response":{"id":"rnext"}}"#,
+        ));
+        sink.record(E::WebsocketResponse(&done_next));
+    })
+    .await;
+    let rows = rows(&proxy, &dir.0, 2).await;
+    assert_eq!(rows[1].input_tokens, Some(30));
+    assert_eq!(rows[1].request_frames.as_deref(), Some(&[][..]));
+}
+
+#[tokio::test]
+async fn a_resent_turn_takes_the_response_not_the_failed_send() {
+    let _registry = REGISTRY.lock().await;
+    let (a, again, done) = (create("a"), create("a"), terminal("ra", 10));
+    let (proxy, dir, sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketError {
+            stage: "send",
+            error: "broken pipe",
+        });
+        sink.record(E::WebsocketRequest(frame(Box::leak(again.into_boxed_slice()))));
+        sink.record(E::WebsocketResponse(&done));
+    })
+    .await;
+    sends.finish(&proxy.rt, dropped());
+    let rows = rows(&proxy, &dir.0, 2).await;
+    let by_send = |n: i32| rows.iter().find(|r| r.send == n).unwrap();
+    assert_eq!(by_send(0).outcome, Outcome::Failed);
+    assert_eq!(by_send(0).response_frames.as_deref(), Some(&[][..]));
+    assert_eq!(by_send(1).outcome, Outcome::Complete);
+    assert_eq!(by_send(1).input_tokens, Some(10));
+}
+
+#[tokio::test]
+async fn a_turn_left_open_does_not_repeat_an_earlier_turns_usage() {
+    let _registry = REGISTRY.lock().await;
+    let (a, b, done_a) = (create("a"), create("b"), terminal("ra", 10));
+    let (proxy, dir, sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketResponse(&done_a));
+        sink.record(E::WebsocketRequest(frame(Box::leak(b.into_boxed_slice()))));
+    })
+    .await;
+    // The tracker reports the first terminal's usage for the whole attempt.
+    let mut end = dropped();
+    end.detail = crate::usage_record::parse_codex(&terminal("ra", 10)).unwrap();
+    sends.finish(&proxy.rt, end);
+    let rows = rows(&proxy, &dir.0, 2).await;
+    let open = rows.iter().find(|r| r.send == 1).unwrap();
+    assert_eq!(open.outcome, Outcome::Cancelled);
+    assert_eq!(open.input_tokens, None);
+}
+
+#[tokio::test]
+async fn a_websocket_turn_records_time_to_first_frame() {
+    let _registry = REGISTRY.lock().await;
+    let (a, done) = (create("a"), terminal("ra", 10));
+    let (proxy, dir, _sends) = steered(|sink| {
+        sink.record(E::WebsocketRequest(frame(Box::leak(a.into_boxed_slice()))));
+        sink.record(E::WebsocketResponse(br#"{"type":"response.created"}"#));
+        sink.record(E::WebsocketResponse(&done));
+    })
+    .await;
+    let rows = rows(&proxy, &dir.0, 1).await;
+    assert!(rows[0].ttft_ms.is_some());
+}
+
+#[test]
+fn a_usage_detail_with_only_a_service_tier_writes_no_tokens() {
+    let mut row = Row::default();
+    row.set_tokens(&crate::usage_record::Detail {
+        response_service_tier: "flex".into(),
+        ..Default::default()
+    });
+    assert_eq!((row.input_tokens, row.total_tokens), (None, None));
 }

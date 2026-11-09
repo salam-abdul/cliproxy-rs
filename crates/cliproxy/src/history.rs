@@ -72,7 +72,8 @@ fn execute(args: HistoryArgs) -> anyhow::Result<String> {
     // Parsed, not loaded: loading rewrites a plaintext management key into the file.
     let text = std::fs::read_to_string(&args.config).with_context(|| format!("read {}", args.config.display()))?;
     let config = cpa_core::config::Config::parse(&text).with_context(|| format!("parse {}", args.config.display()))?;
-    let dir = configured_dir(&config).context("history is not configured: set observability.history.dir")?;
+    let dir = configured_dir(&config)
+        .context("history is not configured: set observability.history.dir to an absolute path")?;
     let time = |value: &Option<String>| value.as_deref().map(parse_time).transpose();
     let selector = Selector {
         from: time(&args.from)?,

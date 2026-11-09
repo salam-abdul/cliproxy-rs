@@ -163,6 +163,7 @@ fn shutdown_flushes_buffered_rows_within_the_wait() {
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     assert!(!writer.is_running());
     assert_eq!(all_rows(&dir.0).len(), 1);
+    assert_eq!(writer.lost(), 1, "a row after shutdown is counted");
 }
 
 fn dead_pid() -> u32 {
@@ -199,6 +200,7 @@ fn a_live_processes_partial_survives_startup_cleanup() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&live)
         .unwrap();
     assert!(crate::request_logging::history::lock::try_lock(&held).unwrap());
@@ -257,7 +259,7 @@ fn a_full_channel_drops_rows_and_counts_them() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
     let cfg = on(&dir.0);
-    let release = writer.pause(&cfg);
+    let release = writer.pause();
     for i in 0..CHANNEL {
         writer.submit(&cfg, pending(&writer, &format!("r{i}"), b"x", &[]));
     }
@@ -368,4 +370,24 @@ fn age_rotation_happens_while_rows_keep_arriving() {
     // A barrier that runs no timers: only the row itself can trigger the rotation.
     writer.sync();
     assert_eq!(parquet_files(&dir.0).len(), 1);
+}
+
+#[test]
+fn a_body_cut_inside_a_character_stays_text() {
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    let mut p = PendingRow::new(row("a"), writer.budget());
+    // 'é' is two bytes; the cap falls between them.
+    let mut body = vec![b'a'; (BODY_CAP - 1) as usize];
+    body.extend_from_slice("é".as_bytes());
+    p.response.push_bytes(&Bytes::from(body));
+    writer.submit(&on(&dir.0), p);
+    writer.flush();
+    let rows = all_rows(&dir.0);
+    assert!(rows[0].response_truncated);
+    assert_eq!(rows[0].response_body_raw, None);
+    assert_eq!(
+        rows[0].response_body.as_ref().map(String::len),
+        Some((BODY_CAP - 1) as usize)
+    );
 }

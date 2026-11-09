@@ -32,14 +32,14 @@ pub(crate) struct NativeCapture {
     pending: Option<PendingRow>,
     /// The response's `content-length`, when it declared one.
     length: Option<u64>,
+    /// When the first response byte arrived, in microseconds since the epoch.
+    first_byte_us: Option<i64>,
 }
 
 /// How a native send ended.
 pub(crate) struct NativeEnd<'a> {
     pub(crate) stream: bool,
     pub(crate) outcome: Outcome,
-    pub(crate) latency_ms: i64,
-    pub(crate) ttft_ms: Option<i64>,
     pub(crate) detail: Option<&'a Detail>,
     pub(crate) error: Option<String>,
 }
@@ -50,7 +50,7 @@ impl NativeCapture {
         if !super::on(&rt.config()) {
             return None;
         }
-        let text = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+        let text = super::text;
         let row = Row {
             exchange_id: send.exchange_id.to_owned(),
             send: i32::try_from(send.send).unwrap_or(i32::MAX),
@@ -72,6 +72,7 @@ impl NativeCapture {
             rt: rt.clone(),
             pending: Some(pending),
             length: None,
+            first_byte_us: None,
         })
     }
 
@@ -83,7 +84,7 @@ impl NativeCapture {
             .and_then(|v| v.trim().parse().ok());
         let Some(pending) = self.pending.as_mut() else { return };
         pending.row.status = Some(i32::from(status));
-        pending.row.upstream_request_id = ["request-id", "x-request-id"]
+        pending.row.upstream_request_id = super::capture::REQUEST_ID_HEADERS
             .iter()
             .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()).map(str::to_owned));
         pending.response_encoding = headers
@@ -97,6 +98,9 @@ impl NativeCapture {
     /// A response chunk as received, still encoded.
     pub(crate) fn push(&mut self, chunk: &Bytes) {
         if let Some(pending) = self.pending.as_mut() {
+            if !chunk.is_empty() {
+                self.first_byte_us.get_or_insert_with(|| Utc::now().timestamp_micros());
+            }
             pending.response.push_bytes(chunk);
         }
     }
@@ -108,24 +112,21 @@ impl NativeCapture {
         // byte arrived; its status then decides.
         let delivered = self.length.is_some_and(|n| n == pending.response.total());
         let row = &mut pending.row;
-        row.ended_at_us = Some(Utc::now().timestamp_micros());
+        let now = Utc::now().timestamp_micros();
+        row.ended_at_us = Some(now);
+        // Timed from this send, not from the request's arrival: admission and earlier
+        // sends belong to other rows.
+        row.latency_ms = Some((now - row.started_at_us) / 1000);
+        row.ttft_ms = self.first_byte_us.map(|at| (at - row.started_at_us) / 1000);
         row.stream = end.stream;
         row.outcome = match end.outcome {
             Outcome::Cancelled if delivered && row.status.is_some_and(|s| s < 400) => Outcome::Complete,
             Outcome::Cancelled if delivered => Outcome::Failed,
             outcome => outcome,
         };
-        row.latency_ms = Some(end.latency_ms);
-        row.ttft_ms = end.ttft_ms;
         row.error = end.error.filter(|_| row.outcome != Outcome::Complete);
-        if let Some(detail) = end.detail.filter(|d| **d != Detail::default()) {
-            row.input_tokens = Some(detail.input);
-            row.output_tokens = Some(detail.output);
-            row.cache_read_tokens = Some(detail.cache_read);
-            row.cache_write_tokens = Some(detail.cache_creation);
-            row.cache_write_5m_tokens = detail.cache_creation_5m;
-            row.cache_write_1h_tokens = detail.cache_creation_1h;
-            row.total_tokens = Some(detail.total);
+        if let Some(detail) = end.detail {
+            row.set_tokens(detail);
         }
         self.rt.history().submit(&self.rt.config(), pending);
     }

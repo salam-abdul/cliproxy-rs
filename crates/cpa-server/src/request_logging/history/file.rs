@@ -123,8 +123,46 @@ pub struct Row {
     pub response_truncated: bool,
 }
 
+impl Row {
+    /// Token columns from a usage detail; all left empty when it reports no counts.
+    pub(crate) fn set_tokens(&mut self, detail: &crate::usage_record::Detail) {
+        let counts = [
+            detail.input,
+            detail.output,
+            detail.reasoning,
+            detail.cached,
+            detail.cache_read,
+            detail.cache_creation,
+            detail.total,
+        ];
+        if counts.iter().all(|n| *n == 0) && detail.cache_creation_5m.is_none() && detail.cache_creation_1h.is_none() {
+            return;
+        }
+        self.input_tokens = Some(detail.input);
+        self.output_tokens = Some(detail.output);
+        self.reasoning_tokens = Some(detail.reasoning);
+        self.cache_read_tokens = Some(if detail.cache_read > 0 {
+            detail.cache_read
+        } else {
+            detail.cached
+        });
+        self.cache_write_tokens = Some(detail.cache_creation);
+        self.cache_write_5m_tokens = detail.cache_creation_5m;
+        self.cache_write_1h_tokens = detail.cache_creation_1h;
+        self.total_tokens = Some(detail.total);
+    }
+}
+
 /// A body as a string column when it is UTF-8, else as the raw column: one of the two.
-pub(crate) fn body_columns(bytes: Vec<u8>) -> (Option<String>, Option<Vec<u8>>) {
+/// A `truncated` body cut inside a character loses that character's start, so a cut
+/// text body stays text.
+pub(crate) fn body_columns(mut bytes: Vec<u8>, truncated: bool) -> (Option<String>, Option<Vec<u8>>) {
+    if truncated
+        && let Err(error) = std::str::from_utf8(&bytes)
+        && error.error_len().is_none()
+    {
+        bytes.truncate(error.valid_up_to());
+    }
     match String::from_utf8(bytes) {
         Ok(text) => (Some(text), None),
         Err(error) => (None, Some(error.into_bytes())),
@@ -558,8 +596,7 @@ impl ParquetFile {
         Self::open(partition, stem, None)
     }
 
-    /// A file that replaces the finished file at `target` when it is finished. Its
-    /// `.partial` carries this process's PID, so startup cleanup elsewhere leaves it.
+    /// A file that replaces the finished file at `target` when it is finished.
     pub(crate) fn replacing(target: &Path) -> io::Result<Self> {
         let invalid = || {
             io::Error::new(
@@ -691,6 +728,7 @@ impl Drop for ParquetFile {
 }
 
 /// Every row of a history file, in order.
+#[cfg(test)]
 pub(crate) fn read_rows(path: &Path) -> io::Result<Vec<Row>> {
     let reader = SerializedFileReader::new(File::open(path)?).map_err(io_error)?;
     reader
@@ -747,6 +785,8 @@ pub(crate) fn rewrite_without(path: &Path, remove: impl Fn(&Row) -> bool) -> io:
             out.write_group(&rows)?;
         }
     }
+    // Closed before the file is replaced: Windows does not replace a file still open.
+    drop(reader);
     if removed == 0 {
         return Ok(0);
     }
@@ -765,8 +805,6 @@ pub(crate) struct HistoryFile {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) len: u64,
-    /// When it was last written, in microseconds since the epoch.
-    pub(crate) modified_us: i64,
 }
 
 /// The finished history files under `dir`, oldest first by partition date and name.
@@ -784,18 +822,12 @@ pub(crate) fn history_files(dir: &Path) -> io::Result<Vec<HistoryFile>> {
             if !is_history_file(&name) {
                 continue;
             }
-            let meta = file.metadata()?;
-            let modified_us = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+            let len = file.metadata()?.len();
             out.push(HistoryFile {
                 partition: partition_name.clone(),
                 name,
                 path: file.path(),
-                len: meta.len(),
-                modified_us,
+                len,
             });
         }
     }
@@ -812,6 +844,11 @@ pub(crate) fn remove_empty_partitions(dir: &Path) {
             let _ = std::fs::remove_dir(entry.path());
         }
     }
+}
+
+/// The PID in an in-progress file's name.
+pub(crate) fn partial_pid(name: &str) -> Option<u32> {
+    parse_name(name.strip_suffix(".partial")?)
 }
 
 /// Whether `name` is a finished history file this module wrote.

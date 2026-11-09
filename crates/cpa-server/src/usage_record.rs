@@ -1589,10 +1589,8 @@ pub struct Facts {
     pub prompt_prefix_hash: String,
     /// Shared by failover/refresh attempts, independent of credential changes.
     pub attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// History's send numbering, from the request's trace.
-    pub history_sends: std::sync::Arc<std::sync::atomic::AtomicI32>,
-    /// A websocket turn's connection ID and turn index.
-    pub history_turn: Option<(String, i32)>,
+    /// The exchange history files this request's sends under, from its trace.
+    pub(crate) history: crate::request_logging::history::capture::HistoryExchange,
 }
 
 impl Facts {
@@ -1622,8 +1620,7 @@ impl Facts {
             clock: trace.clock(),
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
             attempts: Default::default(),
-            history_sends: trace.history().0,
-            history_turn: trace.history().1,
+            history: trace.history(),
         }
     }
 }
@@ -1979,8 +1976,8 @@ pub struct Tracker {
     /// Attempt start time for queue telemetry.
     requested_at: chrono::DateTime<chrono::FixedOffset>,
     attempt: usize,
-    /// This attempt's sends and account, while history is on.
-    history: Option<(std::sync::Arc<crate::request_logging::history::capture::Sends>, String)>,
+    /// This attempt's sends, while history is on.
+    history: Option<std::sync::Arc<crate::request_logging::history::capture::Sends>>,
 }
 
 impl Tracker {
@@ -2066,10 +2063,22 @@ impl Tracker {
         sends: std::sync::Arc<crate::request_logging::history::capture::Sends>,
         credential: &cpa_core::credential::Credential,
     ) {
-        self.history = Some((
-            sends,
-            crate::request_logging::history::capture::account_label(credential),
-        ));
+        let client = self.client.as_ref().unwrap_or(&self.facts.client);
+        sends.set_base(
+            self.queue.clone(),
+            crate::request_logging::history::capture::AttemptBase {
+                endpoint: client.endpoint.clone(),
+                provider: self.record.provider.clone(),
+                model_requested: self.record.alias.clone(),
+                model: self.record.model.clone(),
+                account: crate::request_logging::history::capture::account_label(credential),
+                auth_index: self.record.auth_index.clone(),
+                session_id: client.session_id.clone(),
+                user_agent: client.user_agent.clone(),
+                stream: self.record.stream,
+            },
+        );
+        self.history = Some(sends);
     }
 
     /// The sink to hand the executor.
@@ -2230,24 +2239,16 @@ impl Tracker {
             record.reasoning_effort = effort;
         }
         let client = self.client.as_ref().unwrap_or(&self.facts.client);
-        if let Some((sends, account)) = history {
+        if let Some(sends) = history {
             use crate::request_logging::history::file::Outcome;
-            sends.emit(
+            sends.finish(
                 &self.queue,
-                crate::request_logging::history::capture::AttemptFacts {
-                    endpoint: client.endpoint.clone(),
-                    provider: record.provider.clone(),
-                    model_requested: record.alias.clone(),
-                    model: record.model.clone(),
+                crate::request_logging::history::capture::AttemptEnd {
                     response_model: record.response_model.clone(),
-                    account,
-                    auth_index: record.auth_index.clone(),
-                    session_id: client.session_id.clone(),
-                    user_agent: client.user_agent.clone(),
-                    stream: record.stream,
                     detail: record.detail.clone(),
                     latency_ms: record.latency_ms,
-                    ttft_ms: record.ttft_ms,
+                    // 0: no first byte was seen.
+                    ttft_ms: (record.ttft_ms > 0).then_some(record.ttft_ms),
                     outcome: if cancelled {
                         Outcome::Cancelled
                     } else if record.failed {
@@ -3002,8 +3003,7 @@ mod tests {
                 clock: Default::default(),
                 prompt_prefix_hash: String::new(),
                 attempts: Default::default(),
-                history_sends: Default::default(),
-                history_turn: None,
+                history: Default::default(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

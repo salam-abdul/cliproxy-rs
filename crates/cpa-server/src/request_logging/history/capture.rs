@@ -1,7 +1,7 @@
 //! Capture of the translating proxy's upstream sends. A tee in front of the request's
 //! capture sink hands every executor event to the existing sink unchanged and to a
-//! per-attempt [`Sends`] recorder; the usage tracker adds the attempt's metadata when
-//! it publishes, and each send becomes one row.
+//! per-attempt [`Sends`] recorder. Each send becomes one row: a WebSocket turn as soon
+//! as its response ends, the rest when the usage tracker publishes the attempt.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,7 +15,17 @@ use super::writer::{Body, Budget, PendingRow};
 use crate::usage_record::Detail;
 
 /// Response headers that carry the provider's request ID, in order of preference.
-const REQUEST_ID_HEADERS: [&str; 3] = ["request-id", "x-request-id", "openai-request-id"];
+pub(crate) const REQUEST_ID_HEADERS: [&str; 3] = ["request-id", "x-request-id", "openai-request-id"];
+
+/// Response-frame types that end a Responses WebSocket turn, and whether it succeeded.
+/// An incomplete response was answered, as over HTTP.
+const TERMINALS: [(&str, bool); 5] = [
+    ("response.completed", true),
+    ("response.done", true),
+    ("response.incomplete", true),
+    ("response.failed", false),
+    ("error", false),
+];
 
 struct SendCapture {
     index: i32,
@@ -28,6 +38,47 @@ struct SendCapture {
     status: Option<i32>,
     upstream_request_id: Option<String>,
     error: Option<String>,
+    /// The response carried an in-band error event.
+    saw_error: bool,
+    /// The send failed before any response: a resend replaces it.
+    dead: bool,
+    /// When the first response bytes arrived, in microseconds since the epoch.
+    first_byte_us: Option<i64>,
+}
+
+/// What an attempt is for, known when it starts.
+#[derive(Clone)]
+pub(crate) struct AttemptBase {
+    pub(crate) endpoint: String,
+    pub(crate) provider: String,
+    pub(crate) model_requested: String,
+    pub(crate) model: String,
+    pub(crate) account: String,
+    pub(crate) auth_index: String,
+    pub(crate) session_id: String,
+    pub(crate) user_agent: String,
+    pub(crate) stream: bool,
+}
+
+/// How an attempt ended, from the usage tracker.
+pub(crate) struct AttemptEnd {
+    pub(crate) response_model: String,
+    pub(crate) detail: Detail,
+    pub(crate) latency_ms: i64,
+    pub(crate) ttft_ms: Option<i64>,
+    pub(crate) outcome: Outcome,
+    pub(crate) status: Option<i32>,
+    pub(crate) error: Option<String>,
+}
+
+/// Which exchange and turn a request's sends belong to. Every attempt and bootstrap
+/// retry of the request shares one.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HistoryExchange {
+    /// Numbers the exchange's sends.
+    pub(crate) sends: Arc<AtomicI32>,
+    /// A WebSocket turn's connection ID and turn index.
+    pub(crate) turn: Option<(String, i32)>,
 }
 
 /// The sends of one dispatch attempt, in order.
@@ -36,19 +87,40 @@ pub(crate) struct Sends {
     turn: i32,
     counter: Arc<AtomicI32>,
     budget: Budget,
-    sends: Mutex<Vec<SendCapture>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    base: Option<(Arc<crate::Runtime>, AttemptBase)>,
+    sends: Vec<SendCapture>,
+    /// The attempt was published: later events belong to no send.
+    finished: bool,
+    /// A WebSocket turn was written with its own usage.
+    wrote_turn: bool,
 }
 
 impl Sends {
-    /// `counter` numbers sends across every attempt and retry of the exchange.
-    pub(crate) fn new(exchange_id: String, turn: i32, counter: Arc<AtomicI32>, budget: &Budget) -> Arc<Self> {
+    /// An HTTP exchange is named by its request ID; WebSocket turns by their connection.
+    pub(crate) fn new(exchange: &HistoryExchange, request_id: &str, budget: &Budget) -> Arc<Self> {
+        let (exchange_id, turn) = exchange.turn.clone().unwrap_or_else(|| (request_id.to_owned(), 0));
         Arc::new(Self {
             exchange_id,
             turn,
-            counter,
+            counter: exchange.sends.clone(),
             budget: budget.clone(),
-            sends: Mutex::default(),
+            state: Mutex::default(),
         })
+    }
+
+    /// What the attempt is for. A WebSocket turn is written once its response ends,
+    /// which needs this; it is set before the executor runs.
+    pub(crate) fn set_base(&self, rt: Arc<crate::Runtime>, base: AttemptBase) {
+        self.lock().base = Some((rt, base));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn open(&self, websocket: bool) -> SendCapture {
@@ -63,168 +135,237 @@ impl Sends {
             status: None,
             upstream_request_id: None,
             error: None,
+            saw_error: false,
+            dead: false,
+            first_byte_us: None,
         }
-    }
-
-    /// The send events after a request belong to.
-    fn current<R>(&self, f: impl FnOnce(&mut SendCapture) -> R) -> R {
-        let mut sends = self.sends.lock().unwrap_or_else(PoisonError::into_inner);
-        if sends.is_empty() {
-            let send = self.open(false);
-            sends.push(send);
-        }
-        let last = sends.len() - 1;
-        f(&mut sends[last])
     }
 
     fn request(&self, websocket: bool, info: &UpstreamRequest<'_>, body: Option<&Bytes>) {
-        // A websocket dial without a payload opens no send.
+        // A WebSocket dial without a payload opens no send.
         if websocket && info.body.is_empty() {
             return;
         }
-        let mut send = self.open(websocket);
+        let mut state = self.lock();
+        if state.finished {
+            return;
+        }
         if websocket {
             let mut frame = Body::new(&self.budget);
             frame.push_slice(info.body);
-            send.request_frames.push(frame);
+            // On a steered connection a steer or append frame belongs to the turn in
+            // progress; only a create starts one.
+            let creates = frame_type(info.body) == "response.create";
+            match state.sends.last_mut() {
+                Some(current) if current.websocket && !creates => current.request_frames.push(frame),
+                _ => {
+                    let mut send = self.open(true);
+                    send.request_frames.push(frame);
+                    state.sends.push(send);
+                }
+            }
         } else {
+            let mut send = self.open(false);
             match body {
                 Some(body) => send.request.push_bytes(body),
                 None => send.request.push_slice(info.body),
             }
+            state.sends.push(send);
         }
-        self.sends.lock().unwrap_or_else(PoisonError::into_inner).push(send);
     }
 
     fn observe(&self, event: &CaptureEvent<'_>) {
         match event {
-            CaptureEvent::Request(info) => self.request(false, info, None),
-            CaptureEvent::WebsocketRequest(info) => self.request(true, info, None),
+            CaptureEvent::Request(info) => return self.request(false, info, None),
+            CaptureEvent::WebsocketRequest(info) => return self.request(true, info, None),
+            CaptureEvent::WebsocketResponse(payload) => return self.websocket_response(payload),
+            _ => {}
+        }
+        let mut state = self.lock();
+        let Some(send) = state.sends.last_mut() else {
+            // Nothing was sent, or the attempt is over: no send to attach to.
+            return;
+        };
+        match event {
             CaptureEvent::ResponseMetadata(status, headers) | CaptureEvent::WebsocketHandshake(status, headers) => {
-                self.current(|send| {
-                    send.status = Some(i32::from(*status));
-                    send.upstream_request_id = REQUEST_ID_HEADERS.iter().find_map(|name| {
-                        headers
-                            .iter()
-                            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                            .map(|(_, value)| value.clone())
-                    });
+                send.status = Some(i32::from(*status));
+                send.upstream_request_id = REQUEST_ID_HEADERS.iter().find_map(|name| {
+                    headers
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                        .map(|(_, value)| value.clone())
                 });
             }
-            CaptureEvent::ResponseChunk(line) => self.current(|send| send.response.push_line(line)),
-            CaptureEvent::ResponseError(error) => self.current(|send| send.error = Some((*error).to_owned())),
-            CaptureEvent::WebsocketResponse(payload) => self.current(|send| {
-                let mut frame = Body::new(&self.budget);
-                frame.push_slice(payload);
-                send.response_frames.push(frame);
-            }),
+            CaptureEvent::ResponseChunk(line) => {
+                send.first_byte_us.get_or_insert_with(|| Utc::now().timestamp_micros());
+                send.saw_error |= is_error_event(line);
+                send.response.push_line(line);
+            }
+            CaptureEvent::ResponseError(error) => send.error = Some((*error).to_owned()),
             CaptureEvent::WebsocketError { stage, error } => {
-                self.current(|send| send.error = Some(format!("{stage}: {error}")))
+                send.error = Some(format!("{stage}: {error}"));
+                send.dead |= send.websocket && send.response_frames.is_empty();
             }
+            CaptureEvent::Request(_) | CaptureEvent::WebsocketRequest(_) | CaptureEvent::WebsocketResponse(_) => {}
         }
     }
 
-    /// Queues one row per send. The last send carries the attempt's outcome and usage;
-    /// earlier ones were answered and replaced, so they count as failed.
-    pub(crate) fn emit(&self, rt: &crate::Runtime, facts: AttemptFacts) {
-        let sends = std::mem::take(&mut *self.sends.lock().unwrap_or_else(PoisonError::into_inner));
-        let Some(last) = sends.len().checked_sub(1) else { return };
+    /// A WebSocket response frame belongs to the oldest turn still waiting: a socket
+    /// answers its creates in order. A `response.created` with no turn waiting is a
+    /// successor the upstream started on its own after a steer.
+    fn websocket_response(&self, payload: &[u8]) {
+        let mut state = self.lock();
+        if state.finished {
+            return;
+        }
+        let kind = frame_type(payload);
+        let waiting = state.sends.iter().position(|send| send.websocket && !send.dead);
+        let index = match waiting {
+            Some(index) => index,
+            None if kind == "response.created" => {
+                state.sends.push(self.open(true));
+                state.sends.len() - 1
+            }
+            None => return,
+        };
+        let send = &mut state.sends[index];
+        send.first_byte_us.get_or_insert_with(|| Utc::now().timestamp_micros());
+        let mut frame = Body::new(&self.budget);
+        frame.push_slice(payload);
+        send.response_frames.push(frame);
+        if let Some((_, ok)) = TERMINALS.iter().find(|(terminal, _)| *terminal == kind) {
+            let send = state.sends.remove(index);
+            state.wrote_turn = true;
+            self.write_turn(&state, send, *ok, payload);
+        }
+    }
+
+    /// Writes the WebSocket turn whose response just ended with `terminal`, so a long
+    /// steered connection neither holds its turns nor loses them in a crash.
+    fn write_turn(&self, state: &State, send: SendCapture, ok: bool, terminal: &[u8]) {
+        let Some((rt, base)) = state.base.clone() else { return };
+        let message = ["response.error.message", "error.message"]
+            .iter()
+            .map(|path| cpa_common::json::get(terminal, path).str().into_owned())
+            .find(|message| !message.is_empty())
+            .unwrap_or_else(|| frame_type(terminal));
+        let end = AttemptEnd {
+            response_model: cpa_common::json::get(terminal, "response.model").str().into_owned(),
+            detail: crate::usage_record::parse_codex(terminal).unwrap_or_default(),
+            latency_ms: (Utc::now().timestamp_micros() - send.started_us) / 1000,
+            ttft_ms: send.first_byte_us.map(|at| (at - send.started_us) / 1000),
+            outcome: if ok { Outcome::Complete } else { Outcome::Failed },
+            status: None,
+            error: (!ok).then_some(message),
+        };
+        let row = self.row(send, &base, Some(&end), None);
+        rt.history().submit(&rt.config(), row);
+    }
+
+    /// Queues one row per send still open when the attempt ends. The last carries the
+    /// attempt's outcome and usage; earlier ones were answered and resent, so they count
+    /// as failed.
+    pub(crate) fn finish(&self, rt: &crate::Runtime, mut end: AttemptEnd) {
+        let (sends, base, wrote_turn) = {
+            let mut state = self.lock();
+            state.finished = true;
+            (
+                std::mem::take(&mut state.sends),
+                state.base.as_ref().map(|(_, base)| base.clone()),
+                state.wrote_turn,
+            )
+        };
+        if wrote_turn {
+            // The tracker's usage and model are a written turn's; a turn still open
+            // has none of its own.
+            end.detail = Detail::default();
+            end.response_model.clear();
+        }
+        let Some(base) = base else { return };
+        // The attempt's ending belongs to the last send that was not replaced.
+        let last = sends.iter().rposition(|send| !send.dead);
         let ended_us = Utc::now().timestamp_micros();
-        let cfg = rt.config();
-        let mut next_started = None;
         let mut rows = Vec::with_capacity(sends.len());
+        let mut next_started = None;
         for (i, send) in sends.into_iter().enumerate().rev() {
-            let is_last = i == last;
-            let mut row = Row {
-                exchange_id: self.exchange_id.clone(),
-                turn: self.turn,
-                send: send.index,
-                started_at_us: send.started_us,
-                ended_at_us: Some(next_started.unwrap_or(ended_us)),
-                source: Source::Proxy,
-                endpoint: text(&facts.endpoint),
-                transport: Some(if send.websocket { "websocket" } else { "http" }.into()),
-                provider: text(&facts.provider),
-                model_requested: text(&facts.model_requested),
-                model: text(&facts.model),
-                response_model: text(&facts.response_model),
-                account: text(&facts.account),
-                auth_index: text(&facts.auth_index),
-                session_id: text(&facts.session_id),
-                user_agent: text(&facts.user_agent),
-                stream: facts.stream,
-                status: send.status,
-                outcome: Outcome::Failed,
-                error: send.error,
-                upstream_request_id: send.upstream_request_id,
-                ..Row::default()
+            let started = send.started_us;
+            let ended = next_started.unwrap_or(ended_us);
+            rows.push(self.row(send, &base, (Some(i) == last).then_some(&end), Some(ended)));
+            next_started = Some(started);
+        }
+        let cfg = rt.config();
+        for row in rows.into_iter().rev() {
+            rt.history().submit(&cfg, row);
+        }
+    }
+
+    /// One send's row. Without `end` the send was answered and resent.
+    fn row(
+        &self,
+        send: SendCapture,
+        base: &AttemptBase,
+        end: Option<&AttemptEnd>,
+        ended_us: Option<i64>,
+    ) -> PendingRow {
+        let text = super::text;
+        let mut row = Row {
+            exchange_id: self.exchange_id.clone(),
+            turn: self.turn,
+            send: send.index,
+            started_at_us: send.started_us,
+            ended_at_us: Some(ended_us.unwrap_or_else(|| Utc::now().timestamp_micros())),
+            source: Source::Proxy,
+            endpoint: text(&base.endpoint),
+            transport: Some(if send.websocket { "websocket" } else { "http" }.into()),
+            provider: text(&base.provider),
+            model_requested: text(&base.model_requested),
+            model: text(&base.model),
+            account: text(&base.account),
+            auth_index: text(&base.auth_index),
+            session_id: text(&base.session_id),
+            user_agent: text(&base.user_agent),
+            stream: base.stream,
+            status: send.status,
+            outcome: Outcome::Failed,
+            error: send.error,
+            upstream_request_id: send.upstream_request_id,
+            ..Row::default()
+        };
+        if let Some(end) = end {
+            row.outcome = match end.outcome {
+                // The server stops reading a stream at its in-band error, so the
+                // attempt reads as dropped.
+                Outcome::Cancelled if send.saw_error => Outcome::Failed,
+                outcome => outcome,
             };
-            next_started = Some(send.started_us);
-            if is_last {
-                row.outcome = facts.outcome;
-                row.status = row.status.or(facts.status);
-                row.error = row.error.or_else(|| facts.error.clone());
-                row.latency_ms = Some(facts.latency_ms);
-                row.ttft_ms = (facts.ttft_ms > 0).then_some(facts.ttft_ms);
-                tokens(&mut row, &facts.detail);
-            }
-            let mut pending = PendingRow::new(row, &self.budget);
-            pending.request = send.request;
-            pending.response = send.response;
-            if send.websocket {
-                pending.request_frames = Some(send.request_frames);
-                pending.response_frames = Some(send.response_frames);
-            }
-            rows.push(pending);
+            row.status = row.status.or(end.status);
+            row.error = row.error.or_else(|| end.error.clone());
+            row.response_model = text(&end.response_model);
+            row.latency_ms = Some(end.latency_ms);
+            row.ttft_ms = end.ttft_ms;
+            row.set_tokens(&end.detail);
         }
-        for pending in rows.into_iter().rev() {
-            rt.history().submit(&cfg, pending);
+        let mut pending = PendingRow::new(row, &self.budget);
+        pending.request = send.request;
+        pending.response = send.response;
+        if send.websocket {
+            pending.request_frames = Some(send.request_frames);
+            pending.response_frames = Some(send.response_frames);
         }
+        pending
     }
 }
 
-fn text(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_owned())
+fn frame_type(payload: &[u8]) -> String {
+    cpa_common::json::get(payload, "type").str().into_owned()
 }
 
-/// Token columns from a usage detail; all null when the attempt reported none.
-fn tokens(row: &mut Row, detail: &Detail) {
-    if *detail == Detail::default() {
-        return;
-    }
-    row.input_tokens = Some(detail.input);
-    row.output_tokens = Some(detail.output);
-    row.reasoning_tokens = Some(detail.reasoning);
-    row.cache_read_tokens = Some(if detail.cache_read > 0 {
-        detail.cache_read
-    } else {
-        detail.cached
-    });
-    row.cache_write_tokens = Some(detail.cache_creation);
-    row.cache_write_5m_tokens = detail.cache_creation_5m;
-    row.cache_write_1h_tokens = detail.cache_creation_1h;
-    row.total_tokens = Some(detail.total);
-}
-
-/// What the usage tracker knows about an attempt when it ends. Every field is chosen;
-/// the tracker's record and client facts also hold keys and are never copied whole.
-pub(crate) struct AttemptFacts {
-    pub(crate) endpoint: String,
-    pub(crate) provider: String,
-    pub(crate) model_requested: String,
-    pub(crate) model: String,
-    pub(crate) response_model: String,
-    pub(crate) account: String,
-    pub(crate) auth_index: String,
-    pub(crate) session_id: String,
-    pub(crate) user_agent: String,
-    pub(crate) stream: bool,
-    pub(crate) detail: Detail,
-    pub(crate) latency_ms: i64,
-    pub(crate) ttft_ms: i64,
-    pub(crate) outcome: Outcome,
-    pub(crate) status: Option<i32>,
-    pub(crate) error: Option<String>,
+/// An SSE line that opens or carries an error event.
+fn is_error_event(line: &[u8]) -> bool {
+    line.trim_ascii() == b"event: error"
+        || line
+            .strip_prefix(b"data:")
+            .is_some_and(|data| frame_type(data.trim_ascii()) == "error")
 }
 
 /// The account a row names: the credential's email when it has one, else its ID.

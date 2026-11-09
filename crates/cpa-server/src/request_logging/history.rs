@@ -34,15 +34,26 @@ impl Settings {
         }
         let Some(dir) = configured_dir(cfg) else {
             tracing::error!(
-                "observability.history.enable is true but observability.history.dir is empty; history stays off"
+                "observability.history.enable is true but observability.history.dir is not an absolute path; history stays off"
             );
             return None;
         };
         let mb = section
             .get("max-total-size-mb")
-            .and_then(serde_yaml_ng::Value::as_i64)
+            .and_then(|value| {
+                let mb = value.as_i64();
+                if mb.is_none() {
+                    tracing::warn!(
+                        "observability.history.max-total-size-mb is not a whole number; using {DEFAULT_MAX_TOTAL_MB}"
+                    );
+                }
+                mb
+            })
             .map_or(DEFAULT_MAX_TOTAL_MB, |mb| {
-                u64::try_from(mb).unwrap_or(DEFAULT_MAX_TOTAL_MB)
+                u64::try_from(mb).unwrap_or_else(|_| {
+                    tracing::warn!("observability.history.max-total-size-mb is negative; using {DEFAULT_MAX_TOTAL_MB}");
+                    DEFAULT_MAX_TOTAL_MB
+                })
             });
         Some(Settings {
             dir,
@@ -51,8 +62,13 @@ impl Settings {
     }
 }
 
-/// `observability.history.dir`, whether or not recording is on, so history can be
-/// managed after it was turned off.
+/// `value` as an optional column: empty is absent.
+pub(crate) fn text(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// `observability.history.dir` when it is an absolute path, whether or not recording
+/// is on, so history can be managed after it was turned off.
 pub fn configured_dir(cfg: &Config) -> Option<PathBuf> {
     let dir = cfg
         .document
@@ -61,7 +77,10 @@ pub fn configured_dir(cfg: &Config) -> Option<PathBuf> {
         .get("dir")?
         .as_str()?
         .trim();
-    (!dir.is_empty()).then(|| cpa_core::config::expand_home(dir))
+    let dir = cpa_core::config::expand_home(dir);
+    // Absolute only: the server and `cliproxy history delete` run from different
+    // working directories and must name the same folder.
+    dir.is_absolute().then_some(dir)
 }
 
 /// Whether model traffic is recorded under `cfg`. Cached per config snapshot, so the

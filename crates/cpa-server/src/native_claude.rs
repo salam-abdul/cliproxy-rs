@@ -725,9 +725,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         // email, else its ID.
         let account = if crate::request_logging::history::on(&s.rt.config()) {
             s.rt.store()
-                .snapshot()
-                .into_iter()
-                .find(|c| c.id == a.file_id)
+                .get(&a.file_id)
                 .map(|c| crate::request_logging::history::capture::account_label(&c))
                 .unwrap_or_else(|| a.id.clone())
         } else {
@@ -769,8 +767,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     capture.finish(crate::request_logging::history::native::NativeEnd {
                         stream: false,
                         outcome: crate::request_logging::history::file::Outcome::TransportLost,
-                        latency_ms: started.elapsed().as_millis() as i64,
-                        ttft_ms: None,
                         detail: None,
                         error: Some(failure_kind.to_owned()),
                     });
@@ -820,8 +816,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 capture.finish(crate::request_logging::history::native::NativeEnd {
                     stream: false,
                     outcome: crate::request_logging::history::file::Outcome::Failover,
-                    latency_ms: started.elapsed().as_millis() as i64,
-                    ttft_ms: None,
                     detail: None,
                     error: Some(outcome.to_owned()),
                 });

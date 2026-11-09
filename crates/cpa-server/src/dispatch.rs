@@ -666,11 +666,7 @@ pub struct Trace(
     Arc<crate::observability::Clock>,
     /// The client's prompt prefix (`crate::usage_record::prompt_prefix`).
     std::sync::OnceLock<String>,
-    /// Numbers the exchange's upstream sends for history, across attempts and
-    /// bootstrap retries.
-    Arc<std::sync::atomic::AtomicI32>,
-    /// A websocket turn's connection ID and turn index, for history.
-    Option<(String, i32)>,
+    crate::request_logging::history::capture::HistoryExchange,
 );
 
 impl Trace {
@@ -686,7 +682,6 @@ impl Trace {
             crate::observability::current_clock(),
             Default::default(),
             Default::default(),
-            None,
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -708,13 +703,12 @@ impl Trace {
 
     /// Marks this trace as turn `turn` of websocket connection `connection`.
     pub fn with_turn(mut self, connection: String, turn: i32) -> Self {
-        self.6 = Some((connection, turn));
+        self.5.turn = Some((connection, turn));
         self
     }
 
-    /// History's send counter, and the connection and turn of a websocket turn.
-    pub(crate) fn history(&self) -> (Arc<std::sync::atomic::AtomicI32>, Option<(String, i32)>) {
-        (self.5.clone(), self.6.clone())
+    pub(crate) fn history(&self) -> crate::request_logging::history::capture::HistoryExchange {
+        self.5.clone()
     }
 
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
@@ -2102,14 +2096,9 @@ async fn attempt(
                 }
                 let capture = match crate::request_logging::history::on(cfg) {
                     true => {
-                        let (exchange, turn) = facts
-                            .history_turn
-                            .clone()
-                            .unwrap_or_else(|| (facts.client.request_id.clone(), 0));
                         let sends = crate::request_logging::history::capture::Sends::new(
-                            exchange,
-                            turn,
-                            facts.history_sends.clone(),
+                            &facts.history,
+                            &facts.client.request_id,
                             rt.history().budget(),
                         );
                         tracker.history(sends.clone(), credential);

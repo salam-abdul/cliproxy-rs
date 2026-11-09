@@ -462,3 +462,41 @@ fn the_command_spares_rows_that_started_after_it() {
     assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
     assert_eq!(ids(&file), ["later"]);
 }
+
+#[test]
+fn an_empty_time_range_refuses() {
+    let dir = TempDir::new();
+    let selector = Selector {
+        from: Some(at("2026-11-02T00:00:00Z")),
+        to: Some(at("2026-11-01T00:00:00Z")),
+        ..Selector::default()
+    };
+    let error = delete(&dir.0, &selector, false).unwrap_err();
+    assert!(error.to_string().contains("--from"), "{error}");
+}
+
+#[test]
+fn a_pending_delete_reaches_a_file_whatever_its_timestamp() {
+    let dir = TempDir::new();
+    let file = write_file(
+        &dir.0,
+        &Utc::now().to_rfc3339(),
+        0,
+        &[row("a", "s1", "2026-11-01T08:00:00Z")],
+    );
+    // Published after the delete listed the folder, but synced before it was asked.
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    write_tombstone(&dir.0, &session("s1"), Utc::now().timestamp_micros()).unwrap();
+    let writer = Writer::with_limits(Limits::default());
+    writer.submit(
+        &on(&dir.0),
+        PendingRow::new(row("b", "s2", "2026-11-01T09:00:00Z"), writer.budget()),
+    );
+    writer.flush();
+    assert_eq!(left_ids(&dir.0), ["b"]);
+}

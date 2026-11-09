@@ -872,17 +872,25 @@ async fn two_websocket_turns_are_two_history_rows() {
         }
     }
     drop(socket);
-    let history = rt.clone();
-    tokio::task::spawn_blocking(move || history.history().flush())
-        .await
-        .unwrap();
+    // The second turn's row is published as its stream ends, after the client saw it.
     let mut rows = Vec::new();
-    for partition in std::fs::read_dir(dir.0.join("history")).unwrap().flatten() {
-        if partition.path().is_dir() {
-            for file in std::fs::read_dir(partition.path()).unwrap().flatten() {
-                rows.extend(crate::request_logging::history::file::read_rows(&file.path()).unwrap());
+    for _ in 0..200 {
+        let history = rt.clone();
+        tokio::task::spawn_blocking(move || history.history().flush())
+            .await
+            .unwrap();
+        rows.clear();
+        for partition in std::fs::read_dir(dir.0.join("history")).unwrap().flatten() {
+            if partition.path().is_dir() {
+                for file in std::fs::read_dir(partition.path()).unwrap().flatten() {
+                    rows.extend(crate::request_logging::history::file::read_rows(&file.path()).unwrap());
+                }
             }
         }
+        if rows.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     rows.sort_by_key(|r| r.turn);
     assert_eq!(rows.len(), 2, "{rows:#?}");

@@ -476,8 +476,6 @@ impl Observation {
                     (_, true) => Outcome::Complete,
                     _ => Outcome::Failed,
                 },
-                latency_ms: f.started.elapsed().as_millis() as i64,
-                ttft_ms: self.first_byte_ms.map(|ms| ms as i64),
                 detail: Some(&detail),
                 error: (!success).then(|| outcome.to_owned()),
             });

@@ -182,9 +182,15 @@ fn body_columns_have_no_statistics_or_dictionary() {
 
 #[test]
 fn body_columns_keep_utf8_as_text_and_the_rest_as_bytes() {
-    assert_eq!(body_columns(b"{\"a\":1}".to_vec()), (Some("{\"a\":1}".into()), None));
-    assert_eq!(body_columns(vec![0x7b, 0xff]), (None, Some(vec![0x7b, 0xff])));
-    assert_eq!(body_columns(Vec::new()), (Some(String::new()), None));
+    assert_eq!(
+        body_columns(b"{\"a\":1}".to_vec(), false),
+        (Some("{\"a\":1}".into()), None)
+    );
+    assert_eq!(body_columns(vec![0x7b, 0xff], false), (None, Some(vec![0x7b, 0xff])));
+    assert_eq!(body_columns(Vec::new(), false), (Some(String::new()), None));
+    // A cut character is dropped only from a truncated body.
+    assert_eq!(body_columns(vec![b'a', 0xc3], true), (Some("a".into()), None));
+    assert_eq!(body_columns(vec![b'a', 0xc3], false), (None, Some(vec![b'a', 0xc3])));
 }
 
 #[test]

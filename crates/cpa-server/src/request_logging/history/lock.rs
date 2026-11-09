@@ -111,6 +111,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .unwrap();
         assert!(try_lock(&held).unwrap());
