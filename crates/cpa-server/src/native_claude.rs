@@ -156,9 +156,6 @@ fn now() -> u64 {
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
 }
-fn session(body: &Value, headers: &HeaderMap) -> Option<String> {
-    client_session(body, headers).map(hash)
-}
 /// The client's own session ID, validated; routing uses its hash.
 fn client_session(body: &Value, headers: &HeaderMap) -> Option<String> {
     let m = &body["metadata"];
@@ -1262,8 +1259,9 @@ mod tests {
     fn native_identity_is_stable_across_account_metadata() {
         let a = json!({"metadata":{"user_id":"user_A_account_A_session_native-123"}});
         let b = json!({"metadata":{"user_id":"{\"account_uuid\":\"B\",\"session_id\":\"native-123\"}"}});
-        assert_eq!(session(&a, &HeaderMap::new()), session(&b, &HeaderMap::new()));
-        assert!(session(&json!({}), &HeaderMap::new()).is_none());
+        assert_eq!(client_session(&a, &HeaderMap::new()).as_deref(), Some("native-123"));
+        assert_eq!(client_session(&b, &HeaderMap::new()).as_deref(), Some("native-123"));
+        assert!(client_session(&json!({}), &HeaderMap::new()).is_none());
     }
     #[test]
     fn included_quota_does_not_require_changing_account_billing() {

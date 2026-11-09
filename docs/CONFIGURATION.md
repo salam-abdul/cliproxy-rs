@@ -156,7 +156,7 @@ Each row has the exchange's request ID, the WebSocket turn and send number, star
 | Native response | The bytes received, decoded from their content encoding. |
 | WebSocket frames | One list entry per frame in `request_frames` and `response_frames`. |
 
-Text bodies are in `request_body` and `response_body`; a body that is not UTF-8 goes in `request_body_raw` or `response_body_raw` instead. A body keeps its first 32 MiB, and `request_truncated` or `response_truncated` marks one that was cut.
+`request_bytes` and `response_bytes` are the full sizes as received, before the cap; for a native response that is its encoded size. Text bodies are in `request_body` and `response_body`; a body that is not UTF-8 goes in `request_body_raw` or `response_body_raw` instead. A body keeps its first 32 MiB, and `request_truncated` or `response_truncated` marks one that was cut.
 
 Headers, URLs, tokens and keys are never stored. The bodies are full prompts and outputs, including anything pasted into a conversation. On Unix the folder is created `0700` and files `0600`.
 
@@ -192,7 +192,7 @@ sends.filter(pl.col("outcome") == "complete").select("started_at", "model", "req
 | `--model NAME` | For this upstream model or the model the client asked for. |
 | `--dry-run` | None; prints what would go. |
 
-A file whose rows all match is deleted; a file with some matching rows is rewritten without them. Rows still in a running server's open file are removed when that file closes, within 10 minutes. The command and size retention share a lock file, `<dir>/.lock`; while another process holds it, the command stops and asks to retry.
+A file whose rows all match is deleted; a file with some matching rows is rewritten without them. Each delete also leaves a tombstone in `<dir>/.deletes` for a day: a running server drops matching rows that started before the delete and that it had not written yet, including sends still in flight, and rewrites a file that was open during the delete. Rows that start after the delete are kept. The command, size retention and those rewrites share a lock file, `<dir>/.lock`; while another process holds it, the command stops and asks to retry.
 
 ## worker-threads
 
