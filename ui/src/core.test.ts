@@ -5,7 +5,6 @@ import {
   ago,
   buckets,
   clockSkew,
-  cooldownClock,
   credState,
   equal,
   fieldPath,
@@ -30,15 +29,7 @@ test("v8 paths, URL boundaries, and structural equality", () => {
   assert.equal(equal({ a: false }, { a: null }), false);
 });
 
-test("server clock from cooldowns and the skew it implies", () => {
-  // The server answered at `now`; remaining_seconds is rounded up.
-  const files = [
-    { cooldowns: [{ retry_at: at(10_900), remaining_seconds: 11 }] },
-    { cooldowns: [{ retry_at: at(90_400), remaining_seconds: 91 }, { retry_at: at(30_000) }] },
-    { cooldowns: null },
-  ];
-  assert.equal(cooldownClock(files), now - 100, "the latest estimate wins");
-  assert.equal(cooldownClock([{ cooldowns: [{ retry_at: at(5000) }] }, {}]), null);
+test("server clock skew corrects a browser whose clock is wrong", () => {
   // A browser five minutes ahead of the server.
   const skew = clockSkew(now, now + 300_000);
   assert.equal(skew, -300_000);

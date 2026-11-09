@@ -46,6 +46,6 @@
     </span>
   {:else}<span class="muted quota-unreported">Quota not reported</span>{/each}
   {#if quota.failed}<span class="warning-text">Last reading · check failed</span>
-  {:else if quota.at}<span class="muted">Updated {ago(quota.at, store.now)}</span>
+  {:else if quota.at}<span class="muted">Updated {ago(quota.at, store.serverNow)}</span>
   {:else if quota.stale}<span class="warning-text">Last reading · needs refresh</span>{/if}
 </span>

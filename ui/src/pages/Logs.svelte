@@ -2,7 +2,7 @@
   import { tick, untrack } from "svelte";
   import { store, Res, every } from "../store.svelte";
   import { api, download } from "../api";
-  import { type Data } from "../core";
+  import { plural, type Data } from "../core";
   import { facets, keep, parseLine, type Filter } from "../logs";
   import Load from "../Load.svelte";
 
@@ -42,7 +42,7 @@
       .filter((l) => (own || !l.includes("/management/")) && l.toLowerCase().includes(query.trim().toLowerCase()))
       .map(parseLine),
   );
-  const options = $derived(facets(base));
+  const options = $derived(facets(base, f));
   const shown = $derived(base.filter((l) => keep(l, f)));
   const filtered = $derived(!!(f.method || f.status || f.path));
   // Browsers expose the clipboard only to HTTPS and localhost pages.
@@ -103,12 +103,12 @@
               {#each options[k] as [v, n]}<button aria-pressed={f[k] === v} onclick={() => (f[k] = f[k] === v ? "" : v)}>{v}<b>{n}</b></button>{/each}
             </div>{/if}{/each}
         {#if options.path.length || f.path}<select aria-label="Path" bind:value={f.path}
-            ><option value="">All paths</option>{#if f.path && !options.path.some((o) => o[0] === f.path)}<option>{f.path}</option>{/if}{#each options.path.slice(0, 50) as [v, n]}<option value={v}>{v} ({n})</option>{/each}</select
+            ><option value="">All paths</option>{#each options.path.filter((o, n) => n < 50 || o[0] === f.path) as [v, n]}<option value={v}>{v} ({n})</option>{/each}</select
           >{/if}
         {#if filtered}<button class="key quiet" onclick={() => (f = { method: "", status: "", path: "" })}>Clear filters</button>{/if}
         <span class="grow"></span>
         <label class="check"><input type="checkbox" bind:checked={wrap} />Wrap lines</label>
-        <button class="key" disabled={!shown.length} onclick={() => copy(shown.map((l) => l.raw), `${shown.length} lines copied.`)}
+        <button class="key" disabled={!shown.length} onclick={() => copy(shown.map((l) => l.raw), `${plural(shown.length, "line")} copied.`)}
           ><svg class="i" aria-hidden="true"><use href="#i-copy" /></svg>Copy shown</button
         >
         <button class="key" disabled={!document.fullscreenEnabled} onclick={() => (full ? document.exitFullscreen() : box?.requestFullscreen())}

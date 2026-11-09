@@ -6,7 +6,7 @@ import {
   ApiError,
   requests,
 } from "./api";
-import { clockSkew, cooldownClock, equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
+import { clockSkew, equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
 
 /** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
@@ -101,9 +101,9 @@ class Store {
   );
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> => {
-    const files: Data[] = (await api("/credentials")).files || [];
-    this.#clock(cooldownClock(files));
-    return reconcile(this.creds.data || [], files, (a) => `${a.name}\u0000${a.auth_index}`);
+    const list = await api("/credentials");
+    this.#clock(Date.parse(list.observed_at));
+    return reconcile(this.creds.data || [], list.files || [], (a) => `${a.name}\u0000${a.auth_index}`);
   });
   /** Live quota checks made in this tab, by auth index. */
   quota = $state<

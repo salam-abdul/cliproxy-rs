@@ -112,7 +112,8 @@ async function read(a: Data, lifetime: Lifetime) {
     }
     if (!lifetime.active) return;
     store.quota[quotaKey(a)] = {
-      at: Date.now(),
+      // Server clock, as passive readings' observed_at is.
+      at: store.serverNow,
       windows: quotaWindows(p, raw, store.serverNow),
     };
   } catch (e) {

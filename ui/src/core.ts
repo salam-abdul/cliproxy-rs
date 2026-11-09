@@ -100,20 +100,9 @@ export function ago(value: unknown, now = Date.now()): string {
  * two seconds reads as 0, so request latency and rounding never shift a countdown.
  */
 export const clockSkew = (server: number, received: number) => (Math.abs(server - received) < 2000 ? 0 : server - received);
-/**
- * The server's time when it listed these credentials: a cooldown's retry_at less its
- * remaining_seconds. The server rounds remaining_seconds up, so this is up to a second early
- * and the latest estimate is the closest. Null when no cooldown carries both fields.
- */
-export function cooldownClock(files: Data[]): number | null {
-  let at = -Infinity;
-  for (const a of files)
-    for (const c of Array.isArray(a.cooldowns) ? a.cooldowns : []) {
-      const t = Date.parse(c.retry_at) - c.remaining_seconds * 1000;
-      if (typeof c.remaining_seconds === "number" && t > at) at = t;
-    }
-  return at > -Infinity ? at : null;
-}
+export const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+/** The fields every per-credential route accepts to find one credential. */
+export const credRef = (a: Data) => ({ name: a.name, ...(a.auth_index ? { auth_index: a.auth_index } : {}) });
 
 export type CredState = { lamp: Lamp; label: string; detail: string };
 /** One state per credential, derived only from fields /credentials reports. */
@@ -150,7 +139,7 @@ export function credState(a: Data, now = Date.now()): CredState {
       detail: a.status_message || "",
     };
   const models = cooldowns.length - whole.length;
-  const detail = models ? `${models} model${models > 1 ? "s" : ""} cooling` : "";
+  const detail = models ? `${plural(models, "model")} cooling` : "";
   if (["active", "ok", ""].includes(String(a.status ?? "")))
     return { lamp: "ok", label: "Ready", detail };
   return { lamp: "off", label: String(a.status), detail };

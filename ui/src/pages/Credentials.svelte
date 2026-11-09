@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import { store, every } from "../store.svelte";
   import { api, download } from "../api";
-  import { credName, provider, label, type Data } from "../core";
+  import { credName, credRef, plural, provider, label, type Data } from "../core";
   import { accountStatus } from "../accounts";
   import Load from "../Load.svelte";
   import AccountDetail from "../AccountDetail.svelte";
@@ -63,10 +63,10 @@
   );
   const selected = $derived(rows.find((r) => id(r.a) === store.route.arg)?.a);
   const reload = () => store.creds.load(true);
-  const chosen = $derived(rows.filter((r) => picked.includes(key(r.a))).map((r) => r.a));
-  /** Files behind the chosen accounts; configuration-backed accounts have none. */
+  // Selected accounts the filters hide are left alone.
+  const chosen = $derived(shown.filter((r) => picked.includes(key(r.a))).map((r) => r.a));
+  /** Files behind the chosen accounts. An AI Studio relay session has none. */
   const files = $derived([...new Set(chosen.filter((a) => !a.runtime_only).map((a) => String(a.name)))]);
-  const count = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
   const pick = (a: Data, on: boolean) => (picked = on ? [...picked, key(a)] : picked.filter((k) => k !== key(a)));
   const failures = (bad: string[]) => {
     if (bad.length) throw new Error(`${bad.length} failed: ${bad.join(", ")}`);
@@ -76,25 +76,31 @@
     store.act(async () => {
       const bad: string[] = [];
       for (const a of chosen)
-        await api("/credentials/status", "PATCH", { name: a.name, ...(a.auth_index ? { auth_index: a.auth_index } : {}), disabled }).catch(
+        await api("/credentials/status", "PATCH", { ...credRef(a), disabled }).catch(
           (e) => bad.push(`${a.name} (${e.message})`),
         );
       await Promise.all([reload(), store.native.load(true)]);
       failures(bad);
-    }, `${count(chosen.length, "account")} ${disabled ? "disabled" : "enabled"}.`);
+    }, `${plural(chosen.length, "account")} ${disabled ? "disabled" : "enabled"}.`);
   function remove() {
-    const skipped = chosen.length - chosen.filter((a) => !a.runtime_only).length;
-    if (!confirm(`Delete ${count(files.length, "account file")} from the server?${skipped ? ` ${skipped} from configuration are kept.` : ""}`)) return;
+    const skipped = chosen.filter((a) => a.runtime_only).length;
+    // A file can hold several accounts, and deleting it removes them all.
+    const removed = rows.filter((r) => !r.a.runtime_only && files.includes(String(r.a.name))).length;
+    const text = `Delete ${plural(files.length, "account file")} (${plural(removed, "account")}) from the server?`;
+    if (!confirm(text + (skipped ? ` ${plural(skipped, "AI Studio relay session")} without a file stay.` : ""))) return;
     store.act(async () => {
       const result = await api("/credentials", "DELETE", { names: files });
       picked = [];
       await Promise.all([reload(), store.native.load(true)]);
       failures((result.failed || []).map((f: Data) => `${f.name} (${f.error})`));
-    }, `${count(files.length, "account file")} deleted.`);
+    }, `${plural(files.length, "account file")} deleted.`);
   }
   const downloadAll = () =>
     store.act(async () => {
-      for (const name of files) download(await api(`/credentials/download?name=${encodeURIComponent(name)}`, "GET", undefined, "blob"), name);
+      const blobs: [string, Blob][] = [];
+      for (const name of files) blobs.push([name, await api(`/credentials/download?name=${encodeURIComponent(name)}`, "GET", undefined, "blob")]);
+      // Started together, so a browser asks once about multiple downloads.
+      for (const [name, blob] of blobs) download(blob, name);
     });
 
   async function upload(input: HTMLInputElement) {
@@ -126,7 +132,7 @@
         );
       store.notify(
         result.results?.length
-          ? `${result.results.length} tokens refreshed.`
+          ? `${plural(result.results.length, "token")} refreshed.`
           : "No accounts can refresh.",
       );
     });

@@ -12,7 +12,7 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
-let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false;
+let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
@@ -74,7 +74,7 @@ await page.route("**/*", async route => {
     return send({});
   }
   if (path === "/v8/management/credentials" && request.method() === "DELETE") { deleteBodies.push(request.postDataJSON()); return send({status:"ok"}); }
-  if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds });
+  if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds, observed_at: credsObservedAt });
   if (path === "/v8/management/observability/claude/usage") {
     assert.equal(request.method(), "GET");
     assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a");
@@ -239,7 +239,8 @@ try {
   await page.getByText("Advanced account settings", {exact:true}).click();
   await page.getByLabel("Note",{exact:true}).fill("Synthetic draft");
   let dialogs = 0;
-  page.on("dialog", async dialog => {dialogs++; await (acceptDialogs ? dialog.accept() : dialog.dismiss());});
+  let lastDialog = "";
+  page.on("dialog", async dialog => {dialogs++; lastDialog = dialog.message(); await (acceptDialogs ? dialog.accept() : dialog.dismiss());});
   await page.keyboard.press("Escape");
   await settle();
   assert.equal(dialogs, 1, "unsaved account fields guard closing the details");
@@ -280,11 +281,12 @@ try {
   await settle();
   assert.ok(remaining - await seconds() >= 4, "cooldown countdown ticks");
   // The server's clock is five minutes behind this browser's: a two-minute cooldown is still live.
-  const serverNow = await page.evaluate(() => Date.now()) - 300_000;
-  creds[0].cooldowns = [{model_key:"claude",reason:"rate_limit",retry_at:new Date(serverNow + 120_000).toISOString(),remaining_seconds:120}];
+  const serverNow = await page.evaluate(() => Date.now()) + 15_000 - 300_000;
+  credsObservedAt = new Date(serverNow).toISOString();
+  creds[0].cooldowns = [{model_key:"claude",reason:"rate_limit",retry_at:new Date(serverNow + 120_000).toISOString()}];
   await page.clock.fastForward(15_000);
-  await cooldown.getByText(/· 1m 4\ds$|· 2m$|· 1m$/).waitFor();
-  delete creds[1].email; delete creds[0].cooldowns;
+  await cooldown.getByText(/· 2m$/).waitFor();
+  delete creds[1].email; delete creds[0].cooldowns; credsObservedAt = undefined;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   await page.screenshot({path:join(tmpdir(),"cliproxy-accounts-mobile.png"),fullPage:true});
@@ -363,19 +365,27 @@ try {
   acceptDialogs = true;
   await page.getByRole("button",{name:"Delete",exact:true}).click();
   await page.getByText("1 account file deleted.",{exact:true}).waitFor();
+  assert.equal(lastDialog, "Delete 1 account file (1 account) from the server?", "the confirm counts the accounts the files hold");
   acceptDialogs = false;
   assert.deepEqual(deleteBodies, [{names:["disabled.json"]}]);
   await page.getByText(/^Select accounts to enable/).waitFor();
   delete creds[0].disabled; creds[1].disabled = true;
-  config = {"api-keys":{"openai-compatibility":[{name:"router","base-url":"https://models.example.test/v1/",headers:{"X-Org":"org-1"},
-    keys:[{"api-key":"sk-test-1","proxy-url":"socks5://127.0.0.1:1"}],models:[{name:"m-b"}]}]}};
+  config = {"api-keys":{claude:[{name:"anthropic",keys:[{"api-key":"sk-claude"}]}],
+    "openai-compatibility":[{name:"router","base-url":"https://models.example.test/v1/ ",headers:{"X-Org":" org-1 ",authorization:"Bearer group",Empty:"","X-Client":"$X-Client","X-Session":"s-$CPA-SESSION-ID"},
+    keys:[{"api-key":" sk-test-1 ","proxy-url":"socks5://127.0.0.1:1"}],models:[{name:"m-b"}]}]}};
   await page.goto("http://dashboard.test/management.html#providers");
   await page.reload();
   await page.getByRole("button",{name:/^OpenAI-compatible/}).click();
   await page.getByRole("button",{name:"Import models",exact:true}).click();
   await page.getByText("2 offered",{exact:true}).waitFor();
-  assert.deepEqual(apiCalls, [{method:"GET",url:"https://models.example.test/v1/models",header:{"X-Org":"org-1",Authorization:"Bearer sk-test-1"},proxy_url:"socks5://127.0.0.1:1"}],
-    "the list is read with the group's key, headers and proxy");
+  assert.deepEqual(apiCalls, [{method:"GET",url:"https://models.example.test/v1/models",header:{"X-Org":"org-1",authorization:"Bearer group"},proxy_url:"socks5://127.0.0.1:1"}],
+    "the list is read with inference's headers: a group header replaces the key's token");
+  await page.getByRole("button",{name:/^Claude/}).click();
+  assert.equal(await page.getByText("2 offered").count(), 0, "an offer never shows under another provider's group");
+  await page.getByRole("button",{name:/^OpenAI-compatible/}).click();
+  assert.equal(await page.getByText("2 offered").count(), 0, "switching provider closes the offer");
+  await page.getByRole("button",{name:"Import models",exact:true}).click();
+  await page.getByText("2 offered",{exact:true}).waitFor();
   assert.equal(await page.getByLabel("m-b",{exact:true}).isDisabled(), true, "a configured model stays as configured");
   await page.getByLabel("Filter offered models").fill("A");
   assert.equal(await page.getByLabel("m-b",{exact:true}).count(), 0);
