@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync, copyFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
-const BUDGET = { js: 54_800, css: 6_500 };
+const BUDGET = { js: 55_500, css: 6_550 };
 
 copyFileSync("dist/index.html", "dist/management.html");
 const html = readFileSync("dist/index.html", "utf8");

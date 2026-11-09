@@ -13,7 +13,8 @@ page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false;
-const statusCalls = [], deleteBodies = [];
+const statusCalls = [], deleteBodies = [], apiCalls = [];
+let config = {};
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
@@ -55,7 +56,16 @@ await page.route("**/*", async route => {
       statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}],
       errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
   }
-  if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
+  if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send(config);
+  if (path === "/v8/management/config/api-keys/openai-compatibility") {
+    if (request.method() === "PUT") config["api-keys"]["openai-compatibility"] = request.postDataJSON();
+    return send(request.method() === "PUT" ? {} : config["api-keys"]["openai-compatibility"]);
+  }
+  if (path === "/v8/management/observability/usage/api-keys") return send({});
+  if (path === "/v8/management/requests/api-call") {
+    apiCalls.push(request.postDataJSON());
+    return send({status_code:200, header:{}, body:JSON.stringify({object:"list", data:[{id:"m-b"},{id:"m-a"},{id:"m-a"}]})});
+  }
   if (path === "/v8/management/credentials/status") {
     const body = request.postDataJSON();
     statusCalls.push(body);
@@ -357,6 +367,24 @@ try {
   assert.deepEqual(deleteBodies, [{names:["disabled.json"]}]);
   await page.getByText(/^Select accounts to enable/).waitFor();
   delete creds[0].disabled; creds[1].disabled = true;
+  config = {"api-keys":{"openai-compatibility":[{name:"router","base-url":"https://models.example.test/v1/",headers:{"X-Org":"org-1"},
+    keys:[{"api-key":"sk-test-1","proxy-url":"socks5://127.0.0.1:1"}],models:[{name:"m-b"}]}]}};
+  await page.goto("http://dashboard.test/management.html#providers");
+  await page.reload();
+  await page.getByRole("button",{name:/^OpenAI-compatible/}).click();
+  await page.getByRole("button",{name:"Import models",exact:true}).click();
+  await page.getByText("2 offered",{exact:true}).waitFor();
+  assert.deepEqual(apiCalls, [{method:"GET",url:"https://models.example.test/v1/models",header:{"X-Org":"org-1",Authorization:"Bearer sk-test-1"},proxy_url:"socks5://127.0.0.1:1"}],
+    "the list is read with the group's key, headers and proxy");
+  assert.equal(await page.getByLabel("m-b",{exact:true}).isDisabled(), true, "a configured model stays as configured");
+  await page.getByLabel("Filter offered models").fill("A");
+  assert.equal(await page.getByLabel("m-b",{exact:true}).count(), 0);
+  await page.getByLabel("m-a",{exact:true}).check();
+  await page.getByRole("button",{name:"Add 1 selected",exact:true}).click();
+  await page.getByText("1 model added.",{exact:true}).waitFor();
+  assert.deepEqual(config["api-keys"]["openai-compatibility"][0].models, [{name:"m-b"},{name:"m-a"}]);
+  await page.getByText("2 offered").waitFor({state:"hidden"});
+  config = {};
   await page.goto("http://dashboard.test/management.html#logs");
   const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
   await status.waitFor();
@@ -398,5 +426,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
