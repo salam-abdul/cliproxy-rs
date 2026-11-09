@@ -2862,8 +2862,11 @@ mod tests {
     ) -> Vec<u8> {
         let dir = scratch();
         let state = management(&dir, enabled, false);
+        let served = Arc::new(Mutex::new(None));
+        let slot = served.clone();
         let app = axum::Router::new().fallback(move |axum::Extension(log): axum::Extension<RequestLog>| {
             let events = events.clone();
+            *slot.lock().unwrap() = Some(log.clone());
             async move {
                 events(&log);
                 (status, [("set-cookie", "down=c00kie-down-set")], "done")
@@ -2878,16 +2881,16 @@ mod tests {
             .unwrap();
         let response = app.call(request).await.unwrap();
         axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let mut content = Vec::new();
-        for _ in 0..500 {
-            if let [log] = &logs(&dir)[..] {
-                content = std::fs::read(log).unwrap();
-                if content.trim_ascii_end().ends_with(b"\ndone") {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        // The log file is complete before the writer drops its spools, so wait for
+        // the logging task itself rather than for the file's last line.
+        let log = served.lock().unwrap().take().expect("handler ran");
+        tokio::time::timeout(std::time::Duration::from_secs(10), log.finished())
+            .await
+            .expect("request log finalized");
+        let [log] = &logs(&dir)[..] else {
+            panic!("expected one log in {dir:?}");
+        };
+        let content = std::fs::read(log).unwrap();
         assert!(content.trim_ascii_end().ends_with(b"\ndone"), "no complete log");
         drop(app);
         drop(state);
