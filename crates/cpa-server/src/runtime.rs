@@ -69,6 +69,7 @@ pub struct Runtime {
     config_changed: tokio::sync::watch::Sender<()>,
     /// Quota windows by credential, parsed once per observation for selection.
     quota_windows: Mutex<HashMap<String, crate::scheduler::Observation>>,
+    history: crate::request_logging::history::writer::Writer,
 }
 
 /// One config publication: requests read the config and its policy from the same one.
@@ -123,6 +124,7 @@ impl Runtime {
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
             quota_windows: Mutex::default(),
+            history: Default::default(),
         };
         rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
@@ -135,6 +137,11 @@ impl Runtime {
     /// `queuedUsageDetail` per upstream request when `accepts()` (additive API).
     pub fn usage_queue(&self) -> &crate::usage::UsageQueue {
         &self.usage
+    }
+
+    /// The model-traffic history writer (`observability.history`).
+    pub fn history(&self) -> &crate::request_logging::history::writer::Writer {
+        &self.history
     }
 
     /// Records `--local-model` (Go `modelCatalogUpdaterPlan`'s `localModel`): remote
