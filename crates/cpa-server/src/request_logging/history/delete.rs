@@ -1,7 +1,8 @@
 //! Deleting selected rows from history (`cliproxy history delete`). Finished files are
-//! deleted whole or rewritten without the matching rows. Rows a running server still
-//! holds in its open file are covered by a tombstone in `<dir>/.deletes/`, which the
-//! writer applies to rows that started before it and removes once its file is finished.
+//! deleted whole or rewritten without the matching rows. Every delete also leaves a
+//! tombstone in `<dir>/.deletes/`: a running server drops the matching rows it still
+//! holds or has yet to receive, as long as they started before the delete, and the
+//! tombstone expires after a day.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::file::{ParquetFile, Row, is_history_file, partial_pid, read_rows};
+use super::file::{ParquetFile, Row, is_history_file, read_rows};
 use super::writer::pid_alive;
 
 /// Which rows to delete: every given condition must hold.
@@ -60,8 +61,9 @@ pub struct Report {
     pub rows_deleted: u64,
     /// Bytes freed. A dry run counts only whole files.
     pub bytes_freed: u64,
-    /// A running server has a file open; its matching rows go when that file is finished.
-    pub pending_in_open_file: bool,
+    /// A tombstone was left, so a running server drops matching rows it has not
+    /// written yet.
+    pub pending_for_writer: bool,
 }
 
 impl std::fmt::Display for Report {
@@ -71,11 +73,8 @@ impl std::fmt::Display for Report {
             "{} row(s) in {} deleted and {} rewritten file(s), {} byte(s) freed",
             self.rows_deleted, self.files_deleted, self.files_rewritten, self.bytes_freed
         )?;
-        if self.pending_in_open_file {
-            write!(
-                f,
-                "; the running server removes matching rows from its open file when it closes it (within 10 minutes)"
-            )?;
+        if self.pending_for_writer {
+            write!(f, "; a running server drops matching rows it has not written yet")?;
         }
         Ok(())
     }
@@ -87,9 +86,11 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         bail!("history delete needs at least one of --from, --to, --session, --account or --model");
     }
     let mut report = Report::default();
-    if !dir.exists() {
+    if dry_run && !dir.exists() {
         return Ok(report);
     }
+    // A server may be buffering its first rows with nothing on disk yet.
+    super::file::private_dir(dir)?;
     let _lock = if dry_run {
         None
     } else {
@@ -98,9 +99,12 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
                 .with_context(|| format!("{} is held by another process; try again", dir.join(LOCK).display()))?,
         )
     };
-    report.pending_in_open_file = has_live_partial(dir)?;
-    if report.pending_in_open_file && !dry_run {
+    if !dry_run {
+        // Always: a server may hold matching rows in memory, or have sends in flight,
+        // with no file on disk yet.
+        expire_tombstones(dir, Utc::now());
         write_tombstone(dir, selector)?;
+        report.pending_for_writer = true;
     }
     for (partition, path) in history_files(dir)? {
         // A row lands in the partition of the file's first row, never an earlier one.
@@ -162,21 +166,6 @@ fn history_files(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
-fn has_live_partial(dir: &Path) -> io::Result<bool> {
-    for partition in std::fs::read_dir(dir)? {
-        let partition = partition?;
-        if !partition.file_name().to_string_lossy().starts_with("date=") || !partition.file_type()?.is_dir() {
-            continue;
-        }
-        for file in std::fs::read_dir(partition.path())? {
-            if partial_pid(&file?.file_name().to_string_lossy()).is_some_and(pid_alive) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
 pub(crate) fn remove_empty_partitions(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -213,13 +202,15 @@ pub(crate) fn apply_tombstones(path: &Path, stones: &[Tombstone]) -> io::Result<
 
 const LOCK: &str = ".lock";
 const TOMBSTONES: &str = ".deletes";
+/// Longer than any send can take to start, finish and wait in a writer's buffer.
+const TOMBSTONE_TTL: chrono::TimeDelta = chrono::TimeDelta::hours(24);
 
 /// A pending delete for rows a running server had not yet written to a finished file.
 pub(crate) struct Tombstone {
     pub(crate) path: PathBuf,
     selector: Selector,
     /// Only rows that started before the delete was asked for.
-    created_us: i64,
+    pub(crate) created_us: i64,
 }
 
 impl Tombstone {
@@ -245,6 +236,16 @@ fn write_tombstone(dir: &Path, selector: &Selector) -> anyhow::Result<()> {
     std::fs::write(&partial, serde_json::to_vec(&body)?)?;
     std::fs::rename(&partial, &path)?;
     Ok(())
+}
+
+/// Removes tombstones older than a day.
+pub(crate) fn expire_tombstones(dir: &Path, now: DateTime<Utc>) {
+    let cutoff = (now - TOMBSTONE_TTL).timestamp_micros();
+    for stone in pending_tombstones(dir) {
+        if stone.created_us < cutoff {
+            let _ = std::fs::remove_file(&stone.path);
+        }
+    }
 }
 
 /// Tombstones under `dir`. Unreadable ones are skipped, never applied loosely.

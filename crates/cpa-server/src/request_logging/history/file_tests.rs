@@ -193,3 +193,20 @@ fn partial_names_carry_the_writer_pid() {
     assert_eq!(partial_pid("081530-4242-0007.parquet"), None);
     assert_eq!(partial_pid("notes.partial"), None);
 }
+
+#[test]
+fn a_failed_finish_leaves_no_partial() {
+    let dir = TempDir::new();
+    let target = write_dir_target(&dir.0);
+    let mut file = ParquetFile::replacing(&target).unwrap();
+    file.write_group(&[sparse_row()]).unwrap();
+    // The target is a directory, so the rename fails after the footer is written.
+    assert!(file.finish().is_err());
+    assert!(files(&dir.0, ".partial").is_empty());
+}
+
+fn write_dir_target(dir: &Path) -> PathBuf {
+    let target = dir.join("date=2026-11-09").join("080000-1-0000.parquet");
+    std::fs::create_dir_all(target.join("occupied")).unwrap();
+    target
+}

@@ -84,7 +84,7 @@ fn whole_matching_files_are_deleted_and_partial_ones_rewritten() {
     assert_eq!(report.files_rewritten, 1);
     assert_eq!(report.rows_deleted, 2);
     assert!(report.bytes_freed > 0);
-    assert!(!report.pending_in_open_file);
+    assert!(report.pending_for_writer);
     assert!(!whole.exists());
     assert_eq!(ids(&mixed), ["c"]);
     assert_eq!(std::fs::read(&untouched).unwrap(), untouched_bytes);
@@ -202,7 +202,7 @@ fn a_tombstone_removes_rows_from_the_open_file() {
     );
     writer.tick();
     let report = delete(&dir.0, &session("s1"), false).unwrap();
-    assert!(report.pending_in_open_file);
+    assert!(report.pending_for_writer);
     assert_eq!(report.rows_deleted, 0);
     writer.submit(
         &cfg,
@@ -223,10 +223,6 @@ fn a_tombstone_removes_rows_from_the_open_file() {
         }
     }
     assert_eq!(left, ["c"]);
-    assert!(
-        std::fs::read_dir(dir.0.join(".deletes")).map_or(true, |mut d| d.next().is_none()),
-        "tombstone left behind"
-    );
 }
 
 #[test]
@@ -289,7 +285,7 @@ fn a_tombstone_spares_rows_that_started_after_the_delete() {
         PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
     );
     writer.tick();
-    assert!(delete(&dir.0, &session("s1"), false).unwrap().pending_in_open_file);
+    assert!(delete(&dir.0, &session("s1"), false).unwrap().pending_for_writer);
     let mut later = row("later", "s1", "2026-11-09T08:00:00Z");
     later.started_at_us = (Utc::now() + chrono::Duration::hours(1)).timestamp_micros();
     writer.submit(&cfg, PendingRow::new(later, writer.budget()));
@@ -304,4 +300,100 @@ fn a_tombstone_spares_rows_that_started_after_the_delete() {
         }
     }
     assert_eq!(left, ["later"]);
+}
+
+fn left_ids(dir: &Path) -> Vec<String> {
+    let mut left = Vec::new();
+    for partition in std::fs::read_dir(dir).unwrap() {
+        let partition = partition.unwrap().path();
+        if partition.is_dir() && partition.file_name().unwrap().to_string_lossy().starts_with("date=") {
+            for file in std::fs::read_dir(partition).unwrap() {
+                let path = file.unwrap().path();
+                if path.extension().is_some_and(|e| e == "parquet") {
+                    left.extend(ids(&path));
+                }
+            }
+        }
+    }
+    left.sort();
+    left
+}
+
+#[test]
+fn a_delete_covers_rows_a_server_still_buffers() {
+    let dir = TempDir::new();
+    // Default limits: rows wait in memory and no file exists yet.
+    let writer = Writer::with_limits(Limits::default());
+    let cfg = on(&dir.0);
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
+    );
+    writer.tick();
+    let report = delete(&dir.0, &session("s1"), false).unwrap();
+    assert!(report.pending_for_writer);
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()),
+    );
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()),
+    );
+    writer.flush();
+    assert_eq!(left_ids(&dir.0), ["c"]);
+}
+
+#[test]
+fn the_writer_rewrites_a_file_only_under_the_lock() {
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits {
+        group_rows: 1,
+        ..Limits::default()
+    });
+    let cfg = on(&dir.0);
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
+    );
+    writer.tick();
+    delete(&dir.0, &session("s1"), false).unwrap();
+    let holder = if cfg!(windows) { 4 } else { 1 };
+    std::fs::write(dir.0.join(".lock"), holder.to_string()).unwrap();
+    writer.flush();
+    assert_eq!(left_ids(&dir.0), ["a"], "rewritten without the lock");
+    std::fs::remove_file(dir.0.join(".lock")).unwrap();
+    writer.tick();
+    assert!(left_ids(&dir.0).is_empty());
+}
+
+#[test]
+fn a_tombstone_outlives_the_first_rotation() {
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    let cfg = on(&dir.0);
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("a", "s2", "2026-11-09T08:00:00Z"), writer.budget()),
+    );
+    writer.tick();
+    delete(&dir.0, &session("s1"), false).unwrap();
+    writer.flush();
+    // A send that started before the delete but finished after this rotation.
+    writer.submit(
+        &cfg,
+        PendingRow::new(row("late", "s1", "2026-11-09T08:00:01Z"), writer.budget()),
+    );
+    writer.flush();
+    assert_eq!(left_ids(&dir.0), ["a"]);
+}
+
+#[test]
+fn expired_tombstones_are_removed() {
+    let dir = TempDir::new();
+    std::fs::create_dir_all(&dir.0).unwrap();
+    delete(&dir.0, &session("s1"), false).unwrap();
+    assert_eq!(pending_tombstones(&dir.0).len(), 1);
+    expire_tombstones(&dir.0, Utc::now() + chrono::Duration::hours(25));
+    assert!(pending_tombstones(&dir.0).is_empty());
 }

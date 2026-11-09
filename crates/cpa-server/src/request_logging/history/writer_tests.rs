@@ -347,3 +347,17 @@ fn a_native_body_is_decoded_on_the_writer_thread() {
         Some("event: message_start\ndata: {}\n\n")
     );
 }
+
+#[test]
+fn age_rotation_happens_while_rows_keep_arriving() {
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:00:00Z");
+    let writer = Writer::with_limits(clock.limits());
+    writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
+    writer.tick();
+    clock.set("2026-11-09T08:10:01Z");
+    writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
+    // A barrier that runs no timers: only the row itself can trigger the rotation.
+    writer.sync();
+    assert_eq!(parquet_files(&dir.0).len(), 1);
+}

@@ -514,7 +514,7 @@ fn free_name(partition: &Path, stem: &str, ext: &str) -> PathBuf {
     path
 }
 
-fn private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -621,16 +621,43 @@ impl ParquetFile {
             .writer
             .take()
             .ok_or_else(|| io::Error::other("history file already finished"))?;
+        let finished = self.publish(writer);
+        if finished.is_err() {
+            let _ = std::fs::remove_file(&self.partial);
+        }
+        finished
+    }
+
+    fn publish(&mut self, writer: SerializedFileWriter<File>) -> io::Result<PathBuf> {
         let file = writer.into_inner().map_err(io_error)?;
         file.sync_all()?;
         drop(file);
         let target = match self.replaces.take() {
-            Some(target) => target,
-            None => free_name(&self.partition, &self.stem, ".parquet"),
+            Some(target) => {
+                std::fs::rename(&self.partial, &target)?;
+                target
+            }
+            None => self.link_free_name()?,
         };
-        std::fs::rename(&self.partial, &target)?;
         sync_dir(&self.partition)?;
         Ok(target)
+    }
+
+    /// Links the finished file under the first free `.parquet` name and drops the
+    /// `.partial` name. A link never replaces an existing file, so another writer that
+    /// took the same name in the meantime keeps its file.
+    fn link_free_name(&self) -> io::Result<PathBuf> {
+        loop {
+            let target = free_name(&self.partition, &self.stem, ".parquet");
+            match std::fs::hard_link(&self.partial, &target) {
+                Ok(()) => {
+                    std::fs::remove_file(&self.partial)?;
+                    return Ok(target);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 

@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use cpa_core::config::Config;
 
 use super::Settings;
-use super::delete::{DirLock, apply_tombstones, pending_tombstones};
+use super::delete::{DirLock, apply_tombstones, expire_tombstones, pending_tombstones};
 use super::file::{ParquetFile, Row, body_columns, is_history_file, partial_pid};
 
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
@@ -210,6 +210,8 @@ enum Command {
     #[cfg(test)]
     Tick(SyncSender<()>),
     #[cfg(test)]
+    Sync(SyncSender<()>),
+    #[cfg(test)]
     Pause(SyncSender<()>, Receiver<()>),
 }
 
@@ -355,6 +357,12 @@ impl Writer {
         self.call(Command::Tick);
     }
 
+    /// Waits until the writer has taken every earlier command, running nothing else.
+    #[cfg(test)]
+    pub(crate) fn sync(&self) {
+        self.call(Command::Sync);
+    }
+
     /// Blocks the writer thread until the returned sender is dropped.
     #[cfg(test)]
     pub(crate) fn pause(&self, _cfg: &Config) -> SyncSender<()> {
@@ -384,6 +392,9 @@ struct Worker {
     seq: u32,
     maintained: Option<Instant>,
     decoder: Option<tokio::runtime::Runtime>,
+    /// Finished files that may hold rows a delete asked for while they were open, with
+    /// their history folder. Rewritten under the history lock, retried while it is busy.
+    rewrites: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Worker {
@@ -400,6 +411,7 @@ impl Worker {
             seq: 0,
             maintained: None,
             decoder: None,
+            rewrites: Vec::new(),
         }
     }
 
@@ -424,6 +436,10 @@ impl Worker {
                 #[cfg(test)]
                 Ok(Command::Tick(ack)) => {
                     self.timers();
+                    let _ = ack.send(());
+                }
+                #[cfg(test)]
+                Ok(Command::Sync(ack)) => {
                     let _ = ack.send(());
                 }
                 #[cfg(test)]
@@ -465,6 +481,23 @@ impl Worker {
         if self.maintained.is_some_and(|at| at.elapsed() >= MAINTENANCE) {
             self.maintain();
         }
+        self.apply_rewrites();
+    }
+
+    fn apply_rewrites(&mut self) {
+        self.rewrites.retain(|(dir, path)| {
+            let Ok(Some(_lock)) = DirLock::try_acquire(dir) else {
+                return true;
+            };
+            match apply_tombstones(path, &pending_tombstones(dir)) {
+                Ok(()) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    tracing::warn!("history: cannot apply a pending delete to {}: {error}", path.display());
+                    true
+                }
+            }
+        });
     }
 
     fn row(&mut self, pending: PendingRow, settings: &Settings) {
@@ -506,6 +539,9 @@ impl Worker {
         {
             self.rotate();
         }
+        // A queue that never empties never times out; rotation and maintenance must
+        // still run on time.
+        self.timers();
     }
 
     fn finalize(&mut self, pending: PendingRow) -> Row {
@@ -611,16 +647,12 @@ impl Worker {
         {
             match file.finish() {
                 Ok(path) => {
-                    // Deletes asked for while this file was open: its earlier row groups
-                    // may hold matching rows.
-                    let stones = pending_tombstones(&window.dir);
-                    if !stones.is_empty() {
-                        if let Err(error) = apply_tombstones(&path, &stones) {
-                            tracing::warn!("history: cannot apply a pending delete: {error}");
-                        }
-                        for stone in stones {
-                            let _ = std::fs::remove_file(stone.path);
-                        }
+                    let opened = window.started.timestamp_micros();
+                    if pending_tombstones(&window.dir)
+                        .iter()
+                        .any(|stone| stone.created_us > opened)
+                    {
+                        self.rewrites.push((window.dir.clone(), path));
                     }
                 }
                 Err(error) => {
@@ -632,6 +664,7 @@ impl Worker {
                 apply_cap(&window.dir, cap);
             }
         }
+        self.apply_rewrites();
         let lost = self.lost.load(Ordering::Relaxed);
         if lost > self.reported {
             tracing::warn!("history: {} row(s) were not written", lost - self.reported);
@@ -644,6 +677,7 @@ impl Worker {
         self.maintained = Some(Instant::now());
         let Some(settings) = &self.settings else { return };
         remove_dead_partials(&settings.dir);
+        expire_tombstones(&settings.dir, Utc::now());
         if let Some(cap) = settings.max_total_bytes {
             apply_cap(&settings.dir, cap);
         }
