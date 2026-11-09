@@ -152,7 +152,7 @@ Each row has the exchange's request ID, the WebSocket turn and send number, star
 | --- | --- |
 | Request | The body sent upstream. For Devin it is the logged form of the request, without the session token the wire body carries. |
 | Buffered response | The body as received, decoded from its content encoding. |
-| Streamed response, translating proxy | Each line the executor read, joined with `\n`. Blank lines between events and CRLF line endings are not kept. |
+| Streamed response, translating proxy | Each line the executor read, joined with `\n`. For Claude this is the event stream as received, without its last line ending; line endings, and any line an executor does not read, can differ from the bytes received. |
 | Native response | The bytes received, decoded from their content encoding. |
 | WebSocket frames | One list entry per frame in `request_frames` and `response_frames`. |
 

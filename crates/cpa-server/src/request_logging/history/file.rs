@@ -215,56 +215,80 @@ macro_rules! column {
         Column {
             name: stringify!($name),
             get: Get::Str(|r| r.$name.as_deref()),
-            set: |r, f| Ok(r.$name = opt_str(stringify!($name), f)?),
+            set: |r, f| {
+                r.$name = opt_str(stringify!($name), f)?;
+                Ok(())
+            },
         }
     };
     ($name:ident, Bin) => {
         Column {
             name: stringify!($name),
             get: Get::Bin(|r| r.$name.as_deref()),
-            set: |r, f| Ok(r.$name = opt_bytes(stringify!($name), f)?),
+            set: |r, f| {
+                r.$name = opt_bytes(stringify!($name), f)?;
+                Ok(())
+            },
         }
     };
     ($name:ident, OptI32) => {
         Column {
             name: stringify!($name),
             get: Get::I32(|r| r.$name),
-            set: |r, f| Ok(r.$name = opt_i32(stringify!($name), f)?),
+            set: |r, f| {
+                r.$name = opt_i32(stringify!($name), f)?;
+                Ok(())
+            },
         }
     };
     ($name:ident, I32) => {
         Column {
             name: stringify!($name),
             get: Get::I32(|r| Some(r.$name)),
-            set: |r, f| Ok(r.$name = opt_i32(stringify!($name), f)?.unwrap_or_default()),
+            set: |r, f| {
+                r.$name = opt_i32(stringify!($name), f)?.unwrap_or_default();
+                Ok(())
+            },
         }
     };
     ($name:ident, OptI64) => {
         Column {
             name: stringify!($name),
             get: Get::I64(|r| r.$name),
-            set: |r, f| Ok(r.$name = opt_i64(stringify!($name), f)?),
+            set: |r, f| {
+                r.$name = opt_i64(stringify!($name), f)?;
+                Ok(())
+            },
         }
     };
     ($name:ident, I64) => {
         Column {
             name: stringify!($name),
             get: Get::I64(|r| Some(r.$name)),
-            set: |r, f| Ok(r.$name = opt_i64(stringify!($name), f)?.unwrap_or_default()),
+            set: |r, f| {
+                r.$name = opt_i64(stringify!($name), f)?.unwrap_or_default();
+                Ok(())
+            },
         }
     };
     ($name:ident, Bool) => {
         Column {
             name: stringify!($name),
             get: Get::Bool(|r| Some(r.$name)),
-            set: |r, f| Ok(r.$name = opt_bool(stringify!($name), f)?.unwrap_or_default()),
+            set: |r, f| {
+                r.$name = opt_bool(stringify!($name), f)?.unwrap_or_default();
+                Ok(())
+            },
         }
     };
     ($name:ident, List) => {
         Column {
             name: stringify!($name),
             get: Get::List(|r| r.$name.as_deref()),
-            set: |r, f| Ok(r.$name = opt_list(stringify!($name), f)?),
+            set: |r, f| {
+                r.$name = opt_list(stringify!($name), f)?;
+                Ok(())
+            },
         }
     };
 }
@@ -275,19 +299,28 @@ static COLUMNS: [Column; 41] = [
     Column {
         name: "exchange_id",
         get: Get::Str(|r| Some(r.exchange_id.as_str())),
-        set: |r, f| Ok(r.exchange_id = opt_str("exchange_id", f)?.unwrap_or_default()),
+        set: |r, f| {
+            r.exchange_id = opt_str("exchange_id", f)?.unwrap_or_default();
+            Ok(())
+        },
     },
     column!(turn, I32),
     column!(send, I32),
     Column {
         name: "started_at",
         get: Get::Ts(|r| Some(r.started_at_us)),
-        set: |r, f| Ok(r.started_at_us = opt_i64("started_at", f)?.unwrap_or_default()),
+        set: |r, f| {
+            r.started_at_us = opt_i64("started_at", f)?.unwrap_or_default();
+            Ok(())
+        },
     },
     Column {
         name: "ended_at",
         get: Get::Ts(|r| r.ended_at_us),
-        set: |r, f| Ok(r.ended_at_us = opt_i64("ended_at", f)?),
+        set: |r, f| {
+            r.ended_at_us = opt_i64("ended_at", f)?;
+            Ok(())
+        },
     },
     Column {
         name: "source",
@@ -519,7 +552,12 @@ impl ParquetFile {
     /// A file that replaces the finished file at `target` when it is finished. Its
     /// `.partial` carries this process's PID, so startup cleanup elsewhere leaves it.
     pub(crate) fn replacing(target: &Path) -> io::Result<Self> {
-        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, format!("not a history file: {}", target.display()));
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a history file: {}", target.display()),
+            )
+        };
         let partition = target.parent().ok_or_else(invalid)?.to_path_buf();
         let name = target.file_name().and_then(|n| n.to_str()).ok_or_else(invalid)?;
         if !is_history_file(name) {
@@ -539,8 +577,12 @@ impl ParquetFile {
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let file = options.open(&partial)?;
-        let writer = SerializedFileWriter::new(file, schema().map_err(io_error)?, Arc::new(properties().map_err(io_error)?))
-            .map_err(io_error)?;
+        let writer = SerializedFileWriter::new(
+            file,
+            schema().map_err(io_error)?,
+            Arc::new(properties().map_err(io_error)?),
+        )
+        .map_err(io_error)?;
         Ok(Self {
             writer: Some(writer),
             partition,
