@@ -24,6 +24,15 @@ pub fn create_truncate(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// Go `os.OpenFile(path, O_WRONLY|O_CREATE|O_EXCL, 0o600)`: fails when `path` exists.
+pub fn create_new(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
 /// Go `os.Chmod(path, 0o600)`; a no-op where modes do not apply.
 pub fn restrict(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
@@ -35,5 +44,25 @@ pub fn restrict(path: &Path) -> io::Result<()> {
     {
         let _ = path;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn create_new_makes_a_private_file_and_refuses_an_existing_one() {
+        let dir = std::env::temp_dir().join(format!("cpa-private-fs-{}", std::process::id()));
+        super::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        let _ = std::fs::remove_file(&path);
+        drop(super::create_new(&path).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let error = super::create_new(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

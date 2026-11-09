@@ -22,7 +22,7 @@ fn retention_deletes_oldest_files_by_partition_and_name() {
     }
     let unrelated = dir.0.join("date=2026-11-01/notes.txt");
     std::fs::write(&unrelated, vec![0u8; 1000]).unwrap();
-    let freed = enforce_cap(&dir.0, 250).unwrap();
+    let freed = HistoryDir::new(&dir.0).enforce_cap(250).unwrap();
     assert_eq!(freed, 200);
     assert!(!dir.0.join(names[0]).exists());
     assert!(!dir.0.join(names[1]).exists());
@@ -40,7 +40,7 @@ fn retention_removes_emptied_partitions() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![0u8; 100]).unwrap();
     }
-    enforce_cap(&dir.0, 150).unwrap();
+    HistoryDir::new(&dir.0).enforce_cap(150).unwrap();
     assert!(!old.parent().unwrap().exists());
     assert!(new.exists());
 }

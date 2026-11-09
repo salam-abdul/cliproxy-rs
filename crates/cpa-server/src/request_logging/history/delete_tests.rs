@@ -1,5 +1,6 @@
 use super::*;
 use crate::request_logging::history::body::PendingRow;
+use crate::request_logging::history::dir::HistoryDir;
 use crate::request_logging::history::file::tests::TempDir;
 use crate::request_logging::history::file::{ParquetFile, read_rows};
 use crate::request_logging::history::row::Source;
@@ -395,9 +396,9 @@ fn expired_tombstones_are_removed() {
     let dir = TempDir::new();
     std::fs::create_dir_all(&dir.0).unwrap();
     delete(&dir.0, &session("s1"), false).unwrap();
-    assert_eq!(pending_tombstones(&dir.0).len(), 1);
-    expire_tombstones(&dir.0, Utc::now() + chrono::Duration::hours(25));
-    assert!(pending_tombstones(&dir.0).is_empty());
+    assert_eq!(HistoryDir::new(&dir.0).tombstones().len(), 1);
+    HistoryDir::new(&dir.0).expire_tombstones(Utc::now() + chrono::Duration::hours(25));
+    assert!(HistoryDir::new(&dir.0).tombstones().is_empty());
 }
 
 #[test]
@@ -493,7 +494,9 @@ fn a_pending_delete_reaches_a_file_whatever_its_timestamp() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
         .unwrap();
-    write_tombstone(&dir.0, &session("s1"), Utc::now().timestamp_micros()).unwrap();
+    HistoryDir::new(&dir.0)
+        .write_tombstone(&session("s1"), Utc::now().timestamp_micros())
+        .unwrap();
     let writer = Writer::with_limits(Limits::default());
     writer.submit(
         &on(&dir.0),

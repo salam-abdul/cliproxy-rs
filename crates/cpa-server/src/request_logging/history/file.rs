@@ -466,11 +466,7 @@ impl ParquetFile {
 
     fn open(partition: PathBuf, stem: String, replaces: Option<PathBuf>) -> io::Result<Self> {
         let partial = free_name(&partition, &stem, ".partial");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let file = options.open(&partial)?;
+        let file = cpa_core::private_fs::create_new(&partial)?;
         // Held until the file is published: startup cleanup removes only unlocked
         // `.partial` files, whatever process wrote them.
         if !super::lock::try_lock(&file)? {

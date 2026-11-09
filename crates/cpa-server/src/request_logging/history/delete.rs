@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 
-use super::dir::{history_files, remove_empty_partitions};
+use super::dir::HistoryDir;
 use super::file::{read_keys, rewrite_without};
-use super::lock::DirLock;
 use super::row::Row;
 
 /// Which rows to delete: every given condition must hold.
@@ -101,7 +101,8 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
     let cutoff = asked.timestamp_micros();
     // Earlier deletes still pending go too: a server that could not apply them may
     // have stopped since.
-    let pending = pending_tombstones(dir);
+    let history = HistoryDir::new(dir);
+    let pending = history.tombstones();
     let matches = |row: &Row| {
         (row.started_at_us < cutoff && selector.matches(row)) || pending.iter().any(|stone| stone.matches(row))
     };
@@ -111,18 +112,19 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         None
     } else {
         Some(
-            DirLock::try_acquire(dir)?
+            history
+                .lock()?
                 .with_context(|| format!("{} is held by another process; try again", dir.join(".lock").display()))?,
         )
     };
     if !dry_run {
         // Always: a server may hold matching rows in memory, or have sends in flight,
         // with no file on disk yet.
-        expire_tombstones(dir, asked);
-        write_tombstone(dir, selector, cutoff)?;
+        history.expire_tombstones(asked);
+        history.write_tombstone(selector, cutoff)?;
         report.pending_for_writer = true;
     }
-    for file in history_files(dir)? {
+    for file in history.files()? {
         // A row lands in the partition of the file's first row, never an earlier one.
         if let (Some(from), Some(date)) = (selector.from, partition_date(&file.partition))
             && date
@@ -152,7 +154,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         }
     }
     if !dry_run {
-        remove_empty_partitions(dir);
+        history.remove_empty_partitions();
     }
     Ok(report)
 }
@@ -189,78 +191,86 @@ impl Tombstone {
     }
 }
 
-fn write_tombstone(dir: &Path, selector: &Selector, created_us: i64) -> anyhow::Result<()> {
-    let folder = dir.join(TOMBSTONES);
-    // Tombstones name sessions and accounts: as private as the history itself.
-    cpa_core::private_fs::create_dir_all(&folder)?;
-    #[cfg(unix)]
-    std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    let time = |t: Option<DateTime<Utc>>| t.map(|t| t.timestamp_micros());
-    let body = serde_json::json!({
-        "created": created_us,
-        "from": time(selector.from),
-        "to": time(selector.to),
-        "session": selector.session,
-        "account": selector.account,
-        "model": selector.model,
-    });
-    let path = folder.join(format!("{}.json", uuid::Uuid::new_v4()));
-    let partial = path.with_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    std::io::Write::write_all(&mut options.open(&partial)?, &serde_json::to_vec(&body)?)?;
-    std::fs::rename(&partial, &path)?;
-    Ok(())
+/// A tombstone as stored: times in microseconds since the epoch.
+#[derive(Serialize, Deserialize)]
+struct TombstoneRecord {
+    created: i64,
+    from: Option<i64>,
+    to: Option<i64>,
+    session: Option<String>,
+    account: Option<String>,
+    model: Option<String>,
 }
 
-/// Removes tombstones older than a day.
-pub(crate) fn expire_tombstones(dir: &Path, now: DateTime<Utc>) {
-    let cutoff = (now - TOMBSTONE_TTL).timestamp_micros();
-    for stone in pending_tombstones(dir) {
-        if stone.created_us < cutoff {
-            let _ = std::fs::remove_file(&stone.path);
-        }
+impl HistoryDir<'_> {
+    fn write_tombstone(self, selector: &Selector, created_us: i64) -> anyhow::Result<()> {
+        let folder = self.path().join(TOMBSTONES);
+        // Tombstones name sessions and accounts: as private as the history itself.
+        cpa_core::private_fs::create_dir_all(&folder)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let time = |t: Option<DateTime<Utc>>| t.map(|t| t.timestamp_micros());
+        let record = TombstoneRecord {
+            created: created_us,
+            from: time(selector.from),
+            to: time(selector.to),
+            session: selector.session.clone(),
+            account: selector.account.clone(),
+            model: selector.model.clone(),
+        };
+        let path = folder.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let partial = path.with_extension("tmp");
+        std::io::Write::write_all(
+            &mut cpa_core::private_fs::create_new(&partial)?,
+            &serde_json::to_vec(&record)?,
+        )?;
+        std::fs::rename(&partial, &path)?;
+        Ok(())
     }
-}
 
-/// Tombstones under `dir`. Unreadable ones are skipped, never applied loosely.
-pub(crate) fn pending_tombstones(dir: &Path) -> Vec<Tombstone> {
-    let Ok(entries) = std::fs::read_dir(dir.join(TOMBSTONES)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
-        let Some(created_us) = value["created"].as_i64() else {
-            continue;
-        };
-        let time = |key: &str| value[key].as_i64().and_then(DateTime::from_timestamp_micros);
-        let text = |key: &str| value[key].as_str().map(str::to_owned);
-        let selector = Selector {
-            from: time("from"),
-            to: time("to"),
-            session: text("session"),
-            account: text("account"),
-            model: text("model"),
-        };
-        if !selector.is_empty() {
-            out.push(Tombstone {
-                path,
-                selector,
-                created_us,
-            });
+    /// Removes tombstones older than a day.
+    pub(crate) fn expire_tombstones(self, now: DateTime<Utc>) {
+        let cutoff = (now - TOMBSTONE_TTL).timestamp_micros();
+        for stone in self.tombstones() {
+            if stone.created_us < cutoff {
+                let _ = std::fs::remove_file(&stone.path);
+            }
         }
     }
-    out
+
+    /// Pending tombstones. Unreadable ones are skipped, never applied loosely.
+    pub(crate) fn tombstones(self) -> Vec<Tombstone> {
+        let Ok(entries) = std::fs::read_dir(self.path().join(TOMBSTONES)) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(record) = serde_json::from_slice::<TombstoneRecord>(&bytes) else {
+                continue;
+            };
+            let time = |t: Option<i64>| t.and_then(DateTime::from_timestamp_micros);
+            let selector = Selector {
+                from: time(record.from),
+                to: time(record.to),
+                session: record.session,
+                account: record.account,
+                model: record.model,
+            };
+            if !selector.is_empty() {
+                out.push(Tombstone {
+                    path,
+                    selector,
+                    created_us: record.created,
+                });
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

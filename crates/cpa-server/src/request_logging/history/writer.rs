@@ -14,10 +14,9 @@ use cpa_core::config::Config;
 
 use super::Settings;
 use super::body::{BODY_CAP, Body, Budget, PendingRow};
-use super::delete::{apply_tombstones, expire_tombstones, pending_tombstones};
-use super::dir::{apply_cap, history_files, remove_dead_partials};
+use super::delete::apply_tombstones;
+use super::dir::HistoryDir;
 use super::file::ParquetFile;
-use super::lock::DirLock;
 use super::row::{Row, body_columns};
 
 pub(crate) const CHANNEL: usize = 256;
@@ -359,16 +358,17 @@ impl Worker {
         let Some(dir) = self.settings.as_ref().map(|s| s.dir.clone()) else {
             return;
         };
-        let stones = pending_tombstones(&dir);
+        let history = HistoryDir::new(&dir);
+        let stones = history.tombstones();
         let Some(since) = stones.iter().map(|stone| stone.created_us).min() else {
             return;
         };
         let retry = Some(Instant::now() + DELETE_RETRY);
-        let Ok(Some(_lock)) = DirLock::try_acquire(&dir) else {
+        let Ok(Some(_lock)) = history.lock() else {
             self.retry_deletes = retry;
             return;
         };
-        let Ok(files) = history_files(&dir) else {
+        let Ok(files) = history.files() else {
             self.retry_deletes = retry;
             return;
         };
@@ -513,7 +513,7 @@ impl Worker {
             self.lost.fetch_add(rows.len() as u64, Ordering::Relaxed);
             return;
         };
-        let stones = pending_tombstones(&window.dir);
+        let stones = HistoryDir::new(&window.dir).tombstones();
         rows.retain(|row| !stones.iter().any(|stone| stone.matches(row)));
         if rows.is_empty() {
             return;
@@ -557,7 +557,7 @@ impl Worker {
                 }
             }
             if let Some(cap) = self.settings.as_ref().and_then(|s| s.max_total_bytes) {
-                apply_cap(&window.dir, cap);
+                HistoryDir::new(&window.dir).apply_cap(cap);
             }
         }
         self.apply_deletes();
@@ -579,12 +579,13 @@ impl Worker {
             .as_ref()
             .and_then(|w| w.file.as_ref())
             .map(ParquetFile::partial);
-        remove_dead_partials(&dir, open);
+        let history = HistoryDir::new(&dir);
+        history.remove_dead_partials(open);
         // Applied before any expires, so a delete waiting since the last run counts.
         self.apply_deletes();
-        expire_tombstones(&dir, Utc::now());
+        history.expire_tombstones(Utc::now());
         if let Some(cap) = cap {
-            apply_cap(&dir, cap);
+            history.apply_cap(cap);
         }
     }
 }
