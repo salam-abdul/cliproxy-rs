@@ -38,8 +38,8 @@
           datetime={w.reset}
           title={new Date(w.reset).toLocaleString()}
         >
-          {resetsAt > store.now
-            ? `Resets in ${span(resetsAt - store.now)}`
+          {resetsAt > store.serverNow
+            ? `Resets in ${span(resetsAt - store.serverNow)}`
             : "Reset passed · awaiting update"}
         </time>{/if}
       {#if w.detail}<span class="muted">{w.detail}</span>{/if}

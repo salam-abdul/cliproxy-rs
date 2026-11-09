@@ -95,6 +95,26 @@ export function ago(value: unknown, now = Date.now()): string {
   return now - t < 45_000 ? "just now" : `${span(now - t)} ago`;
 }
 
+/**
+ * Server clock minus this browser's clock, from the server's time when it answered. Under
+ * two seconds reads as 0, so request latency and rounding never shift a countdown.
+ */
+export const clockSkew = (server: number, received: number) => (Math.abs(server - received) < 2000 ? 0 : server - received);
+/**
+ * The server's time when it listed these credentials: a cooldown's retry_at less its
+ * remaining_seconds. The server rounds remaining_seconds up, so this is up to a second early
+ * and the latest estimate is the closest. Null when no cooldown carries both fields.
+ */
+export function cooldownClock(files: Data[]): number | null {
+  let at = -Infinity;
+  for (const a of files)
+    for (const c of Array.isArray(a.cooldowns) ? a.cooldowns : []) {
+      const t = Date.parse(c.retry_at) - c.remaining_seconds * 1000;
+      if (typeof c.remaining_seconds === "number" && t > at) at = t;
+    }
+  return at > -Infinity ? at : null;
+}
+
 export type CredState = { lamp: Lamp; label: string; detail: string };
 /** One state per credential, derived only from fields /credentials reports. */
 export function credState(a: Data, now = Date.now()): CredState {
@@ -157,7 +177,7 @@ export const level = (n: number, max: number) => (n <= 0 || max <= 0 ? 0 : Math.
 export type Window = { label: string; used: number | null; reset: string; detail?: string };
 const clamp = (n: number) => Math.round(Math.max(0, Math.min(100, n)) * 10) / 10;
 /** Normalised quota groups first; then the built-in Claude, Codex and Kimi usage payloads. */
-export function quotaWindows(p: string, payload: Data): Window[] {
+export function quotaWindows(p: string, payload: Data, now = Date.now()): Window[] {
   const out: Window[] = [];
   if (Array.isArray(payload.groups)) {
     for (const g of payload.groups)
@@ -182,7 +202,7 @@ export function quotaWindows(p: string, payload: Data): Window[] {
           reset: v.reset_at
             ? new Date(v.reset_at * 1000).toISOString()
             : Number(v.reset_after_seconds) >= 0 && v.reset_after_seconds !== undefined
-              ? new Date(Date.now() + Number(v.reset_after_seconds) * 1000).toISOString()
+              ? new Date(now + Number(v.reset_after_seconds) * 1000).toISOString()
               : "",
         });
   } else if (p === "kimi" || p === "kimi-ai") {

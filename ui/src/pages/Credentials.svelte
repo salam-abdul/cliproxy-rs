@@ -23,7 +23,7 @@
   const rows = $derived(
     (store.creds.data || []).map((a) => ({
       a,
-      s: accountStatus(a, store.native.data, store.native.error, "claude", store.now),
+      s: accountStatus(a, store.native.data, store.native.error, "claude", store.serverNow),
     })),
   );
   const matches = (r: (typeof rows)[number], f: string) =>

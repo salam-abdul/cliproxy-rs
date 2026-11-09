@@ -20,7 +20,7 @@
       : undefined,
   );
   const status = $derived(
-    accountStatus(a, native, store.native.error, "claude", store.now),
+    accountStatus(a, native, store.native.error, "claude", store.serverNow),
   );
   const name = $derived(n?.name || a.label || credName(a));
   const history = $derived(
@@ -244,7 +244,7 @@
                 "_",
                 " ",
               )}{c.http_status ? ` ${c.http_status}` : ""} · {span(
-                Date.parse(c.retry_at) - store.now,
+                Date.parse(c.retry_at) - store.serverNow,
               )}</span
             >{/each}
           {#each Object.entries(a.quota?.signals || {}) as [k, v]}<span class="chip"

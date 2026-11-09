@@ -6,7 +6,7 @@ import {
   ApiError,
   requests,
 } from "./api";
-import { equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
+import { clockSkew, cooldownClock, equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
 
 /** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
@@ -80,20 +80,31 @@ class Store {
   dirty = $state(false);
   toast = $state<{ text: string; bad: boolean } | null>(null);
   now = $state(Date.now());
-  native = new Res<Data>(() => api("/observability/native/status"));
+  /** Server clock minus this browser's, so server times compare correctly on a browser whose clock is wrong. */
+  skew = $state(0);
+  /** The server's current time: compare server-reported times against this, not `now`. */
+  get serverNow() {
+    return this.now + this.skew;
+  }
+  #clock(server: unknown) {
+    if (typeof server === "number" && Number.isFinite(server)) this.skew = clockSkew(server, Date.now());
+  }
+  native = new Res<Data>(async () => {
+    const status = await api("/observability/native/status");
+    this.#clock(status?.observedAt);
+    return status;
+  });
   activity = new Res<Data>(() => api("/observability/native/events"));
   historyRange = $state("24h");
   history = new Res<Data>(() =>
     api(`/observability/native/history?range=${this.historyRange}`),
   );
   config = new Res<Data>(() => api("/config"));
-  creds: Res<Data[]> = new Res(async (): Promise<Data[]> =>
-    reconcile(
-      this.creds.data || [],
-      (await api("/credentials")).files || [],
-      (a) => `${a.name}\u0000${a.auth_index}`,
-    ),
-  );
+  creds: Res<Data[]> = new Res(async (): Promise<Data[]> => {
+    const files: Data[] = (await api("/credentials")).files || [];
+    this.#clock(cooldownClock(files));
+    return reconcile(this.creds.data || [], files, (a) => `${a.name}\u0000${a.auth_index}`);
+  });
   /** Live quota checks made in this tab, by auth index. */
   quota = $state<
     Record<
@@ -158,6 +169,7 @@ class Store {
       resource.loading = false;
     }
     this.quota = {};
+    this.skew = 0;
     this.busy = false;
     this.dirty = false;
   }

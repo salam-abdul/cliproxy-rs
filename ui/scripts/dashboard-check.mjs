@@ -260,6 +260,11 @@ try {
   await page.clock.fastForward(5000);
   await settle();
   assert.ok(remaining - await seconds() >= 4, "cooldown countdown ticks");
+  // The server's clock is five minutes behind this browser's: a two-minute cooldown is still live.
+  const serverNow = await page.evaluate(() => Date.now()) - 300_000;
+  creds[0].cooldowns = [{model_key:"claude",reason:"rate_limit",retry_at:new Date(serverNow + 120_000).toISOString(),remaining_seconds:120}];
+  await page.clock.fastForward(15_000);
+  await cooldown.getByText(/· 1m 4\ds$|· 2m$|· 1m$/).waitFor();
   delete creds[1].email; delete creds[0].cooldowns;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
@@ -365,5 +370,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
