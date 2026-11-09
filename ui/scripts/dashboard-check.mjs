@@ -15,6 +15,9 @@ let requireKey = false, quotaStarted, expired = false, availability = "included"
 let historyHold, historyRelease, historyFailure = false, credsFailure = false;
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
+const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
+const logLines = [access(200, "POST", "/v1/messages?beta=true"), access(503, "POST", "/v1/messages", "1a2b3c4d"), access(200, "GET", "/v1/models"),
+  "[2030-01-01 10:00:01] [--------] [info ] server listening", access(200, "GET", "/v8/management/config", "--------")];
 await page.route("**/*", async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
   const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "cliproxy-rs-0.2.6" } });
@@ -62,6 +65,8 @@ await page.route("**/*", async route => {
     const body = { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} };
     return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
+  if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
+  if (path === "/v8/management/observability/logs/errors") return send({files: []});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
   assert.match(asset, /^(index\.html|favicon\.svg|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
@@ -317,8 +322,22 @@ try {
   assert.equal(await page.getByText("No accounts connected.").count(),0,"a failed first read is not an empty account list");
   assert.equal(await page.getByText("Refresh failed. Showing the last readings.",{exact:true}).count(),0,"a failed account read reports one error");
   credsFailure = false;
+  await page.goto("http://dashboard.test/management.html#logs");
+  const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
+  await status.waitFor();
+  assert.equal(await lines.count(), 4, "the dashboard's own management calls stay hidden");
+  assert.equal(await page.locator("option").filter({hasText:"/v8/"}).count(), 0, "hidden lines offer no path");
+  await status.getByRole("button",{name:/^5xx/}).click();
+  assert.equal(await lines.count(), 1, "a status class keeps only matching access lines");
+  await page.getByRole("group",{name:"Method"}).getByRole("button",{name:/^GET/}).click();
+  await page.getByText("No lines match.",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"Clear filters",exact:true}).click();
+  await page.getByLabel("Path",{exact:true}).selectOption("/v1/messages");
+  assert.equal(await lines.count(), 2, "a path matches without its query");
+  await page.getByRole("button",{name:"Clear filters",exact:true}).click();
+  assert.equal(await lines.count(), 4);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
