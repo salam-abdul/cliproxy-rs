@@ -1,6 +1,9 @@
 use super::*;
+use crate::request_logging::history::file::read_rows;
 use crate::request_logging::history::file::tests::TempDir;
-use crate::request_logging::history::file::{Outcome, Row, Source, read_rows};
+use crate::request_logging::history::row::{Outcome, Row, Source};
+use bytes::Bytes;
+use std::path::Path;
 use std::sync::Mutex;
 
 fn on(dir: &Path) -> Config {
@@ -282,49 +285,6 @@ fn websocket_byte_counts_add_up_every_frame() {
 }
 
 #[test]
-fn retention_deletes_oldest_files_by_partition_and_name() {
-    let dir = TempDir::new();
-    let names = [
-        "date=2026-11-01/080000-1-0000.parquet",
-        "date=2026-11-01/090000-1-0001.parquet",
-        "date=2026-11-02/070000-1-0000.parquet",
-        "date=2026-11-02/080000-1-0001.parquet",
-    ];
-    let now = std::time::SystemTime::now();
-    for (i, name) in names.iter().enumerate() {
-        let path = dir.0.join(name);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, vec![0u8; 100]).unwrap();
-        // Newest mtime on the oldest name: retention must not order by mtime.
-        let file = std::fs::File::options().write(true).open(&path).unwrap();
-        file.set_modified(now - Duration::from_secs(i as u64 * 60)).unwrap();
-    }
-    let unrelated = dir.0.join("date=2026-11-01/notes.txt");
-    std::fs::write(&unrelated, vec![0u8; 1000]).unwrap();
-    let freed = enforce_cap(&dir.0, 250).unwrap();
-    assert_eq!(freed, 200);
-    assert!(!dir.0.join(names[0]).exists());
-    assert!(!dir.0.join(names[1]).exists());
-    assert!(dir.0.join(names[2]).exists());
-    assert!(dir.0.join(names[3]).exists());
-    assert!(unrelated.exists());
-}
-
-#[test]
-fn retention_removes_emptied_partitions() {
-    let dir = TempDir::new();
-    let old = dir.0.join("date=2026-10-01/080000-1-0000.parquet");
-    let new = dir.0.join("date=2026-11-01/080000-1-0000.parquet");
-    for path in [&old, &new] {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, vec![0u8; 100]).unwrap();
-    }
-    enforce_cap(&dir.0, 150).unwrap();
-    assert!(!old.parent().unwrap().exists());
-    assert!(new.exists());
-}
-
-#[test]
 fn a_full_channel_drops_rows_and_counts_them() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
@@ -341,44 +301,6 @@ fn a_full_channel_drops_rows_and_counts_them() {
     drop(release);
     writer.flush();
     assert_eq!(all_rows(&dir.0).len(), CHANNEL);
-}
-
-#[test]
-fn bodies_past_the_in_flight_budget_are_truncated_and_flagged() {
-    let budget = Budget::new(10);
-    let mut body = Body::new(&budget);
-    body.push_slice(b"123456");
-    body.push_slice(b"7890ab");
-    assert_eq!(body.total(), 12);
-    assert!(body.truncated());
-    assert_eq!(budget.used(), 6);
-    let mut other = Body::new(&budget);
-    other.push_bytes(&Bytes::from_static(b"abcd"));
-    assert_eq!(budget.used(), 10);
-    assert!(!other.truncated());
-    assert_eq!(body.into_vec(), b"123456");
-    assert_eq!(budget.used(), 4);
-    drop(other);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn a_body_keeps_its_first_32_mib() {
-    let budget = Budget::new(u64::MAX);
-    let mut body = Body::new(&budget);
-    body.push_bytes(&Bytes::from(vec![b'a'; (BODY_CAP + 5) as usize]));
-    assert_eq!(body.total(), BODY_CAP + 5);
-    assert!(body.truncated());
-    assert_eq!(body.into_vec().len() as u64, BODY_CAP);
-}
-
-#[test]
-fn lines_are_joined_without_a_trailing_newline() {
-    let budget = Budget::new(u64::MAX);
-    let mut body = Body::new(&budget);
-    body.push_line(b"event: a");
-    body.push_line(b"data: {}");
-    assert_eq!(body.into_vec(), b"event: a\ndata: {}");
 }
 
 #[test]

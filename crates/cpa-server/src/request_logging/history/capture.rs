@@ -10,8 +10,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use cpa_core::exec::{CaptureEvent, CaptureObserver, CaptureSink, UpstreamRequest};
 
-use super::file::{Outcome, Row, Source};
-use super::writer::{Body, Budget, PendingRow};
+use super::body::{Body, Budget, PendingRow};
+use super::row::{Outcome, Row, Source};
 use crate::usage_record::Detail;
 
 /// Response headers that carry the provider's request ID, in order of preference.

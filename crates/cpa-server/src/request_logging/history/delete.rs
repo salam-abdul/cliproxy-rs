@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::file::{Row, history_files, read_keys, remove_empty_partitions, rewrite_without};
+use super::dir::{history_files, remove_empty_partitions};
+use super::file::{read_keys, rewrite_without};
 use super::lock::DirLock;
+use super::row::Row;
 
 /// Which rows to delete: every given condition must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

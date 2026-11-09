@@ -9,8 +9,8 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use chrono::Utc;
 
-use super::file::{Outcome, Row, Source};
-use super::writer::PendingRow;
+use super::body::PendingRow;
+use super::row::{Outcome, Row, Source};
 use crate::usage_record::Detail;
 
 /// Who and what a native send is for, known before it goes out.

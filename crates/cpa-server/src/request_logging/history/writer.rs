@@ -3,184 +3,26 @@
 //! path only clones or copies chunks and calls `try_send`; a full channel drops the row
 //! and counts it, so inference never waits on the disk.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use cpa_core::config::Config;
 
 use super::Settings;
+use super::body::{BODY_CAP, Body, Budget, PendingRow};
 use super::delete::{apply_tombstones, expire_tombstones, pending_tombstones};
-use super::file::{ParquetFile, Row, body_columns, history_files, is_partial_file, remove_empty_partitions};
-use super::lock::{DirLock, is_abandoned};
+use super::dir::{apply_cap, history_files, remove_dead_partials};
+use super::file::ParquetFile;
+use super::lock::DirLock;
+use super::row::{Row, body_columns};
 
-// ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
-// spool-backed body if longer bodies need keeping.
-pub(crate) const BODY_CAP: u64 = 32 << 20;
-/// Body bytes held by sends in flight or queued, across the process.
-const IN_FLIGHT_CAP: u64 = 512 << 20;
 pub(crate) const CHANNEL: usize = 256;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 const DELETE_RETRY: Duration = Duration::from_secs(10);
-
-/// A byte budget shared by every [`Body`] that reserves from it.
-#[derive(Clone)]
-pub(crate) struct Budget(Arc<BudgetState>);
-
-struct BudgetState {
-    used: AtomicU64,
-    cap: u64,
-}
-
-impl Budget {
-    pub(crate) fn new(cap: u64) -> Self {
-        Self(Arc::new(BudgetState {
-            used: AtomicU64::new(0),
-            cap,
-        }))
-    }
-
-    fn global() -> &'static Budget {
-        static GLOBAL: OnceLock<Budget> = OnceLock::new();
-        GLOBAL.get_or_init(|| Budget::new(IN_FLIGHT_CAP))
-    }
-
-    fn try_reserve(&self, n: u64) -> bool {
-        let used = &self.0.used;
-        let mut current = used.load(Ordering::Acquire);
-        loop {
-            let Some(next) = current.checked_add(n).filter(|total| *total <= self.0.cap) else {
-                return false;
-            };
-            match used.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return true,
-                Err(actual) => current = actual,
-            }
-        }
-    }
-
-    fn release(&self, n: u64) {
-        self.0.used.fetch_sub(n, Ordering::AcqRel);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn used(&self) -> u64 {
-        self.0.used.load(Ordering::Acquire)
-    }
-}
-
-/// A body collected as chunks. It keeps at most [`BODY_CAP`] bytes and only what the
-/// budget allows; past either it counts the rest and marks itself truncated.
-pub(crate) struct Body {
-    chunks: Vec<Bytes>,
-    kept: u64,
-    total: u64,
-    truncated: bool,
-    lines: bool,
-    budget: Budget,
-}
-
-impl Body {
-    pub(crate) fn new(budget: &Budget) -> Self {
-        Self {
-            chunks: Vec::new(),
-            kept: 0,
-            total: 0,
-            truncated: false,
-            lines: false,
-            budget: budget.clone(),
-        }
-    }
-
-    /// Keeps a handle to `bytes`, without copying.
-    pub(crate) fn push_bytes(&mut self, bytes: &Bytes) {
-        self.keep(bytes.len(), |n| bytes.slice(..n));
-    }
-
-    pub(crate) fn push_slice(&mut self, bytes: &[u8]) {
-        self.keep(bytes.len(), |n| Bytes::copy_from_slice(&bytes[..n]));
-    }
-
-    /// Appends one scanned line, with `\n` between lines.
-    pub(crate) fn push_line(&mut self, line: &[u8]) {
-        if std::mem::replace(&mut self.lines, true) {
-            self.push_bytes(&Bytes::from_static(b"\n"));
-        }
-        self.push_slice(line);
-    }
-
-    fn keep(&mut self, len: usize, take: impl FnOnce(usize) -> Bytes) {
-        let len = len as u64;
-        self.total = self.total.saturating_add(len);
-        if self.truncated || len == 0 {
-            return;
-        }
-        let n = len.min(BODY_CAP - self.kept);
-        if n < len {
-            self.truncated = true;
-        }
-        if n == 0 {
-            return;
-        }
-        if !self.budget.try_reserve(n) {
-            self.truncated = true;
-            return;
-        }
-        self.kept += n;
-        self.chunks.push(take(n as usize));
-    }
-
-    pub(crate) fn total(&self) -> u64 {
-        self.total
-    }
-
-    pub(crate) fn truncated(&self) -> bool {
-        self.truncated
-    }
-
-    pub(crate) fn into_vec(mut self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.kept as usize);
-        for chunk in std::mem::take(&mut self.chunks) {
-            out.extend_from_slice(&chunk);
-        }
-        out
-    }
-}
-
-impl Drop for Body {
-    fn drop(&mut self) {
-        self.budget.release(self.kept);
-    }
-}
-
-/// A send's row before its bodies are joined, decoded and split into columns.
-pub(crate) struct PendingRow {
-    pub(crate) row: Row,
-    pub(crate) request: Body,
-    pub(crate) response: Body,
-    /// Websocket transports: one body per frame.
-    pub(crate) request_frames: Option<Vec<Body>>,
-    pub(crate) response_frames: Option<Vec<Body>>,
-    /// The response's `content-encoding`, when its bytes are still encoded.
-    pub(crate) response_encoding: Option<String>,
-}
-
-impl PendingRow {
-    pub(crate) fn new(row: Row, budget: &Budget) -> Self {
-        Self {
-            row,
-            request: Body::new(budget),
-            response: Body::new(budget),
-            request_frames: None,
-            response_frames: None,
-            response_encoding: None,
-        }
-    }
-}
 
 /// Thresholds for row groups and files, and the clock that dates them.
 #[derive(Clone)]
@@ -251,7 +93,7 @@ impl Writer {
     pub(crate) fn with_limits(limits: Limits) -> Self {
         Self {
             limits,
-            budget: Budget::new(IN_FLIGHT_CAP),
+            budget: Budget::new(super::body::IN_FLIGHT_CAP),
             ..Self::default()
         }
     }
@@ -581,7 +423,7 @@ impl Worker {
             self.rotate();
         }
         let row = self.finalize(pending);
-        self.buffer_bytes += body_bytes(&row);
+        self.buffer_bytes += row.body_bytes();
         self.buffer.push(row);
         self.window.get_or_insert_with(|| Window {
             dir: settings.dir.clone(),
@@ -747,31 +589,6 @@ impl Worker {
     }
 }
 
-/// [`enforce_cap`] under the history lock; skipped this round while a delete holds it.
-fn apply_cap(dir: &Path, cap: u64) {
-    match DirLock::try_acquire(dir) {
-        Ok(Some(_lock)) => {
-            if let Err(error) = enforce_cap(dir, cap) {
-                tracing::warn!("history: cannot apply max-total-size-mb: {error}");
-            }
-        }
-        Ok(None) => {}
-        Err(error) => tracing::warn!("history: cannot lock {}: {error}", dir.display()),
-    }
-}
-
-fn body_bytes(row: &Row) -> u64 {
-    let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
-    let raw = |b: &Option<Vec<u8>>| b.as_ref().map_or(0, Vec::len);
-    let frames = |f: &Option<Vec<String>>| f.as_ref().map_or(0, |f| f.iter().map(String::len).sum());
-    (text(&row.request_body)
-        + text(&row.response_body)
-        + raw(&row.request_body_raw)
-        + raw(&row.response_body_raw)
-        + frames(&row.request_frames)
-        + frames(&row.response_frames)) as u64
-}
-
 async fn decode(raw: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
     use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
     use tokio::io::{AsyncRead, AsyncReadExt};
@@ -805,53 +622,6 @@ async fn decode(raw: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
     let over = out.len() as u64 > BODY_CAP;
     out.truncate(BODY_CAP as usize);
     (out, failed || over)
-}
-
-/// Deletes the oldest history files, by partition date then name, until the files
-/// under `dir` total at most `cap` bytes. Returns the bytes freed.
-pub(crate) fn enforce_cap(dir: &Path, cap: u64) -> std::io::Result<u64> {
-    let files = history_files(dir)?;
-    let mut total: u64 = files.iter().map(|f| f.len).sum();
-    let mut freed = 0;
-    for file in files {
-        if total <= cap {
-            break;
-        }
-        if std::fs::remove_file(&file.path).is_ok() {
-            total -= file.len;
-            freed += file.len;
-        }
-    }
-    remove_empty_partitions(dir);
-    Ok(freed)
-}
-
-/// Removes in-progress files no writer holds, except `open`, this writer's own: probing
-/// it would release its lock where the OS emulates flock with process-wide locks.
-fn remove_dead_partials(dir: &Path, open: Option<&Path>) {
-    let Ok(partitions) = std::fs::read_dir(dir) else { return };
-    let mut removed = 0u64;
-    for partition in partitions.flatten() {
-        if !partition.file_name().to_string_lossy().starts_with("date=") {
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(partition.path()) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            if is_partial_file(&file.file_name().to_string_lossy())
-                && open != Some(path.as_path())
-                && is_abandoned(&path).unwrap_or(false)
-                && std::fs::remove_file(&path).is_ok()
-            {
-                removed += 1;
-            }
-        }
-    }
-    if removed > 0 {
-        tracing::warn!("history: removed {removed} unfinished file(s) left by a writer that stopped");
-    }
 }
 
 #[cfg(test)]

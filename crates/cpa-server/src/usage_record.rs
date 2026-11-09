@@ -2240,7 +2240,7 @@ impl Tracker {
         }
         let client = self.client.as_ref().unwrap_or(&self.facts.client);
         if let Some(sends) = history {
-            use crate::request_logging::history::file::Outcome;
+            use crate::request_logging::history::row::Outcome;
             sends.finish(
                 &self.queue,
                 crate::request_logging::history::capture::AttemptEnd {

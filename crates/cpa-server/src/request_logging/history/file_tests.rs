@@ -1,4 +1,5 @@
 use super::*;
+use crate::request_logging::history::row::body_columns;
 
 pub(crate) struct TempDir(pub(crate) PathBuf);
 

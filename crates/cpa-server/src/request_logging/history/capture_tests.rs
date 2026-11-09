@@ -9,8 +9,9 @@ use axum::response::{IntoResponse, Response};
 use cpa_exec::Executors;
 use cpa_exec::claude::ClaudeExecutor;
 
+use crate::request_logging::history::file::read_rows;
 use crate::request_logging::history::file::tests::TempDir;
-use crate::request_logging::history::file::{Outcome, Row, read_rows};
+use crate::request_logging::history::row::{Outcome, Row};
 
 const JSON_REPLY: &str = r#"{"id":"msg_1","type":"message","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}"#;
 const SSE: &str = "event: message_start\n\

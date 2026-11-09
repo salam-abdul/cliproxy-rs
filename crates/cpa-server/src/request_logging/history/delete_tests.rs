@@ -1,7 +1,9 @@
 use super::*;
+use crate::request_logging::history::body::PendingRow;
 use crate::request_logging::history::file::tests::TempDir;
-use crate::request_logging::history::file::{ParquetFile, Source, read_rows};
-use crate::request_logging::history::writer::{Limits, PendingRow, Writer};
+use crate::request_logging::history::file::{ParquetFile, read_rows};
+use crate::request_logging::history::row::Source;
+use crate::request_logging::history::writer::{Limits, Writer};
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)

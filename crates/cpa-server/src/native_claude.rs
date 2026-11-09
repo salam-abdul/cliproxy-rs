@@ -766,7 +766,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 if let Some(capture) = capture.take() {
                     capture.finish(crate::request_logging::history::native::NativeEnd {
                         stream: false,
-                        outcome: crate::request_logging::history::file::Outcome::TransportLost,
+                        outcome: crate::request_logging::history::row::Outcome::TransportLost,
                         detail: None,
                         error: Some(failure_kind.to_owned()),
                     });
@@ -815,7 +815,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             if let Some(capture) = capture.take() {
                 capture.finish(crate::request_logging::history::native::NativeEnd {
                     stream: false,
-                    outcome: crate::request_logging::history::file::Outcome::Failover,
+                    outcome: crate::request_logging::history::row::Outcome::Failover,
                     detail: None,
                     error: Some(outcome.to_owned()),
                 });

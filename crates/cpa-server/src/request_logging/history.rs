@@ -6,11 +6,14 @@ use std::path::PathBuf;
 
 use cpa_core::config::Config;
 
+pub(crate) mod body;
 pub(crate) mod capture;
 pub mod delete;
+pub(crate) mod dir;
 pub(crate) mod file;
 pub(crate) mod lock;
 pub(crate) mod native;
+pub(crate) mod row;
 pub mod writer;
 
 const DEFAULT_MAX_TOTAL_MB: u64 = 10240;

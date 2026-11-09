@@ -467,7 +467,7 @@ impl Observation {
             .unwrap_or_default();
         let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
         if let Some(history) = history {
-            use crate::request_logging::history::file::Outcome;
+            use crate::request_logging::history::row::Outcome;
             history.finish(crate::request_logging::history::native::NativeEnd {
                 stream: f.sse,
                 outcome: match (end, success) {
