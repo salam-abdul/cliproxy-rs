@@ -720,6 +720,17 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             }
         };
         let started = Instant::now();
+        let mut capture = crate::request_logging::history::native::NativeCapture::start(
+            &s.rt,
+            &request_id,
+            tried.len().saturating_sub(1),
+            &raw,
+        );
+        let account = if a.name.is_empty() {
+            a.id.clone()
+        } else {
+            a.name.clone()
+        };
         let result = s
             .client
             .request(parts.method.clone(), format!("{target}{path}"))
@@ -744,6 +755,22 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     "transport"
                 };
                 s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
+                if let Some(capture) = capture.take() {
+                    capture.finish(
+                        &s.rt,
+                        crate::request_logging::history::native::NativeFacts {
+                            account: &account,
+                            model: &model,
+                            session_id: &sid,
+                            stream: false,
+                            outcome: crate::request_logging::history::file::Outcome::TransportLost,
+                            latency_ms: started.elapsed().as_millis() as i64,
+                            ttft_ms: None,
+                            detail: None,
+                            error: Some(failure_kind.to_owned()),
+                        },
+                    );
+                }
                 return Ok(error(
                     422,
                     "Upstream response was lost; request was not replayed to avoid duplicate inference. Check the session before explicitly retrying.",
@@ -752,6 +779,9 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         };
         upstream_headers_ms += started.elapsed().as_millis();
         let status = r.status();
+        if let Some(capture) = capture.as_mut() {
+            capture.response_head(status.as_u16(), r.headers());
+        }
         s.rt.executors
             .claude
             .quota()
@@ -784,6 +814,22 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 "retryable_rejection"
             };
             s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
+            if let Some(capture) = capture.take() {
+                capture.finish(
+                    &s.rt,
+                    crate::request_logging::history::native::NativeFacts {
+                        account: &account,
+                        model: &model,
+                        session_id: &sid,
+                        stream: false,
+                        outcome: crate::request_logging::history::file::Outcome::Failover,
+                        latency_ms: started.elapsed().as_millis() as i64,
+                        ttft_ms: None,
+                        detail: None,
+                        error: Some(outcome.to_owned()),
+                    },
+                );
+            }
             continue;
         }
         let facts = Exchange {
@@ -803,8 +849,9 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             digest: hash(&raw),
             body_bytes: raw.len(),
             started: request_started,
+            history_account: account,
         };
-        let record = Observation::new(s.clone(), facts, &encoding);
+        let record = Observation::new(s.clone(), facts, &encoding, capture);
         let stream = futures_util::stream::unfold(
             (stream, Some(record), guard),
             |(mut stream, mut record, guard)| async move {

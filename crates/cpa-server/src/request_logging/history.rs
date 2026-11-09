@@ -9,6 +9,7 @@ use cpa_core::config::Config;
 pub(crate) mod capture;
 pub mod delete;
 pub(crate) mod file;
+pub(crate) mod native;
 pub mod writer;
 
 const DEFAULT_MAX_TOTAL_MB: u64 = 10240;

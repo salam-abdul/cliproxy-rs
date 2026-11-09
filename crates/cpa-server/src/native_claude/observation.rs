@@ -344,10 +344,14 @@ pub(super) struct Exchange {
     pub(super) digest: String,
     pub(super) body_bytes: usize,
     pub(super) started: Instant,
+    /// The account as history names it.
+    pub(super) history_account: String,
 }
 pub(super) struct Observation {
     s: Arc<State>,
     facts: Exchange,
+    /// This send's history capture, while history is on.
+    history: Option<crate::request_logging::history::native::NativeCapture>,
     usage: Arc<Mutex<UsageScanner>>,
     writer: Option<tokio::io::DuplexStream>,
     decoder: Option<JoinHandle<()>>,
@@ -356,7 +360,12 @@ pub(super) struct Observation {
     first_byte_ms: Option<u128>,
 }
 impl Observation {
-    pub(super) fn new(s: Arc<State>, facts: Exchange, encoding: &str) -> Self {
+    pub(super) fn new(
+        s: Arc<State>,
+        facts: Exchange,
+        encoding: &str,
+        history: Option<crate::request_logging::history::native::NativeCapture>,
+    ) -> Self {
         use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
         let (writer, reader) = tokio::io::duplex(65536);
         let source = BufReader::new(reader);
@@ -389,6 +398,7 @@ impl Observation {
         Self {
             s,
             facts,
+            history,
             usage,
             writer: Some(writer),
             decoder: Some(decoder),
@@ -397,8 +407,11 @@ impl Observation {
             first_byte_ms: None,
         }
     }
-    pub(super) async fn observe(&mut self, b: &[u8]) {
+    pub(super) async fn observe(&mut self, b: &axum::body::Bytes) {
         use tokio::io::AsyncWriteExt;
+        if let Some(history) = self.history.as_mut() {
+            history.push(b);
+        }
         if !b.is_empty() && self.first_byte_ms.is_none() {
             self.first_byte_ms = Some(self.facts.started.elapsed().as_millis());
         }
@@ -425,6 +438,7 @@ impl Observation {
         if std::mem::replace(&mut self.published, true) {
             return;
         }
+        let history = self.history.take();
         let f = &self.facts;
         let (usage, outcome) = {
             let scan = self.usage.lock().unwrap_or_else(PoisonError::into_inner);
@@ -454,6 +468,28 @@ impl Observation {
             .map(|c| cpa_core::config::credentials::auth_index(c))
             .unwrap_or_default();
         let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
+        if let Some(history) = history {
+            use crate::request_logging::history::file::Outcome;
+            history.finish(
+                &self.s.rt,
+                crate::request_logging::history::native::NativeFacts {
+                    account: &f.history_account,
+                    model: &f.model,
+                    session_id: &f.sid,
+                    stream: f.sse,
+                    outcome: match (end, success) {
+                        ("client_cancelled", _) => Outcome::Cancelled,
+                        ("upstream_stream_error", _) => Outcome::StreamError,
+                        (_, true) => Outcome::Complete,
+                        _ => Outcome::Failed,
+                    },
+                    latency_ms: f.started.elapsed().as_millis() as i64,
+                    ttft_ms: self.first_byte_ms.map(|ms| ms as i64),
+                    detail: Some(&detail),
+                    error: (!success).then(|| outcome.to_owned()),
+                },
+            );
+        }
         let record = crate::usage_record::Record {
             timestamp: chrono::Utc::now().to_rfc3339(),
             execution_id: uuid::Uuid::new_v4().to_string(),
@@ -501,6 +537,7 @@ impl Drop for Observation {
         let mut finalizer = Self {
             s: self.s.clone(),
             facts: self.facts.clone(),
+            history: self.history.take(),
             usage: self.usage.clone(),
             writer: None,
             decoder: self.decoder.take(),
