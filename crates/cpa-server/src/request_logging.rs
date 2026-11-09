@@ -23,6 +23,8 @@ use crate::Runtime;
 use crate::management::Management;
 use crate::observability::{RequestId, hide_key, mask_query};
 
+pub mod history;
+
 // ponytail: request capture and decoded output stop at 32 MiB; raise together only
 // with bounded storage and decompression tests for larger diagnostic bodies.
 const DEFERRED_BODY: u64 = 32 << 20;
