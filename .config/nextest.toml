@@ -24,6 +24,7 @@ filter = '''
         | test(=claude::cloak::tests::ttl_passes_edit_many_markers_in_one_pass)
         | test(=antigravity_request::tests::tool_schemas_are_cleaned_in_one_pass)))
     | (binary_id(cpa-server) & test(/^websocket::tests::/))
+    | (binary_id(cpa-home) & test(=inflight::tests::a_new_interval_applies_at_the_next_timer_cycle))
     | (binary_id(cliproxy::bin/cliproxy) & (
         test(=home::tests::usage_and_in_flight_reach_home_and_drains_cancel_running_work)
         | test(=home::tests::a_drain_cancels_a_stalled_alpha_search)
