@@ -30,10 +30,47 @@ enum Get {
     List(fn(&Row) -> Option<&[String]>),
 }
 
+/// What a column is for beyond holding its value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Plain,
+    /// Read by a delete to decide which rows match, without reading bodies.
+    Key,
+    /// A whole body: no dictionary (every value is distinct) and no statistics (min/max
+    /// of a body would copy prompt text into the footer).
+    Body,
+}
+
 struct Column {
     name: &'static str,
     get: Get,
     set: fn(&mut Row, Field) -> io::Result<()>,
+    role: Role,
+}
+
+impl Column {
+    const fn key(self) -> Self {
+        Self {
+            role: Role::Key,
+            ..self
+        }
+    }
+
+    const fn body(self) -> Self {
+        Self {
+            role: Role::Body,
+            ..self
+        }
+    }
+
+    /// The leaf's path in the schema.
+    fn leaf(&self) -> ColumnPath {
+        let mut path = vec![self.name.to_owned()];
+        if matches!(self.get, Get::List(_)) {
+            path.extend(["list".to_owned(), "element".to_owned()]);
+        }
+        ColumnPath::new(path)
+    }
 }
 
 fn bad(name: &str, field: &Field) -> io::Error {
@@ -108,6 +145,7 @@ macro_rules! column {
                 r.$name = opt_str(stringify!($name), f)?;
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, Bin) => {
@@ -118,6 +156,7 @@ macro_rules! column {
                 r.$name = opt_bytes(stringify!($name), f)?;
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, OptI32) => {
@@ -128,6 +167,7 @@ macro_rules! column {
                 r.$name = opt_i32(stringify!($name), f)?;
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, I32) => {
@@ -138,6 +178,7 @@ macro_rules! column {
                 r.$name = opt_i32(stringify!($name), f)?.unwrap_or_default();
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, OptI64) => {
@@ -148,6 +189,7 @@ macro_rules! column {
                 r.$name = opt_i64(stringify!($name), f)?;
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, I64) => {
@@ -158,6 +200,7 @@ macro_rules! column {
                 r.$name = opt_i64(stringify!($name), f)?.unwrap_or_default();
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, Bool) => {
@@ -168,6 +211,7 @@ macro_rules! column {
                 r.$name = opt_bool(stringify!($name), f)?.unwrap_or_default();
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
     ($name:ident, List) => {
@@ -178,12 +222,12 @@ macro_rules! column {
                 r.$name = opt_list(stringify!($name), f)?;
                 Ok(())
             },
+            role: Role::Plain,
         }
     };
 }
 
-/// The file's columns, in schema order. Body and frame columns are listed in
-/// [`UNINDEXED`].
+/// The file's columns, in schema order.
 static COLUMNS: [Column; 41] = [
     Column {
         name: "exchange_id",
@@ -192,6 +236,7 @@ static COLUMNS: [Column; 41] = [
             r.exchange_id = opt_str("exchange_id", f)?.unwrap_or_default();
             Ok(())
         },
+        role: Role::Plain,
     },
     column!(turn, I32),
     column!(send, I32),
@@ -202,7 +247,9 @@ static COLUMNS: [Column; 41] = [
             r.started_at_us = opt_i64("started_at", f)?.unwrap_or_default();
             Ok(())
         },
-    },
+        role: Role::Plain,
+    }
+    .key(),
     Column {
         name: "ended_at",
         get: Get::Ts(|r| r.ended_at_us),
@@ -210,6 +257,7 @@ static COLUMNS: [Column; 41] = [
             r.ended_at_us = opt_i64("ended_at", f)?;
             Ok(())
         },
+        role: Role::Plain,
     },
     Column {
         name: "source",
@@ -219,16 +267,17 @@ static COLUMNS: [Column; 41] = [
             r.source = Source::parse(&value).ok_or_else(|| bad("source", &Field::Str(value)))?;
             Ok(())
         },
+        role: Role::Plain,
     },
     column!(endpoint, Str),
     column!(transport, Str),
     column!(provider, Str),
-    column!(model_requested, Str),
-    column!(model, Str),
+    column!(model_requested, Str).key(),
+    column!(model, Str).key(),
     column!(response_model, Str),
-    column!(account, Str),
+    column!(account, Str).key(),
     column!(auth_index, Str),
-    column!(session_id, Str),
+    column!(session_id, Str).key(),
     column!(user_agent, Str),
     column!(stream, Bool),
     column!(status, OptI32),
@@ -240,6 +289,7 @@ static COLUMNS: [Column; 41] = [
             r.outcome = Outcome::parse(&value).ok_or_else(|| bad("outcome", &Field::Str(value)))?;
             Ok(())
         },
+        role: Role::Plain,
     },
     column!(error, Str),
     column!(input_tokens, OptI64),
@@ -253,35 +303,21 @@ static COLUMNS: [Column; 41] = [
     column!(latency_ms, OptI64),
     column!(ttft_ms, OptI64),
     column!(upstream_request_id, Str),
-    column!(request_body, Str),
-    column!(request_body_raw, Bin),
-    column!(response_body, Str),
-    column!(response_body_raw, Bin),
-    column!(request_frames, List),
-    column!(response_frames, List),
+    column!(request_body, Str).body(),
+    column!(request_body_raw, Bin).body(),
+    column!(response_body, Str).body(),
+    column!(response_body_raw, Bin).body(),
+    column!(request_frames, List).body(),
+    column!(response_frames, List).body(),
     column!(request_bytes, I64),
     column!(response_bytes, I64),
     column!(request_truncated, Bool),
     column!(response_truncated, Bool),
 ];
 
-/// Columns whose values are whole bodies: no dictionary (every value is distinct) and
-/// no statistics (min/max of a body would copy prompt text into the footer).
-const UNINDEXED: [&[&str]; 6] = [
-    &["request_body"],
-    &["request_body_raw"],
-    &["response_body"],
-    &["response_body_raw"],
-    &["request_frames", "list", "element"],
-    &["response_frames", "list", "element"],
-];
-
 fn schema() -> parquet::errors::Result<parquet::schema::types::TypePtr> {
     schema_of(COLUMNS.iter())
 }
-
-/// The columns a delete matches on: enough to decide without reading bodies.
-const KEY_COLUMNS: [&str; 5] = ["started_at", "session_id", "account", "model", "model_requested"];
 
 fn schema_of<'a>(
     columns: impl Iterator<Item = &'a Column>,
@@ -311,8 +347,7 @@ fn schema_of<'a>(
 
 fn properties() -> parquet::errors::Result<WriterProperties> {
     let mut builder = WriterProperties::builder().set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?));
-    for path in UNINDEXED {
-        let path = ColumnPath::new(path.iter().map(|p| (*p).to_owned()).collect());
+    for path in COLUMNS.iter().filter(|c| c.role == Role::Body).map(Column::leaf) {
         builder = builder
             .set_column_dictionary_enabled(path.clone(), false)
             .set_column_statistics_enabled(path, EnabledStatistics::None);
@@ -585,7 +620,7 @@ pub(crate) fn read_rows(path: &Path) -> io::Result<Vec<Row>> {
 /// Every row of a history file with only the columns a delete matches on set.
 pub(crate) fn read_keys(path: &Path) -> io::Result<Vec<Row>> {
     let reader = SerializedFileReader::new(File::open(path)?).map_err(io_error)?;
-    let projection = schema_of(COLUMNS.iter().filter(|c| KEY_COLUMNS.contains(&c.name))).map_err(io_error)?;
+    let projection = schema_of(COLUMNS.iter().filter(|c| c.role == Role::Key)).map_err(io_error)?;
     reader
         .get_row_iter(Some((*projection).clone()))
         .map_err(io_error)?
