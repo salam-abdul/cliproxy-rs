@@ -10,7 +10,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use cpa_core::exec::{CaptureEvent, CaptureObserver, CaptureSink, UpstreamRequest};
 
-use super::body::{Body, Budget, PendingRow};
+use super::body::{Bodies, Body, Budget, HttpBodies, PendingRow};
 use super::row::{Outcome, Row, Source};
 use crate::usage_record::Detail;
 
@@ -325,7 +325,6 @@ impl Sends {
             ended_at_us: Some(ended_us.unwrap_or_else(|| Utc::now().timestamp_micros())),
             source: Source::Proxy,
             endpoint: text(&base.endpoint),
-            transport: Some(if send.websocket { "websocket" } else { "http" }.into()),
             provider: text(&base.provider),
             model_requested: text(&base.model_requested),
             model: text(&base.model),
@@ -354,14 +353,19 @@ impl Sends {
             row.ttft_ms = end.ttft_ms;
             row.set_tokens(&end.detail);
         }
-        let mut pending = PendingRow::new(row, &self.budget);
-        pending.request = send.request;
-        pending.response = send.response;
-        if send.websocket {
-            pending.request_frames = Some(send.request_frames);
-            pending.response_frames = Some(send.response_frames);
-        }
-        pending
+        let bodies = if send.websocket {
+            Bodies::Websocket {
+                request: send.request_frames,
+                response: send.response_frames,
+            }
+        } else {
+            Bodies::Http(HttpBodies {
+                request: send.request,
+                response: send.response,
+                response_encoding: None,
+            })
+        };
+        PendingRow { row, bodies }
     }
 }
 

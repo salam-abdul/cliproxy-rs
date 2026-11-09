@@ -429,7 +429,10 @@ async fn websocket_frames_are_kept_per_send() {
     let rows = rows(&proxy, &dir.0, 1).await;
     let row = &rows[0];
     assert_eq!((row.exchange_id.as_str(), row.turn, row.send), ("conn", 3, 0));
-    assert_eq!(row.transport.as_deref(), Some("websocket"));
+    assert_eq!(
+        row.transport,
+        crate::request_logging::history::row::Transport::Websocket
+    );
     assert_eq!(
         row.request_frames.as_deref(),
         Some(&["{\"type\":\"response.create\",\"input\":\"a\nb\"}".to_owned()][..])

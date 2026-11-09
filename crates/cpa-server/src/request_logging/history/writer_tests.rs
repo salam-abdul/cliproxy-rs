@@ -1,7 +1,8 @@
 use super::*;
 use crate::request_logging::history::file::read_rows;
 use crate::request_logging::history::file::tests::TempDir;
-use crate::request_logging::history::row::{Outcome, Row, Source};
+use crate::request_logging::history::row::{Outcome, Row, Source, Transport};
+use crate::request_logging::history::test_support::{http, http_bodies};
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Mutex;
@@ -50,10 +51,11 @@ fn row(id: &str) -> Row {
 }
 
 fn pending(writer: &Writer, id: &str, request: &[u8], response_lines: &[&[u8]]) -> PendingRow {
-    let mut p = PendingRow::new(row(id), writer.budget());
-    p.request.push_slice(request);
+    let mut p = http(row(id), writer.budget());
+    let bodies = http_bodies(&mut p);
+    bodies.request.push_slice(request);
     for line in response_lines {
-        p.response.push_line(line);
+        bodies.response.push_line(line);
     }
     p
 }
@@ -265,7 +267,6 @@ fn a_live_processes_partial_survives_startup_cleanup() {
 fn websocket_byte_counts_add_up_every_frame() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
-    let mut p = PendingRow::new(row("a"), writer.budget());
     let frames = |bodies: &[&[u8]]| {
         bodies
             .iter()
@@ -276,12 +277,18 @@ fn websocket_byte_counts_add_up_every_frame() {
             })
             .collect::<Vec<_>>()
     };
-    p.request_frames = Some(frames(&[b"abc"]));
-    p.response_frames = Some(frames(&[b"de", b"fghi"]));
+    let p = PendingRow {
+        row: row("a"),
+        bodies: Bodies::Websocket {
+            request: frames(&[b"abc"]),
+            response: frames(&[b"de", b"fghi"]),
+        },
+    };
     writer.submit(&on(&dir.0), p);
     writer.flush();
     let rows = all_rows(&dir.0);
     assert_eq!((rows[0].request_bytes, rows[0].response_bytes), (3, 6));
+    assert_eq!(rows[0].transport, Transport::Websocket);
 }
 
 #[test]
@@ -337,10 +344,10 @@ fn an_unwritable_dir_counts_rows_and_never_fails_requests() {
 fn a_native_body_is_decoded_on_the_writer_thread() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
-    let mut p = PendingRow::new(row("n"), writer.budget());
+    let mut p = http(row("n"), writer.budget());
     let encoded = zstd::bulk::compress(b"event: message_start\ndata: {}\n\n", 3).unwrap();
-    p.response.push_bytes(&Bytes::from(encoded));
-    p.response_encoding = Some("zstd".into());
+    http_bodies(&mut p).response.push_bytes(&Bytes::from(encoded));
+    http_bodies(&mut p).response_encoding = Some("zstd".into());
     writer.submit(&on(&dir.0), p);
     writer.flush();
     let rows = all_rows(&dir.0);
@@ -368,11 +375,11 @@ fn age_rotation_happens_while_rows_keep_arriving() {
 fn a_body_cut_inside_a_character_stays_text() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
-    let mut p = PendingRow::new(row("a"), writer.budget());
+    let mut p = http(row("a"), writer.budget());
     // 'é' is two bytes; the cap falls between them.
     let mut body = vec![b'a'; (BODY_CAP - 1) as usize];
     body.extend_from_slice("é".as_bytes());
-    p.response.push_bytes(&Bytes::from(body));
+    http_bodies(&mut p).response.push_bytes(&Bytes::from(body));
     writer.submit(&on(&dir.0), p);
     writer.flush();
     let rows = all_rows(&dir.0);

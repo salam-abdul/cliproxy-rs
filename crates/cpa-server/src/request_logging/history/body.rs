@@ -143,29 +143,38 @@ impl Drop for Body {
     }
 }
 
-/// A send's row before its bodies are joined, decoded and split into columns.
-pub(crate) struct PendingRow {
-    pub(crate) row: Row,
+/// An HTTP send's bodies.
+pub(crate) struct HttpBodies {
     pub(crate) request: Body,
     pub(crate) response: Body,
-    /// Websocket transports: one body per frame.
-    pub(crate) request_frames: Option<Vec<Body>>,
-    pub(crate) response_frames: Option<Vec<Body>>,
     /// The response's `content-encoding`, when its bytes are still encoded.
     pub(crate) response_encoding: Option<String>,
 }
 
-impl PendingRow {
-    pub(crate) fn new(row: Row, budget: &Budget) -> Self {
+impl HttpBodies {
+    pub(crate) fn new(budget: &Budget) -> Self {
         Self {
-            row,
             request: Body::new(budget),
             response: Body::new(budget),
-            request_frames: None,
-            response_frames: None,
             response_encoding: None,
         }
     }
+}
+
+/// A send's bodies, as its transport carried them; the transport column follows.
+pub(crate) enum Bodies {
+    Http(HttpBodies),
+    /// One body per frame.
+    Websocket {
+        request: Vec<Body>,
+        response: Vec<Body>,
+    },
+}
+
+/// A send's row before its bodies are joined, decoded and split into columns.
+pub(crate) struct PendingRow {
+    pub(crate) row: Row,
+    pub(crate) bodies: Bodies,
 }
 
 #[cfg(test)]

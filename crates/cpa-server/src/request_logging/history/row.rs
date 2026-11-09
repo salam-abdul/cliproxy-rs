@@ -21,6 +21,27 @@ impl Source {
     }
 }
 
+/// How the send reached the upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transport {
+    #[default]
+    Http,
+    Websocket,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Websocket => "websocket",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        [Self::Http, Self::Websocket].into_iter().find(|v| v.as_str() == s)
+    }
+}
+
 /// How one upstream send ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Outcome {
@@ -70,7 +91,7 @@ pub struct Row {
     pub ended_at_us: Option<i64>,
     pub source: Source,
     pub endpoint: Option<String>,
-    pub transport: Option<String>,
+    pub transport: Transport,
     pub provider: Option<String>,
     pub model_requested: Option<String>,
     pub model: Option<String>,

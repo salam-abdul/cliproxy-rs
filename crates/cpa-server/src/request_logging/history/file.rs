@@ -18,7 +18,7 @@ use parquet::record::Field;
 use parquet::schema::types::ColumnPath;
 
 use super::dir::is_history_file;
-use super::row::{Outcome, Row, Source};
+use super::row::{Outcome, Row, Source, Transport};
 
 enum Get {
     Str(fn(&Row) -> Option<&str>),
@@ -137,6 +137,18 @@ fn opt_list(name: &str, field: Field) -> io::Result<Option<Vec<String>>> {
 }
 
 macro_rules! column {
+    ($name:ident, Enum($ty:ident)) => {
+        Column {
+            name: stringify!($name),
+            get: Get::Str(|r| Some(r.$name.as_str())),
+            set: |r, f| {
+                let value = opt_str(stringify!($name), f)?.unwrap_or_default();
+                r.$name = $ty::parse(&value).ok_or_else(|| bad(stringify!($name), &Field::Str(value)))?;
+                Ok(())
+            },
+            role: Role::Plain,
+        }
+    };
     ($name:ident, Str) => {
         Column {
             name: stringify!($name),
@@ -259,18 +271,9 @@ static COLUMNS: [Column; 41] = [
         },
         role: Role::Plain,
     },
-    Column {
-        name: "source",
-        get: Get::Str(|r| Some(r.source.as_str())),
-        set: |r, f| {
-            let value = opt_str("source", f)?.unwrap_or_default();
-            r.source = Source::parse(&value).ok_or_else(|| bad("source", &Field::Str(value)))?;
-            Ok(())
-        },
-        role: Role::Plain,
-    },
+    column!(source, Enum(Source)),
     column!(endpoint, Str),
-    column!(transport, Str),
+    column!(transport, Enum(Transport)),
     column!(provider, Str),
     column!(model_requested, Str).key(),
     column!(model, Str).key(),
@@ -281,16 +284,7 @@ static COLUMNS: [Column; 41] = [
     column!(user_agent, Str),
     column!(stream, Bool),
     column!(status, OptI32),
-    Column {
-        name: "outcome",
-        get: Get::Str(|r| Some(r.outcome.as_str())),
-        set: |r, f| {
-            let value = opt_str("outcome", f)?.unwrap_or_default();
-            r.outcome = Outcome::parse(&value).ok_or_else(|| bad("outcome", &Field::Str(value)))?;
-            Ok(())
-        },
-        role: Role::Plain,
-    },
+    column!(outcome, Enum(Outcome)),
     column!(error, Str),
     column!(input_tokens, OptI64),
     column!(output_tokens, OptI64),

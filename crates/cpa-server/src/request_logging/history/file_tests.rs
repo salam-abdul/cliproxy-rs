@@ -28,7 +28,7 @@ fn full_row() -> Row {
         ended_at_us: Some(1_762_000_001_000_000),
         source: Source::Proxy,
         endpoint: Some("POST /v1/messages".into()),
-        transport: Some("websocket".into()),
+        transport: Transport::Websocket,
         provider: Some("claude".into()),
         model_requested: Some("sonnet".into()),
         model: Some("claude-sonnet-4-6".into()),

@@ -13,11 +13,11 @@ use chrono::{DateTime, Utc};
 use cpa_core::config::Config;
 
 use super::Settings;
-use super::body::{BODY_CAP, Body, Budget, PendingRow};
+use super::body::{BODY_CAP, Bodies, Body, Budget, HttpBodies, PendingRow};
 use super::delete::apply_tombstones;
 use super::dir::HistoryDir;
 use super::file::ParquetFile;
-use super::row::{Row, body_columns};
+use super::row::{Row, Transport, body_columns};
 
 pub(crate) const CHANNEL: usize = 256;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
@@ -448,44 +448,48 @@ impl Worker {
     }
 
     fn finalize(&mut self, pending: PendingRow) -> Row {
-        let PendingRow {
-            mut row,
-            request,
-            response,
-            request_frames,
-            response_frames,
-            response_encoding,
-        } = pending;
-        row.request_bytes = i64::try_from(request.total()).unwrap_or(i64::MAX);
-        row.request_truncated = request.truncated();
-        if request.total() > 0 {
-            (row.request_body, row.request_body_raw) = body_columns(request.into_vec(), row.request_truncated);
-        }
-        row.response_bytes = i64::try_from(response.total()).unwrap_or(i64::MAX);
-        row.response_truncated = response.truncated();
-        if response.total() > 0 {
-            let mut body = response.into_vec();
-            if let Some(encoding) = response_encoding {
-                let failed;
-                (body, failed) = self.decode(body, &encoding);
-                row.response_truncated |= failed;
+        let PendingRow { mut row, bodies } = pending;
+        let size = |body: &Body| i64::try_from(body.total()).unwrap_or(i64::MAX);
+        match bodies {
+            Bodies::Http(HttpBodies {
+                request,
+                response,
+                response_encoding,
+            }) => {
+                row.transport = Transport::Http;
+                row.request_bytes = size(&request);
+                row.request_truncated = request.truncated();
+                if request.total() > 0 {
+                    (row.request_body, row.request_body_raw) = body_columns(request.into_vec(), row.request_truncated);
+                }
+                row.response_bytes = size(&response);
+                row.response_truncated = response.truncated();
+                if response.total() > 0 {
+                    let mut body = response.into_vec();
+                    if let Some(encoding) = response_encoding {
+                        let failed;
+                        (body, failed) = self.decode(body, &encoding);
+                        row.response_truncated |= failed;
+                    }
+                    (row.response_body, row.response_body_raw) = body_columns(body, row.response_truncated);
+                }
             }
-            (row.response_body, row.response_body_raw) = body_columns(body, row.response_truncated);
+            Bodies::Websocket { request, response } => {
+                row.transport = Transport::Websocket;
+                let frames = |bodies: Vec<Body>, bytes: &mut i64, truncated: &mut bool| {
+                    bodies
+                        .into_iter()
+                        .map(|body| {
+                            *bytes = bytes.saturating_add(size(&body));
+                            *truncated |= body.truncated();
+                            String::from_utf8_lossy(&body.into_vec()).into_owned()
+                        })
+                        .collect()
+                };
+                row.request_frames = Some(frames(request, &mut row.request_bytes, &mut row.request_truncated));
+                row.response_frames = Some(frames(response, &mut row.response_bytes, &mut row.response_truncated));
+            }
         }
-        let frames = |bodies: Option<Vec<Body>>, bytes: &mut i64, truncated: &mut bool| {
-            bodies.map(|bodies| {
-                bodies
-                    .into_iter()
-                    .map(|body| {
-                        *bytes = bytes.saturating_add(i64::try_from(body.total()).unwrap_or(i64::MAX));
-                        *truncated |= body.truncated();
-                        String::from_utf8_lossy(&body.into_vec()).into_owned()
-                    })
-                    .collect()
-            })
-        };
-        row.request_frames = frames(request_frames, &mut row.request_bytes, &mut row.request_truncated);
-        row.response_frames = frames(response_frames, &mut row.response_bytes, &mut row.response_truncated);
         row
     }
 

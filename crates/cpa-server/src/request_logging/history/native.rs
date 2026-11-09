@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use bytes::Bytes;
 use chrono::Utc;
 
-use super::body::PendingRow;
+use super::body::{Bodies, HttpBodies, PendingRow};
 use super::row::{Outcome, Row, Source};
 use crate::usage_record::Detail;
 
@@ -29,7 +29,7 @@ pub(crate) struct NativeSend<'a> {
 /// cancelled: the upstream may already have received it.
 pub(crate) struct NativeCapture {
     rt: Arc<crate::Runtime>,
-    pending: Option<PendingRow>,
+    pending: Option<(Row, HttpBodies)>,
     /// The response's `content-length`, when it declared one.
     length: Option<u64>,
     /// When the first response byte arrived, in microseconds since the epoch.
@@ -57,7 +57,6 @@ impl NativeCapture {
             started_at_us: Utc::now().timestamp_micros(),
             source: Source::Native,
             endpoint: Some("POST /v1/messages".into()),
-            transport: Some("http".into()),
             provider: Some("claude".into()),
             account: text(send.account),
             model: text(send.model),
@@ -66,11 +65,11 @@ impl NativeCapture {
             outcome: Outcome::Cancelled,
             ..Row::default()
         };
-        let mut pending = PendingRow::new(row, rt.history().budget());
-        pending.request.push_bytes(request);
+        let mut http = HttpBodies::new(rt.history().budget());
+        http.request.push_bytes(request);
         Some(Self {
             rt: rt.clone(),
-            pending: Some(pending),
+            pending: Some((row, http)),
             length: None,
             first_byte_us: None,
         })
@@ -82,12 +81,14 @@ impl NativeCapture {
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse().ok());
-        let Some(pending) = self.pending.as_mut() else { return };
-        pending.row.status = Some(i32::from(status));
-        pending.row.upstream_request_id = super::capture::REQUEST_ID_HEADERS
+        let Some((row, http)) = self.pending.as_mut() else {
+            return;
+        };
+        row.status = Some(i32::from(status));
+        row.upstream_request_id = super::capture::REQUEST_ID_HEADERS
             .iter()
             .find_map(|name| headers.get(*name).and_then(|v| v.to_str().ok()).map(str::to_owned));
-        pending.response_encoding = headers
+        http.response_encoding = headers
             .get("content-encoding")
             .and_then(|v| v.to_str().ok())
             .map(str::trim)
@@ -97,21 +98,22 @@ impl NativeCapture {
 
     /// A response chunk as received, still encoded.
     pub(crate) fn push(&mut self, chunk: &Bytes) {
-        if let Some(pending) = self.pending.as_mut() {
+        if let Some((_, http)) = self.pending.as_mut() {
             if !chunk.is_empty() {
                 self.first_byte_us.get_or_insert_with(|| Utc::now().timestamp_micros());
             }
-            pending.response.push_bytes(chunk);
+            http.response.push_bytes(chunk);
         }
     }
 
     pub(crate) fn finish(mut self, end: NativeEnd<'_>) {
-        let Some(mut pending) = self.pending.take() else { return };
+        let Some((mut row, http)) = self.pending.take() else {
+            return;
+        };
         // The router forwards the upstream's content-length, so a response can end
         // without its stream being polled to the end and read as cancelled when every
         // byte arrived; its status then decides.
-        let delivered = self.length.is_some_and(|n| n == pending.response.total());
-        let row = &mut pending.row;
+        let delivered = self.length.is_some_and(|n| n == http.response.total());
         let now = Utc::now().timestamp_micros();
         row.ended_at_us = Some(now);
         // Timed from this send, not from the request's arrival: admission and earlier
@@ -128,17 +130,24 @@ impl NativeCapture {
         if let Some(detail) = end.detail {
             row.set_tokens(detail);
         }
+        let pending = PendingRow {
+            row,
+            bodies: Bodies::Http(http),
+        };
         self.rt.history().submit(&self.rt.config(), pending);
     }
 }
 
 impl Drop for NativeCapture {
     fn drop(&mut self) {
-        if let Some(mut pending) = self.pending.take() {
-            let row = &mut pending.row;
+        if let Some((mut row, http)) = self.pending.take() {
             let now = Utc::now().timestamp_micros();
             row.ended_at_us = Some(now);
             row.latency_ms = Some((now - row.started_at_us) / 1000);
+            let pending = PendingRow {
+                row,
+                bodies: Bodies::Http(http),
+            };
             self.rt.history().submit(&self.rt.config(), pending);
         }
     }

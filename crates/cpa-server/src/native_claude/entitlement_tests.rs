@@ -458,6 +458,7 @@ async fn a_native_exchange_is_recorded_decoded() {
     let rows = flushed_rows(&fixture, &dir.0, 1).await;
     let row = &rows[0];
     assert_eq!(row.source, Source::Native);
+    assert_eq!(row.transport, crate::request_logging::history::row::Transport::Http);
     assert_eq!(row.request_body.as_deref().map(str::as_bytes), Some(REQUEST));
     assert_eq!(row.response_body.as_deref().map(str::as_bytes), Some(&plain[..]));
     assert!(!row.response_truncated);

@@ -1,9 +1,9 @@
 use super::*;
-use crate::request_logging::history::body::PendingRow;
 use crate::request_logging::history::dir::HistoryDir;
 use crate::request_logging::history::file::tests::TempDir;
 use crate::request_logging::history::file::{ParquetFile, read_rows};
 use crate::request_logging::history::row::Source;
+use crate::request_logging::history::test_support::http;
 use crate::request_logging::history::writer::{Limits, Writer};
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -199,22 +199,13 @@ fn a_tombstone_removes_rows_from_the_open_file() {
     });
     let cfg = on(&dir.0);
     // Group size 1: the first row is already in the open file's first row group.
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     let report = delete(&dir.0, &session("s1"), false).unwrap();
     assert!(report.pending_for_writer);
     assert_eq!(report.rows_deleted, 0);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()),
-    );
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()));
+    writer.submit(&cfg, http(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()));
     writer.flush();
     let mut left = Vec::new();
     for partition in std::fs::read_dir(&dir.0).unwrap() {
@@ -282,15 +273,12 @@ fn a_tombstone_spares_rows_that_started_after_the_delete() {
         ..Limits::default()
     });
     let cfg = on(&dir.0);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     assert!(delete(&dir.0, &session("s1"), false).unwrap().pending_for_writer);
     let mut later = row("later", "s1", "2026-11-09T08:00:00Z");
     later.started_at_us = (Utc::now() + chrono::Duration::hours(1)).timestamp_micros();
-    writer.submit(&cfg, PendingRow::new(later, writer.budget()));
+    writer.submit(&cfg, http(later, writer.budget()));
     writer.flush();
     let mut left = Vec::new();
     for partition in std::fs::read_dir(&dir.0).unwrap() {
@@ -327,21 +315,12 @@ fn a_delete_covers_rows_a_server_still_buffers() {
     // Default limits: rows wait in memory and no file exists yet.
     let writer = Writer::with_limits(Limits::default());
     let cfg = on(&dir.0);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     let report = delete(&dir.0, &session("s1"), false).unwrap();
     assert!(report.pending_for_writer);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()),
-    );
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()));
+    writer.submit(&cfg, http(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()));
     writer.flush();
     assert_eq!(left_ids(&dir.0), ["c"]);
 }
@@ -354,10 +333,7 @@ fn the_writer_rewrites_a_file_only_under_the_lock() {
         ..Limits::default()
     });
     let cfg = on(&dir.0);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     delete(&dir.0, &session("s1"), false).unwrap();
     let held = crate::request_logging::history::lock::DirLock::try_acquire(&dir.0)
@@ -375,18 +351,12 @@ fn a_tombstone_outlives_the_first_rotation() {
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
     let cfg = on(&dir.0);
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s2", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s2", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     delete(&dir.0, &session("s1"), false).unwrap();
     writer.flush();
     // A send that started before the delete but finished after this rotation.
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("late", "s1", "2026-11-09T08:00:01Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("late", "s1", "2026-11-09T08:00:01Z"), writer.budget()));
     writer.flush();
     assert_eq!(left_ids(&dir.0), ["a"]);
 }
@@ -409,10 +379,7 @@ fn a_delete_the_server_could_not_apply_is_applied_after_a_restart() {
         group_rows: 1,
         ..Limits::default()
     });
-    writer.submit(
-        &cfg,
-        PendingRow::new(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()),
-    );
+    writer.submit(&cfg, http(row("a", "s1", "2026-11-09T08:00:00Z"), writer.budget()));
     writer.tick();
     delete(&dir.0, &session("s1"), false).unwrap();
     // A delete holds the lock while the server shuts down, so it cannot rewrite.
@@ -423,10 +390,7 @@ fn a_delete_the_server_could_not_apply_is_applied_after_a_restart() {
     assert_eq!(left_ids(&dir.0), ["a"]);
     drop(held);
     let restarted = Writer::with_limits(Limits::default());
-    restarted.submit(
-        &cfg,
-        PendingRow::new(row("b", "s2", "2026-11-09T09:00:00Z"), restarted.budget()),
-    );
+    restarted.submit(&cfg, http(row("b", "s2", "2026-11-09T09:00:00Z"), restarted.budget()));
     restarted.flush();
     assert_eq!(left_ids(&dir.0), ["b"]);
 }
@@ -500,7 +464,7 @@ fn a_pending_delete_reaches_a_file_whatever_its_timestamp() {
     let writer = Writer::with_limits(Limits::default());
     writer.submit(
         &on(&dir.0),
-        PendingRow::new(row("b", "s2", "2026-11-01T09:00:00Z"), writer.budget()),
+        http(row("b", "s2", "2026-11-01T09:00:00Z"), writer.budget()),
     );
     writer.flush();
     assert_eq!(left_ids(&dir.0), ["b"]);
