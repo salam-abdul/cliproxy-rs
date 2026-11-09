@@ -336,8 +336,23 @@ try {
   assert.equal(await lines.count(), 2, "a path matches without its query");
   await page.getByRole("button",{name:"Clear filters",exact:true}).click();
   assert.equal(await lines.count(), 4);
+  await page.getByRole("button",{name:"Copy shown",exact:true}).click();
+  await page.getByText("Copying needs the dashboard on HTTPS or localhost.",{exact:true}).waitFor();
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", {value: {writeText: async t => { window.copied = t; }}}));
+  await page.reload();
+  await page.getByRole("button",{name:"Copy shown",exact:true}).click();
+  await page.getByText("4 lines copied.",{exact:true}).waitFor();
+  assert.equal(await page.evaluate(() => window.copied), logLines.slice(0, 4).join("\n"), "copy takes the raw lines shown");
+  await lines.nth(1).dblclick();
+  await page.getByText("Line copied.",{exact:true}).waitFor();
+  assert.equal(await page.evaluate(() => window.copied), logLines[1]);
+  await page.getByLabel("Wrap lines",{exact:true}).uncheck();
+  assert.equal(await lines.first().evaluate(e => getComputedStyle(e).whiteSpace), "pre", "unwrapped lines scroll sideways");
+  await page.getByRole("button",{name:"Full screen",exact:true}).click();
+  await page.getByRole("button",{name:"Exit full screen",exact:true}).click();
+  await page.getByRole("button",{name:"Full screen",exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }

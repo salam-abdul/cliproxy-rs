@@ -310,6 +310,9 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 .log .lvl { display: inline-block; min-width: 44px; }
 .log .warn .lvl { color: var(--warn-ink); }
 .log .error, .log .fatal { color: var(--bad-ink); }
+.log.nowrap > div { white-space: pre; word-break: normal; }
+.logs:fullscreen { background: var(--bg); padding: var(--s4); display: flex; flex-direction: column; }
+.logs:fullscreen .log { max-height: none; flex: 1; }
 .request { max-height: 50vh; padding: var(--s3) var(--s4); }
 .account-summary { flex-wrap: wrap; }
 @media (max-width: 860px) {
