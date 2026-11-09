@@ -381,17 +381,6 @@ fn is_error_event(line: &[u8]) -> bool {
             .is_some_and(|data| frame_type(data.trim_ascii()) == "error")
 }
 
-/// The account a row names: the credential's email when it has one, else its ID.
-/// Neither holds a key: config credentials have hashed IDs and file credentials are
-/// named by their file.
-pub(crate) fn account_label(credential: &cpa_core::credential::Credential) -> String {
-    credential
-        .str("email")
-        .map(str::trim)
-        .filter(|email| !email.is_empty())
-        .map_or_else(|| credential.id.clone(), str::to_owned)
-}
-
 struct Tee {
     log: CaptureSink,
     sends: Arc<Sends>,

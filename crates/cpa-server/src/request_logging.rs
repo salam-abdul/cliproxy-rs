@@ -1586,8 +1586,31 @@ fn retain_errors(dir: &Path, max: i64) -> io::Result<()> {
     Ok(())
 }
 
-async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<u64>) -> (Vec<u8>, Option<String>) {
+/// The decoder the request log reads one response `content-encoding` with, over
+/// `body`; `None` for an encoding it leaves encoded.
+pub(crate) fn response_decoder<'a>(encoding: &str, body: &'a [u8]) -> Option<Pin<Box<dyn AsyncRead + Send + 'a>>> {
     use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, GzipDecoder, ZstdDecoder};
+    Some(match encoding {
+        "zstd" => {
+            let mut decoder = ZstdDecoder::with_params(
+                body,
+                &[async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)],
+            );
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
+        "gzip" => {
+            let mut decoder = GzipDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
+        "deflate" => Box::pin(DeflateDecoder::new(body)),
+        "br" => Box::pin(BrotliDecoder::new(body)),
+        _ => return None,
+    })
+}
+
+async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<u64>) -> (Vec<u8>, Option<String>) {
     let encoding = headers
         .get("content-encoding")
         .and_then(|v| v.to_str().ok())
@@ -1608,28 +1631,18 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
     let limit = limit.unwrap_or(DEFERRED_BODY).min(DEFERRED_BODY);
     let mut body = raw.clone();
     for encoding in encoding.split(',').rev().map(|s| s.trim().to_ascii_lowercase()) {
-        let mut reader: Pin<Box<dyn AsyncRead + Send + '_>> = match encoding.as_str() {
-            "" | "identity" => continue,
-            "zstd" => {
-                let mut decoder = ZstdDecoder::with_params(
-                    body.as_slice(),
-                    &[async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)],
-                );
-                decoder.multiple_members(true);
-                Box::pin(decoder)
-            }
-            "gzip" if !request => {
-                let mut decoder = GzipDecoder::new(body.as_slice());
-                decoder.multiple_members(true);
-                Box::pin(decoder)
-            }
-            "deflate" if !request => Box::pin(DeflateDecoder::new(body.as_slice())),
-            "br" if !request => Box::pin(BrotliDecoder::new(body.as_slice())),
-            _ => return (raw, None),
-        };
+        if matches!(encoding.as_str(), "" | "identity") {
+            continue;
+        }
         let mut output = Vec::new();
-        let result = reader.as_mut().take(limit + 1).read_to_end(&mut output).await;
-        drop(reader);
+        // Requests are decoded only from zstd.
+        let result = match (!request || encoding == "zstd")
+            .then(|| response_decoder(&encoding, body.as_slice()))
+            .flatten()
+        {
+            Some(mut reader) => reader.as_mut().take(limit + 1).read_to_end(&mut output).await,
+            None => return (raw, None),
+        };
         if let Err(error) = result {
             // ponytail: malformed Brotli can withhold
             // partial decoded bytes that Go accepts, and codec diagnostic text

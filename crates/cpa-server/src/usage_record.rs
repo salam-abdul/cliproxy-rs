@@ -2071,7 +2071,7 @@ impl Tracker {
                 provider: self.record.provider.clone(),
                 model_requested: self.record.alias.clone(),
                 model: self.record.model.clone(),
-                account: crate::request_logging::history::capture::account_label(credential),
+                account: credential.account_name(),
                 auth_index: self.record.auth_index.clone(),
                 session_id: client.session_id.clone(),
                 user_agent: client.user_agent.clone(),

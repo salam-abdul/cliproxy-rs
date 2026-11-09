@@ -721,22 +721,13 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             }
         };
         let started = Instant::now();
-        // History names the account as the translating proxy does: the credential's
-        // email, else its ID.
-        let account = if crate::request_logging::history::on(&s.rt.config()) {
-            s.rt.store()
-                .get(&a.file_id)
-                .map(|c| crate::request_logging::history::capture::account_label(&c))
-                .unwrap_or_else(|| a.id.clone())
-        } else {
-            String::new()
-        };
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
             &s.rt,
             crate::request_logging::history::native::NativeSend {
                 exchange_id: &request_id,
                 send: tried.len().saturating_sub(1),
-                account: &account,
+                credential: &a.file_id,
+                account_id: &a.id,
                 model: &model,
                 session_id: &client_sid,
             },

@@ -247,7 +247,6 @@ struct Worker {
     buffer_bytes: u64,
     seq: u32,
     maintained: Option<Instant>,
-    decoder: Option<tokio::runtime::Runtime>,
     /// When to try pending deletes again after the history lock was busy or a rewrite
     /// failed.
     retry_deletes: Option<Instant>,
@@ -268,7 +267,6 @@ impl Worker {
             buffer_bytes: 0,
             seq: 0,
             maintained: None,
-            decoder: None,
             retry_deletes: None,
             delete_failed: false,
         }
@@ -468,7 +466,7 @@ impl Worker {
                     let mut body = response.into_vec();
                     if let Some(encoding) = response_encoding {
                         let failed;
-                        (body, failed) = self.decode(body, &encoding);
+                        (body, failed) = decode(body, &encoding);
                         row.response_truncated |= failed;
                     }
                     (row.response_body, row.response_body_raw) = body_columns(body, row.response_truncated);
@@ -491,20 +489,6 @@ impl Worker {
             }
         }
         row
-    }
-
-    /// The decoded body and whether decoding stopped early (an error or the cap).
-    fn decode(&mut self, body: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
-        if self.decoder.is_none() {
-            match tokio::runtime::Builder::new_current_thread().build() {
-                Ok(runtime) => self.decoder = Some(runtime),
-                Err(_) => return (body, true),
-            }
-        }
-        match &self.decoder {
-            Some(runtime) => runtime.block_on(decode(body, encoding)),
-            None => (body, true),
-        }
     }
 
     fn write_group(&mut self) {
@@ -594,33 +578,19 @@ impl Worker {
     }
 }
 
-async fn decode(raw: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
-    use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
-    use tokio::io::{AsyncRead, AsyncReadExt};
-    let mut reader: std::pin::Pin<Box<dyn AsyncRead + Send + '_>> = match encoding.trim().to_ascii_lowercase().as_str()
-    {
-        "gzip" => {
-            let mut decoder = GzipDecoder::new(raw.as_slice());
-            decoder.multiple_members(true);
-            Box::pin(decoder)
-        }
-        "br" => Box::pin(BrotliDecoder::new(raw.as_slice())),
-        "deflate" => Box::pin(ZlibDecoder::new(raw.as_slice())),
-        "zstd" => {
-            let mut decoder = ZstdDecoder::with_params(
-                raw.as_slice(),
-                &[async_compression::zstd::DParameter::window_log_max(
-                    crate::request_logging::ZSTD_WINDOW_LOG_MAX,
-                )],
-            );
-            decoder.multiple_members(true);
-            Box::pin(decoder)
-        }
-        _ => return (raw, false),
+/// `raw` decoded from `encoding` as the request log decodes responses, and whether
+/// decoding stopped early (an error or the cap).
+fn decode(raw: Vec<u8>, encoding: &str) -> (Vec<u8>, bool) {
+    use futures_util::FutureExt;
+    use tokio::io::AsyncReadExt;
+    let Some(mut reader) = crate::request_logging::response_decoder(&encoding.trim().to_ascii_lowercase(), &raw) else {
+        return (raw, false);
     };
     let mut out = Vec::new();
-    let failed = reader.as_mut().take(BODY_CAP + 1).read_to_end(&mut out).await.is_err();
+    // A decoder over bytes in memory never waits, so one poll reads it all.
+    let read = reader.as_mut().take(BODY_CAP + 1).read_to_end(&mut out).now_or_never();
     drop(reader);
+    let failed = !matches!(read, Some(Ok(_)));
     if failed && out.is_empty() {
         return (raw, true);
     }

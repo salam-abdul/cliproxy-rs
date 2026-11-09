@@ -18,7 +18,11 @@ pub(crate) struct NativeSend<'a> {
     pub(crate) exchange_id: &'a str,
     /// The send's number within the exchange, from 0.
     pub(crate) send: usize,
-    pub(crate) account: &'a str,
+    /// The credential's store ID, which names the account as the translating proxy
+    /// does.
+    pub(crate) credential: &'a str,
+    /// The account's ID, when the store no longer holds the credential.
+    pub(crate) account_id: &'a str,
     pub(crate) model: &'a str,
     /// The client's session ID.
     pub(crate) session_id: &'a str,
@@ -58,7 +62,11 @@ impl NativeCapture {
             source: Source::Native,
             endpoint: Some("POST /v1/messages".into()),
             provider: Some("claude".into()),
-            account: text(send.account),
+            account: text(
+                &rt.store()
+                    .get(send.credential)
+                    .map_or_else(|| send.account_id.to_owned(), |c| c.account_name()),
+            ),
             model: text(send.model),
             model_requested: text(send.model),
             session_id: text(send.session_id),
