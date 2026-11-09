@@ -503,6 +503,8 @@ pub(crate) struct ParquetFile {
     partition: PathBuf,
     stem: String,
     partial: PathBuf,
+    /// Set when this file replaces an existing one.
+    replaces: Option<PathBuf>,
 }
 
 impl ParquetFile {
@@ -511,23 +513,40 @@ impl ParquetFile {
         let partition = dir.join(format!("date={}", now.format("%Y-%m-%d")));
         private_dir(&partition)?;
         let stem = format!("{}-{}-{seq:04}", now.format("%H%M%S"), std::process::id());
+        Self::open(partition, stem, None)
+    }
+
+    /// A file that replaces the finished file at `target` when it is finished. Its
+    /// `.partial` carries this process's PID, so startup cleanup elsewhere leaves it.
+    pub(crate) fn replacing(target: &Path) -> io::Result<Self> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, format!("not a history file: {}", target.display()));
+        let partition = target.parent().ok_or_else(invalid)?.to_path_buf();
+        let name = target.file_name().and_then(|n| n.to_str()).ok_or_else(invalid)?;
+        if !is_history_file(name) {
+            return Err(invalid());
+        }
+        let stem = name.strip_suffix(".parquet").ok_or_else(invalid)?;
+        let (time, rest) = stem.split_once('-').ok_or_else(invalid)?;
+        let (pid, seq) = rest.split_once('-').ok_or_else(invalid)?;
+        let stem = format!("{time}-{}-{seq}-{pid}", std::process::id());
+        Self::open(partition, stem, Some(target.to_path_buf()))
+    }
+
+    fn open(partition: PathBuf, stem: String, replaces: Option<PathBuf>) -> io::Result<Self> {
         let partial = free_name(&partition, &stem, ".partial");
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         let file = options.open(&partial)?;
-        let writer = SerializedFileWriter::new(
-            file,
-            schema().map_err(io_error)?,
-            Arc::new(properties().map_err(io_error)?),
-        )
-        .map_err(io_error)?;
+        let writer = SerializedFileWriter::new(file, schema().map_err(io_error)?, Arc::new(properties().map_err(io_error)?))
+            .map_err(io_error)?;
         Ok(Self {
             writer: Some(writer),
             partition,
             stem,
             partial,
+            replaces,
         })
     }
 
@@ -563,7 +582,10 @@ impl ParquetFile {
         let file = writer.into_inner().map_err(io_error)?;
         file.sync_all()?;
         drop(file);
-        let target = free_name(&self.partition, &self.stem, ".parquet");
+        let target = match self.replaces.take() {
+            Some(target) => target,
+            None => free_name(&self.partition, &self.stem, ".parquet"),
+        };
         std::fs::rename(&self.partial, &target)?;
         sync_dir(&self.partition)?;
         Ok(target)

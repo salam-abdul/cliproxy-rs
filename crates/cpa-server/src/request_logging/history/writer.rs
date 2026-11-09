@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use cpa_core::config::Config;
 
 use super::Settings;
+use super::delete::{DirLock, apply_tombstones, pending_tombstones};
 use super::file::{ParquetFile, Row, body_columns, is_history_file, partial_pid};
 
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
@@ -566,13 +567,18 @@ impl Worker {
         if self.buffer.is_empty() {
             return;
         }
-        let rows = std::mem::take(&mut self.buffer);
+        let mut rows = std::mem::take(&mut self.buffer);
         self.buffer_bytes = 0;
-        let n = rows.len() as u64;
         let Some(window) = self.window.as_mut() else {
-            self.lost.fetch_add(n, Ordering::Relaxed);
+            self.lost.fetch_add(rows.len() as u64, Ordering::Relaxed);
             return;
         };
+        let stones = pending_tombstones(&window.dir);
+        rows.retain(|row| !stones.iter().any(|stone| stone.matches(row)));
+        if rows.is_empty() {
+            return;
+        }
+        let n = rows.len() as u64;
         if window.file.is_none() {
             match ParquetFile::create(&window.dir, window.started, self.seq) {
                 Ok(file) => {
@@ -603,14 +609,27 @@ impl Worker {
         if let Some(window) = self.window.take()
             && let Some(file) = window.file
         {
-            if let Err(error) = file.finish() {
-                tracing::warn!("history: cannot finish a file: {error}");
-                self.lost.fetch_add(window.rows, Ordering::Relaxed);
+            match file.finish() {
+                Ok(path) => {
+                    // Deletes asked for while this file was open: its earlier row groups
+                    // may hold matching rows.
+                    let stones = pending_tombstones(&window.dir);
+                    if !stones.is_empty() {
+                        if let Err(error) = apply_tombstones(&path, &stones) {
+                            tracing::warn!("history: cannot apply a pending delete: {error}");
+                        }
+                        for stone in stones {
+                            let _ = std::fs::remove_file(stone.path);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("history: cannot finish a file: {error}");
+                    self.lost.fetch_add(window.rows, Ordering::Relaxed);
+                }
             }
-            if let Some(cap) = self.settings.as_ref().and_then(|s| s.max_total_bytes)
-                && let Err(error) = enforce_cap(&window.dir, cap)
-            {
-                tracing::warn!("history: cannot apply max-total-size-mb: {error}");
+            if let Some(cap) = self.settings.as_ref().and_then(|s| s.max_total_bytes) {
+                apply_cap(&window.dir, cap);
             }
         }
         let lost = self.lost.load(Ordering::Relaxed);
@@ -625,11 +644,22 @@ impl Worker {
         self.maintained = Some(Instant::now());
         let Some(settings) = &self.settings else { return };
         remove_dead_partials(&settings.dir);
-        if let Some(cap) = settings.max_total_bytes
-            && let Err(error) = enforce_cap(&settings.dir, cap)
-        {
-            tracing::warn!("history: cannot apply max-total-size-mb: {error}");
+        if let Some(cap) = settings.max_total_bytes {
+            apply_cap(&settings.dir, cap);
         }
+    }
+}
+
+/// [`enforce_cap`] under the history lock; skipped this round while a delete holds it.
+fn apply_cap(dir: &Path, cap: u64) {
+    match DirLock::try_acquire(dir) {
+        Ok(Some(_lock)) => {
+            if let Err(error) = enforce_cap(dir, cap) {
+                tracing::warn!("history: cannot apply max-total-size-mb: {error}");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("history: cannot lock {}: {error}", dir.display()),
     }
 }
 
@@ -745,7 +775,7 @@ fn remove_dead_partials(dir: &Path) {
 
 /// Whether process `pid` may still be writing. Unsure answers are "alive", so a live
 /// writer's file is never removed.
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
