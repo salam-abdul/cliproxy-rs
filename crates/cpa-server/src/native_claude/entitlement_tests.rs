@@ -306,6 +306,55 @@ async fn native_accepted_broken_stream_is_never_replayed() {
     assert_eq!(fixture.seen.lock().unwrap().len(), 1);
 }
 
+/// The router stops polling a body once it has sent the declared content-length, so the
+/// exchange must finish when that many bytes arrived, including none at all.
+#[tokio::test]
+async fn a_reply_read_to_its_content_length_is_recorded_as_complete() {
+    for (status, body, outcome, input_tokens) in [
+        (200, SUCCESS.to_vec(), "success", json!(1)),
+        (404, vec![b'x'; 70000], "not_found", Value::Null),
+        (500, Vec::new(), "provider_error", Value::Null),
+    ] {
+        let fixture = Fixture::new(Reply {
+            status,
+            body: body.clone(),
+            broken: false,
+        })
+        .await;
+        let usage = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
+        fixture.state.rt.usage_queue().configure(true, &usage);
+        let response = fixture.request().await;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["content-length"], body.len().to_string().as_str());
+        assert_eq!(response.bytes().await.unwrap(), body);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let records = loop {
+            let records = fixture.state.rt.usage_queue().pop_oldest(10);
+            if !records.is_empty() {
+                break records;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "no usage record for {status}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(records.len(), 1);
+        let record: Value = serde_json::from_slice(&records[0]).unwrap();
+        assert_eq!(record["failed"], status != 200, "{record}");
+        let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+        let inference: Vec<_> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "inference")
+            .collect();
+        assert_eq!(inference.len(), 1, "{events}");
+        let event = inference[0];
+        assert_eq!(event["outcome"], outcome, "{event}");
+        assert_eq!(event["complete"], true, "{event}");
+        assert_eq!(event["status"], status, "{event}");
+        assert_eq!(event["usage"]["input_tokens"], input_tokens, "{event}");
+    }
+}
+
 /// A panic while the routing and session locks were held does not take the router
 /// down: later requests still route and status still answers.
 #[tokio::test]

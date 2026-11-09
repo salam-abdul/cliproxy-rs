@@ -804,23 +804,39 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             body_bytes: raw.len(),
             started: request_started,
         };
-        let record = Observation::new(s.clone(), facts, &encoding);
+        let mut record = Some(Observation::new(s.clone(), facts, &encoding));
+        // The server stops polling a body once it has sent the declared content-length, so the
+        // stream never reaches its end; the exchange completes when that many bytes arrived.
+        let declared = h
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if declared == Some(0)
+            && let Some(o) = record.take()
+        {
+            o.finish("complete").await;
+        }
         let stream = futures_util::stream::unfold(
-            (stream, Some(record), guard),
-            |(mut stream, mut record, guard)| async move {
+            (stream, record, guard, declared),
+            |(mut stream, mut record, guard, mut remaining)| async move {
                 match stream.next().await {
                     Some(item) => {
                         if let Some(o) = record.as_mut()
                             && let Ok(b) = &item
                         {
                             o.observe(b).await;
+                            remaining = remaining.map(|n| n.saturating_sub(b.len() as u64));
                         }
                         if item.is_err()
                             && let Some(o) = record.take()
                         {
                             o.finish("upstream_stream_error").await;
+                        } else if remaining == Some(0)
+                            && let Some(o) = record.take()
+                        {
+                            o.finish("complete").await;
                         }
-                        Some((item, (stream, record, guard)))
+                        Some((item, (stream, record, guard, remaining)))
                     }
                     None => {
                         if let Some(o) = record.take() {
