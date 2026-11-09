@@ -831,7 +831,7 @@ async fn two_websocket_turns_are_two_history_rows() {
         )
     }))
     .await;
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let cfg = Config::parse(&format!(
         "auth-dir: {}\nobservability: {{history: {{enable: true, dir: '{}'}}}}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n",
         dir.0.join("auths").display(),
@@ -879,14 +879,7 @@ async fn two_websocket_turns_are_two_history_rows() {
         tokio::task::spawn_blocking(move || history.history().flush())
             .await
             .unwrap();
-        rows.clear();
-        for partition in std::fs::read_dir(dir.0.join("history")).unwrap().flatten() {
-            if partition.path().is_dir() {
-                for file in std::fs::read_dir(partition.path()).unwrap().flatten() {
-                    rows.extend(crate::request_logging::history::file::read_rows(&file.path()).unwrap());
-                }
-            }
-        }
+        rows = crate::request_logging::history::test_support::rows(&dir.0.join("history"));
         if rows.len() >= 2 {
             break;
         }

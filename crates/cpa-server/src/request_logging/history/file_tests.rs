@@ -1,19 +1,6 @@
 use super::*;
 use crate::request_logging::history::row::body_columns;
-
-pub(crate) struct TempDir(pub(crate) PathBuf);
-
-impl TempDir {
-    pub(crate) fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("cpa-history-{}", uuid::Uuid::new_v4())))
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::request_logging::history::test_support::TempDir;
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)

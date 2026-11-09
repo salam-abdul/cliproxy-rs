@@ -406,19 +406,7 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
 }
 
 fn history_rows(dir: &Path) -> Vec<crate::request_logging::history::row::Row> {
-    let mut rows = Vec::new();
-    let Ok(partitions) = std::fs::read_dir(dir) else {
-        return rows;
-    };
-    for partition in partitions.flatten() {
-        if partition.path().is_dir() && partition.file_name() != ".deletes" {
-            for file in std::fs::read_dir(partition.path()).unwrap().flatten() {
-                if file.path().extension().is_some_and(|e| e == "parquet") {
-                    rows.extend(crate::request_logging::history::file::read_rows(&file.path()).unwrap());
-                }
-            }
-        }
-    }
+    let mut rows = crate::request_logging::history::test_support::rows(dir);
     rows.sort_by_key(|r| r.send);
     rows
 }
@@ -441,7 +429,7 @@ async fn flushed_rows(fixture: &Fixture, dir: &Path, count: usize) -> Vec<crate:
 #[tokio::test]
 async fn a_native_exchange_is_recorded_decoded() {
     use crate::request_logging::history::row::{Outcome, Source};
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let plain = br#"{"content":[],"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":3}}"#;
     let fixture = Fixture::with_history(
         Reply {
@@ -478,7 +466,7 @@ async fn a_native_exchange_is_recorded_decoded() {
 #[tokio::test]
 async fn a_native_failover_records_both_sends() {
     use crate::request_logging::history::row::Outcome;
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let fixture = Fixture::with_history(
         Reply {
             status: 403,
@@ -505,7 +493,7 @@ async fn a_native_failover_records_both_sends() {
 #[tokio::test]
 async fn a_broken_native_stream_is_a_stream_error_row() {
     use crate::request_logging::history::row::Outcome;
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let fixture = Fixture::with_history(
         Reply {
             status: 200,
@@ -525,7 +513,7 @@ async fn a_broken_native_stream_is_a_stream_error_row() {
 #[tokio::test]
 async fn a_native_error_response_is_a_failed_row() {
     use crate::request_logging::history::row::Outcome;
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let fixture = Fixture::with_history(
         Reply {
             status: 400,
@@ -545,7 +533,7 @@ async fn a_native_error_response_is_a_failed_row() {
 #[tokio::test]
 async fn a_client_that_leaves_before_the_headers_still_leaves_a_row() {
     use crate::request_logging::history::row::Outcome;
-    let dir = crate::request_logging::history::file::tests::TempDir::new();
+    let dir = crate::request_logging::history::test_support::TempDir::new();
     let fixture = Fixture::with_history(
         Reply {
             status: 200,

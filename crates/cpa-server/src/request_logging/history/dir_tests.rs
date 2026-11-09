@@ -1,5 +1,5 @@
 use super::*;
-use crate::request_logging::history::file::tests::TempDir;
+use crate::request_logging::history::test_support::TempDir;
 use std::time::Duration;
 
 #[test]

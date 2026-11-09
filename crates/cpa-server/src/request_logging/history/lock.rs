@@ -81,7 +81,7 @@ pub(crate) fn is_abandoned(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request_logging::history::file::tests::TempDir;
+    use crate::request_logging::history::test_support::TempDir;
 
     #[test]
     fn a_held_dir_lock_refuses_a_second_holder_until_dropped() {

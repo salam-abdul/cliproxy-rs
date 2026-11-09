@@ -1,8 +1,8 @@
 use super::*;
 use crate::request_logging::history::file::read_rows;
-use crate::request_logging::history::file::tests::TempDir;
 use crate::request_logging::history::row::{Outcome, Row, Source, Transport};
-use crate::request_logging::history::test_support::{http, http_bodies};
+use crate::request_logging::history::test_support::TempDir;
+use crate::request_logging::history::test_support::{files, http, http_bodies, rows};
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Mutex;
@@ -60,31 +60,6 @@ fn pending(writer: &Writer, id: &str, request: &[u8], response_lines: &[&[u8]]) 
     p
 }
 
-fn parquet_files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(partitions) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for partition in partitions {
-        let partition = partition.unwrap().path();
-        if !partition.is_dir() {
-            continue;
-        }
-        for file in std::fs::read_dir(&partition).unwrap() {
-            let path = file.unwrap().path();
-            if path.extension().is_some_and(|e| e == "parquet") {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-fn all_rows(dir: &Path) -> Vec<Row> {
-    parquet_files(dir).iter().flat_map(|p| read_rows(p).unwrap()).collect()
-}
-
 #[test]
 fn rows_land_in_a_dated_partition_after_rotation() {
     let dir = TempDir::new();
@@ -95,7 +70,7 @@ fn rows_land_in_a_dated_partition_after_rotation() {
         pending(&writer, "a", b"{\"model\":\"m\"}", &[b"data: 1", b"data: 2"]),
     );
     writer.flush();
-    let files = parquet_files(&dir.0);
+    let files = files(&dir.0);
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].parent().unwrap().file_name().unwrap(), "date=2026-11-09");
     let rows = read_rows(&files[0]).unwrap();
@@ -117,10 +92,10 @@ fn rotation_happens_on_age() {
     writer.tick();
     clock.set("2026-11-09T08:05:00Z");
     writer.tick();
-    assert!(parquet_files(&dir.0).is_empty());
+    assert!(files(&dir.0).is_empty());
     clock.set("2026-11-09T08:10:01Z");
     writer.tick();
-    assert_eq!(parquet_files(&dir.0).len(), 1);
+    assert_eq!(files(&dir.0).len(), 1);
 }
 
 #[test]
@@ -135,7 +110,7 @@ fn rotation_happens_on_size() {
     writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     writer.tick();
-    assert_eq!(parquet_files(&dir.0).len(), 2);
+    assert_eq!(files(&dir.0).len(), 2);
 }
 
 #[test]
@@ -148,7 +123,7 @@ fn rotation_happens_on_utc_date_change() {
     clock.set("2026-11-10T00:00:10Z");
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     writer.flush();
-    let files = parquet_files(&dir.0);
+    let files = files(&dir.0);
     let partitions: Vec<_> = files
         .iter()
         .map(|f| f.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned())
@@ -164,10 +139,10 @@ fn shutdown_flushes_buffered_rows_within_the_wait() {
     let writer = Writer::with_limits(Limits::default());
     writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
     writer.shutdown(Duration::from_secs(5));
-    assert_eq!(all_rows(&dir.0).len(), 1);
+    assert_eq!(rows(&dir.0).len(), 1);
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     assert!(!writer.is_running());
-    assert_eq!(all_rows(&dir.0).len(), 1);
+    assert_eq!(rows(&dir.0).len(), 1);
     assert_eq!(writer.lost(), 1, "a row after shutdown is counted");
 }
 
@@ -203,22 +178,13 @@ fn rows_after_shutdown_warn_once() {
     assert_eq!(logs.matches("was not written").count(), 1, "{logs}");
 }
 
-fn dead_pid() -> u32 {
-    let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
-        .args(if cfg!(windows) { &["/C", "exit"][..] } else { &[][..] })
-        .spawn()
-        .unwrap();
-    let pid = child.id();
-    child.wait().unwrap();
-    pid
-}
-
 #[test]
 fn a_dead_processes_partial_is_removed_at_start() {
     let dir = TempDir::new();
     let partition = dir.0.join("date=2026-11-01");
     std::fs::create_dir_all(&partition).unwrap();
-    let dead = partition.join(format!("081530-{}-0000.partial", dead_pid()));
+    // Another process's file that no one holds.
+    let dead = partition.join("081530-99999-0000.partial");
     std::fs::write(&dead, b"PAR1").unwrap();
     let writer = Writer::with_limits(Limits::default());
     writer.submit(&on(&dir.0), pending(&writer, "a", b"x", &[]));
@@ -286,7 +252,7 @@ fn websocket_byte_counts_add_up_every_frame() {
     };
     writer.submit(&on(&dir.0), p);
     writer.flush();
-    let rows = all_rows(&dir.0);
+    let rows = rows(&dir.0);
     assert_eq!((rows[0].request_bytes, rows[0].response_bytes), (3, 6));
     assert_eq!(rows[0].transport, Transport::Websocket);
 }
@@ -307,7 +273,7 @@ fn a_full_channel_drops_rows_and_counts_them() {
     assert_eq!(writer.lost(), 1);
     drop(release);
     writer.flush();
-    assert_eq!(all_rows(&dir.0).len(), CHANNEL);
+    assert_eq!(rows(&dir.0).len(), CHANNEL);
 }
 
 #[test]
@@ -319,7 +285,7 @@ fn writer_starts_on_first_row_after_reload() {
     assert!(!dir.0.exists());
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     writer.flush();
-    let rows = all_rows(&dir.0);
+    let rows = rows(&dir.0);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].exchange_id, "b");
 }
@@ -337,7 +303,7 @@ fn an_unwritable_dir_counts_rows_and_never_fails_requests() {
     let ok = dir.0.join("ok");
     writer.submit(&on(&ok), pending(&writer, "b", b"y", &[]));
     writer.flush();
-    assert_eq!(all_rows(&ok).len(), 1);
+    assert_eq!(rows(&ok).len(), 1);
 }
 
 #[test]
@@ -350,7 +316,7 @@ fn a_native_body_is_decoded_on_the_writer_thread() {
     http_bodies(&mut p).response_encoding = Some("zstd".into());
     writer.submit(&on(&dir.0), p);
     writer.flush();
-    let rows = all_rows(&dir.0);
+    let rows = rows(&dir.0);
     assert_eq!(
         rows[0].response_body.as_deref(),
         Some("event: message_start\ndata: {}\n\n")
@@ -368,7 +334,7 @@ fn age_rotation_happens_while_rows_keep_arriving() {
     writer.submit(&on(&dir.0), pending(&writer, "b", b"y", &[]));
     // A barrier that runs no timers: only the row itself can trigger the rotation.
     writer.sync();
-    assert_eq!(parquet_files(&dir.0).len(), 1);
+    assert_eq!(files(&dir.0).len(), 1);
 }
 
 #[test]
@@ -382,7 +348,7 @@ fn a_body_cut_inside_a_character_stays_text() {
     http_bodies(&mut p).response.push_bytes(&Bytes::from(body));
     writer.submit(&on(&dir.0), p);
     writer.flush();
-    let rows = all_rows(&dir.0);
+    let rows = rows(&dir.0);
     assert!(rows[0].response_truncated);
     assert_eq!(rows[0].response_body_raw, None);
     assert_eq!(

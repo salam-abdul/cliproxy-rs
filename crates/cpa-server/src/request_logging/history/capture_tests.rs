@@ -9,9 +9,8 @@ use axum::response::{IntoResponse, Response};
 use cpa_exec::Executors;
 use cpa_exec::claude::ClaudeExecutor;
 
-use crate::request_logging::history::file::read_rows;
-use crate::request_logging::history::file::tests::TempDir;
 use crate::request_logging::history::row::{Outcome, Row};
+use crate::request_logging::history::test_support::TempDir;
 
 const JSON_REPLY: &str = r#"{"id":"msg_1","type":"message","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}"#;
 const SSE: &str = "event: message_start\n\
@@ -143,20 +142,7 @@ async fn proxy(history: Option<&Path>, keys: &[&str], retry_credentials: usize) 
 static REGISTRY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn rows_in(dir: &Path) -> Vec<Row> {
-    let mut rows = Vec::new();
-    let Ok(partitions) = std::fs::read_dir(dir) else {
-        return rows;
-    };
-    for partition in partitions.flatten() {
-        if !partition.path().is_dir() || partition.file_name() == ".deletes" {
-            continue;
-        }
-        for file in std::fs::read_dir(partition.path()).unwrap().flatten() {
-            if file.path().extension().is_some_and(|e| e == "parquet") {
-                rows.extend(read_rows(&file.path()).unwrap());
-            }
-        }
-    }
+    let mut rows = crate::request_logging::history::test_support::rows(dir);
     rows.sort_by_key(|r| (r.started_at_us, r.send));
     rows
 }

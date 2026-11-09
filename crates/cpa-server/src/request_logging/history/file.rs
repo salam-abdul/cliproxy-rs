@@ -674,4 +674,4 @@ pub(crate) fn rewrite_without(path: &Path, remove: impl Fn(&Row) -> bool) -> io:
 
 #[cfg(test)]
 #[path = "file_tests.rs"]
-pub(crate) mod tests;
+mod tests;

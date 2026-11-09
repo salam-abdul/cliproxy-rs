@@ -1,9 +1,9 @@
 use super::*;
 use crate::request_logging::history::dir::HistoryDir;
-use crate::request_logging::history::file::tests::TempDir;
 use crate::request_logging::history::file::{ParquetFile, read_rows};
 use crate::request_logging::history::row::Source;
-use crate::request_logging::history::test_support::http;
+use crate::request_logging::history::test_support::TempDir;
+use crate::request_logging::history::test_support::{http, rows};
 use crate::request_logging::history::writer::{Limits, Writer};
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -207,15 +207,7 @@ fn a_tombstone_removes_rows_from_the_open_file() {
     writer.submit(&cfg, http(row("b", "s1", "2026-11-09T08:00:01Z"), writer.budget()));
     writer.submit(&cfg, http(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()));
     writer.flush();
-    let mut left = Vec::new();
-    for partition in std::fs::read_dir(&dir.0).unwrap() {
-        let partition = partition.unwrap().path();
-        if partition.is_dir() && partition.file_name().unwrap() != ".deletes" {
-            for file in std::fs::read_dir(partition).unwrap() {
-                left.extend(ids(&file.unwrap().path()));
-            }
-        }
-    }
+    let left = left_ids(&dir.0);
     assert_eq!(left, ["c"]);
 }
 
@@ -244,13 +236,8 @@ fn a_stale_lock_is_taken_over() {
         0,
         &[row("a", "s1", "2026-11-09T08:00:00Z")],
     );
-    let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
-        .args(if cfg!(windows) { &["/C", "exit"][..] } else { &[][..] })
-        .spawn()
-        .unwrap();
-    let dead = child.id();
-    child.wait().unwrap();
-    std::fs::write(dir.0.join(".lock"), dead.to_string()).unwrap();
+    // Left by a holder that exited: the file stays, its lock went with the holder.
+    std::fs::write(dir.0.join(".lock"), b"").unwrap();
     assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
     assert!(!file.exists());
 }
@@ -280,31 +267,12 @@ fn a_tombstone_spares_rows_that_started_after_the_delete() {
     later.started_at_us = (Utc::now() + chrono::Duration::hours(1)).timestamp_micros();
     writer.submit(&cfg, http(later, writer.budget()));
     writer.flush();
-    let mut left = Vec::new();
-    for partition in std::fs::read_dir(&dir.0).unwrap() {
-        let partition = partition.unwrap().path();
-        if partition.is_dir() && partition.file_name().unwrap() != ".deletes" {
-            for file in std::fs::read_dir(partition).unwrap() {
-                left.extend(ids(&file.unwrap().path()));
-            }
-        }
-    }
+    let left = left_ids(&dir.0);
     assert_eq!(left, ["later"]);
 }
 
 fn left_ids(dir: &Path) -> Vec<String> {
-    let mut left = Vec::new();
-    for partition in std::fs::read_dir(dir).unwrap() {
-        let partition = partition.unwrap().path();
-        if partition.is_dir() && partition.file_name().unwrap().to_string_lossy().starts_with("date=") {
-            for file in std::fs::read_dir(partition).unwrap() {
-                let path = file.unwrap().path();
-                if path.extension().is_some_and(|e| e == "parquet") {
-                    left.extend(ids(&path));
-                }
-            }
-        }
-    }
+    let mut left: Vec<_> = rows(dir).into_iter().map(|r| r.exchange_id).collect();
     left.sort();
     left
 }
