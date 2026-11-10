@@ -132,7 +132,7 @@
         </div>
         {#each summary.models.slice(0, 5) as model}
           <div class="history-model">
-            <code>{model.model || "Unknown model"}</code>
+            <code class="ellipsis">{model.model || "Unknown model"}</code>
             <span class="meter-track"
               ><i
                 style:width={`${summary.requests ? (100 * model.requests) / summary.requests : 0}%`}
@@ -297,11 +297,6 @@
   .history-token strong,
   .history-model strong {
     text-align: right;
-  }
-  .history-model code {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .history-model .meter-track i {
     background: var(--series-1);

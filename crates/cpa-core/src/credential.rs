@@ -92,6 +92,16 @@ impl Credential {
         Some(cred)
     }
 
+    /// The account this credential names in records: its email when it has one, else
+    /// its ID. Neither holds a key: config credentials have hashed IDs and file
+    /// credentials are named by their file.
+    pub fn account_name(&self) -> String {
+        self.str("email")
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map_or_else(|| self.id.clone(), str::to_owned)
+    }
+
     /// Recomputes the fields derived from `metadata`. Call after every metadata change.
     pub fn refresh_derived(&mut self) {
         self.disabled = self.metadata.get("disabled").and_then(Value::as_bool).unwrap_or(false);
@@ -117,5 +127,26 @@ impl MetadataPatch {
         for (key, value) in &self.set {
             metadata.insert(key.clone(), value.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cred(email: Option<&str>) -> Credential {
+        let mut metadata = Map::new();
+        metadata.insert("type".into(), "claude".into());
+        if let Some(email) = email {
+            metadata.insert("email".into(), email.into());
+        }
+        Credential::from_file(Path::new("/auth"), Path::new("/auth/a.json"), metadata).unwrap()
+    }
+
+    #[test]
+    fn the_account_name_is_the_email_else_the_id() {
+        assert_eq!(cred(Some(" user@example.com ")).account_name(), "user@example.com");
+        assert_eq!(cred(Some("  ")).account_name(), cred(None).id);
+        assert_eq!(cred(None).account_name(), "a.json");
     }
 }

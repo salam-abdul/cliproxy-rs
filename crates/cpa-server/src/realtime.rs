@@ -399,6 +399,7 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         clock: Default::default(),
         prompt_prefix_hash: String::new(),
         attempts: Default::default(),
+        history: Default::default(),
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

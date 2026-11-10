@@ -9,6 +9,7 @@ use btls::{
     pkey::PKey,
     x509::{X509, X509NameBuilder},
 };
+use cpa_core::credential::Credential;
 
 const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
@@ -60,6 +61,16 @@ fn tls() -> Arc<SslAcceptor> {
 }
 impl Fixture {
     async fn new(reply: Reply) -> Self {
+        Self::build(reply, None, None).await
+    }
+    async fn with_history(reply: Reply, history: &Path) -> Self {
+        Self::build(reply, Some(history), None).await
+    }
+    /// With history, and account `a` backed by `credential` in the runtime's store.
+    async fn with_credential(reply: Reply, history: &Path, credential: Credential) -> Self {
+        Self::build(reply, Some(history), Some(credential)).await
+    }
+    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -83,9 +94,13 @@ impl Fixture {
                             let token = req.headers()["authorization"].to_str().unwrap().to_owned();
                             let body = axum::body::to_bytes(Body::new(req.into_body()), 65536).await.unwrap();
                             seen.lock().unwrap().push((token.clone(), body.to_vec()));
+                            if cpa_common::gostr::contains(&body, b"MODE_STALL") {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                            }
                             let response = if token == "Bearer token-a"
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
+                                let zstd = reply.body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
                                 let body = if reply.broken {
                                     let stream = futures_util::stream::once(async move {
                                         Ok::<_, std::io::Error>(Bytes::from(reply.body))
@@ -98,12 +113,14 @@ impl Fixture {
                                 } else {
                                     Body::from(reply.body)
                                 };
-                                Response::builder()
+                                let mut response = Response::builder()
                                     .status(reply.status)
                                     .header("content-type", "application/json")
-                                    .header("x-request-id", "synthetic-id")
-                                    .body(body)
-                                    .unwrap()
+                                    .header("x-request-id", "synthetic-id");
+                                if zstd {
+                                    response = response.header("content-encoding", "zstd");
+                                }
+                                response.body(body).unwrap()
                             } else {
                                 Response::builder()
                                     .header("content-type", "application/json")
@@ -123,14 +140,24 @@ impl Fixture {
         let native: Config = serde_json::from_value(json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":[{"id":"a","token":"token-a","quota":quota},{"id":"b","token":"token-b","quota":quota}],
+            "fixtureAccounts":[
+                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default()},
+                {"id":"b","token":"token-b","quota":quota}
+            ],
             "upstream":{"hostname":"127.0.0.1","port":port}
         }))
         .unwrap();
-        let rt_config = cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.display())).unwrap();
+        let mut rt_yaml = format!("auth-dir: {}\n", dir.display());
+        if let Some(history) = history {
+            rt_yaml.push_str(&format!(
+                "observability: {{history: {{enable: true, dir: '{}'}}}}\n",
+                history.display()
+            ));
+        }
+        let rt_config = cpa_core::config::Config::parse(&rt_yaml).unwrap();
         let rt = Arc::new(crate::testing::runtime(
             rt_config,
-            vec![],
+            credential.into_iter().collect(),
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap(),
                 codex: Default::default(),
@@ -193,6 +220,7 @@ impl Fixture {
             .build()
             .unwrap()
             .post(format!("{}/v1/messages", self.url))
+            .header("user-agent", "synthetic-agent/1")
             .body(body)
             .send()
             .await
@@ -415,7 +443,7 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
             body_bytes: 0,
             started: std::time::Instant::now(),
         };
-        let observation = Observation::new(fixture.state.clone(), facts, "identity");
+        let observation = Observation::new(fixture.state.clone(), facts, "identity", None);
         tokio::spawn(async move {
             let _streaming = observation;
             std::future::pending::<()>().await;
@@ -433,4 +461,189 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
     assert_eq!(recorded.len(), 1, "{events}");
     assert_eq!(recorded[0]["outcome"], "client_cancelled");
     assert_eq!(recorded[0]["status"], 499);
+}
+
+fn history_rows(dir: &Path) -> Vec<crate::request_logging::history::row::Row> {
+    let mut rows = crate::request_logging::history::test_support::rows(dir);
+    rows.sort_by_key(|r| r.send);
+    rows
+}
+
+/// Flushes the history writer until `count` rows are on disk.
+async fn flushed_rows(fixture: &Fixture, dir: &Path, count: usize) -> Vec<crate::request_logging::history::row::Row> {
+    for _ in 0..200 {
+        let rt = fixture.state.rt.clone();
+        tokio::task::spawn_blocking(move || rt.history().flush()).await.unwrap();
+        let rows = history_rows(dir);
+        if rows.len() >= count {
+            assert_eq!(rows.len(), count, "{rows:#?}");
+            return rows;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("expected {count} history row(s), found {:#?}", history_rows(dir));
+}
+
+#[tokio::test]
+async fn a_native_row_names_the_store_credential_and_the_client() {
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("type".into(), "claude".into());
+    metadata.insert("email".into(), "user-a@example.com".into());
+    let auth = Path::new("/synthetic-auth");
+    let credential = Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap();
+    let auth_index = cpa_core::config::credentials::auth_index(&credential);
+    let fixture = Fixture::with_credential(
+        Reply {
+            status: 200,
+            body: br#"{"content":[]}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+        credential,
+    )
+    .await;
+    fixture.request().await.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].account.as_deref(), Some("user-a@example.com"));
+    assert_eq!(rows[0].auth_index.as_deref(), Some(auth_index.as_str()));
+    assert_eq!(rows[0].user_agent.as_deref(), Some("synthetic-agent/1"));
+}
+
+#[tokio::test]
+async fn a_native_exchange_is_recorded_decoded() {
+    use crate::request_logging::history::row::{Outcome, Source};
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let plain = br#"{"content":[],"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":3}}"#;
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 200,
+            body: zstd::bulk::compress(plain, 3).unwrap(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    let row = &rows[0];
+    assert_eq!(row.source, Source::Native);
+    assert_eq!(row.transport, crate::request_logging::history::row::Transport::Http);
+    assert_eq!(row.request_body.as_deref().map(str::as_bytes), Some(REQUEST));
+    assert_eq!(row.response_body.as_deref().map(str::as_bytes), Some(&plain[..]));
+    assert!(!row.response_truncated);
+    assert_eq!(row.outcome, Outcome::Complete);
+    assert_eq!(row.status, Some(200));
+    assert_eq!(row.endpoint.as_deref(), Some("POST /v1/messages"));
+    assert_eq!(row.model.as_deref(), Some("claude-opus-test"));
+    // The client's own session ID, so `history delete --session` finds native rows.
+    assert_eq!(row.session_id.as_deref(), Some("synthetic-session"));
+    assert_eq!(row.account.as_deref(), Some("a"));
+    assert_eq!(row.upstream_request_id.as_deref(), Some("synthetic-id"));
+    assert_eq!(row.input_tokens, Some(4));
+    assert_eq!(row.output_tokens, Some(2));
+    assert_eq!(row.cache_read_tokens, Some(3));
+}
+
+#[tokio::test]
+async fn a_native_failover_records_both_sends() {
+    use crate::request_logging::history::row::Outcome;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 403,
+            body: br#"{"error":{"code":"model_access_denied"}}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 2).await;
+    assert_eq!(rows[0].exchange_id, rows[1].exchange_id);
+    assert_eq!((rows[0].send, rows[1].send), (0, 1));
+    assert_eq!((rows[0].status, rows[0].outcome), (Some(403), Outcome::Failover));
+    assert_eq!(rows[0].account.as_deref(), Some("a"));
+    assert_eq!(rows[0].request_body.as_deref().map(str::as_bytes), Some(REQUEST));
+    assert_eq!((rows[1].status, rows[1].outcome), (Some(200), Outcome::Complete));
+    assert_eq!(rows[1].account.as_deref(), Some("b"));
+    assert_eq!(rows[1].response_body.as_deref().map(str::as_bytes), Some(SUCCESS));
+}
+
+#[tokio::test]
+async fn a_broken_native_stream_is_a_stream_error_row() {
+    use crate::request_logging::history::row::Outcome;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 200,
+            body: br#"{"content":["#.to_vec(),
+            broken: true,
+        },
+        &dir.0,
+    )
+    .await;
+    let response = fixture.request().await;
+    let _ = response.bytes().await;
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].outcome, Outcome::StreamError);
+    assert_eq!(rows[0].response_body.as_deref(), Some(r#"{"content":["#));
+}
+
+#[tokio::test]
+async fn a_native_error_response_is_a_failed_row() {
+    use crate::request_logging::history::row::Outcome;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 400,
+            body: br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 400);
+    response.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!((rows[0].status, rows[0].outcome), (Some(400), Outcome::Failed));
+}
+
+#[tokio::test]
+async fn a_client_that_leaves_before_the_headers_still_leaves_a_row() {
+    use crate::request_logging::history::row::Outcome;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    let stalled = br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[{"role":"user","content":"MODE_STALL"}]}"#;
+    let request = wreq::Client::builder()
+        .no_proxy()
+        .retry(wreq::retry::Policy::never())
+        .build()
+        .unwrap()
+        .post(format!("{}/v1/messages", fixture.url))
+        .body(&stalled[..])
+        .send();
+    assert!(tokio::time::timeout(Duration::from_millis(500), request).await.is_err());
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].outcome, Outcome::Cancelled);
+    assert_eq!(rows[0].status, None);
+    assert!(
+        rows[0]
+            .request_body
+            .as_deref()
+            .is_some_and(|b| b.contains("MODE_STALL"))
+    );
 }

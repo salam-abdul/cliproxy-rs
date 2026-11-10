@@ -23,6 +23,8 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
+# History files: the low-level column writer and row reader, without arrow.
+parquet = { version = "60.1", default-features = false, features = ["zstd"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

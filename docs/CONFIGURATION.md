@@ -138,6 +138,62 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `logs.logs-max-total-size-mb` | The most disk space the log files may use. |
 | `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
 | `usage.claude-cache-telemetry` | `false` by default. With usage collection and management on, `true` adds content-free cache observations of the final request bytes to the usage queue and RESP channel. It costs parsing and hashing per request, sends no extra requests and changes no cache markers or request bytes. |
+| `history.enable` | `false` by default. `true` records every request sent to a model and its response in Parquet files under `history.dir`. See [history](#history). |
+| `history.dir` | The history folder, an absolute path outside any repository or synced folder; `~` is the home directory. Required: with `enable: true` and no `dir` or a relative one, history stays off and the log says so. |
+| `history.max-total-size-mb` | `10240` by default. When the files exceed it, the oldest are deleted. `0` keeps everything. There is no age limit. |
+
+### History
+
+History keeps one row per upstream send, except in commercial mode, which turns it off: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.
+
+Each row has the exchange's request ID, the WebSocket turn and send number, start and end times, provider, requested, upstream and reported model, account (its email, or its credential ID) and its auth index, session, user agent, stream flag, upstream status, outcome (`complete`, `failed` or `cancelled`; native rows also use `failover`, `stream_error` and `transport_lost`, where the translating proxy records `failed`), error text, token counts including cache reads and writes, latency, time to first byte, the provider's request ID, and both bodies.
+
+| Body | What is stored |
+| --- | --- |
+| Request | The body sent upstream. For Devin it is the logged form of the request, without the session token the wire body carries. |
+| Buffered response | The body as received, decoded from its content encoding. |
+| Streamed response, translating proxy | Each line the executor read, joined with `\n`. For Claude this is the event stream as received, without its last line ending; line endings, and any line an executor does not read, can differ from the bytes received. |
+| Native response | The bytes received, decoded from their content encoding. |
+| WebSocket frames | One list entry per frame, as text, in `request_frames` and `response_frames`. A turn starts at its `response.create` frame; steering frames join the turn in progress, and the row is written as soon as the turn's response ends. |
+| Native failover | No response body. The router reads at most the first 64 KiB of a 400, 403, 404 or 422 response to tell a model-entitlement rejection apart, and keeps none of it. |
+
+`request_bytes` and `response_bytes` are the full sizes as received, before the cap; for a native response that is its encoded size. Text bodies are in `request_body` and `response_body`; a body that is not UTF-8 goes in `request_body_raw` or `response_body_raw` instead. A body keeps its first 32 MiB, and `request_truncated` or `response_truncated` marks one that was cut.
+
+Headers, URLs, tokens and keys are never stored. The bodies are full prompts and outputs, including anything pasted into a conversation. On Unix the folder is created `0700` and files `0600`.
+
+Recording never makes a request wait. Up to 256 rows can wait for the writer and up to 512 MiB of bodies can be held in flight; past either, rows are dropped or bodies cut, and the log reports how many rows were not written. Files are `<dir>/date=YYYY-MM-DD/<HHMMSS>-<pid>-<seq>.parquet` (UTC). The file being written ends in `.partial` and becomes `.parquet` when it closes: every 10 minutes, at 512 MiB, at UTC midnight and at shutdown. A crash loses the open file, at most 10 minutes of rows; the writer deletes it once it runs again.
+
+Query the folder with DuckDB:
+
+```sql
+SELECT date, provider, model, count(*) AS sends,
+       sum(input_tokens) AS input, sum(cache_read_tokens) AS cache_read
+FROM read_parquet('/srv/cliproxy/history/**/*.parquet', hive_partitioning = true)
+GROUP BY ALL
+ORDER BY date;
+```
+
+or Polars:
+
+```python
+import polars as pl
+
+sends = pl.scan_parquet("/srv/cliproxy/history/**/*.parquet", hive_partitioning=True)
+sends.filter(pl.col("outcome") == "complete").select("started_at", "model", "request_body").collect()
+```
+
+`cliproxy history delete` removes rows. It reads `history.dir` from `--config` (`config.yaml` by default), also while recording is off, and needs at least one selector:
+
+| Flag | Rows deleted |
+| --- | --- |
+| `--from TIME` | Started at or after `TIME` (`YYYY-MM-DD` in UTC, or RFC 3339). |
+| `--to TIME` | Started before `TIME`, which must be later than `--from`. |
+| `--session ID` | Of this session. |
+| `--account LABEL` | Of this account, ignoring case. |
+| `--model NAME` | For this upstream model or the model the client asked for. |
+| `--dry-run` | None; prints what would go. |
+
+A file whose rows all match is deleted; a file with some matching rows is rewritten without them. Each delete also leaves a tombstone in `<dir>/.deletes` for a day: a running server drops matching rows that started before the delete and that it had not written yet, including sends still in flight, and rewrites a file that was open during the delete. Rows that start after the delete are kept. The command, size retention and those rewrites share a lock file, `<dir>/.lock`; while another process holds it, the command stops and asks to retry.
 
 ## worker-threads
 

@@ -156,7 +156,8 @@ fn now() -> u64 {
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
 }
-fn session(body: &Value, headers: &HeaderMap) -> Option<String> {
+/// The client's own session ID, validated; routing uses its hash.
+fn client_session(body: &Value, headers: &HeaderMap) -> Option<String> {
     let m = &body["metadata"];
     let mut id = m["session_id"].as_str().or(m["sessionId"].as_str()).map(str::to_owned);
     if id.is_none()
@@ -174,7 +175,6 @@ fn session(body: &Value, headers: &HeaderMap) -> Option<String> {
             .map(str::to_owned)
     })
     .filter(|id| valid_id(id))
-    .map(hash)
 }
 fn available(v: &Value) -> bool {
     v["utilization"]
@@ -634,12 +634,13 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         Ok(b) => b,
         Err(_) => return Ok(error(400, "Invalid native JSON")),
     };
-    let Some(sid) = session(&body, &parts.headers) else {
+    let Some(client_sid) = client_session(&body, &parts.headers) else {
         return Ok(error(
             400,
             "Native Claude session identity required; request was not routed",
         ));
     };
+    let sid = hash(&client_sid);
     let Some(model) = body["model"]
         .as_str()
         .filter(|m| m.starts_with("claude-") && m.len() <= 256)
@@ -720,6 +721,23 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             }
         };
         let started = Instant::now();
+        let mut capture = crate::request_logging::history::native::NativeCapture::start(
+            &s.rt,
+            crate::request_logging::history::native::NativeSend {
+                exchange_id: &request_id,
+                send: tried.len().saturating_sub(1),
+                credential: &a.file_id,
+                account_id: &a.id,
+                model: &model,
+                session_id: &client_sid,
+                user_agent: parts
+                    .headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default(),
+            },
+            &raw,
+        );
         let result = s
             .client
             .request(parts.method.clone(), format!("{target}{path}"))
@@ -731,8 +749,6 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         let r = match result {
             Ok(r) => r,
             Err(upstream_error) => {
-                s.cool(&a, &model, 0, None, false).await?;
-                s.rt.store().note_activity(&a.file_id, false);
                 // Log only classifications, never error Display strings containing URLs or credentials.
                 let failure_kind = if upstream_error.is_timeout() {
                     "timeout"
@@ -743,6 +759,16 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 } else {
                     "transport"
                 };
+                if let Some(capture) = capture.take() {
+                    capture.finish(crate::request_logging::history::native::NativeEnd {
+                        stream: false,
+                        outcome: crate::request_logging::history::row::Outcome::TransportLost,
+                        detail: None,
+                        error: Some(failure_kind.to_owned()),
+                    });
+                }
+                s.cool(&a, &model, 0, None, false).await?;
+                s.rt.store().note_activity(&a.file_id, false);
                 s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 return Ok(error(
                     422,
@@ -752,6 +778,9 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         };
         upstream_headers_ms += started.elapsed().as_millis();
         let status = r.status();
+        if let Some(capture) = capture.as_mut() {
+            capture.response_head(status.as_u16(), r.headers());
+        }
         s.rt.executors
             .claude
             .quota()
@@ -774,15 +803,23 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
                 rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
             }
-            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
-            if !entitlement {
-                s.rt.claude_usage.invalidate(&a.token).await;
-            }
             let outcome = if entitlement {
                 "model_entitlement"
             } else {
                 "retryable_rejection"
             };
+            if let Some(capture) = capture.take() {
+                capture.finish(crate::request_logging::history::native::NativeEnd {
+                    stream: false,
+                    outcome: crate::request_logging::history::row::Outcome::Failover,
+                    detail: None,
+                    error: Some(outcome.to_owned()),
+                });
+            }
+            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
+            if !entitlement {
+                s.rt.claude_usage.invalidate(&a.token).await;
+            }
             s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
             continue;
         }
@@ -804,7 +841,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             body_bytes: raw.len(),
             started: request_started,
         };
-        let mut record = Some(Observation::new(s.clone(), facts, &encoding));
+        let mut record = Some(Observation::new(s.clone(), facts, &encoding, capture));
         // The server stops polling a body once it has sent the declared content-length, so the
         // stream never reaches its end; the exchange completes when that many bytes arrived.
         let declared = h
@@ -1228,8 +1265,9 @@ mod tests {
     fn native_identity_is_stable_across_account_metadata() {
         let a = json!({"metadata":{"user_id":"user_A_account_A_session_native-123"}});
         let b = json!({"metadata":{"user_id":"{\"account_uuid\":\"B\",\"session_id\":\"native-123\"}"}});
-        assert_eq!(session(&a, &HeaderMap::new()), session(&b, &HeaderMap::new()));
-        assert!(session(&json!({}), &HeaderMap::new()).is_none());
+        assert_eq!(client_session(&a, &HeaderMap::new()).as_deref(), Some("native-123"));
+        assert_eq!(client_session(&b, &HeaderMap::new()).as_deref(), Some("native-123"));
+        assert!(client_session(&json!({}), &HeaderMap::new()).is_none());
     }
     #[test]
     fn included_quota_does_not_require_changing_account_billing() {

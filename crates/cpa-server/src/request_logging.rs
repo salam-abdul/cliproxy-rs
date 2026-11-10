@@ -23,6 +23,8 @@ use crate::Runtime;
 use crate::management::Management;
 use crate::observability::{RequestId, hide_key, mask_query};
 
+pub mod history;
+
 // ponytail: request capture and decoded output stop at 32 MiB; raise together only
 // with bounded storage and decompression tests for larger diagnostic bodies.
 const DEFERRED_BODY: u64 = 32 << 20;
@@ -1584,8 +1586,31 @@ fn retain_errors(dir: &Path, max: i64) -> io::Result<()> {
     Ok(())
 }
 
-async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<u64>) -> (Vec<u8>, Option<String>) {
+/// The decoder the request log reads one response `content-encoding` with, over
+/// `body`; `None` for an encoding it leaves encoded.
+pub(crate) fn response_decoder<'a>(encoding: &str, body: &'a [u8]) -> Option<Pin<Box<dyn AsyncRead + Send + 'a>>> {
     use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, GzipDecoder, ZstdDecoder};
+    Some(match encoding {
+        "zstd" => {
+            let mut decoder = ZstdDecoder::with_params(
+                body,
+                &[async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)],
+            );
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
+        "gzip" => {
+            let mut decoder = GzipDecoder::new(body);
+            decoder.multiple_members(true);
+            Box::pin(decoder)
+        }
+        "deflate" => Box::pin(DeflateDecoder::new(body)),
+        "br" => Box::pin(BrotliDecoder::new(body)),
+        _ => return None,
+    })
+}
+
+async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<u64>) -> (Vec<u8>, Option<String>) {
     let encoding = headers
         .get("content-encoding")
         .and_then(|v| v.to_str().ok())
@@ -1606,28 +1631,18 @@ async fn decode(raw: Vec<u8>, headers: &HeaderMap, request: bool, limit: Option<
     let limit = limit.unwrap_or(DEFERRED_BODY).min(DEFERRED_BODY);
     let mut body = raw.clone();
     for encoding in encoding.split(',').rev().map(|s| s.trim().to_ascii_lowercase()) {
-        let mut reader: Pin<Box<dyn AsyncRead + Send + '_>> = match encoding.as_str() {
-            "" | "identity" => continue,
-            "zstd" => {
-                let mut decoder = ZstdDecoder::with_params(
-                    body.as_slice(),
-                    &[async_compression::zstd::DParameter::window_log_max(ZSTD_WINDOW_LOG_MAX)],
-                );
-                decoder.multiple_members(true);
-                Box::pin(decoder)
-            }
-            "gzip" if !request => {
-                let mut decoder = GzipDecoder::new(body.as_slice());
-                decoder.multiple_members(true);
-                Box::pin(decoder)
-            }
-            "deflate" if !request => Box::pin(DeflateDecoder::new(body.as_slice())),
-            "br" if !request => Box::pin(BrotliDecoder::new(body.as_slice())),
-            _ => return (raw, None),
-        };
+        if matches!(encoding.as_str(), "" | "identity") {
+            continue;
+        }
         let mut output = Vec::new();
-        let result = reader.as_mut().take(limit + 1).read_to_end(&mut output).await;
-        drop(reader);
+        // Requests are decoded only from zstd.
+        let result = match (!request || encoding == "zstd")
+            .then(|| response_decoder(&encoding, body.as_slice()))
+            .flatten()
+        {
+            Some(mut reader) => reader.as_mut().take(limit + 1).read_to_end(&mut output).await,
+            None => return (raw, None),
+        };
         if let Err(error) = result {
             // ponytail: malformed Brotli can withhold
             // partial decoded bytes that Go accepts, and codec diagnostic text
@@ -2176,7 +2191,10 @@ mod tests {
             let status = StatusCode::from_u16(case["status"].as_u64().unwrap() as u16).unwrap();
             let consume = case["consume"].as_i64().unwrap();
             let streaming = case["stream"].as_bool().unwrap();
+            let served = Arc::new(Mutex::new(None));
+            let slot = served.clone();
             let app = axum::Router::new().fallback(move |request: Request| async move {
+                *slot.lock().unwrap() = request.extensions().get::<RequestLog>().cloned();
                 if consume < 0 {
                     let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await.unwrap();
                 } else {
@@ -2222,23 +2240,20 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(body, if case["method"] == "HEAD" { "" } else { "outbound\n" });
             let expected = case["content"].as_str().unwrap();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let files = logs(&dir);
-                let actual = files
-                    .first()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .unwrap_or_default();
-                if canonical(&actual) == expected {
-                    break;
-                }
-                assert!(tokio::time::Instant::now() < deadline, "case {case}: got {actual}");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Wait for capture to finalize: its log written or discarded and its
+            // spools removed. A request the middleware does not capture has no log.
+            let log = served.lock().unwrap().take();
+            if let Some(log) = log {
+                tokio::time::timeout(std::time::Duration::from_secs(5), log.finished())
+                    .await
+                    .expect("request log finalized");
             }
-            // Wait for scheduled cleanup too, so discarded error-only capture
-            // cannot leave files behind and an unexpected later write fails.
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             let files = logs(&dir);
+            let actual = files
+                .first()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            assert_eq!(canonical(&actual), expected, "case {case}");
             assert_eq!(files.len(), usize::from(!expected.is_empty()));
             if let Some(file) = files.first() {
                 assert_eq!(
@@ -2862,8 +2877,11 @@ mod tests {
     ) -> Vec<u8> {
         let dir = scratch();
         let state = management(&dir, enabled, false);
+        let served = Arc::new(Mutex::new(None));
+        let slot = served.clone();
         let app = axum::Router::new().fallback(move |axum::Extension(log): axum::Extension<RequestLog>| {
             let events = events.clone();
+            *slot.lock().unwrap() = Some(log.clone());
             async move {
                 events(&log);
                 (status, [("set-cookie", "down=c00kie-down-set")], "done")
@@ -2878,16 +2896,16 @@ mod tests {
             .unwrap();
         let response = app.call(request).await.unwrap();
         axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let mut content = Vec::new();
-        for _ in 0..500 {
-            if let [log] = &logs(&dir)[..] {
-                content = std::fs::read(log).unwrap();
-                if content.trim_ascii_end().ends_with(b"\ndone") {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        // The log file is complete before the writer drops its spools, so wait for
+        // the logging task itself rather than for the file's last line.
+        let log = served.lock().unwrap().take().expect("handler ran");
+        tokio::time::timeout(std::time::Duration::from_secs(10), log.finished())
+            .await
+            .expect("request log finalized");
+        let [log] = &logs(&dir)[..] else {
+            panic!("expected one log in {dir:?}");
+        };
+        let content = std::fs::read(log).unwrap();
         assert!(content.trim_ascii_end().ends_with(b"\ndone"), "no complete log");
         drop(app);
         drop(state);

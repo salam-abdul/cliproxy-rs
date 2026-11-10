@@ -40,6 +40,8 @@ When possible, a local 429 carries Claude's unified reset and limit headers and 
 
 **Overview** reads `GET /v8/management/observability/native/history?range=24h|7d|30d` from a private SQLite file beside the event log. It keeps final request outcomes, token counters and account availability, and excludes sessions, request bodies and body fingerprints. Account status is sampled without inference calls. An unavailable history file does not stop routing. History starts when this version first runs; older event logs are not backfilled. The dashboard marks incomplete token totals, dropped records and possible gaps after an unclean shutdown.
 
+With `observability.history` on, every native send is also recorded with its request and response bodies in the model-traffic history ([Configuration](../docs/CONFIGURATION.md#history)). The SQLite history above stays free of content either way.
+
 Timing fields separate body preparation, session waiting, quota admission, upstream headers across attempts and response streaming. First-byte time is measured from request arrival and can precede generated text, so it is not time to first token. The fields are elapsed time, not CPU cost.
 
 | Store | Bound |
