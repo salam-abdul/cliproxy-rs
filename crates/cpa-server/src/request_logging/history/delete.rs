@@ -39,7 +39,10 @@ impl Selector {
             .is_none_or(|from| row.started_at_us >= from.timestamp_micros())
             && self.to.is_none_or(|to| row.started_at_us < to.timestamp_micros())
             && text(&self.session, &row.session_id)
-            && text(&self.account, &row.account)
+            && self
+                .account
+                .as_ref()
+                .is_none_or(|want| row.account.as_ref().is_some_and(|have| have.eq_ignore_ascii_case(want)))
             && (self.model.is_none() || self.model == row.model || self.model == row.model_requested)
     }
 }

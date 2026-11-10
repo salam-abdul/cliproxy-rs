@@ -141,7 +141,7 @@ fn a_row_in_a_later_partition_still_matches_its_start_time() {
 }
 
 #[test]
-fn model_matches_the_upstream_or_requested_model_and_account_is_exact() {
+fn model_matches_the_upstream_or_requested_model_and_account_ignores_case() {
     let dir = TempDir::new();
     let file = write_file(
         &dir.0,
@@ -151,12 +151,13 @@ fn model_matches_the_upstream_or_requested_model_and_account_is_exact() {
     );
     let by_alias = Selector {
         model: Some("sonnet".into()),
-        account: Some("A@example.invalid".into()),
+        account: Some("b@example.invalid".into()),
         ..Selector::default()
     };
     assert_eq!(delete(&dir.0, &by_alias, false).unwrap().rows_deleted, 0);
+    // Email addresses are matched as people type them.
     let by_alias = Selector {
-        account: Some("a@example.invalid".into()),
+        account: Some("A@Example.INVALID".into()),
         ..by_alias
     };
     assert_eq!(delete(&dir.0, &by_alias, false).unwrap().rows_deleted, 1);

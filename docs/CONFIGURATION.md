@@ -189,7 +189,7 @@ sends.filter(pl.col("outcome") == "complete").select("started_at", "model", "req
 | `--from TIME` | Started at or after `TIME` (`YYYY-MM-DD` in UTC, or RFC 3339). |
 | `--to TIME` | Started before `TIME`, which must be later than `--from`. |
 | `--session ID` | Of this session. |
-| `--account LABEL` | Of this account. |
+| `--account LABEL` | Of this account, ignoring case. |
 | `--model NAME` | For this upstream model or the model the client asked for. |
 | `--dry-run` | None; prints what would go. |
 
