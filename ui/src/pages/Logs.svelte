@@ -2,7 +2,8 @@
   import { tick, untrack } from "svelte";
   import { store, Res, every } from "../store.svelte";
   import { api, download } from "../api";
-  import { type Data } from "../core";
+  import { plural, type Data } from "../core";
+  import { facets, keep, parseLine, type Filter } from "../logs";
   import Load from "../Load.svelte";
 
   const MAX = 1500;
@@ -15,7 +16,12 @@
     own = $state(false),
     reqId = $state(store.route.arg),
     reqText = $state(""),
-    reqError = $state("");
+    reqError = $state(""),
+    f = $state<Filter>({ method: "", status: "", path: "" }),
+    wrap = $state(true),
+    box = $state<HTMLElement>(),
+    full = $state(false),
+    errLog = $state<{ name: string; text: string; cut: boolean } | null>(null);
   const logs: Res<string[]> = new Res(async (): Promise<string[]> => {
     const follow = !pane || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40,
       at = epoch;
@@ -31,10 +37,31 @@
   files.load();
   $effect(() => every(3000, async () => tail && (await logs.load(true))));
   // The dashboard's own management calls (including this tail) are hidden unless asked for.
-  const shown = $derived(
-    (logs.data || []).filter((l) => (own || !l.includes("/management/")) && l.toLowerCase().includes(query.trim().toLowerCase())),
+  const base = $derived(
+    (logs.data || [])
+      .filter((l) => (own || !l.includes("/management/")) && l.toLowerCase().includes(query.trim().toLowerCase()))
+      .map(parseLine),
   );
-  const parse = (line: string) => line.match(/^\[([^\]]*)\] \[([^\]]*)\] \[(\w+)\s*\] (?:\[[^\]]*\] )?(.*)$/);
+  const options = $derived(facets(base, f));
+  const shown = $derived(base.filter((l) => keep(l, f)));
+  const filtered = $derived(!!(f.method || f.status || f.path));
+  // Browsers expose the clipboard only to HTTPS and localhost pages.
+  const copy = (lines: string[], done: string) =>
+    store.act(async () => {
+      if (!navigator.clipboard) throw new Error("Copying needs the dashboard on HTTPS or localhost.");
+      await navigator.clipboard.writeText(lines.join("\n"));
+    }, done);
+  $effect(() => {
+    const on = () => (full = !!box && document.fullscreenElement === box);
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  });
+  const VIEW = 256 * 1024;
+  const openError = (name: string) =>
+    store.act(async () => {
+      const blob: Blob = await api(`/observability/logs/errors/${encodeURIComponent(name)}`, "GET", undefined, "blob");
+      errLog = { name, text: await blob.slice(0, VIEW).text(), cut: blob.size > VIEW };
+    });
   async function inspect(id: string) {
     reqId = id;
     reqText = reqError = "";
@@ -66,24 +93,45 @@
 
 <Load res={logs} what="Application logs">
   {#snippet children(lines)}
-    <section class="section">
+    <section class="section logs" bind:this={box}>
       <div class="row">
         <label class="search grow"><svg class="i" aria-hidden="true"><use href="#i-search" /></svg><span class="sr">Filter lines</span><input bind:value={query} placeholder="Filter lines" /></label>
         <label class="check"><input type="checkbox" bind:checked={own} />Management API calls</label>
       </div>
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex: the scrolling log must be reachable by keyboard -->
-      <div class="code-window log" bind:this={pane} role="log" aria-label="Application log" tabindex="0">
-        {#each shown as line}
-          {@const m = parse(line)}
-          {#if m}<div class={m[3].toLowerCase()}>
-              <span class="t">{m[1].slice(11)}</span>
-              {#if /[^-]/.test(m[2])}<a class="t" href={`#logs/${encodeURIComponent(m[2])}`}>{m[2]}</a>{:else}<span class="t">{m[2]}</span>{/if}
-              <span class="lvl">{m[3]}</span>
-              {m[4]}
-            </div>{:else}<div>{line}</div>{/if}
-        {:else}<div class="muted">{query ? "No lines match." : lines.length ? "" : "No lines yet. Needs observability.logs.logging-to-file."}</div>{/each}
+      <div class="row">
+        {#each [["method", "Method"], ["status", "Status"]] as const as [k, name]}{#if options[k].length}<div class="seg" role="group" aria-label={name}>
+              {#each options[k] as [v, n]}<button aria-pressed={f[k] === v} onclick={() => (f[k] = f[k] === v ? "" : v)}>{v}<b>{n}</b></button>{/each}
+            </div>{/if}{/each}
+        {#if options.path.length || f.path}<select aria-label="Path" bind:value={f.path}
+            ><option value="">All paths</option>{#each options.path.filter((o, n) => n < 50 || o[0] === f.path) as [v, n]}<option value={v}>{v} ({n})</option>{/each}</select
+          >{/if}
+        {#if filtered}<button class="key quiet" onclick={() => (f = { method: "", status: "", path: "" })}>Clear filters</button>{/if}
+        <span class="grow"></span>
+        <label class="check"><input type="checkbox" bind:checked={wrap} />Wrap lines</label>
+        <button class="key" disabled={!shown.length} onclick={() => copy(shown.map((l) => l.raw), `${plural(shown.length, "line")} copied.`)}
+          ><svg class="i" aria-hidden="true"><use href="#i-copy" /></svg>Copy shown</button
+        >
+        <button class="key" disabled={!document.fullscreenEnabled} onclick={() => (full ? document.exitFullscreen() : box?.requestFullscreen())}
+          ><svg class="i" aria-hidden="true"><use href="#i-open" /></svg>{full ? "Exit full screen" : "Full screen"}</button
+        >
       </div>
-      <p class="legend">{shown.length.toLocaleString()} of {lines.length.toLocaleString()} lines · newest {MAX.toLocaleString()} kept in this tab</p>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex: the scrolling log must be reachable by keyboard -->
+      <div class="code-window log" class:nowrap={!wrap} bind:this={pane}
+        ondblclick={(e) => {
+          const line = (e.target as Element).closest(".log > div");
+          const i = line ? [...pane!.children].indexOf(line) : -1;
+          if (shown[i]) copy([shown[i].raw], "Line copied.");
+        }} role="log" aria-label="Application log" tabindex="0">
+        {#each shown as l}
+          {#if l.time !== undefined}<div class={l.level}>
+              <span class="t">{l.time.slice(11)}</span>
+              {#if /[^-]/.test(l.id || "")}<a class="t" href={`#logs/${encodeURIComponent(l.id || "")}`}>{l.id}</a>{:else}<span class="t">{l.id}</span>{/if}
+              <span class="lvl">{l.level}</span>
+              {l.text}
+            </div>{:else}<div>{l.raw}</div>{/if}
+        {:else}<div class="muted">{query || filtered ? "No lines match." : lines.length ? "" : "No lines yet. Needs observability.logs.logging-to-file."}</div>{/each}
+      </div>
+      <p class="legend">{shown.length.toLocaleString()} of {lines.length.toLocaleString()} lines · newest {MAX.toLocaleString()} kept in this tab · double-click a line to copy it</p>
     </section>
   {/snippet}
 </Load>
@@ -114,6 +162,7 @@
             <li class="item">
               <code class="grow ellipsis">{f.name}</code>
               <span class="legend">{f.modified ? new Date(f.modified * 1000).toLocaleString() : ""}</span>
+              <button class="key" disabled={store.busy} onclick={() => openError(f.name)}>Open</button>
               <button
                 class="key"
                 onclick={() =>
@@ -125,6 +174,14 @@
           {/each}
         </ul>
       {:else}<p class="muted">No error logs.</p>{/if}
+      {#if errLog}
+        <div class="row">
+          <code class="grow ellipsis">{errLog.name}</code>
+          <button class="key quiet" onclick={() => (errLog = null)}>Close</button>
+        </div>
+        {#if errLog.cut}<p class="note">Showing the first 256 KB. Download the file for the rest.</p>{/if}
+        <pre class="code-window request" aria-label={errLog.name}>{errLog.text}</pre>
+      {/if}
     {/snippet}
   </Load>
 </section>

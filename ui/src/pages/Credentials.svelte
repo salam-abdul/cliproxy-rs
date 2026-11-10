@@ -1,8 +1,8 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { store, every } from "../store.svelte";
-  import { api } from "../api";
-  import { credName, provider, label, type Data } from "../core";
+  import { api, download } from "../api";
+  import { credName, credRef, plural, provider, label, type Data } from "../core";
   import { accountStatus } from "../accounts";
   import Load from "../Load.svelte";
   import AccountDetail from "../AccountDetail.svelte";
@@ -15,7 +15,8 @@
   });
 
   let query = $state(""),
-    filter = $state("all");
+    filter = $state("all"),
+    picked = $state<string[]>([]);
   const key = (a: Data) => `${a.name}\u0000${a.auth_index}`;
   // One file can hold several credentials; the ID is unique and every per-credential
   // route accepts it in place of the file name. Downloads and deletes still use the file.
@@ -23,7 +24,7 @@
   const rows = $derived(
     (store.creds.data || []).map((a) => ({
       a,
-      s: accountStatus(a, store.native.data, store.native.error, "claude", store.now),
+      s: accountStatus(a, store.native.data, store.native.error, "claude", store.serverNow),
     })),
   );
   const matches = (r: (typeof rows)[number], f: string) =>
@@ -62,6 +63,45 @@
   );
   const selected = $derived(rows.find((r) => id(r.a) === store.route.arg)?.a);
   const reload = () => store.creds.load(true);
+  // Selected accounts the filters hide are left alone.
+  const chosen = $derived(shown.filter((r) => picked.includes(key(r.a))).map((r) => r.a));
+  /** Files behind the chosen accounts. An AI Studio relay session has none. */
+  const files = $derived([...new Set(chosen.filter((a) => !a.runtime_only).map((a) => String(a.name)))]);
+  const pick = (a: Data, on: boolean) => (picked = on ? [...picked, key(a)] : picked.filter((k) => k !== key(a)));
+  const failures = (bad: string[]) => {
+    if (bad.length) throw new Error(`${bad.length} failed: ${bad.join(", ")}`);
+  };
+  /** One status write per account; the server has no batch form. */
+  const setDisabled = (disabled: boolean) =>
+    store.act(async () => {
+      const bad: string[] = [];
+      for (const a of chosen)
+        await api("/credentials/status", "PATCH", { ...credRef(a), disabled }).catch(
+          (e) => bad.push(`${a.name} (${e.message})`),
+        );
+      await Promise.all([reload(), store.native.load(true)]);
+      failures(bad);
+    }, `${plural(chosen.length, "account")} ${disabled ? "disabled" : "enabled"}.`);
+  function remove() {
+    const skipped = chosen.filter((a) => a.runtime_only).length;
+    // A file can hold several accounts, and deleting it removes them all.
+    const removed = rows.filter((r) => !r.a.runtime_only && files.includes(String(r.a.name))).length;
+    const text = `Delete ${plural(files.length, "account file")} (${plural(removed, "account")}) from the server?`;
+    if (!confirm(text + (skipped ? ` ${plural(skipped, "AI Studio relay session")} without a file stay.` : ""))) return;
+    store.act(async () => {
+      const result = await api("/credentials", "DELETE", { names: files });
+      picked = [];
+      await Promise.all([reload(), store.native.load(true)]);
+      failures((result.failed || []).map((f: Data) => `${f.name} (${f.error})`));
+    }, `${plural(files.length, "account file")} deleted.`);
+  }
+  const downloadAll = () =>
+    store.act(async () => {
+      const blobs: [string, Blob][] = [];
+      for (const name of files) blobs.push([name, await api(`/credentials/download?name=${encodeURIComponent(name)}`, "GET", undefined, "blob")]);
+      // Started together, so a browser asks once about multiple downloads.
+      for (const [name, blob] of blobs) download(blob, name);
+    });
 
   async function upload(input: HTMLInputElement) {
     const files = [...(input.files || [])];
@@ -92,7 +132,7 @@
         );
       store.notify(
         result.results?.length
-          ? `${result.results.length} tokens refreshed.`
+          ? `${plural(result.results.length, "token")} refreshed.`
           : "No accounts can refresh.",
       );
     });
@@ -137,12 +177,27 @@
               >{/each}
           </div>
         </div>
+        <div class="row bulk">
+          {#if chosen.length}<strong>{chosen.length} selected</strong>
+            <button class="key" disabled={store.busy} onclick={() => setDisabled(false)}>Enable</button>
+            <button class="key" disabled={store.busy} onclick={() => setDisabled(true)}>Disable</button>
+            <button class="key" disabled={store.busy || !files.length} onclick={downloadAll}
+              ><svg class="i" aria-hidden="true"><use href="#i-download" /></svg>Download</button
+            >
+            <button class="key quiet danger" disabled={store.busy || !files.length} onclick={remove}>Delete</button>
+            <button class="key quiet" onclick={() => (picked = [])}>Clear selection</button>
+          {:else}<span class="legend">Select accounts to enable, disable, download or delete several at once.</span>{/if}
+          {#if shown.some((r) => !picked.includes(key(r.a)))}<button class="key quiet" onclick={() => (picked = [...new Set([...picked, ...shown.map((r) => key(r.a))])])}
+              >Select shown</button
+            >{/if}
+        </div>
         <ul class="list accounts">
           {#each groups as g (g.p)}
             <li class="group">{label(g.p)}<span>{g.rows.length}</span></li>
             {#each g.rows as r (key(r.a))}
               {@const title = r.a.label || credName(r.a)}
-              <li>
+              <li class="pick">
+                <input type="checkbox" aria-label={`Select ${title}`} checked={picked.includes(key(r.a))} onchange={(e) => pick(r.a, e.currentTarget.checked)} />
                 <a class="item" href={`#credentials/${encodeURIComponent(id(r.a))}`}>
                   <span class="lamp {r.s.lamp}"></span>
                   <span class="name"
