@@ -730,6 +730,11 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 account_id: &a.id,
                 model: &model,
                 session_id: &client_sid,
+                user_agent: parts
+                    .headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default(),
             },
             &raw,
         );

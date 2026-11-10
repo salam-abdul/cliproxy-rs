@@ -26,6 +26,7 @@ pub(crate) struct NativeSend<'a> {
     pub(crate) model: &'a str,
     /// The client's session ID.
     pub(crate) session_id: &'a str,
+    pub(crate) user_agent: &'a str,
 }
 
 /// One native send in progress. Dropped before [`NativeCapture::finish`], for example
@@ -55,6 +56,7 @@ impl NativeCapture {
             return None;
         }
         let text = super::text;
+        let credential = rt.store().get(send.credential);
         let row = Row {
             exchange_id: send.exchange_id.to_owned(),
             send: i32::try_from(send.send).unwrap_or(i32::MAX),
@@ -63,10 +65,14 @@ impl NativeCapture {
             endpoint: Some("POST /v1/messages".into()),
             provider: Some("claude".into()),
             account: text(
-                &rt.store()
-                    .get(send.credential)
+                &credential
+                    .as_ref()
                     .map_or_else(|| send.account_id.to_owned(), |c| c.account_name()),
             ),
+            auth_index: credential
+                .as_ref()
+                .and_then(|c| text(&cpa_core::config::credentials::auth_index(c))),
+            user_agent: text(send.user_agent),
             model: text(send.model),
             model_requested: text(send.model),
             session_id: text(send.session_id),

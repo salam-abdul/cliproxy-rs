@@ -9,6 +9,7 @@ use btls::{
     pkey::PKey,
     x509::{X509, X509NameBuilder},
 };
+use cpa_core::credential::Credential;
 
 const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
@@ -60,12 +61,16 @@ fn tls() -> Arc<SslAcceptor> {
 }
 impl Fixture {
     async fn new(reply: Reply) -> Self {
-        Self::build(reply, None).await
+        Self::build(reply, None, None).await
     }
     async fn with_history(reply: Reply, history: &Path) -> Self {
-        Self::build(reply, Some(history)).await
+        Self::build(reply, Some(history), None).await
     }
-    async fn build(reply: Reply, history: Option<&Path>) -> Self {
+    /// With history, and account `a` backed by `credential` in the runtime's store.
+    async fn with_credential(reply: Reply, history: &Path, credential: Credential) -> Self {
+        Self::build(reply, Some(history), Some(credential)).await
+    }
+    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -135,7 +140,10 @@ impl Fixture {
         let native: Config = serde_json::from_value(json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":[{"id":"a","token":"token-a","quota":quota},{"id":"b","token":"token-b","quota":quota}],
+            "fixtureAccounts":[
+                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default()},
+                {"id":"b","token":"token-b","quota":quota}
+            ],
             "upstream":{"hostname":"127.0.0.1","port":port}
         }))
         .unwrap();
@@ -149,7 +157,7 @@ impl Fixture {
         let rt_config = cpa_core::config::Config::parse(&rt_yaml).unwrap();
         let rt = Arc::new(crate::testing::runtime(
             rt_config,
-            vec![],
+            credential.into_iter().collect(),
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap(),
                 codex: Default::default(),
@@ -212,6 +220,7 @@ impl Fixture {
             .build()
             .unwrap()
             .post(format!("{}/v1/messages", self.url))
+            .header("user-agent", "synthetic-agent/1")
             .body(body)
             .send()
             .await
@@ -424,6 +433,32 @@ async fn flushed_rows(fixture: &Fixture, dir: &Path, count: usize) -> Vec<crate:
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("expected {count} history row(s), found {:#?}", history_rows(dir));
+}
+
+#[tokio::test]
+async fn a_native_row_names_the_store_credential_and_the_client() {
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("type".into(), "claude".into());
+    metadata.insert("email".into(), "user-a@example.com".into());
+    let auth = Path::new("/synthetic-auth");
+    let credential = Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap();
+    let auth_index = cpa_core::config::credentials::auth_index(&credential);
+    let fixture = Fixture::with_credential(
+        Reply {
+            status: 200,
+            body: br#"{"content":[]}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+        credential,
+    )
+    .await;
+    fixture.request().await.bytes().await.unwrap();
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].account.as_deref(), Some("user-a@example.com"));
+    assert_eq!(rows[0].auth_index.as_deref(), Some(auth_index.as_str()));
+    assert_eq!(rows[0].user_agent.as_deref(), Some("synthetic-agent/1"));
 }
 
 #[tokio::test]
