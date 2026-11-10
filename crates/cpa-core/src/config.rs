@@ -234,6 +234,7 @@ const V8_PARENTS: &[&str] = &[
     "multimedia",
     "observability",
     "observability.logs",
+    "observability.history",
     "observability.usage",
     "server.tls",
     "server.discovery",
@@ -481,10 +482,14 @@ fn normalize_keys(keys: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Go's util.ResolveAuthDir: empty means the default, and a leading `~` is the home
-/// directory with any following slashes dropped (so `~other/x` is `$HOME/other/x`).
+/// Go's util.ResolveAuthDir: empty means the default, then [`expand_home`].
 fn resolve_auth_dir(dir: &str) -> PathBuf {
-    let dir = if dir.is_empty() { DEFAULT_AUTH_DIR } else { dir };
+    expand_home(if dir.is_empty() { DEFAULT_AUTH_DIR } else { dir })
+}
+
+/// A leading `~` is the home directory with any following slashes dropped (so
+/// `~other/x` is `$HOME/other/x`).
+pub fn expand_home(dir: &str) -> PathBuf {
     let (Some(rest), Some(home)) = (dir.strip_prefix('~'), std::env::var_os("HOME")) else {
         return PathBuf::from(dir);
     };

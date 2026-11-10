@@ -817,3 +817,80 @@ async fn turn_access_clones_post_body_without_upgrade_headers() {
         .unwrap();
     assert_eq!(caller.principal, "client-key");
 }
+
+#[tokio::test]
+async fn two_websocket_turns_are_two_history_rows() {
+    use futures_util::StreamExt;
+    use wreq::ws::message::Message as WsMessage;
+    const CREATED: &str = r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#;
+    const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"r1","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let upstream = serve(axum::Router::new().fallback(|| async {
+        (
+            [("content-type", "text/event-stream")],
+            format!("data: {CREATED}\n\ndata: {COMPLETED}\n\n"),
+        )
+    }))
+    .await;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let cfg = Config::parse(&format!(
+        "auth-dir: {}\nobservability: {{history: {{enable: true, dir: '{}'}}}}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    models:\n      - name: gpt-fixture\n",
+        dir.0.join("auths").display(),
+        dir.0.join("history").display()
+    ))
+    .unwrap();
+    let credentials = cpa_core::config::credentials::from_config(&cfg);
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: cpa_exec::codex::CodexExecutor::new().unwrap(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let rt = Arc::new(crate::testing::runtime(cfg, credentials, executors));
+    let proxy = serve(crate::observability::router(&rt, router(rt.clone()))).await;
+    let mut socket = wreq::Client::new()
+        .websocket(format!("ws://{proxy}/v1/responses"))
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    let creates = [
+        r#"{"type":"response.create","model":"gpt-fixture","input":[{"role":"user","content":"one"}]}"#,
+        r#"{"type":"response.create","model":"gpt-fixture","input":[{"role":"user","content":"two"}]}"#,
+    ];
+    for create in creates {
+        socket.send(WsMessage::text(create)).await.unwrap();
+        while let Some(Ok(WsMessage::Text(text))) = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .unwrap()
+        {
+            if text.as_str().contains("response.completed") {
+                break;
+            }
+        }
+    }
+    drop(socket);
+    // The second turn's row is published as its stream ends, after the client saw it.
+    let mut rows = Vec::new();
+    for _ in 0..200 {
+        let history = rt.clone();
+        tokio::task::spawn_blocking(move || history.history().flush())
+            .await
+            .unwrap();
+        rows = crate::request_logging::history::test_support::rows(&dir.0.join("history"));
+        if rows.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rows.sort_by_key(|r| r.turn);
+    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert_eq!(rows[0].exchange_id, rows[1].exchange_id);
+    assert_eq!((rows[0].turn, rows[1].turn), (0, 1));
+    assert_eq!((rows[0].send, rows[1].send), (0, 0));
+    assert!(rows[0].request_body.as_deref().is_some_and(|b| b.contains("one")));
+    assert!(rows[1].request_body.as_deref().is_some_and(|b| b.contains("two")));
+    assert_eq!(rows[0].endpoint.as_deref(), Some("GET /v1/responses"));
+}

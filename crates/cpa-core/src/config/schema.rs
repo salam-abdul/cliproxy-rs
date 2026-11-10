@@ -488,4 +488,15 @@ mod tests {
         assert!(archive_unknown(&mut migrated).is_empty());
         assert_eq!(migrated, on);
     }
+
+    #[test]
+    fn history_keys_validate() {
+        let on = yaml("observability: {history: {enable: true, dir: /x, max-total-size-mb: 5}}");
+        validate(&on, true).unwrap();
+        assert!(validate(&yaml("observability: {history: {enable: [true]}}"), true).is_err());
+        assert!(validate(&yaml("observability: {history: {max-total-size-mb: a}}"), true).is_err());
+        let mut migrated = on.clone();
+        assert!(archive_unknown(&mut migrated).is_empty());
+        assert_eq!(migrated, on);
+    }
 }

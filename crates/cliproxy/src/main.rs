@@ -1,5 +1,6 @@
 mod discovery;
 mod dotenv;
+mod history;
 mod home;
 mod tui;
 
@@ -563,6 +564,9 @@ fn main() -> anyhow::Result<()> {
         let cli = (csv_flags(&args.include), csv_flags(&args.exclude));
         let opts = discover_options(args.timeout, args.json, args.service_type, &args.config, cli);
         std::process::exit(runtime(None)?.block_on(discovery::cli::discover(&opts)));
+    }
+    if raw.get(1).map(String::as_str) == Some("history") {
+        std::process::exit(history::run(raw.into_iter().skip(1)));
     }
     if !argv_enables_bool_flag(&raw[1..], "discover-json") {
         println!("{}", banner());
@@ -1324,6 +1328,8 @@ async fn serve(
         shutdown.cancel();
         let _ = task.await;
     }
+    let history = rt.clone();
+    let _ = tokio::task::spawn_blocking(move || history.history().shutdown(Duration::from_secs(5))).await;
     served
 }
 

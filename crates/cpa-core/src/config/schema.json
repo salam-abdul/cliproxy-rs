@@ -552,6 +552,13 @@
             "error-logs-max-files": "int"
           }
         },
+        "history": {
+          "fields": {
+            "enable": "bool",
+            "dir": "string",
+            "max-total-size-mb": "int"
+          }
+        },
         "usage": {
           "fields": {
             "usage-statistics-enabled": "bool",
