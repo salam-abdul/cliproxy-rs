@@ -50,3 +50,38 @@ pub(crate) fn http_bodies(pending: &mut PendingRow) -> &mut HttpBodies {
         Bodies::Websocket { .. } => panic!("not an HTTP row"),
     }
 }
+
+/// Logs on this thread, captured while it lives.
+pub(crate) struct Logs {
+    text: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+impl Logs {
+    pub(crate) fn capture() -> Self {
+        #[derive(Clone)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let text = std::sync::Arc::default();
+        let sink = Sink(std::sync::Arc::clone(&text));
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || sink.clone())
+                .finish(),
+        );
+        Self { text, _guard: guard }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.text.lock().unwrap()).into_owned()
+    }
+}

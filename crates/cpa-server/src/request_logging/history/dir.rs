@@ -79,7 +79,9 @@ impl<'a> HistoryDir<'a> {
                     tracing::warn!("history: cannot apply max-total-size-mb: {error}");
                 }
             }
+            // Locked by a delete, or no folder yet: nothing to remove.
             Ok(None) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => tracing::warn!("history: cannot lock {}: {error}", self.0.display()),
         }
     }

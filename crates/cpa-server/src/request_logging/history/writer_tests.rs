@@ -2,7 +2,7 @@ use super::*;
 use crate::request_logging::history::file::read_rows;
 use crate::request_logging::history::row::{Outcome, Row, Source, Transport};
 use crate::request_logging::history::test_support::TempDir;
-use crate::request_logging::history::test_support::{files, http, http_bodies, rows};
+use crate::request_logging::history::test_support::{Logs, files, http, http_bodies, rows};
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Mutex;
@@ -148,25 +148,7 @@ fn shutdown_flushes_buffered_rows_within_the_wait() {
 
 #[test]
 fn rows_after_shutdown_warn_once() {
-    #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let capture = Capture::default();
-    let sink = capture.clone();
-    let _log = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || sink.clone())
-            .finish(),
-    );
+    let logs = Logs::capture();
     let dir = TempDir::new();
     let writer = Writer::with_limits(Limits::default());
     writer.shutdown(Duration::from_secs(5));
@@ -174,7 +156,7 @@ fn rows_after_shutdown_warn_once() {
         writer.submit(&on(&dir.0), pending(&writer, id, b"x", &[]));
     }
     assert_eq!(writer.lost(), 3);
-    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let logs = logs.text();
     assert_eq!(logs.matches("was not written").count(), 1, "{logs}");
 }
 

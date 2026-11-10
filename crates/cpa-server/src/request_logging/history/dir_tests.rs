@@ -44,3 +44,12 @@ fn retention_removes_emptied_partitions() {
     assert!(!old.parent().unwrap().exists());
     assert!(new.exists());
 }
+
+#[test]
+fn retention_on_a_folder_not_made_yet_does_nothing_quietly() {
+    let dir = TempDir::new();
+    let logs = crate::request_logging::history::test_support::Logs::capture();
+    HistoryDir::new(&dir.0).apply_cap(1);
+    assert_eq!(logs.text(), "");
+    assert!(!dir.0.exists());
+}

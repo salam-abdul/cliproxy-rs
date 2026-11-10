@@ -146,7 +146,7 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 
 History keeps one row per upstream send, except in commercial mode, which turns it off: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.
 
-Each row has the exchange's request ID, the WebSocket turn and send number, start and end times, provider, requested, upstream and reported model, account (its email, or its credential ID), session, user agent, stream flag, upstream status, outcome (`complete`, `failed` or `cancelled`; native rows also use `failover`, `stream_error` and `transport_lost`, where the translating proxy records `failed`), error text, token counts including cache reads and writes, latency, time to first byte, the provider's request ID, and both bodies.
+Each row has the exchange's request ID, the WebSocket turn and send number, start and end times, provider, requested, upstream and reported model, account (its email, or its credential ID) and its auth index, session, user agent, stream flag, upstream status, outcome (`complete`, `failed` or `cancelled`; native rows also use `failover`, `stream_error` and `transport_lost`, where the translating proxy records `failed`), error text, token counts including cache reads and writes, latency, time to first byte, the provider's request ID, and both bodies.
 
 | Body | What is stored |
 | --- | --- |
@@ -155,7 +155,7 @@ Each row has the exchange's request ID, the WebSocket turn and send number, star
 | Streamed response, translating proxy | Each line the executor read, joined with `\n`. For Claude this is the event stream as received, without its last line ending; line endings, and any line an executor does not read, can differ from the bytes received. |
 | Native response | The bytes received, decoded from their content encoding. |
 | WebSocket frames | One list entry per frame, as text, in `request_frames` and `response_frames`. A turn starts at its `response.create` frame; steering frames join the turn in progress, and the row is written as soon as the turn's response ends. |
-| Native failover | No response body: the router does not read the body of a response it fails over from. |
+| Native failover | No response body. The router reads at most the first 64 KiB of a 400, 403, 404 or 422 response to tell a model-entitlement rejection apart, and keeps none of it. |
 
 `request_bytes` and `response_bytes` are the full sizes as received, before the cap; for a native response that is its encoded size. Text bodies are in `request_body` and `response_body`; a body that is not UTF-8 goes in `request_body_raw` or `response_body_raw` instead. A body keeps its first 32 MiB, and `request_truncated` or `response_truncated` marks one that was cut.
 
