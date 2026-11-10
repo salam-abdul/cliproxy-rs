@@ -2176,7 +2176,10 @@ mod tests {
             let status = StatusCode::from_u16(case["status"].as_u64().unwrap() as u16).unwrap();
             let consume = case["consume"].as_i64().unwrap();
             let streaming = case["stream"].as_bool().unwrap();
+            let served = Arc::new(Mutex::new(None));
+            let slot = served.clone();
             let app = axum::Router::new().fallback(move |request: Request| async move {
+                *slot.lock().unwrap() = request.extensions().get::<RequestLog>().cloned();
                 if consume < 0 {
                     let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await.unwrap();
                 } else {
@@ -2222,23 +2225,20 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(body, if case["method"] == "HEAD" { "" } else { "outbound\n" });
             let expected = case["content"].as_str().unwrap();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let files = logs(&dir);
-                let actual = files
-                    .first()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .unwrap_or_default();
-                if canonical(&actual) == expected {
-                    break;
-                }
-                assert!(tokio::time::Instant::now() < deadline, "case {case}: got {actual}");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Wait for capture to finalize: its log written or discarded and its
+            // spools removed. A request the middleware does not capture has no log.
+            let log = served.lock().unwrap().take();
+            if let Some(log) = log {
+                tokio::time::timeout(std::time::Duration::from_secs(5), log.finished())
+                    .await
+                    .expect("request log finalized");
             }
-            // Wait for scheduled cleanup too, so discarded error-only capture
-            // cannot leave files behind and an unexpected later write fails.
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             let files = logs(&dir);
+            let actual = files
+                .first()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            assert_eq!(canonical(&actual), expected, "case {case}");
             assert_eq!(files.len(), usize::from(!expected.is_empty()));
             if let Some(file) = files.first() {
                 assert_eq!(
