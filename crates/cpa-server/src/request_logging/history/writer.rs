@@ -3,6 +3,7 @@
 //! path only clones or copies chunks and calls `try_send`; a full channel drops the row
 //! and counts it, so inference never waits on the disk.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -14,7 +15,7 @@ use cpa_core::config::Config;
 
 use super::Settings;
 use super::body::{BODY_CAP, Bodies, Body, Budget, HttpBodies, PendingRow};
-use super::delete::apply_tombstones;
+use super::delete::{Tombstone, apply_tombstones};
 use super::dir::HistoryDir;
 use super::file::ParquetFile;
 use super::row::{Row, Transport, body_columns};
@@ -31,6 +32,9 @@ pub(crate) struct Limits {
     pub(crate) group_rows: usize,
     pub(crate) group_bytes: u64,
     pub(crate) now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Files a pending delete was checked against.
+    #[cfg(test)]
+    pub(crate) delete_scans: Arc<AtomicU64>,
 }
 
 impl Default for Limits {
@@ -41,6 +45,8 @@ impl Default for Limits {
             group_rows: 4096,
             group_bytes: 64 << 20,
             now: Arc::new(Utc::now),
+            #[cfg(test)]
+            delete_scans: Arc::default(),
         }
     }
 }
@@ -252,6 +258,8 @@ struct Worker {
     retry_deletes: Option<Instant>,
     /// The last attempt to apply pending deletes failed; its warning was logged.
     delete_failed: bool,
+    /// The tombstones applied to each finished file, by path.
+    applied: HashMap<PathBuf, HashSet<PathBuf>>,
 }
 
 impl Worker {
@@ -269,6 +277,7 @@ impl Worker {
             maintained: None,
             retry_deletes: None,
             delete_failed: false,
+            applied: HashMap::new(),
         }
     }
 
@@ -358,14 +367,16 @@ impl Worker {
         };
         let history = HistoryDir::new(&dir);
         let stones = history.tombstones();
+        // A finished file only loses rows, so a tombstone applied to it stays applied
+        // until it expires.
+        self.applied.retain(|_, applied| {
+            applied.retain(|stone| stones.iter().any(|s| &s.path == stone));
+            !applied.is_empty()
+        });
         let Some(since) = stones.iter().map(|stone| stone.created_us).min() else {
             return;
         };
         let retry = Some(Instant::now() + DELETE_RETRY);
-        let Ok(Some(_lock)) = history.lock() else {
-            self.retry_deletes = retry;
-            return;
-        };
         let Ok(files) = history.files() else {
             self.retry_deletes = retry;
             return;
@@ -376,13 +387,33 @@ impl Worker {
         let first_day = DateTime::from_timestamp_micros(since)
             .map(|at| at.date_naive() - chrono::Days::new(1))
             .map(|day| format!("date={}", day.format("%Y-%m-%d")));
-        let mut failed = false;
-        for file in files
+        let work: Vec<_> = files
             .iter()
             .filter(|file| first_day.as_ref().is_none_or(|day| file.partition >= *day))
-        {
-            match apply_tombstones(&file.path, &stones) {
+            .filter_map(|file| {
+                let applied = self.applied.get(&file.path);
+                let todo: Vec<&Tombstone> = stones
+                    .iter()
+                    .filter(|stone| applied.is_none_or(|applied| !applied.contains(&stone.path)))
+                    .collect();
+                (!todo.is_empty()).then_some((file, todo))
+            })
+            .collect();
+        if work.is_empty() {
+            self.delete_failed = false;
+            return;
+        }
+        let Ok(Some(_lock)) = history.lock() else {
+            self.retry_deletes = retry;
+            return;
+        };
+        let mut failed = false;
+        for (file, todo) in work {
+            #[cfg(test)]
+            self.limits.delete_scans.fetch_add(1, Ordering::Relaxed);
+            match apply_tombstones(&file.path, &todo) {
                 Ok(()) => {}
+                // Retention removed it meanwhile.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     if !self.delete_failed {
@@ -392,8 +423,13 @@ impl Worker {
                         );
                     }
                     failed = true;
+                    continue;
                 }
             }
+            self.applied
+                .entry(file.path.clone())
+                .or_default()
+                .extend(todo.iter().map(|stone| stone.path.clone()));
         }
         self.delete_failed = failed;
         if failed {

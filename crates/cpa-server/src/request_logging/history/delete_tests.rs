@@ -330,6 +330,30 @@ fn a_tombstone_outlives_the_first_rotation() {
 }
 
 #[test]
+fn a_file_a_pending_delete_was_applied_to_is_not_read_again() {
+    let dir = TempDir::new();
+    let limits = Limits::default();
+    let scans = limits.delete_scans.clone();
+    let writer = Writer::with_limits(limits);
+    let cfg = on(&dir.0);
+    writer.submit(&cfg, http(row("a", "s2", "2026-11-09T08:00:00Z"), writer.budget()));
+    writer.flush();
+    delete(&dir.0, &session("s1"), false).unwrap();
+    writer.submit(&cfg, http(row("b", "s2", "2026-11-09T08:00:01Z"), writer.budget()));
+    writer.flush();
+    let after_first = scans.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(after_first, 2, "both files are checked once");
+    writer.submit(&cfg, http(row("c", "s2", "2026-11-09T08:00:02Z"), writer.budget()));
+    writer.flush();
+    assert_eq!(
+        scans.load(std::sync::atomic::Ordering::Relaxed) - after_first,
+        1,
+        "only the new file is checked"
+    );
+    assert_eq!(left_ids(&dir.0), ["a", "b", "c"]);
+}
+
+#[test]
 fn expired_tombstones_are_removed() {
     let dir = TempDir::new();
     std::fs::create_dir_all(&dir.0).unwrap();

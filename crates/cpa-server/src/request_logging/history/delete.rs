@@ -165,7 +165,7 @@ fn partition_date(name: &str) -> Option<NaiveDate> {
 
 /// Removes the rows `stones` match from the finished file at `path`, reading only the
 /// match columns unless a row matches.
-pub(crate) fn apply_tombstones(path: &Path, stones: &[Tombstone]) -> io::Result<()> {
+pub(crate) fn apply_tombstones(path: &Path, stones: &[&Tombstone]) -> io::Result<()> {
     let matches = |row: &Row| stones.iter().any(|stone| stone.matches(row));
     if read_keys(path)?.iter().any(matches) {
         rewrite_without(path, matches)?;
