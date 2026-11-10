@@ -735,9 +735,11 @@ mod tests {
     }
 
     /// Go `TestHomeInFlightPublisherAppliesConfigUpdateAtNextTimerCycle`: a new interval
-    /// takes effect after the pending timer fires, not before. Paused time: the timers
-    /// and arrival stamps share one controlled clock, so scheduler delay cannot skew them.
-    #[tokio::test(start_paused = true)]
+    /// takes effect after the pending timer fires, not before. Real time, run alone by
+    /// `.config/nextest.toml`: a paused clock auto-advances whenever the runtime idles on
+    /// the fake Home's socket, so the first push took tens of virtual milliseconds and the
+    /// update landed less than 30ms before the pending timer fired.
+    #[tokio::test]
     async fn a_new_interval_applies_at_the_next_timer_cycle() {
         let settings = test_settings(Duration::from_millis(60));
         let published = Published::start(true).await;
