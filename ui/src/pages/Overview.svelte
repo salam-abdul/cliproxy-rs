@@ -44,7 +44,7 @@
   const fresh = $derived(
     !store.native.error &&
       native?.model === "claude" &&
-      native?.validUntil > store.now,
+      native?.validUntil > store.serverNow,
   );
   const order = $derived(
     fresh && Array.isArray(native?.selectionOrder)
@@ -62,7 +62,7 @@
           native,
           store.native.error,
           "claude",
-          store.now,
+          store.serverNow,
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
         const recent = n?.id

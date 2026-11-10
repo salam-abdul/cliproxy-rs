@@ -95,6 +95,15 @@ export function ago(value: unknown, now = Date.now()): string {
   return now - t < 45_000 ? "just now" : `${span(now - t)} ago`;
 }
 
+/**
+ * Server clock minus this browser's clock, from the server's time when it answered. Under
+ * two seconds reads as 0, so request latency and rounding never shift a countdown.
+ */
+export const clockSkew = (server: number, received: number) => (Math.abs(server - received) < 2000 ? 0 : server - received);
+export const plural = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+/** The fields every per-credential route accepts to find one credential. */
+export const credRef = (a: Data) => ({ name: a.name, ...(a.auth_index ? { auth_index: a.auth_index } : {}) });
+
 export type CredState = { lamp: Lamp; label: string; detail: string };
 /** One state per credential, derived only from fields /credentials reports. */
 export function credState(a: Data, now = Date.now()): CredState {
@@ -130,7 +139,7 @@ export function credState(a: Data, now = Date.now()): CredState {
       detail: a.status_message || "",
     };
   const models = cooldowns.length - whole.length;
-  const detail = models ? `${models} model${models > 1 ? "s" : ""} cooling` : "";
+  const detail = models ? `${plural(models, "model")} cooling` : "";
   if (["active", "ok", ""].includes(String(a.status ?? "")))
     return { lamp: "ok", label: "Ready", detail };
   return { lamp: "off", label: String(a.status), detail };
@@ -157,7 +166,7 @@ export const level = (n: number, max: number) => (n <= 0 || max <= 0 ? 0 : Math.
 export type Window = { label: string; used: number | null; reset: string; detail?: string };
 const clamp = (n: number) => Math.round(Math.max(0, Math.min(100, n)) * 10) / 10;
 /** Normalised quota groups first; then the built-in Claude, Codex and Kimi usage payloads. */
-export function quotaWindows(p: string, payload: Data): Window[] {
+export function quotaWindows(p: string, payload: Data, now = Date.now()): Window[] {
   const out: Window[] = [];
   if (Array.isArray(payload.groups)) {
     for (const g of payload.groups)
@@ -182,7 +191,7 @@ export function quotaWindows(p: string, payload: Data): Window[] {
           reset: v.reset_at
             ? new Date(v.reset_at * 1000).toISOString()
             : Number(v.reset_after_seconds) >= 0 && v.reset_after_seconds !== undefined
-              ? new Date(Date.now() + Number(v.reset_after_seconds) * 1000).toISOString()
+              ? new Date(now + Number(v.reset_after_seconds) * 1000).toISOString()
               : "",
         });
   } else if (p === "kimi" || p === "kimi-ai") {
