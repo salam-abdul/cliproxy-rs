@@ -20,14 +20,16 @@ use parquet::schema::types::ColumnPath;
 use super::dir::is_history_file;
 use super::row::{Outcome, Row, Source, Transport};
 
+/// How a column's values come out of a row being written. Text, bytes and lists are
+/// moved out, not copied: the rows are consumed by the write.
 enum Get {
-    Str(fn(&Row) -> Option<&str>),
-    Bin(fn(&Row) -> Option<&[u8]>),
+    Str(fn(&mut Row) -> Option<ByteArray>),
+    Bin(fn(&mut Row) -> Option<ByteArray>),
     I32(fn(&Row) -> Option<i32>),
     I64(fn(&Row) -> Option<i64>),
     Ts(fn(&Row) -> Option<i64>),
     Bool(fn(&Row) -> Option<bool>),
-    List(fn(&Row) -> Option<&[String]>),
+    List(fn(&mut Row) -> Option<Vec<String>>),
 }
 
 /// What a column is for beyond holding its value.
@@ -140,7 +142,7 @@ macro_rules! column {
     ($name:ident, Enum($ty:ident)) => {
         Column {
             name: stringify!($name),
-            get: Get::Str(|r| Some(r.$name.as_str())),
+            get: Get::Str(|r| Some(ByteArray::from(r.$name.as_str()))),
             set: |r, f| {
                 let value = opt_str(stringify!($name), f)?.unwrap_or_default();
                 r.$name = $ty::parse(&value).ok_or_else(|| bad(stringify!($name), &Field::Str(value)))?;
@@ -152,7 +154,7 @@ macro_rules! column {
     ($name:ident, Str) => {
         Column {
             name: stringify!($name),
-            get: Get::Str(|r| r.$name.as_deref()),
+            get: Get::Str(|r| r.$name.take().map(|s| ByteArray::from(s.into_bytes()))),
             set: |r, f| {
                 r.$name = opt_str(stringify!($name), f)?;
                 Ok(())
@@ -163,7 +165,7 @@ macro_rules! column {
     ($name:ident, Bin) => {
         Column {
             name: stringify!($name),
-            get: Get::Bin(|r| r.$name.as_deref()),
+            get: Get::Bin(|r| r.$name.take().map(ByteArray::from)),
             set: |r, f| {
                 r.$name = opt_bytes(stringify!($name), f)?;
                 Ok(())
@@ -229,7 +231,7 @@ macro_rules! column {
     ($name:ident, List) => {
         Column {
             name: stringify!($name),
-            get: Get::List(|r| r.$name.as_deref()),
+            get: Get::List(|r| r.$name.take()),
             set: |r, f| {
                 r.$name = opt_list(stringify!($name), f)?;
                 Ok(())
@@ -243,7 +245,7 @@ macro_rules! column {
 static COLUMNS: [Column; 41] = [
     Column {
         name: "exchange_id",
-        get: Get::Str(|r| Some(r.exchange_id.as_str())),
+        get: Get::Str(|r| Some(ByteArray::from(std::mem::take(&mut r.exchange_id).into_bytes()))),
         set: |r, f| {
             r.exchange_id = opt_str("exchange_id", f)?.unwrap_or_default();
             Ok(())
@@ -370,20 +372,11 @@ fn levels<T>(values: impl Iterator<Item = Option<T>>) -> (Vec<T>, Vec<i16>) {
 fn write_column(
     writer: &mut parquet::file::writer::SerializedColumnWriter<'_>,
     get: &Get,
-    rows: &[Row],
+    rows: &mut [Row],
 ) -> parquet::errors::Result<()> {
     match get {
-        Get::Str(get) => {
-            let (values, defs) = levels(
-                rows.iter()
-                    .map(|r| get(r).map(|s| ByteArray::from(s.as_bytes().to_vec()))),
-            );
-            writer
-                .typed::<ByteArrayType>()
-                .write_batch(&values, Some(&defs), None)?;
-        }
-        Get::Bin(get) => {
-            let (values, defs) = levels(rows.iter().map(|r| get(r).map(|b| ByteArray::from(b.to_vec()))));
+        Get::Str(get) | Get::Bin(get) => {
+            let (values, defs) = levels(rows.iter_mut().map(get));
             writer
                 .typed::<ByteArrayType>()
                 .write_batch(&values, Some(&defs), None)?;
@@ -403,19 +396,19 @@ fn write_column(
         Get::List(get) => {
             // Three-level list: 0 null list, 1 empty list, 3 present element.
             let (mut values, mut defs, mut reps) = (Vec::new(), Vec::new(), Vec::new());
-            for row in rows {
+            for row in rows.iter_mut() {
                 match get(row) {
                     None => {
                         defs.push(0);
                         reps.push(0);
                     }
-                    Some([]) => {
+                    Some(items) if items.is_empty() => {
                         defs.push(1);
                         reps.push(0);
                     }
                     Some(items) => {
-                        for (i, item) in items.iter().enumerate() {
-                            values.push(ByteArray::from(item.as_bytes().to_vec()));
+                        for (i, item) in items.into_iter().enumerate() {
+                            values.push(ByteArray::from(item.into_bytes()));
                             defs.push(3);
                             reps.push(i16::from(i > 0));
                         }
@@ -517,7 +510,7 @@ impl ParquetFile {
     }
 
     /// Writes `rows` as one row group.
-    pub(crate) fn write_group(&mut self, rows: &[Row]) -> io::Result<()> {
+    pub(crate) fn write_group(&mut self, mut rows: Vec<Row>) -> io::Result<()> {
         let writer = self
             .writer
             .as_mut()
@@ -528,7 +521,7 @@ impl ParquetFile {
                 .next_column()
                 .map_err(io_error)?
                 .ok_or_else(|| io::Error::other("history schema has fewer columns than expected"))?;
-            write_column(&mut out, &column.get, rows).map_err(io_error)?;
+            write_column(&mut out, &column.get, &mut rows).map_err(io_error)?;
             out.close().map_err(io_error)?;
         }
         group.close().map_err(io_error)?;
@@ -655,7 +648,7 @@ pub(crate) fn rewrite_without(path: &Path, remove: impl Fn(&Row) -> bool) -> io:
         removed += (before - rows.len()) as u64;
         kept += rows.len() as u64;
         if !rows.is_empty() {
-            out.write_group(&rows)?;
+            out.write_group(rows)?;
         }
     }
     // Closed before the file is replaced: Windows does not replace a file still open.

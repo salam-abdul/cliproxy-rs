@@ -257,7 +257,7 @@ impl Sends {
             .iter()
             .map(|path| cpa_common::json::get(terminal, path).str().into_owned())
             .find(|message| !message.is_empty())
-            .unwrap_or_else(|| frame_type(terminal));
+            .unwrap_or_else(|| frame_type(terminal).into_owned());
         let end = AttemptEnd {
             response_model: cpa_common::json::get(terminal, "response.model").str().into_owned(),
             detail: crate::usage_record::parse_codex(terminal).unwrap_or_default(),
@@ -369,8 +369,8 @@ impl Sends {
     }
 }
 
-fn frame_type(payload: &[u8]) -> String {
-    cpa_common::json::get(payload, "type").str().into_owned()
+fn frame_type(payload: &[u8]) -> std::borrow::Cow<'_, str> {
+    cpa_common::json::get(payload, "type").str()
 }
 
 /// An SSE line that opens or carries an error event.

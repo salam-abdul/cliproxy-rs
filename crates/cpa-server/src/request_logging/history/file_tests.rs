@@ -80,7 +80,7 @@ fn rows_round_trip_through_a_file() {
     let dir = TempDir::new();
     let rows = vec![full_row(), sparse_row()];
     let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:15:30Z"), 7).unwrap();
-    file.write_group(&rows).unwrap();
+    file.write_group(rows.clone()).unwrap();
     let path = file.finish().unwrap();
     assert_eq!(read_rows(&path).unwrap(), rows);
 }
@@ -89,8 +89,8 @@ fn rows_round_trip_through_a_file() {
 fn rows_written_in_two_groups_read_back_in_order() {
     let dir = TempDir::new();
     let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:15:30Z"), 0).unwrap();
-    file.write_group(&[full_row()]).unwrap();
-    file.write_group(&[sparse_row()]).unwrap();
+    file.write_group(vec![full_row()]).unwrap();
+    file.write_group(vec![sparse_row()]).unwrap();
     let path = file.finish().unwrap();
     assert_eq!(read_rows(&path).unwrap(), vec![full_row(), sparse_row()]);
 }
@@ -99,7 +99,7 @@ fn rows_written_in_two_groups_read_back_in_order() {
 fn a_file_is_invisible_until_finished() {
     let dir = TempDir::new();
     let mut file = ParquetFile::create(&dir.0, at("2026-11-09T23:59:59Z"), 3).unwrap();
-    file.write_group(&[sparse_row()]).unwrap();
+    file.write_group(vec![sparse_row()]).unwrap();
     assert!(file.bytes_written() > 0);
     assert_eq!(files(&dir.0, ".partial").len(), 1);
     assert!(files(&dir.0, ".parquet").is_empty());
@@ -126,7 +126,7 @@ fn a_finished_name_already_taken_is_never_overwritten() {
     let first = first.finish().unwrap();
     let before = std::fs::read(&first).unwrap();
     let mut second = ParquetFile::create(&dir.0, at("2026-11-09T08:00:00Z"), 0).unwrap();
-    second.write_group(&[sparse_row()]).unwrap();
+    second.write_group(vec![sparse_row()]).unwrap();
     let second = second.finish().unwrap();
     assert_ne!(first, second);
     assert_eq!(std::fs::read(&first).unwrap(), before);
@@ -138,7 +138,7 @@ fn body_columns_have_no_statistics_or_dictionary() {
     use parquet::file::reader::FileReader;
     let dir = TempDir::new();
     let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:15:30Z"), 0).unwrap();
-    file.write_group(&[full_row(), full_row()]).unwrap();
+    file.write_group(vec![full_row(), full_row()]).unwrap();
     let path = file.finish().unwrap();
     let reader =
         parquet::file::serialized_reader::SerializedFileReader::new(std::fs::File::open(path).unwrap()).unwrap();
@@ -186,7 +186,7 @@ fn a_failed_finish_leaves_no_partial() {
     let dir = TempDir::new();
     let target = write_dir_target(&dir.0);
     let mut file = ParquetFile::replacing(&target).unwrap();
-    file.write_group(&[sparse_row()]).unwrap();
+    file.write_group(vec![sparse_row()]).unwrap();
     // The target is a directory, so the rename fails after the footer is written.
     assert!(file.finish().is_err());
     assert!(files(&dir.0, ".partial").is_empty());

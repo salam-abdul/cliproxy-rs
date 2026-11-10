@@ -26,7 +26,7 @@ fn row(id: &str, session: &str, started: &str) -> Row {
 
 fn write_file(dir: &Path, opened: &str, seq: u32, rows: &[Row]) -> PathBuf {
     let mut file = ParquetFile::create(dir, at(opened), seq).unwrap();
-    file.write_group(rows).unwrap();
+    file.write_group(rows.to_vec()).unwrap();
     file.finish().unwrap()
 }
 
@@ -392,13 +392,13 @@ fn a_rewrite_keeps_the_other_row_groups() {
     use parquet::file::reader::FileReader;
     let dir = TempDir::new();
     let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:00:00Z"), 0).unwrap();
-    file.write_group(&[row("a", "s2", "2026-11-09T08:00:00Z")]).unwrap();
-    file.write_group(&[
+    file.write_group(vec![row("a", "s2", "2026-11-09T08:00:00Z")]).unwrap();
+    file.write_group(vec![
         row("b", "s1", "2026-11-09T08:00:01Z"),
         row("c", "s2", "2026-11-09T08:00:02Z"),
     ])
     .unwrap();
-    file.write_group(&[row("d", "s2", "2026-11-09T08:00:03Z")]).unwrap();
+    file.write_group(vec![row("d", "s2", "2026-11-09T08:00:03Z")]).unwrap();
     let path = file.finish().unwrap();
     assert_eq!(delete(&dir.0, &session("s1"), false).unwrap().rows_deleted, 1);
     assert_eq!(ids(&path), ["a", "c", "d"]);

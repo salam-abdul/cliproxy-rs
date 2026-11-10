@@ -557,7 +557,7 @@ impl Worker {
             }
         }
         let Some(file) = window.file.as_mut() else { return };
-        match file.write_group(&rows) {
+        match file.write_group(rows) {
             Ok(()) => window.rows += n,
             Err(error) => {
                 tracing::warn!("history: cannot write a row group: {error}");

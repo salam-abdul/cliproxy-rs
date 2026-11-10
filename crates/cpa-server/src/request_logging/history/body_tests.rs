@@ -37,3 +37,19 @@ fn lines_are_joined_without_a_trailing_newline() {
     body.push_line(b"data: {}");
     assert_eq!(body.into_vec(), b"event: a\ndata: {}");
 }
+
+#[test]
+fn copied_lines_share_chunks_and_keep_their_order() {
+    let budget = Budget::new(u64::MAX);
+    let mut body = Body::new(&budget);
+    for _ in 0..1000 {
+        body.push_line(b"data: {}");
+    }
+    assert_eq!(body.chunks.len(), 0, "short lines stay in one buffer");
+    body.push_bytes(&Bytes::from_static(b"|held|"));
+    body.push_slice(b"end");
+    let mut expected = vec!["data: {}"; 1000].join("\n").into_bytes();
+    expected.extend_from_slice(b"|held|end");
+    assert_eq!(body.total(), expected.len() as u64);
+    assert_eq!(body.into_vec(), expected);
+}

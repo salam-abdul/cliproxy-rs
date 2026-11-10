@@ -10,6 +10,8 @@ use super::row::Row;
 // ponytail: each body keeps its first 32 MiB, as the request log does; raise with a
 // spool-backed body if longer bodies need keeping.
 pub(crate) const BODY_CAP: u64 = 32 << 20;
+/// Copied bytes a body gathers before sealing them into one chunk.
+const TAIL: usize = 64 << 10;
 /// Body bytes held by sends in flight or queued, across the process.
 pub(crate) const IN_FLIGHT_CAP: u64 = 512 << 20;
 
@@ -63,6 +65,8 @@ impl Budget {
 /// budget allows; past either it counts the rest and marks itself truncated.
 pub(crate) struct Body {
     chunks: Vec<Bytes>,
+    /// Copied bytes not yet sealed into a chunk, so short lines share allocations.
+    tail: Vec<u8>,
     kept: u64,
     total: u64,
     truncated: bool,
@@ -74,6 +78,7 @@ impl Body {
     pub(crate) fn new(budget: &Budget) -> Self {
         Self {
             chunks: Vec::new(),
+            tail: Vec::new(),
             kept: 0,
             total: 0,
             truncated: false,
@@ -84,40 +89,55 @@ impl Body {
 
     /// Keeps a handle to `bytes`, without copying.
     pub(crate) fn push_bytes(&mut self, bytes: &Bytes) {
-        self.keep(bytes.len(), |n| bytes.slice(..n));
+        if let Some(n) = self.admit(bytes.len()) {
+            self.seal();
+            self.chunks.push(bytes.slice(..n));
+        }
     }
 
     pub(crate) fn push_slice(&mut self, bytes: &[u8]) {
-        self.keep(bytes.len(), |n| Bytes::copy_from_slice(&bytes[..n]));
+        if let Some(n) = self.admit(bytes.len()) {
+            self.tail.extend_from_slice(&bytes[..n]);
+            if self.tail.len() >= TAIL {
+                self.seal();
+            }
+        }
     }
 
     /// Appends one scanned line, with `\n` between lines.
     pub(crate) fn push_line(&mut self, line: &[u8]) {
         if std::mem::replace(&mut self.lines, true) {
-            self.push_bytes(&Bytes::from_static(b"\n"));
+            self.push_slice(b"\n");
         }
         self.push_slice(line);
     }
 
-    fn keep(&mut self, len: usize, take: impl FnOnce(usize) -> Bytes) {
+    /// Counts `len` more bytes and returns how many of them to keep.
+    fn admit(&mut self, len: usize) -> Option<usize> {
         let len = len as u64;
         self.total = self.total.saturating_add(len);
         if self.truncated || len == 0 {
-            return;
+            return None;
         }
         let n = len.min(BODY_CAP - self.kept);
         if n < len {
             self.truncated = true;
         }
         if n == 0 {
-            return;
+            return None;
         }
         if !self.budget.try_reserve(n) {
             self.truncated = true;
-            return;
+            return None;
         }
         self.kept += n;
-        self.chunks.push(take(n as usize));
+        Some(n as usize)
+    }
+
+    fn seal(&mut self) {
+        if !self.tail.is_empty() {
+            self.chunks.push(Bytes::from(std::mem::take(&mut self.tail)));
+        }
     }
 
     pub(crate) fn total(&self) -> u64 {
@@ -133,6 +153,7 @@ impl Body {
         for chunk in std::mem::take(&mut self.chunks) {
             out.extend_from_slice(&chunk);
         }
+        out.extend_from_slice(&self.tail);
         out
     }
 }
