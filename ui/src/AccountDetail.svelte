@@ -6,7 +6,7 @@
   import { api, download } from "./api";
   import { accountStatus } from "./accounts";
   import { accountHealth, requestBuckets } from "./history";
-  import { credName, label, provider, span, type Data } from "./core";
+  import { credName, credRef, label, provider, span, type Data } from "./core";
 
   // One account's details, opened as a modal drawer from Overview and Accounts. The parent
   // remounts it per account, so the form starts from the account as it was when opened.
@@ -20,7 +20,7 @@
       : undefined,
   );
   const status = $derived(
-    accountStatus(a, native, store.native.error, "claude", store.now),
+    accountStatus(a, native, store.native.error, "claude", store.serverNow),
   );
   const name = $derived(n?.name || a.label || credName(a));
   const history = $derived(
@@ -39,10 +39,8 @@
   );
   const total = (k: "requests" | "failures") =>
     buckets.reduce((sum, b) => sum + b[k], 0);
-  const lookup = untrack(() => ({
-    name: a.name,
-    ...(a.auth_index ? { auth_index: a.auth_index } : {}),
-  }));
+  const lookup = untrack(() => credRef(a));
+  const sharing = $derived((store.creds.data || []).filter((x) => x.name === a.name && !x.runtime_only).length);
 
   const fieldNames = [
     ["note", "Note", ""],
@@ -74,7 +72,7 @@
     [
       ["File", a.name, true],
       ["Auth index", a.auth_index || "—", true],
-      ["Source", a.runtime_only ? "Configuration" : a.source || "file"],
+      ["Source", a.runtime_only ? "AI Studio relay session" : a.source || "file"],
       [
         "Lifetime",
         a.success === undefined
@@ -104,8 +102,8 @@
       "DELETE",
       "/credentials",
       { names: [a.name] },
-      "Account deleted.",
-      `Delete ${a.name}? The file is removed from the server.`,
+      sharing > 1 ? `${sharing} accounts deleted.` : "Account deleted.",
+      `Delete ${a.name}? The file is removed from the server${sharing > 1 ? `, with all ${sharing} accounts it holds` : ""}.`,
       !!a.runtime_only,
     ],
   ]);
@@ -244,7 +242,7 @@
                 "_",
                 " ",
               )}{c.http_status ? ` ${c.http_status}` : ""} · {span(
-                Date.parse(c.retry_at) - store.now,
+                Date.parse(c.retry_at) - store.serverNow,
               )}</span
             >{/each}
           {#each Object.entries(a.quota?.signals || {}) as [k, v]}<span class="chip"

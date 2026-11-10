@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   ago,
   buckets,
+  clockSkew,
   credState,
   equal,
   fieldPath,
@@ -26,6 +27,16 @@ test("v8 paths, URL boundaries, and structural equality", () => {
   assert.equal(equal({ b: null, a: [1, false] }, { a: [1, false], b: null }), true);
   assert.equal(equal({ a: [1, 2] }, { a: [2, 1] }), false);
   assert.equal(equal({ a: false }, { a: null }), false);
+});
+
+test("server clock skew corrects a browser whose clock is wrong", () => {
+  // A browser five minutes ahead of the server.
+  const skew = clockSkew(now, now + 300_000);
+  assert.equal(skew, -300_000);
+  assert.equal(clockSkew(now, now + 1500), 0, "latency-sized gaps read as none");
+  const cooling = { status: "active", cooldowns: [{ scope: "credential", retry_at: at(120_000) }] };
+  assert.equal(credState(cooling, now + 300_000).label, "Ready", "the browser's own clock misreads a live cooldown");
+  assert.equal(credState(cooling, now + 300_000 + skew).label, "Cooling 2m");
 });
 
 test("diff keeps both sides of a change", () => {
@@ -76,6 +87,7 @@ test("quota is percent used, not remaining; unknown payloads stay empty", () => 
     { label: "5-hour limit", used: 37, reset: "later" },
   ]);
   assert.equal(quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 24, reset_at: 1000 } } })[0].used, 24);
+  assert.equal(quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 1, reset_after_seconds: 60 } } }, now)[0].reset, at(60_000), "reset_after counts from the given time");
   // Codex windows are named by their length; without one, by their slot.
   assert.deepEqual(
     quotaWindows("codex", {

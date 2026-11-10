@@ -60,7 +60,7 @@ export function quotaSummary(a: Data) {
     failed: !!(q?.error || (native && store.native.error)),
     at: native ? 0 : q && "at" in q ? q.at : 0,
     // Native status refreshes every 10 seconds; other readings show their age instead.
-    stale: !!native && !(store.native.data?.validUntil > store.now),
+    stale: !!native && !(store.native.data?.validUntil > store.serverNow),
   };
 }
 
@@ -112,8 +112,9 @@ async function read(a: Data, lifetime: Lifetime) {
     }
     if (!lifetime.active) return;
     store.quota[quotaKey(a)] = {
-      at: Date.now(),
-      windows: quotaWindows(p, raw),
+      // Server clock, as passive readings' observed_at is.
+      at: store.serverNow,
+      windows: quotaWindows(p, raw, store.serverNow),
     };
   } catch (e) {
     if (!lifetime.active) return;
