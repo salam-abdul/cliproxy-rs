@@ -1589,8 +1589,9 @@ pub struct Facts {
     pub prompt_prefix_hash: String,
     /// Shared by failover/refresh attempts, independent of credential changes.
     pub attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    /// The exchange history files this request's sends under, from its trace.
-    pub(crate) history: crate::request_logging::history::capture::HistoryExchange,
+    /// The exchange history files this request's sends under, from its trace, while
+    /// history records it.
+    pub(crate) history: Option<crate::request_logging::history::capture::HistoryExchange>,
 }
 
 impl Facts {
@@ -1620,8 +1621,14 @@ impl Facts {
             clock: trace.clock(),
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
             attempts: Default::default(),
-            history: trace.history(),
+            history: None,
         }
+    }
+
+    /// These facts with the request recorded in history under its trace's exchange.
+    pub(crate) fn recording(mut self, trace: &crate::dispatch::Trace) -> Self {
+        self.history = Some(trace.history());
+        self
     }
 }
 

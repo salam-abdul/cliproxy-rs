@@ -81,6 +81,24 @@ pub(crate) struct HistoryExchange {
     pub(crate) turn: Option<(String, i32)>,
 }
 
+/// A request's history identity as its trace carries it. The send counter is made on
+/// first use, so a request with history off allocates nothing for it.
+#[derive(Default)]
+pub(crate) struct TraceExchange {
+    sends: std::sync::OnceLock<Arc<AtomicI32>>,
+    /// A WebSocket turn's connection ID and turn index.
+    pub(crate) turn: Option<(String, i32)>,
+}
+
+impl TraceExchange {
+    pub(crate) fn exchange(&self) -> HistoryExchange {
+        HistoryExchange {
+            sends: self.sends.get_or_init(Arc::default).clone(),
+            turn: self.turn.clone(),
+        }
+    }
+}
+
 /// The sends of one dispatch attempt, in order.
 pub(crate) struct Sends {
     exchange_id: String,

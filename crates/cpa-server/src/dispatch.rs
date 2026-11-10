@@ -666,7 +666,7 @@ pub struct Trace(
     Arc<crate::observability::Clock>,
     /// The client's prompt prefix (`crate::usage_record::prompt_prefix`).
     std::sync::OnceLock<String>,
-    crate::request_logging::history::capture::HistoryExchange,
+    crate::request_logging::history::capture::TraceExchange,
 );
 
 impl Trace {
@@ -708,7 +708,7 @@ impl Trace {
     }
 
     pub(crate) fn history(&self) -> crate::request_logging::history::capture::HistoryExchange {
-        self.5.clone()
+        self.5.exchange()
     }
 
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
@@ -918,11 +918,11 @@ async fn run_attempts(
     // Go's usage reporter: one record per Generate attempt while the queue accepts.
     // Home count-tokens attempts record only their upstream 401s (`reportHomeUnauthorized`).
     let home_count = call.operation == Operation::CountTokens && rt.remote_dispatch().is_some();
-    let facts = ((call.operation == Operation::Generate
-        && (rt.usage_queue().accepts() || crate::request_logging::history::on(&cfg)))
+    let history = call.operation == Operation::Generate && crate::request_logging::history::on(&cfg);
+    let facts = ((call.operation == Operation::Generate && (rt.usage_queue().accepts() || history))
         || (home_count && rt.usage_queue().accepts()))
     .then(|| {
-        Arc::new(crate::usage_record::Facts::new(
+        let facts = crate::usage_record::Facts::new(
             usage_client(&cfg, &call, trace, &session),
             call.entry,
             call.response,
@@ -930,7 +930,8 @@ async fn run_attempts(
             &call.body,
             call.stream,
             trace,
-        ))
+        );
+        Arc::new(if history { facts.recording(trace) } else { facts })
     });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
@@ -2094,17 +2095,17 @@ async fn attempt(
                 if let Some(m) = &lcp {
                     tracker.lcp_session(m);
                 }
-                let capture = match crate::request_logging::history::on(cfg) {
-                    true => {
+                let capture = match &facts.history {
+                    Some(exchange) => {
                         let sends = crate::request_logging::history::capture::Sends::new(
-                            &facts.history,
+                            exchange,
                             &facts.client.request_id,
                             rt.history().budget(),
                         );
                         tracker.history(sends.clone(), credential);
                         crate::request_logging::history::capture::tee(capture.clone(), sends)
                     }
-                    false => capture.clone(),
+                    None => capture.clone(),
                 };
                 req.usage = tracker.sink().with_capture(capture);
                 tracker

@@ -343,10 +343,12 @@ fn facts_rebuilt_for_a_bootstrap_retry_keep_counting_sends() {
             false,
             &trace,
         )
+        .recording(&trace)
     };
     let (first, retry) = (facts(), facts());
-    first.history.sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(retry.history.sends.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let sends = |facts: &crate::usage_record::Facts| facts.history.as_ref().unwrap().sends.clone();
+    sends(&first).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(sends(&retry).load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 fn exchange(connection: &str, turn: i32) -> super::HistoryExchange {
