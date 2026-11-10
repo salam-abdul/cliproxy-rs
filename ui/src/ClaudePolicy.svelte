@@ -4,7 +4,7 @@
   const known = $derived(
     typeof store.native.data?.allowExtraUsage === "boolean" &&
       !store.native.error &&
-      !(store.native.data?.validUntil <= store.now),
+      !(store.native.data?.validUntil <= store.serverNow),
   );
   const on = $derived(!!store.native.data?.allowExtraUsage);
   const toggle = () =>

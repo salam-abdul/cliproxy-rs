@@ -12,9 +12,14 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
-let historyHold, historyRelease, historyFailure = false, credsFailure = false;
+let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
+const statusCalls = [], deleteBodies = [], apiCalls = [];
+let config = {};
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
+const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
+const logLines = [access(200, "POST", "/v1/messages?beta=true"), access(503, "POST", "/v1/messages", "1a2b3c4d"), access(200, "GET", "/v1/models"),
+  "[2030-01-01 10:00:01] [--------] [info ] server listening", access(200, "GET", "/v8/management/config", "--------")];
 await page.route("**/*", async route => {
   const request = route.request(), path = new URL(request.url()).pathname;
   const send = body => route.fulfill({ json: body, headers: { "x-cpa-version": "cliproxy-rs-0.2.6" } });
@@ -51,8 +56,25 @@ await page.route("**/*", async route => {
       statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}],
       errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
   }
-  if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send({});
-  if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds });
+  if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send(config);
+  if (path === "/v8/management/config/api-keys/openai-compatibility") {
+    if (request.method() === "PUT") config["api-keys"]["openai-compatibility"] = request.postDataJSON();
+    return send(request.method() === "PUT" ? {} : config["api-keys"]["openai-compatibility"]);
+  }
+  if (path === "/v8/management/observability/usage/api-keys") return send({});
+  if (path === "/v8/management/requests/api-call") {
+    apiCalls.push(request.postDataJSON());
+    return send({status_code:200, header:{}, body:JSON.stringify({object:"list", data:[{id:"m-b"},{id:"m-a"},{id:"m-a"}]})});
+  }
+  if (path === "/v8/management/credentials/status") {
+    const body = request.postDataJSON();
+    statusCalls.push(body);
+    if (!body.disabled && body.name === "disabled.json") return route.fulfill({status:409,json:{error:"Locked"}});
+    creds.find(a => a.name === body.name).disabled = body.disabled;
+    return send({});
+  }
+  if (path === "/v8/management/credentials" && request.method() === "DELETE") { deleteBodies.push(request.postDataJSON()); return send({status:"ok"}); }
+  if (path === "/v8/management/credentials") return credsFailure ? route.fulfill({status:500,json:{error:"Credentials unavailable"}}) : send({ files: creds, observed_at: credsObservedAt });
   if (path === "/v8/management/observability/claude/usage") {
     assert.equal(request.method(), "GET");
     assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a");
@@ -62,6 +84,10 @@ await page.route("**/*", async route => {
     const body = { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} };
     return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
+  if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
+  if (path === "/v8/management/observability/logs/errors") return send({files: [{name: "error-small.log", modified: 1893456000}, {name: "error-large.log", modified: 1893456000}]});
+  if (path === "/v8/management/observability/logs/errors/error-small.log") return route.fulfill({body: "upstream status 502"});
+  if (path === "/v8/management/observability/logs/errors/error-large.log") return route.fulfill({body: "x".repeat(256 * 1024) + "TAIL"});
   if (path.startsWith("/v8/")) throw new Error(`Unexpected API: ${path}`);
   const asset = path === "/management.html" ? "index.html" : path.slice(1);
   assert.match(asset, /^(index\.html|favicon\.svg|(assets|fonts)\/[\w.-]+\.(js|css|woff2))$/);
@@ -213,7 +239,8 @@ try {
   await page.getByText("Advanced account settings", {exact:true}).click();
   await page.getByLabel("Note",{exact:true}).fill("Synthetic draft");
   let dialogs = 0;
-  page.on("dialog", async dialog => {dialogs++; await dialog.dismiss();});
+  let lastDialog = "";
+  page.on("dialog", async dialog => {dialogs++; lastDialog = dialog.message(); await (acceptDialogs ? dialog.accept() : dialog.dismiss());});
   await page.keyboard.press("Escape");
   await settle();
   assert.equal(dialogs, 1, "unsaved account fields guard closing the details");
@@ -253,7 +280,13 @@ try {
   await page.clock.fastForward(5000);
   await settle();
   assert.ok(remaining - await seconds() >= 4, "cooldown countdown ticks");
-  delete creds[1].email; delete creds[0].cooldowns;
+  // The server's clock is five minutes behind this browser's: a two-minute cooldown is still live.
+  const serverNow = await page.evaluate(() => Date.now()) + 15_000 - 300_000;
+  credsObservedAt = new Date(serverNow).toISOString();
+  creds[0].cooldowns = [{model_key:"claude",reason:"rate_limit",retry_at:new Date(serverNow + 120_000).toISOString()}];
+  await page.clock.fastForward(15_000);
+  await cooldown.getByText(/· 2m$/).waitFor();
+  delete creds[1].email; delete creds[0].cooldowns; credsObservedAt = undefined;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   await page.screenshot({path:join(tmpdir(),"cliproxy-accounts-mobile.png"),fullPage:true});
@@ -317,8 +350,91 @@ try {
   assert.equal(await page.getByText("No accounts connected.").count(),0,"a failed first read is not an empty account list");
   assert.equal(await page.getByText("Refresh failed. Showing the last readings.",{exact:true}).count(),0,"a failed account read reports one error");
   credsFailure = false;
+  await page.goto("http://dashboard.test/management.html#credentials");
+  await page.getByRole("button",{name:"Select shown",exact:true}).click();
+  await page.getByText("2 selected",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"Disable",exact:true}).click();
+  await page.getByText("2 accounts disabled.",{exact:true}).waitFor();
+  assert.deepEqual(statusCalls.splice(0), [{name:"account-a.json",auth_index:"a",disabled:true},{name:"disabled.json",auth_index:"b",disabled:true}]);
+  await page.getByRole("button",{name:"Enable",exact:true}).click();
+  await page.getByText("1 failed: disabled.json (Locked)",{exact:true}).waitFor();
+  assert.equal(statusCalls.splice(0).length, 2, "one failure does not stop the others");
+  assert.equal(creds[0].disabled, false);
+  await page.getByLabel("Select account-a.json",{exact:true}).uncheck();
+  await page.getByText("1 selected",{exact:true}).waitFor();
+  acceptDialogs = true;
+  await page.getByRole("button",{name:"Delete",exact:true}).click();
+  await page.getByText("1 account file deleted.",{exact:true}).waitFor();
+  assert.equal(lastDialog, "Delete 1 account file (1 account) from the server?", "the confirm counts the accounts the files hold");
+  acceptDialogs = false;
+  assert.deepEqual(deleteBodies, [{names:["disabled.json"]}]);
+  await page.getByText(/^Select accounts to enable/).waitFor();
+  delete creds[0].disabled; creds[1].disabled = true;
+  config = {"api-keys":{claude:[{name:"anthropic",keys:[{"api-key":"sk-claude"}]}],
+    "openai-compatibility":[{name:"router","base-url":"https://models.example.test/v1/ ",headers:{"X-Org":" org-1 ",authorization:"Bearer group",Empty:"","X-Client":"$X-Client","X-Session":"s-$CPA-SESSION-ID"},
+    keys:[{"api-key":" sk-test-1 ","proxy-url":"socks5://127.0.0.1:1"}],models:[{name:"m-b"}]}]}};
+  await page.goto("http://dashboard.test/management.html#providers");
+  await page.reload();
+  await page.getByRole("button",{name:/^OpenAI-compatible/}).click();
+  await page.getByRole("button",{name:"Import models",exact:true}).click();
+  await page.getByText("2 offered",{exact:true}).waitFor();
+  assert.deepEqual(apiCalls, [{method:"GET",url:"https://models.example.test/v1/models",header:{"X-Org":"org-1",authorization:"Bearer group"},proxy_url:"socks5://127.0.0.1:1"}],
+    "the list is read with inference's headers: a group header replaces the key's token");
+  await page.getByRole("button",{name:/^Claude/}).click();
+  assert.equal(await page.getByText("2 offered").count(), 0, "an offer never shows under another provider's group");
+  await page.getByRole("button",{name:/^OpenAI-compatible/}).click();
+  assert.equal(await page.getByText("2 offered").count(), 0, "switching provider closes the offer");
+  await page.getByRole("button",{name:"Import models",exact:true}).click();
+  await page.getByText("2 offered",{exact:true}).waitFor();
+  assert.equal(await page.getByLabel("m-b",{exact:true}).isDisabled(), true, "a configured model stays as configured");
+  await page.getByLabel("Filter offered models").fill("A");
+  assert.equal(await page.getByLabel("m-b",{exact:true}).count(), 0);
+  await page.getByLabel("m-a",{exact:true}).check();
+  await page.getByRole("button",{name:"Add 1 selected",exact:true}).click();
+  await page.getByText("1 model added.",{exact:true}).waitFor();
+  assert.deepEqual(config["api-keys"]["openai-compatibility"][0].models, [{name:"m-b"},{name:"m-a"}]);
+  await page.getByText("2 offered").waitFor({state:"hidden"});
+  config = {};
+  await page.goto("http://dashboard.test/management.html#logs");
+  const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
+  await status.waitFor();
+  assert.equal(await lines.count(), 4, "the dashboard's own management calls stay hidden");
+  assert.equal(await page.locator("option").filter({hasText:"/v8/"}).count(), 0, "hidden lines offer no path");
+  await status.getByRole("button",{name:/^5xx/}).click();
+  assert.equal(await lines.count(), 1, "a status class keeps only matching access lines");
+  await page.getByRole("group",{name:"Method"}).getByRole("button",{name:/^GET/}).click();
+  await page.getByText("No lines match.",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"Clear filters",exact:true}).click();
+  await page.getByLabel("Path",{exact:true}).selectOption("/v1/messages");
+  assert.equal(await lines.count(), 2, "a path matches without its query");
+  await page.getByRole("button",{name:"Clear filters",exact:true}).click();
+  assert.equal(await lines.count(), 4);
+  await page.getByRole("button",{name:"Copy shown",exact:true}).click();
+  await page.getByText("Copying needs the dashboard on HTTPS or localhost.",{exact:true}).waitFor();
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", {value: {writeText: async t => { window.copied = t; }}}));
+  await page.reload();
+  await page.getByRole("button",{name:"Copy shown",exact:true}).click();
+  await page.getByText("4 lines copied.",{exact:true}).waitFor();
+  assert.equal(await page.evaluate(() => window.copied), logLines.slice(0, 4).join("\n"), "copy takes the raw lines shown");
+  await lines.nth(1).dblclick();
+  await page.getByText("Line copied.",{exact:true}).waitFor();
+  assert.equal(await page.evaluate(() => window.copied), logLines[1]);
+  await page.getByLabel("Wrap lines",{exact:true}).uncheck();
+  assert.equal(await lines.first().evaluate(e => getComputedStyle(e).whiteSpace), "pre", "unwrapped lines scroll sideways");
+  await page.getByRole("button",{name:"Full screen",exact:true}).click();
+  await page.getByRole("button",{name:"Exit full screen",exact:true}).click();
+  await page.getByRole("button",{name:"Full screen",exact:true}).waitFor();
+  const errorRow = name => page.locator(".list .item").filter({hasText:name});
+  await errorRow("error-small.log").getByRole("button",{name:"Open",exact:true}).click();
+  assert.equal(await page.getByLabel("error-small.log").innerText(), "upstream status 502");
+  assert.equal(await page.getByText("Showing the first 256 KB.",{exact:false}).count(), 0);
+  await errorRow("error-large.log").getByRole("button",{name:"Open",exact:true}).click();
+  await page.getByText("Showing the first 256 KB. Download the file for the rest.",{exact:true}).waitFor();
+  assert.equal((await page.getByLabel("error-large.log").innerText()).includes("TAIL"), false, "a large file is cut at 256 KB");
+  await page.getByRole("button",{name:"Close",exact:true}).click();
+  assert.equal(await page.getByLabel("error-large.log").count(), 0);
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
