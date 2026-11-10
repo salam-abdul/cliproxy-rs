@@ -10,7 +10,7 @@
 //!
 //! Turns go upstream in one of two modes, decided by the credential that served the last
 //! turn:
-//! - WebSocket (Codex credential with `websockets: true`): the client's frames pass
+//! - WebSocket (a credential whose `Executors::session_upstream` holds): the client's frames pass
 //!   through with `previous_response_id` and incremental input, pinned to that credential's
 //!   socket. A continuation that cannot run there closes with 1012 so the client replays.
 //! - HTTP: the handler keeps the transcript and sends each turn as a full request.
@@ -237,7 +237,10 @@ impl Failure {
                 replay: e.is_replay_required(),
                 addon: e.addon.clone(),
             },
-            other => Self::local(other.status(), &other.text()),
+            other => Self {
+                addon: other.retry_after().map(retry_after_addon),
+                ..Self::local(other.status(), &other.text())
+            },
         }
     }
 
@@ -484,6 +487,7 @@ struct Started {
 
 /// Per-turn facts the attempt and forward steps share.
 struct TurnCtx {
+    model: String,
     native: bool,
     requires_current: bool,
     native_request: bool,
@@ -668,7 +672,7 @@ impl Connection {
 
         let mut use_upstream_ws = self.uses_upstream_websocket(&request_model);
         if let Some(pinned) = self.credential(&self.pinned)
-            && CodexExecutor::upstream_websocket(&pinned)
+            && self.rt.executors.session_upstream(&pinned)
         {
             use_upstream_ws = matches!(pinned.provider.to_ascii_lowercase().as_str(), "codex" | "xai");
         }
@@ -775,6 +779,7 @@ impl Connection {
         }
 
         let mut ctx = TurnCtx {
+            model: String::new(),
             native,
             requires_current,
             native_request: lite_request(&payload, &self.headers),
@@ -797,6 +802,7 @@ impl Connection {
             request.clone()
         };
         let model = gjson::get(&request, "model").str().to_owned();
+        ctx.model.clone_from(&model);
         let started = self.attempt(&request, &model, &mut ctx).await;
         let forwarded = match started {
             Ok(started) => self.forward(socket, started, &cfg, &mut ctx).await,
@@ -804,7 +810,7 @@ impl Connection {
                 let failure = Failure::from_dispatch(&error);
                 // A pinned continuation's credential failure also lost the session's
                 // socket; the client still needs the replay signal, not the loss close.
-                if ctx.suppress(failure.status) {
+                if self.replays_pinned_failure(&ctx, &failure) {
                     Forwarded::Suppressed
                 } else if let Some(loss) = self.upstream_loss() {
                     close_for_upstream_loss(socket, &loss).await;
@@ -907,6 +913,25 @@ impl Connection {
                     && self.usable(c, &key)
             })
             .collect()
+    }
+
+    /// `replayPinnedAuthFailure`: a pinned continuation's 401/429 makes the client replay
+    /// the turn on a new socket (1012), except a quota or cooldown 429 that no other
+    /// credential could serve: replaying it would only loop, so the error is shown.
+    fn replays_pinned_failure(&self, ctx: &TurnCtx, failure: &Failure) -> bool {
+        if !ctx.suppress(failure.status) {
+            return false;
+        }
+        if failure.status == 429 || classify::is_quota_or_cooldown(&failure.text) {
+            return self.has_alternative(&ctx.model, &ctx.last_attempted);
+        }
+        true
+    }
+
+    /// `HasAlternativeExecutionTarget`: another usable credential for `model`. Home picks
+    /// its credential remotely, so Home mode always counts as having one.
+    fn has_alternative(&self, model: &str, failed: &str) -> bool {
+        self.rt.remote_dispatch().is_some() || self.available(model).iter().any(|c| c.id != failed)
     }
 
     /// `responsesWebsocketUsesUpstreamWebsocketPassthrough`: every credential for the
@@ -1113,7 +1138,7 @@ impl Connection {
                 Some(Err(error)) => {
                     let failure = Failure::from_exec(&error);
                     // Replay before the session-loss close, as at the turn's start.
-                    if ctx.suppress(failure.status) {
+                    if self.replays_pinned_failure(ctx, &failure) {
                         return Forwarded::Suppressed;
                     }
                     if let Some(loss) = self.upstream_loss() {
@@ -1153,9 +1178,6 @@ impl Connection {
                         status = gjson::get(&payload, "status_code").i64();
                     }
                     let status = u16::try_from(status).ok().filter(|s| *s > 0).unwrap_or(500);
-                    if ctx.suppress(status) {
-                        return Forwarded::Suppressed;
-                    }
                     let failure = Failure {
                         status,
                         text: payload.trim().to_owned(),
@@ -1163,6 +1185,9 @@ impl Connection {
                         replay: false,
                         addon: None,
                     };
+                    if self.replays_pinned_failure(ctx, &failure) {
+                        return Forwarded::Suppressed;
+                    }
                     close_for_failure(socket, &failure).await;
                     return Forwarded::End;
                 }
@@ -1277,12 +1302,33 @@ fn close_code(failure: &Failure) -> Option<(u16, String)> {
     None
 }
 
-/// `shouldExposeResponsesUpstreamError`: only request faults reach the client; credential,
-/// quota and transport failures close silently so the client reconnects and resends.
+/// `shouldExposeResponsesUpstreamError`: request faults and terminal 429 quota or
+/// cooldown failures (failover already exhausted) reach the client, so it shows the final
+/// error instead of reconnecting in a loop. Other credential and transport failures close
+/// silently so the client reconnects and resends.
 // ponytail: Go also exposes terminal upstream-auth errors; no executor reports them yet.
 // Expose them here once an executor classifies them.
 fn exposed(failure: &Failure) -> bool {
-    classify::is_request_fault(failure.status, &failure.text)
+    failure.status == 429
+        || classify::is_quota_or_cooldown(&failure.text)
+        || classify::is_request_fault(failure.status, &failure.text)
+}
+
+/// The exposed event's status: a quota or cooldown failure reported as a server error
+/// is a 429 to the client (`buildResponsesWebsocketErrorPayload`).
+fn exposed_status(failure: &Failure) -> u16 {
+    if classify::is_quota_or_cooldown(&failure.text) && (failure.status == 0 || failure.status >= 500) {
+        429
+    } else {
+        failure.status
+    }
+}
+
+/// Go `SafeResponseHeaders` of a scheduler error: its `Retry-After` seconds.
+fn retry_after_addon(seconds: u64) -> Box<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    Box::new(headers)
 }
 
 /// `closeForUpstreamError` then `writeResponsesWebsocketTerminalError`: a close code,
@@ -1296,7 +1342,7 @@ async fn close_for_failure(socket: &mut Sink, failure: &Failure) {
         let payload = failure
             .payload
             .clone()
-            .unwrap_or_else(|| error_payload(failure.status, &failure.text, failure.addon.as_deref()));
+            .unwrap_or_else(|| error_payload(exposed_status(failure), &failure.text, failure.addon.as_deref()));
         socket.event("response", payload.as_bytes());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     } else {
@@ -1316,7 +1362,7 @@ async fn close_for_upstream_loss(socket: &mut Sink, error: &ExecError) {
     if let Some((code, reason)) = close_code(&failure) {
         close_with_code(socket, code, &reason).await;
     } else if exposed(&failure) {
-        let payload = error_payload(failure.status, &failure.text, failure.addon.as_deref());
+        let payload = error_payload(exposed_status(&failure), &failure.text, failure.addon.as_deref());
         let _ = tokio::time::timeout(TERMINAL_WRITE, socket.inner.send(Message::Text(payload.into()))).await;
     }
     socket.terminate(CLOSE_SENT);

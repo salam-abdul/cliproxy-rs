@@ -62,6 +62,8 @@ The listener is exposed when `server.host` is neither a loopback IP nor `localho
 | `auth-dir` | The folder for account sign-in files, `~/.cli-proxy-api` by default. `~` is expanded. The server watches it, so a file added, edited or removed there takes effect without a restart. |
 | `providers.codex.chatgpt-keep-alive` | `false` by default. `true` keeps up to 2 idle connections to `chatgpt.com` per proxy for 90 seconds. Changes apply from the next request. |
 
+A Codex account sign-in serves Responses WebSocket clients (`GET /v1/responses`, for example Codex CLI with `supports_websockets = true`) over its own upstream socket, so each continuation sends only the new input instead of the whole transcript. Set `"websockets": false` in the sign-in file to use HTTP instead. Codex API keys use HTTP unless their entry sets `websockets: true`.
+
 ## api-keys
 
 Provider API keys, as opposed to account sign-ins, go here, grouped by provider: `claude`, `codex`, `gemini`, `vertex`, `xai` and `openai-compatibility` for any service that speaks the OpenAI API. The dashboard's Provider keys page edits them. An OpenAI-compatible service, for example:
