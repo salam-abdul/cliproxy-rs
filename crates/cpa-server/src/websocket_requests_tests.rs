@@ -206,3 +206,99 @@ fn close_reason_truncation_matches_go() {
         assert_eq!(truncate_reason(s(v, "raw"), max), s(v, "out"));
     }
 }
+
+const PENDING_LAST: &str =
+    r#"{"model":"test-model","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1"}]}"#;
+const PENDING_OUTPUT: &str = r#"[{"type":"function_call","id":"fc-1","call_id":"call-1"}]"#;
+
+fn input_ids(json: &str) -> Vec<String> {
+    gjson::get(json, "input")
+        .array()
+        .iter()
+        .map(|item| item.get("id").str().to_owned())
+        .collect()
+}
+
+#[test]
+fn unanswered_tool_calls_replace_the_transcript_without_incremental_upstream() {
+    let raw = r#"{"type":"response.create","input":[{"type":"message","role":"user","id":"summary-1","content":"compacted summary"}]}"#;
+    let (normalized, next) = normalize(
+        raw,
+        PENDING_LAST,
+        PENDING_OUTPUT,
+        "resp-1",
+        &["call-1".into()],
+        false,
+        false,
+    )
+    .expect("a replacement is a valid request");
+    assert!(
+        !gjson::get(&normalized, "previous_response_id").exists(),
+        "{normalized}"
+    );
+    assert_eq!(
+        input_ids(&normalized),
+        ["summary-1"],
+        "the stale call must not be merged"
+    );
+    assert_eq!(gjson::get(&normalized, "model").str(), "test-model");
+    assert_eq!(gjson::get(&normalized, "instructions").str(), "be helpful");
+    assert_eq!(next, normalized);
+}
+
+#[test]
+fn answered_tool_calls_keep_the_merged_transcript_without_incremental_upstream() {
+    let raw =
+        r#"{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}"#;
+    let (normalized, _) = normalize(
+        raw,
+        PENDING_LAST,
+        PENDING_OUTPUT,
+        "resp-1",
+        &["call-1".into()],
+        false,
+        false,
+    )
+    .expect("an answered call merges");
+    assert_eq!(input_ids(&normalized), ["msg-1", "fc-1", "tool-out-1"]);
+}
+
+#[test]
+fn replayed_items_drop_only_output_only_token_counts() {
+    // Escaped key spelling, duplicate members and an emptied passthrough.
+    assert_eq!(
+        replay_sanitized(r#"{"type":"message","\u0069nternal_chat_message_metadata_passthrough":{"content_token_count":1,"turn_id":"t","content_token_count":2},"id":"m"}"#).as_deref(),
+        Some(r#"{"type":"message","\u0069nternal_chat_message_metadata_passthrough":{"turn_id":"t"},"id":"m"}"#)
+    );
+    assert_eq!(
+        replay_sanitized(
+            r#"{"type":"message", "internal_chat_message_metadata_passthrough" : {"content_token_count":1}, "id":"m"}"#
+        )
+        .as_deref(),
+        Some(r#"{"type":"message","id":"m"}"#)
+    );
+    for unchanged in [
+        r#"{"type":"message","internal_chat_message_metadata_passthrough":{"turn_id":"t"}}"#,
+        r#"{"type":"message","internal_chat_message_metadata_passthrough":{}}"#,
+        r#"{"type":"message","content_token_count":3}"#,
+        r#"{"internal_chat_message_metadata_passthrough":{"content_token_count":1},"content":"#,
+        r#"{"internal_chat_message_metadata_passthrough":{"content_token_count":1}} trailing"#,
+    ] {
+        assert_eq!(replay_sanitized(unchanged), None, "{unchanged}");
+    }
+}
+
+#[test]
+fn merged_transcripts_sanitize_replayed_output_but_not_client_input() {
+    let last = r#"{"model":"m","input":[{"type":"message","id":"msg-1","internal_chat_message_metadata_passthrough":{"content_token_count":5}}]}"#;
+    let output = r#"[{"type":"function_call","id":"fc-1","call_id":"call-1","internal_chat_message_metadata_passthrough":{"content_token_count":7,"turn_id":"u"}}]"#;
+    let append = r#"[{"type":"function_call_output","call_id":"call-1","id":"out-1","internal_chat_message_metadata_passthrough":{"content_token_count":9}}]"#;
+    assert_eq!(
+        merge_input(last, output, append).unwrap(),
+        concat!(
+            r#"[{"type":"message","id":"msg-1","internal_chat_message_metadata_passthrough":{"content_token_count":5}},"#,
+            r#"{"type":"function_call","id":"fc-1","call_id":"call-1","internal_chat_message_metadata_passthrough":{"turn_id":"u"}},"#,
+            r#"{"type":"function_call_output","call_id":"call-1","id":"out-1","internal_chat_message_metadata_passthrough":{"content_token_count":9}}]"#
+        )
+    );
+}

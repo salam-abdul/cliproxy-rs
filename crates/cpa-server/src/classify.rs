@@ -110,6 +110,15 @@ fn any_path(v: &Value, paths: &[&str], pred: impl Fn(&str) -> bool) -> bool {
 const CODE_PATHS: [&str; 4] = ["error.code", "code", "response.error.code", "body.error.code"];
 const TYPE_PATHS: [&str; 4] = ["error.type", "type", "response.error.type", "body.error.type"];
 
+/// `isResponsesWebsocketQuotaOrCooldownError`: the error body names a usage limit or a
+/// model cooldown.
+pub fn is_quota_or_cooldown(text: &str) -> bool {
+    json_body(text).is_some_and(|body| {
+        let marked = |s: &str| s == "usage_limit_reached" || s == "model_cooldown";
+        any_path(&body, &TYPE_PATHS, marked) || any_path(&body, &CODE_PATHS, marked)
+    })
+}
+
 /// `clienterror.IsClaudeThreadNotFound` (v8.0.27, 5c959cb, e7b2226): Claude's 404 for
 /// a stale `previous_message_id` continuation, as a JSON error or plain text. Only a
 /// replay of the whole conversation helps, so no credential is cooled or rotated.
