@@ -9,8 +9,10 @@ import {
   equal,
   fieldPath,
   level,
+  quotaColumns,
   lineDiff,
   quotaWindows,
+  claudeWindows,
   reconcile,
   signalWindows,
   snippet,
@@ -84,7 +86,7 @@ test("grille levels: zero is dark, any traffic is visible, the peak is full", ()
 
 test("quota is percent used, not remaining; unknown payloads stay empty", () => {
   assert.deepEqual(quotaWindows("claude", { five_hour: { utilization: 37, resets_at: "later" }, seven_day: null }), [
-    { label: "5-hour limit", used: 37, reset: "later" },
+    { label: "5-hour limit", used: 37, reset: "later", seconds: 18000 },
   ]);
   assert.equal(quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 24, reset_at: 1000 } } })[0].used, 24);
   assert.equal(quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 1, reset_after_seconds: 60 } } }, now)[0].reset, at(60_000), "reset_after counts from the given time");
@@ -123,11 +125,11 @@ test("Claude usage: the limits list, as Claude Code titles it", () => {
     extra_usage: { is_enabled: true, monthly_limit: 10000, used_credits: 1250, utilization: 12.5, currency: "USD" },
   };
   assert.deepEqual(quotaWindows("claude", withLimits), [
-    { label: "7-day limit (all models)", used: 31, reset: "2026-07-28T10:00:00+00:00" },
-    { label: "7-day limit (Fable only)", used: 64, reset: "2026-07-28T10:00:00+00:00" },
-    { label: "5-hour limit", used: 44, reset: "2026-07-27T10:00:00+00:00" },
-    { label: "5-hour limit", used: 7, reset: "" },
-    { label: "Extra usage", used: 12.5, reset: "", detail: "$12.50 of $100.00" },
+    { label: "7-day limit (all models)", used: 31, reset: "2026-07-28T10:00:00+00:00", seconds: 604800 },
+    { label: "7-day limit (Fable only)", used: 64, reset: "2026-07-28T10:00:00+00:00", seconds: 604800 },
+    { label: "5-hour limit", used: 44, reset: "2026-07-27T10:00:00+00:00", seconds: 18000 },
+    { label: "5-hour limit", used: 7, reset: "", seconds: 18000 },
+    { label: "Extra usage", used: 12.5, reset: "", extra: true, detail: "$12.50 of $100.00" },
   ]);
 });
 
@@ -142,13 +144,13 @@ test("Claude usage: legacy buckets when there is no limits list", () => {
       extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 300, utilization: null, currency: "USD" },
     }),
     [
-      { label: "5-hour limit", used: 12, reset: "2026-05-03T06:50Z" },
-      { label: "7-day limit (all models)", used: 70, reset: "2026-05-04T00:00Z" },
-      { label: "7-day limit (Sonnet only)", used: 38, reset: "2026-05-04T00:00Z" },
+      { label: "5-hour limit", used: 12, reset: "2026-05-03T06:50Z", seconds: 18000 },
+      { label: "7-day limit (all models)", used: 70, reset: "2026-05-04T00:00Z", seconds: 604800 },
+      { label: "7-day limit (Sonnet only)", used: 38, reset: "2026-05-04T00:00Z", seconds: 604800 },
       // A real 0 is a real 0%; only null is hidden.
-      { label: "7-day limit (Opus only)", used: 0, reset: "2026-05-04T00:00Z" },
+      { label: "7-day limit (Opus only)", used: 0, reset: "2026-05-04T00:00Z", seconds: 604800 },
       { label: "Other limit", used: 5, reset: "" },
-      { label: "Extra usage", used: null, reset: "", detail: "$3.00 spent, no limit" },
+      { label: "Extra usage", used: null, reset: "", extra: true, detail: "$3.00 spent, no limit" },
     ],
   );
 });
@@ -168,7 +170,7 @@ test("Claude usage: placeholders and skipped buckets never show, null is never 0
     cinder_cove: null,
     extra_usage: { is_enabled: false, monthly_limit: 5000, used_credits: 100, utilization: 2 },
   };
-  assert.deepEqual(quotaWindows("claude", placeholders), [{ label: "5-hour limit", used: 23, reset: "2026-05-03T06:50Z" }, {label:"7-day limit (OAuth apps)", used:3, reset:""}]);
+  assert.deepEqual(quotaWindows("claude", placeholders), [{ label: "5-hour limit", used: 23, reset: "2026-05-03T06:50Z", seconds: 18000 }, {label:"7-day limit (OAuth apps)", used:3, reset:"", seconds: 604800}]);
   assert.deepEqual(quotaWindows("claude", { tangelo: null, iguana_necktie: null, omelette_promotional: null, limits: [] }), []);
 });
 
@@ -199,6 +201,19 @@ test("durations round to the unit a reader needs", () => {
   assert.equal(ago(now - 120_000, now), "2m ago");
 });
 
+test("compact quota columns place each limit by window length, not by order", () => {
+  const weekly = quotaWindows("codex", { rate_limit: { primary_window: { used_percent: 30, limit_window_seconds: 604800 } } });
+  assert.deepEqual(quotaColumns(weekly), [null, weekly[0]], "a weekly-only plan leaves the short column empty");
+  const claude = claudeWindows({ seven_day: { utilization: 70 }, seven_day_opus: { utilization: 10 } });
+  assert.deepEqual(quotaColumns(claude), [null, claude[0]]);
+  const both = claudeWindows({ seven_day: { utilization: 70 }, five_hour: { utilization: 12 }, extra_usage: { is_enabled: true, used_credits: 1, monthly_limit: 100 } });
+  assert.deepEqual(quotaColumns(both).map((w) => w?.label), ["5-hour limit", "7-day limit (all models)"]);
+  const devin = signalWindows("devin", { signals: { daily_quota_remaining_percent: "80", weekly_quota_remaining_percent: "60" } });
+  assert.deepEqual(quotaColumns(devin).map((w) => w?.label), ["Daily", "Weekly"]);
+  const unknown = quotaWindows("kimi", { usages: { a: { used: 1, limit: 2 }, b: { used: 1, limit: 4 }, c: { used: 0, limit: 1 } } });
+  assert.deepEqual(quotaColumns(unknown), unknown.slice(0, 2), "no stated lengths keep the first two in order");
+});
+
 test("passive limits from Codex headers and Devin quota", () => {
   const observed = "2026-10-02T12:00:00Z";
   const codex = signalWindows("codex", {
@@ -214,16 +229,16 @@ test("passive limits from Codex headers and Devin quota", () => {
     },
   });
   assert.deepEqual(codex, [
-    { label: "5-hour limit", used: 42.5, reset: "2026-10-02T14:00:00.000Z" },
+    { label: "5-hour limit", used: 42.5, reset: "2026-10-02T14:00:00.000Z", seconds: 18000 },
     // Relative resets count from when the server observed them, not from now.
-    { label: "Weekly limit", used: 7, reset: "2026-10-02T13:00:00.000Z" },
+    { label: "Weekly limit", used: 7, reset: "2026-10-02T13:00:00.000Z", seconds: 604800 },
   ]);
   assert.deepEqual(signalWindows("codex", { signals: { "x-codex-primary-window-minutes": "300" } }), []);
   assert.deepEqual(
     signalWindows("devin", { signals: { daily_quota_remaining_percent: "87%", weekly_quota_remaining_percent: "100%", daily_quota_reset_at: "2026-10-03T00:00:00Z" } }),
     [
-      { label: "Daily", used: 13, reset: "2026-10-03T00:00:00Z" },
-      { label: "Weekly", used: 0, reset: "" },
+      { label: "Daily", used: 13, reset: "2026-10-03T00:00:00Z", seconds: 86400 },
+      { label: "Weekly", used: 0, reset: "", seconds: 604800 },
     ],
   );
   assert.deepEqual(signalWindows("claude", { signals: { "x-codex-primary-used-percent": "5" } }), []);
@@ -300,8 +315,8 @@ test("Claude response headers provide live included windows without treating mis
     "Anthropic-Ratelimit-Unified-Overage-Status":"rejected",
   }};
   assert.deepEqual(signalWindows("claude", quota), [
-    {label:"5-hour limit",used:42,reset:"2026-10-02T14:00:00.000Z"},
-    {label:"7-day limit (all models)",used:100,reset:"2026-10-03T14:00:00.000Z"},
+    {label:"5-hour limit",used:42,reset:"2026-10-02T14:00:00.000Z", seconds: 18000},
+    {label:"7-day limit (all models)",used:100,reset:"2026-10-03T14:00:00.000Z", seconds: 604800},
   ]);
   for (const raw of [undefined, "", " ", "Infinity", "NaN", "-0.1"]) {
     assert.deepEqual(signalWindows("claude", {signals:{"anthropic-ratelimit-unified-5h-utilization":raw}}), []);
