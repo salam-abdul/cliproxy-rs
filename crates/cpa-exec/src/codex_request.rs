@@ -293,13 +293,17 @@ impl<'a> View<'a> {
         go_bool(self.attr("codex_disable_cloaking")).unwrap_or(settings.disable_cloaking)
     }
 
-    /// `codexWebsocketsEnabled`: attribute first, then metadata.
+    /// `codexWebsocketsEnabled`: attribute first, then metadata. Unlike Go, a ChatGPT
+    /// sign-in that sets neither uses the upstream socket: its continuations then send
+    /// only the new input instead of the whole transcript. API keys stay on HTTP. A
+    /// metadata value that is neither a boolean nor a string turns it off, as in Go.
     pub fn websockets(&self) -> bool {
         match self.attr("websockets").trim() {
             "" => match self.credential.metadata.get("websockets") {
+                None => !self.api_key,
                 Some(serde_json::Value::Bool(b)) => *b,
                 Some(serde_json::Value::String(s)) => go_bool(s).unwrap_or(false),
-                _ => false,
+                Some(_) => false,
             },
             raw => go_bool(raw).unwrap_or(false),
         }
@@ -1352,6 +1356,54 @@ pub(crate) fn ws_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn websocket_credential(attributes: &[(&str, &str)], metadata: serde_json::Value) -> Credential {
+        Credential {
+            id: "c".into(),
+            provider: "codex".into(),
+            source: cpa_core::credential::Source::File("c".into()),
+            disabled: false,
+            label: String::new(),
+            attributes: attributes
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            metadata: metadata.as_object().cloned().unwrap_or_default(),
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn chatgpt_sign_ins_use_the_upstream_socket_unless_they_opt_out() {
+        let enabled = |attributes: &[(&str, &str)], metadata: serde_json::Value| {
+            View::new(&websocket_credential(attributes, metadata)).websockets()
+        };
+        let sign_in = serde_json::json!({"type": "codex", "access_token": "at-FAKE"});
+        assert!(enabled(&[], sign_in.clone()));
+        assert!(!enabled(&[("websockets", "false")], sign_in.clone()));
+        assert!(!enabled(
+            &[],
+            serde_json::json!({"type": "codex", "access_token": "at-FAKE", "websockets": false})
+        ));
+        for unusable in [
+            serde_json::json!(null),
+            serde_json::json!(1),
+            serde_json::json!("maybe"),
+        ] {
+            assert!(
+                !enabled(
+                    &[],
+                    serde_json::json!({"type": "codex", "access_token": "at-FAKE", "websockets": unusable})
+                ),
+                "{unusable}"
+            );
+        }
+        assert!(!enabled(&[("api_key", "sk-FAKE")], serde_json::json!({})));
+        assert!(enabled(
+            &[("api_key", "sk-FAKE"), ("websockets", "true")],
+            serde_json::json!({})
+        ));
+    }
 
     /// Go `TestHomeCodexCompatUsesSelectedCredentialOptions`: without a binding or config
     /// models, a Home credential's `credential_options` decide is-compat for the upstream

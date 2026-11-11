@@ -571,9 +571,10 @@ fn timeline_events(log: &str) -> Vec<(String, String)> {
 }
 
 /// Go's terminal-error timeline (`writeResponsesWebsocketTerminalError`): an exposed
-/// request fault is the `websocket.response` part the client received; a hidden failure
-/// (quota) keeps the upstream reason as a `websocket.disconnect` part although the client
-/// only sees the close. Either way the connection then ends with gorilla's "close sent".
+/// request fault or terminal quota failure is the `websocket.response` part the client
+/// received; a hidden failure (a transport error) keeps the upstream reason as a
+/// `websocket.disconnect` part although the client only sees the close. Either way the
+/// connection then ends with gorilla's "close sent".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_log_records_terminal_errors_like_go() {
     const REQUEST: &str = r#"{"type":"response.create","model":"gpt-fixture","input":[]}"#;
@@ -595,15 +596,36 @@ async fn request_log_records_terminal_errors_like_go() {
         "\n{log}"
     );
 
+    // Failover already ran out of credentials, so the quota error is shown rather than
+    // leaving the client to reconnect into the same limit.
     const QUOTA: &str = r#"{"error":{"type":"usage_limit_reached","message":"quota exhausted"}}"#;
     let (frames, log) = logged_failure(429, QUOTA).await;
-    assert!(frames.is_empty(), "a quota failure closes silently: {frames:?}");
+    assert_eq!(frames.len(), 1, "the exposed quota event: {frames:?}");
+    assert_eq!(gjson::get(&frames[0], "status").i64(), 429, "{}", frames[0]);
+    assert_eq!(
+        gjson::get(&frames[0], "error.type").str(),
+        "usage_limit_reached",
+        "{}",
+        frames[0]
+    );
+    assert_eq!(
+        timeline_events(&log),
+        [
+            ("websocket.request".to_owned(), REQUEST.to_owned()),
+            ("websocket.response".to_owned(), frames[0].clone()),
+            ("websocket.disconnect".to_owned(), CLOSE_SENT.to_owned()),
+        ],
+        "\n{log}"
+    );
+
+    let (frames, log) = logged_failure(502, "bad gateway").await;
+    assert!(frames.is_empty(), "a transport failure closes silently: {frames:?}");
     let events = timeline_events(&log);
     assert_eq!(events.len(), 3, "\n{log}");
     assert_eq!(events[0], ("websocket.request".to_owned(), REQUEST.to_owned()));
     assert_eq!(events[1].0, "websocket.disconnect", "\n{log}");
     assert!(
-        events[1].1.contains("usage_limit_reached"),
+        events[1].1.contains("bad gateway"),
         "the upstream reason: {}",
         events[1].1
     );
@@ -635,9 +657,14 @@ async fn written_log(dir: &std::path::Path) -> String {
 }
 
 /// A continuation pinned to its credential whose second turn the upstream fails with
-/// `failure` (after `shown`, events the client sees first). The client frames of that
-/// turn, the close as `close <code> <reason>` last.
-async fn pinned_continuation_failure(shown: &'static [&'static str], failure: &'static str) -> Vec<String> {
+/// `failure` (after `shown`, events the client sees first), with `credentials` WebSocket
+/// keys for the model. The client frames of that turn, the close as `close <code>
+/// <reason>` last.
+async fn pinned_continuation_failure(
+    credentials: usize,
+    shown: &'static [&'static str],
+    failure: &'static str,
+) -> Vec<String> {
     use futures_util::StreamExt;
     use wreq::ws::message::Message as WsMessage;
     const FIRST: [&str; 2] = [
@@ -666,11 +693,14 @@ async fn pinned_continuation_failure(shown: &'static [&'static str], failure: &'
     .await;
     let dir = std::env::temp_dir().join(format!("cpa-ws-pinned-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let cfg = Config::parse(&format!(
-        "auth-dir: {}\ncodex-api-key:\n  - api-key: sk-FAKE\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-fixture\n",
-        dir.display()
-    ))
-    .unwrap();
+    let keys: String = (0..credentials)
+        .map(|i| {
+            format!(
+                "  - api-key: sk-FAKE-{i}\n    base-url: http://{upstream}\n    websockets: true\n    models:\n      - name: gpt-fixture\n"
+            )
+        })
+        .collect();
+    let cfg = Config::parse(&format!("auth-dir: {}\ncodex-api-key:\n{keys}", dir.display())).unwrap();
     let credentials = cpa_core::config::credentials::from_config(&cfg);
     let executors = Executors {
         claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
@@ -743,6 +773,7 @@ async fn pinned_continuation_failure(shown: &'static [&'static str], failure: &'
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pinned_continuation_bootstrap_auth_failure_asks_for_replay() {
     let frames = pinned_continuation_failure(
+        1,
         &[],
         r#"{"type":"error","status":401,"error":{"type":"invalid_request_error","message":"bad token"}}"#,
     )
@@ -750,16 +781,24 @@ async fn pinned_continuation_bootstrap_auth_failure_asks_for_replay() {
     assert_eq!(frames, ["close 1012 upstream requires HTTP replay"]);
 }
 
-/// The same after the response started: the shown event, then the replay close.
+const PINNED_DELTA: &str = r#"{"type":"response.output_text.delta","output_index":0,"delta":"hello"}"#;
+const PINNED_QUOTA: &str =
+    r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":60}}"#;
+
+/// A quota failure after the response started, with another credential to replay on:
+/// the shown event, then the replay close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pinned_continuation_later_quota_failure_asks_for_replay() {
-    const DELTA: &str = r#"{"type":"response.output_text.delta","output_index":0,"delta":"hello"}"#;
-    let frames = pinned_continuation_failure(
-        &[DELTA],
-        r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":60}}"#,
-    )
-    .await;
-    assert_eq!(frames, [DELTA, "close 1012 upstream requires HTTP replay"]);
+async fn pinned_continuation_quota_failure_replays_when_another_credential_can_serve() {
+    let frames = pinned_continuation_failure(2, &[PINNED_DELTA], PINNED_QUOTA).await;
+    assert_eq!(frames, [PINNED_DELTA, "close 1012 upstream requires HTTP replay"]);
+}
+
+/// With no other credential a replay would only hit the same limit, so the client gets
+/// the quota error instead of the replay close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_continuation_quota_failure_is_shown_when_no_credential_is_left() {
+    let frames = pinned_continuation_failure(1, &[PINNED_DELTA], PINNED_QUOTA).await;
+    assert_eq!(frames, [PINNED_DELTA, PINNED_QUOTA, "close 1006"]);
 }
 
 #[tokio::test]
@@ -893,4 +932,31 @@ async fn two_websocket_turns_are_two_history_rows() {
     assert!(rows[0].request_body.as_deref().is_some_and(|b| b.contains("one")));
     assert!(rows[1].request_body.as_deref().is_some_and(|b| b.contains("two")));
     assert_eq!(rows[0].endpoint.as_deref(), Some("GET /v1/responses"));
+}
+
+/// `buildResponsesWebsocketErrorPayload`: a cooldown the scheduler reports carries its
+/// `Retry-After`, and a quota body reported as a server error is shown as a 429.
+#[test]
+fn terminal_cooldown_and_quota_errors_are_shown_as_429_with_retry_after() {
+    use super::{Failure, dispatch, error_payload, exposed, exposed_status};
+    let cooldown = Failure::from_dispatch(&dispatch::Failure::Cooldown {
+        model: "gpt-fixture".into(),
+        provider: "codex".into(),
+        wait: Duration::from_millis(1500),
+        cause: None,
+    });
+    assert!(exposed(&cooldown));
+    let payload = error_payload(exposed_status(&cooldown), &cooldown.text, cooldown.addon.as_deref());
+    assert_eq!(gjson::get(&payload, "status").i64(), 429, "{payload}");
+    assert_eq!(gjson::get(&payload, "headers.Retry-After").str(), "2", "{payload}");
+    assert_eq!(gjson::get(&payload, "error.code").str(), "model_cooldown", "{payload}");
+
+    let quota = Failure::local(
+        502,
+        r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}"#,
+    );
+    assert!(exposed(&quota));
+    assert_eq!(exposed_status(&quota), 429);
+    assert!(!exposed(&Failure::local(502, "bad gateway")));
+    assert!(!exposed(&Failure::local(401, "invalid token")));
 }

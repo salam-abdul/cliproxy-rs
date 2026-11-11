@@ -165,13 +165,17 @@ fn normalize_subsequent(
         let normalized = transcript_replacement(raw, last_request);
         return Ok((normalized.clone(), normalized));
     }
+    // Without previous_response_id, input that leaves the last response's tool calls
+    // unanswered cannot extend that response: merging would send those calls without
+    // outputs. It replaces the transcript in every upstream mode (for example a client
+    // compaction summary that carries no compaction markers).
+    let mut prev = field(raw, "previous_response_id");
+    if prev.is_empty() && !satisfies_pending(&next, pending) {
+        let normalized = transcript_replacement(raw, last_request);
+        return Ok((normalized.clone(), normalized));
+    }
     if allow_incremental {
-        let mut prev = field(raw, "previous_response_id");
         if prev.is_empty() {
-            if !satisfies_pending(&next, pending) {
-                let normalized = transcript_replacement(raw, last_request);
-                return Ok((normalized.clone(), normalized));
-            }
             prev = last_id.trim().to_owned();
         }
         if !prev.is_empty() {
@@ -396,7 +400,14 @@ pub(crate) fn merge_input(last_request: &str, last_output: &str, append: &str) -
         if contains_full_transcript(&output) {
             items.retain(|i| i.kind != "compaction_trigger");
         }
-        items.extend(parse_items(&output));
+        // Replayed response items become upstream input; previous-request and appended
+        // client items stay untouched.
+        items.extend(parse_items(&output).into_iter().map(|mut item| {
+            if let Some(clean) = replay_sanitized(&item.raw) {
+                item.raw = clean;
+            }
+            item
+        }));
     }
     let append = match append.trim() {
         "" => "[]",
@@ -413,6 +424,79 @@ pub(crate) fn merge_input(last_request: &str, last_output: &str, append: &str) -
     }
     let items = dedupe_ids(dedupe_calls(items));
     Ok(marshal(&items))
+}
+
+const REPLAY_PASSTHROUGH: &str = "internal_chat_message_metadata_passthrough";
+
+/// An upstream response item with every output-only `content_token_count` removed from
+/// its passthrough object (and a passthrough left empty removed with it), so another
+/// credential does not reject the replayed item as unknown input. Keys match by decoded
+/// name, duplicates and escaped spellings included; kept members are copied as raw
+/// slices. `None` when nothing changes or the item is not a valid object.
+pub(crate) fn replay_sanitized(raw: &str) -> Option<String> {
+    // A decoded passthrough key needs one of these spellings or a `\u` escape.
+    if !(raw.contains("internal") || raw.contains("chat_message_metadata_passthrough") || raw.contains("\\u")) {
+        return None;
+    }
+    if !gjson::valid(raw) {
+        return None;
+    }
+    let item = gjson::parse(raw);
+    if item.kind() != Kind::Object || item.json() != raw {
+        return None;
+    }
+    let mut members: Vec<(String, String)> = Vec::new();
+    let mut changed = false;
+    item.each(|key, value| {
+        if key.str() == REPLAY_PASSTHROUGH && value.kind() == Kind::Object {
+            match without_content_token_count(&value) {
+                Some(None) => {
+                    changed = true;
+                    return true;
+                }
+                Some(Some(kept)) => {
+                    changed = true;
+                    members.push((key.json().to_owned(), kept));
+                    return true;
+                }
+                None => {}
+            }
+        }
+        members.push((key.json().to_owned(), value.json().to_owned()));
+        true
+    });
+    changed.then(|| raw_object(&members))
+}
+
+/// The passthrough object without `content_token_count`: `Some(None)` when nothing is
+/// left, `None` when it has no such member.
+fn without_content_token_count(passthrough: &gjson::Value<'_>) -> Option<Option<String>> {
+    let mut kept = Vec::new();
+    let mut removed = false;
+    passthrough.each(|key, value| {
+        if key.str() == "content_token_count" {
+            removed = true;
+        } else {
+            kept.push((key.json().to_owned(), value.json().to_owned()));
+        }
+        true
+    });
+    removed.then(|| (!kept.is_empty()).then(|| raw_object(&kept)))
+}
+
+fn raw_object(members: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(2 + members.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>());
+    out.push('{');
+    for (index, (key, value)) in members.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(key);
+        out.push(':');
+        out.push_str(value);
+    }
+    out.push('}');
+    out
 }
 
 /// `dedupeResponsesWebsocketMergeFunctionCalls`: the first tool call per call_id wins.
