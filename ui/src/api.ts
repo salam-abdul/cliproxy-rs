@@ -38,6 +38,11 @@ export function disconnect() {
 }
 export const endpoint = () => `${base}/v8/management`;
 
+// A refresh may sign in again. A reset claim gets the provider's 30s on top of a token
+// refresh, so its outcome arrives before the dashboard gives up.
+const timeout = (path: string, method: string) =>
+  path.includes("/refresh") ? 300_000 : path === "/quota/resets" && method === "POST" ? 120_000 : 30_000;
+
 async function send(path: string, method: string, body?: unknown) {
   if (!key && !local) throw new Error("Sign in with your management key.");
   const lifetime = requests;
@@ -53,7 +58,7 @@ async function send(path: string, method: string, body?: unknown) {
       method,
       headers,
       body: body === undefined || body instanceof FormData || yaml ? (body as BodyInit) : JSON.stringify(body),
-      signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(path.includes("/refresh") ? 300_000 : 30_000)]),
+      signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(timeout(path, method))]),
       cache: "no-store",
       redirect: "error",
     });

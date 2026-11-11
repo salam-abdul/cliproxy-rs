@@ -1,17 +1,27 @@
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { store } from "./store.svelte";
 import { checkAll } from "./quota";
 import { newKey, provider, resetLabel, type Data, type Reset } from "./core";
 
-export const hasResets = (a: Data) => !a.disabled && ["claude", "codex"].includes(provider(a));
+/** Enabled Claude and Codex sign-ins; the server refuses the rest, such as setup tokens. */
+export const hasResets = (a: Data) =>
+  !a.disabled &&
+  a.account_type !== "api_key" &&
+  ["claude", "codex"].includes(provider(a)) &&
+  !store.resets[a.auth_index]?.unsupported;
 
-/** Reads the account's resets; the server answers from a read at most an hour old. */
-export async function loadResets(a: Data) {
+/** Reads the account's resets: from a read at most an hour old, or a new one when `fresh`. */
+export async function loadResets(a: Data, fresh = false) {
   if (!hasResets(a)) return;
   try {
-    store.resets[a.auth_index] = await api(`/quota/resets?auth_index=${encodeURIComponent(a.auth_index)}`);
+    const query = `auth_index=${encodeURIComponent(a.auth_index)}${fresh ? "&fresh=1" : ""}`;
+    store.resets[a.auth_index] = await api(`/quota/resets?${query}`);
   } catch (e) {
-    store.resets[a.auth_index] = { error: e instanceof Error ? e.message : String(e) };
+    // A 400 means this account can never have resets.
+    store.resets[a.auth_index] =
+      e instanceof ApiError && e.status === 400
+        ? { unsupported: true }
+        : { error: e instanceof Error ? e.message : String(e) };
   }
 }
 

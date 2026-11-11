@@ -80,12 +80,6 @@ pub(crate) const PROXY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use crate::proxy::Hooks;
 
-/// The Claude Code User-Agent this proxy presents upstream: the configured
-/// `oauth.providers.claude.header-defaults.user-agent`, else the measured CLI release.
-pub fn user_agent(cfg: &Config) -> String {
-    profile::Profile::default_for(&Settings::from_config(cfg)).user_agent
-}
-
 /// The first-party Anthropic transport.
 enum Native {
     /// Production or harness: native and OAuth profiles per effective proxy.

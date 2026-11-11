@@ -110,7 +110,7 @@ class Store {
     >
   >({});
   /** Quota resets read in this tab, by auth index. */
-  resets = $state<Record<string, { resets?: Reset[]; reason?: string; error?: string }>>({});
+  resets = $state<Record<string, { resets?: Reset[]; reason?: string; error?: string; unsupported?: boolean }>>({});
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {

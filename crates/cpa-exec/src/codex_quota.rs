@@ -452,6 +452,12 @@ impl QuotaSignals {
             .unwrap_or_default()
     }
 
+    /// Drops the credential's snapshots, so its quota counts as unknown until the next
+    /// response reports it.
+    pub fn forget(&self, credential_id: &str) {
+        self.snapshots.lock().expect("quota snapshots").remove(credential_id);
+    }
+
     /// Drops state for credentials that no longer exist.
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
         self.snapshots.lock().expect("quota snapshots").retain(|id, _| keep(id));

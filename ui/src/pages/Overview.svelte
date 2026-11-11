@@ -31,7 +31,7 @@
     refreshing = true;
     try {
       await checkAll(store.creds.data || [], () => mounted);
-      for (const a of store.creds.data || []) if (mounted) await loadResets(a);
+      for (const a of store.creds.data || []) if (mounted) await loadResets(a, true);
       if (mounted) await store.native.load(true);
     } finally {
       refreshing = false;

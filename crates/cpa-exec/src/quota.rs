@@ -348,6 +348,11 @@ impl Observations {
     ) -> std::collections::BTreeMap<String, crate::codex_quota::Snapshot> {
         self.0.model_snapshots(credential_id)
     }
+
+    /// Drops the credential's snapshots.
+    pub fn forget(&self, credential_id: &str) {
+        self.0.forget(credential_id);
+    }
 }
 
 #[cfg(test)]

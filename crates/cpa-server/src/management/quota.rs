@@ -253,7 +253,6 @@ async fn reset_account(state: &Management, index: &str) -> Result<Account, Box<R
         id: auth.id.clone(),
         token,
         client,
-        claude_user_agent: cpa_exec::claude::user_agent(&state.rt.config()),
         organization: text("organization_uuid"),
         chatgpt_account: text("account_id"),
     };
@@ -269,8 +268,8 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Response {
     go_json(StatusCode::OK, body)
 }
 
-/// `GET /quota/resets?auth_index=`: the account's available resets, from a read at most
-/// an hour old.
+/// `GET /quota/resets?auth_index=[&fresh=1]`: the account's available resets, from a
+/// read at most an hour old, or a new read with `fresh=1`.
 pub(crate) async fn resets(
     State(state): State<Arc<Management>>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -280,7 +279,13 @@ pub(crate) async fn resets(
         Ok(account) => account,
         Err(response) => return *response,
     };
-    match state.rt.quota_resets.status(&account, deny_external(&state)).await {
+    let fresh = query.get("fresh").is_some_and(|v| v == "1");
+    match state
+        .rt
+        .quota_resets
+        .status(&account, fresh, deny_external(&state))
+        .await
+    {
         Ok(status) => json_reply(&status),
         Err(message) => fail(StatusCode::BAD_GATEWAY, &message),
     }
@@ -294,7 +299,8 @@ struct ClaimBody {
 }
 
 /// `POST /quota/resets`: spends one reset. Any answer from the provider is a 200 whose
-/// `outcome` says what happened; an error status means nothing was sent.
+/// `outcome` says what happened; an error status means nothing was sent. The claim and
+/// its cleanup run to the end even when the dashboard stops waiting.
 pub(crate) async fn claim_reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
     let Ok(body) = serde_json::from_slice::<ClaimBody>(&body) else {
         return fail(
@@ -306,20 +312,54 @@ pub(crate) async fn claim_reset(State(state): State<Arc<Management>>, body: Byte
         Ok(account) => account,
         Err(response) => return *response,
     };
-    let claim = state
-        .rt
-        .quota_resets
-        .claim(&account, &body.reset_id, &body.request_id, deny_external(&state))
-        .await;
-    match claim {
-        Ok(claim) => {
-            if account.provider == Provider::Claude {
-                // Native admission reads this cache; a refilled window must show now.
-                state.rt.claude_usage.invalidate(&account.token).await;
-            }
-            json_reply(&claim)
+    let task = tokio::spawn(async move {
+        let claim = state
+            .rt
+            .quota_resets
+            .claim(&account, &body.reset_id, &body.request_id, deny_external(&state))
+            .await;
+        if let Ok(claim) = &claim {
+            settle(&state, &account, claim).await;
         }
-        Err(Refusal::Busy) => fail(StatusCode::CONFLICT, "A reset is already being applied to this account"),
-        Err(Refusal::Invalid(message)) => fail(StatusCode::BAD_REQUEST, message),
+        claim
+    });
+    match task.await {
+        Ok(Ok(claim)) => json_reply(&claim),
+        Ok(Err(Refusal::Busy)) => fail(StatusCode::CONFLICT, "A reset is already being applied to this account"),
+        Ok(Err(Refusal::Invalid(message))) => fail(StatusCode::BAD_REQUEST, message),
+        Err(_) => fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The reset claim stopped unexpectedly",
+        ),
+    }
+}
+
+/// After a claim: refreshes what admission reads. An applied reset refilled the
+/// account's limits, so its stored quota readings and cooldowns no longer hold.
+async fn settle(state: &Management, account: &Account, claim: &crate::quota_resets::Claim) {
+    if account.provider == Provider::Claude {
+        state.rt.claude_usage.invalidate(&account.token).await;
+    }
+    if claim.outcome != crate::quota_resets::Outcome::Applied {
+        return;
+    }
+    match account.provider {
+        Provider::Claude => state.rt.executors.claude.quota().forget(&account.id),
+        Provider::Codex => state.rt.executors.codex.quota().forget(&account.id),
+    }
+    let rt = state.rt.clone();
+    let id = account.id.clone();
+    // Clearing cooldowns may persist them to disk.
+    let _ = tokio::task::spawn_blocking(move || rt.store().reset_cooldowns(&id)).await;
+    let native = state
+        .rt
+        .native_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade();
+    if let Some(native) = native
+        && let Err(error) = native.clear_cooldowns(&account.id).await
+    {
+        tracing::warn!(%error, "native cooldowns were not cleared after a quota reset");
     }
 }

@@ -17,6 +17,8 @@ const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
 const resetClaims = [];
+const resetFresh = [];
+let resetRefused = false;
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
@@ -90,6 +92,8 @@ await page.route("**/*", async route => {
     if (request.method() === "POST") { resetClaims.push(request.postDataJSON()); return send({outcome:"applied",message:"Reset applied."}); }
     assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a", "disabled accounts are never asked for resets");
     resetReads++;
+    resetFresh.push(new URL(request.url()).searchParams.get("fresh"));
+    if (resetRefused) return route.fulfill({status:400,json:{error:"Setup tokens cannot use resets. Connect Claude through the dashboard sign-in."}});
     return send({eligible:true,resets:resetClaims.length ? [] : [{key:"g:0",id:"g",kind:"session",expires_at:"2099-01-01T00:00:00Z",usable:true,detail:"Refills your 5-hour limit now. This cannot be undone."}]});
   }
   if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
@@ -123,6 +127,7 @@ try {
   assert.equal(checks, 1, "a manual check reaches only the enabled account");
   await page.getByText(/^1 reset · soonest expires in /).waitFor();
   assert.equal(resetReads, 1, "a manual check reads resets for the enabled account only");
+  assert.deepEqual(resetFresh, ["1"], "a manual check asks for a fresh reset read");
   await page.getByText("Updated just now", {exact:true}).waitFor();
   assert.deepEqual(await page.locator(".top .nav a").allInnerTexts(), ["Overview", "Accounts", "Activity", "Settings"]);
   await page.goto("http://dashboard.test/management.html#quotas/account-a.json");
@@ -206,6 +211,7 @@ try {
   await page.getByRole("dialog", {name:/account-a.json details/}).waitFor();
   assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 1, "account details retain additional quota windows");
   await page.getByText("5-hour reset", {exact:true}).waitFor();
+  assert.equal(resetFresh.at(-1), null, "opening an account reads cached resets");
   let resetQuestion = "";
   page.once("dialog", dialog => { resetQuestion = dialog.message(); dialog.accept(); });
   await page.getByRole("button", {name:"Use", exact:true}).click();
@@ -215,6 +221,15 @@ try {
   assert.equal(resetClaims[0].auth_index, "a");
   assert.equal(resetClaims[0].reset_id, "g");
   assert.match(resetClaims[0].request_id, /^[\w-]{1,64}$/);
+  await page.getByRole("button", {name:"Close",exact:true}).click();
+  resetRefused = true;
+  const refusedReads = resetReads;
+  await page.getByRole("button", {name:"account-a.json"}).first().click();
+  await page.getByRole("dialog", {name:/account-a.json details/}).waitFor();
+  await settle();
+  assert.equal(resetReads, refusedReads + 1);
+  await page.getByRole("heading", {name:"Quota resets", exact:true}).waitFor({state:"detached"});
+  resetRefused = false;
   await page.getByRole("button", {name:"Close",exact:true}).click();
 
   await page.setViewportSize({width:1280,height:900});

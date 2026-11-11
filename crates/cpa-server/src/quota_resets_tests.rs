@@ -173,6 +173,8 @@ struct Upstream {
     reads: AtomicUsize,
     claims: Mutex<Vec<(String, String, Value)>>,
     claim_status: Mutex<u16>,
+    /// When set, Claude reads answer 429 with `Retry-After: 120`.
+    read_limited: std::sync::atomic::AtomicBool,
 }
 
 /// A loopback upstream reached through each credential's own proxy setting, so the
@@ -188,11 +190,22 @@ async fn upstream(state: Arc<Upstream>) -> String {
                 state.reads.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(headers["authorization"], "Bearer synthetic-claude");
                 assert_eq!(uri.query(), Some("cedar_ember=1&skip_spend=1"));
-                assert!(headers["user-agent"].to_str().unwrap().starts_with("claude-cli/"));
-                axum::Json(json!({"five_hour": {"utilization": 100}, "cedar_ember": {
+                assert!(headers["user-agent"].to_str().unwrap().starts_with("claude-code/"));
+                if state.read_limited.load(Ordering::SeqCst) {
+                    return (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "120")],
+                        axum::Json(json!({})),
+                    );
+                }
+                (
+                    axum::http::StatusCode::OK,
+                    [("retry-after", "0")],
+                    axum::Json(json!({"five_hour": {"utilization": 100}, "cedar_ember": {
                     "eligible": true, "next_grant_id": "g-1",
                     "grants": [{"id": "g-1", "resets_left": 1, "ends_at": "2099-01-01T00:00:00Z",
-                                "clears": ["five_hour"], "usable_now": true}]}}))
+                                "clears": ["five_hour"], "usable_now": true}]}})),
+                )
             }
         }
     };
@@ -322,6 +335,27 @@ impl Harness {
             .await
     }
 
+    async fn read_fresh(&self, account: usize) -> (u16, Value) {
+        let index = &self.indices[account];
+        self.call(
+            "GET",
+            format!("/v8/management/quota/resets?auth_index={index}&fresh=1"),
+            None,
+        )
+        .await
+    }
+
+    fn id(&self, account: usize) -> String {
+        self.rt
+            .store()
+            .snapshot()
+            .into_iter()
+            .find(|c| auth_index(c) == self.indices[account])
+            .unwrap()
+            .id
+            .clone()
+    }
+
     async fn claim(&self, account: usize, reset: &str, request: &str) -> (u16, Value) {
         let body = json!({"auth_index": self.indices[account], "reset_id": reset, "request_id": request});
         self.call("POST", "/v8/management/quota/resets".into(), Some(body))
@@ -445,4 +479,66 @@ async fn one_claim_runs_per_account_at_a_time() {
         (409, Some("A reset is already being applied to this account"))
     );
     assert!(h.upstream.claims.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_applied_reset_drops_the_quota_readings_that_refused_the_account() {
+    let h = harness().await;
+    let (claude, codex) = (h.id(0), h.id(3));
+    let reset = (SystemTime::now() + Duration::from_secs(4 * 3600))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let mut rejected = HeaderMap::new();
+    rejected.insert("anthropic-ratelimit-unified-5h-status", "rejected".parse().unwrap());
+    rejected.insert("anthropic-ratelimit-unified-5h-reset", reset.parse().unwrap());
+    rejected.insert("anthropic-ratelimit-unified-5h-utilization", "1.0".parse().unwrap());
+    h.rt.executors.claude.quota().observe(&claude, &rejected);
+    let snapshot = h.rt.executors.claude.quota().snapshot(&claude).unwrap();
+    assert!(
+        crate::scheduler::Windows::observed("claude", &snapshot.signals, snapshot.observed_at, SystemTime::now())
+            .exhausted,
+        "the stored reading refuses the account"
+    );
+    let mut used = HeaderMap::new();
+    used.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+    h.rt.executors.codex.quota().observe(&codex, "", &used);
+    assert!(h.rt.executors.codex.quota().snapshot(&codex).is_some());
+
+    let (status, body) = h.claim(0, "g-1", "req-1").await;
+    assert_eq!((status, body["outcome"].as_str()), (200, Some("applied")), "{body}");
+    assert!(h.rt.executors.claude.quota().snapshot(&claude).is_none());
+    let (status, body) = h.claim(3, "cr_1", "req-2").await;
+    assert_eq!((status, body["outcome"].as_str()), (200, Some("applied")), "{body}");
+    assert!(h.rt.executors.codex.quota().snapshot(&codex).is_none());
+}
+
+#[tokio::test]
+async fn an_unconfirmed_claim_keeps_the_quota_readings() {
+    let h = harness().await;
+    let claude = h.id(0);
+    let mut rejected = HeaderMap::new();
+    rejected.insert("anthropic-ratelimit-unified-5h-status", "rejected".parse().unwrap());
+    h.rt.executors.claude.quota().observe(&claude, &rejected);
+    *h.upstream.claim_status.lock().unwrap() = 503;
+    let (_, body) = h.claim(0, "g-1", "req-1").await;
+    assert_eq!(body["outcome"], "unconfirmed");
+    assert!(h.rt.executors.claude.quota().snapshot(&claude).is_some());
+}
+
+#[tokio::test]
+async fn fresh_reads_skip_the_cache_unless_the_provider_asked_to_wait() {
+    let h = harness().await;
+    h.read(0).await;
+    h.read_fresh(0).await;
+    assert_eq!(h.upstream.reads.load(Ordering::SeqCst), 2, "fresh=1 reads again");
+
+    h.upstream.read_limited.store(true, Ordering::SeqCst);
+    let (status, _) = h.read_fresh(0).await;
+    assert_eq!(status, 502);
+    h.upstream.read_limited.store(false, Ordering::SeqCst);
+    let (status, _) = h.read_fresh(0).await;
+    assert_eq!(status, 502, "Retry-After holds even for a fresh read");
+    assert_eq!(h.upstream.reads.load(Ordering::SeqCst), 3);
 }

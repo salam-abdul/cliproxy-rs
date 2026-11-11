@@ -13,11 +13,6 @@ on:
 permissions:
   contents: read
 
-# A newer commit cancels an older publish, so `latest` never moves backwards.
-concurrency:
-  group: docker-publish
-  cancel-in-progress: true
-
 env:
   IMAGE: ghcr.io/${{ github.repository }}
   # The commit CI tested, or the dispatched one.
@@ -39,6 +34,11 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    # A newer publish cancels an older one. The group is on the job, not the workflow,
+    # so a skipped run (CI failed) cancels nothing.
+    concurrency:
+      group: docker-build-${{ matrix.platform }}
+      cancel-in-progress: true
     permissions:
       contents: read
       packages: write
@@ -89,6 +89,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: docker-merge
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -108,10 +111,18 @@ jobs:
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
       - name: Tag and push the manifest
         working-directory: ${{ runner.temp }}/digests
+        # `latest` moves only to main's current tip, so a late run for an older commit
+        # publishes its own tag without moving `latest` backwards.
         run: |
-          docker buildx imagetools create \
-            -t "$IMAGE:latest" \
-            -t "$IMAGE:sha-${SOURCE_SHA::7}" \
-            $(printf "$IMAGE@sha256:%s " *)
+          tags=(-t "$IMAGE:sha-${SOURCE_SHA::7}")
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$tip" = "$SOURCE_SHA" ]; then
+            tags+=(-t "$IMAGE:latest")
+          else
+            echo "main is at $tip, not $SOURCE_SHA; leaving latest alone"
+          fi
+          docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Inspect
-        run: docker buildx imagetools inspect "$IMAGE:latest"
+        run: docker buildx imagetools inspect "$IMAGE:sha-${SOURCE_SHA::7}"

@@ -20,7 +20,7 @@ use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 /// most once an hour.
 const TTL: Duration = Duration::from_secs(3600);
 /// A failed read waits this long, or the provider's `Retry-After` up to [`TTL`].
-const FAILURE_TTL: Duration = Duration::from_secs(600);
+const FAILURE_TTL: Duration = Duration::from_secs(60);
 const CAPACITY: usize = 256;
 const BODY_LIMIT: usize = 1 << 20;
 
@@ -47,8 +47,6 @@ pub(crate) struct Account {
     pub id: String,
     pub token: String,
     pub client: wreq::Client,
-    /// Claude Code identity; Anthropic grants resets only to recent Claude Code releases.
-    pub claude_user_agent: String,
     /// Claude organization UUID, required for a Claude claim.
     pub organization: Option<String>,
     /// ChatGPT account id for the Codex `ChatGPT-Account-Id` header.
@@ -151,6 +149,8 @@ struct Cached {
     expires: Instant,
     token: [u8; 32],
     read: Result<Status, String>,
+    /// The provider asked to wait (`Retry-After`); a fresh read still waits.
+    backoff: bool,
 }
 
 struct Slot {
@@ -250,29 +250,31 @@ impl QuotaResets {
         }
     }
 
-    /// The account's resets, from a read at most [`TTL`] old. Concurrent reads of one
-    /// account share a single upstream call.
-    pub(crate) async fn status(&self, account: &Account, deny_external: bool) -> Result<Status, String> {
+    /// The account's resets, from a read at most [`TTL`] old, or a new read when
+    /// `fresh` unless the provider asked to wait. Concurrent reads of one account share
+    /// a single upstream call.
+    pub(crate) async fn status(&self, account: &Account, fresh: bool, deny_external: bool) -> Result<Status, String> {
         let token: [u8; 32] = Sha256::digest(account.token.as_bytes()).into();
         let slot = self.slot(&account.id);
         let mut cached = slot.lock().await;
         if let Some(hit) = cached
             .as_ref()
-            .filter(|c| c.expires > Instant::now() && c.token == token)
+            .filter(|c| c.expires > Instant::now() && c.token == token && (!fresh || c.backoff))
         {
             return hit.read.clone();
         }
-        let (read, ttl) = match self.read(account, deny_external).await {
-            Ok(status) => (Ok(status), TTL),
-            Err(e) => (
-                Err(e.message),
-                e.retry_after.map_or(FAILURE_TTL, |after| after.clamp(FAILURE_TTL, TTL)),
-            ),
+        let (read, ttl, backoff) = match self.read(account, deny_external).await {
+            Ok(status) => (Ok(status), TTL, false),
+            Err(e) => match e.retry_after {
+                Some(after) => (Err(e.message), after.clamp(FAILURE_TTL, TTL), true),
+                None => (Err(e.message), FAILURE_TTL, false),
+            },
         };
         *cached = Some(Cached {
             expires: Instant::now() + ttl,
             token,
             read: read.clone(),
+            backoff,
         });
         read
     }
@@ -396,6 +398,8 @@ impl QuotaResets {
             Provider::Claude => claude_headers(account.client.post(url), account),
             Provider::Codex => codex_headers(account.client.post(url), account),
         };
+        // The list is stale once the claim may land, even if this task never finishes.
+        self.forget(&account.id).await;
         let response = request
             .header("content-type", "application/json")
             .body(body.to_string())
@@ -422,7 +426,7 @@ fn claude_headers(request: wreq::RequestBuilder, account: &Account) -> wreq::Req
         .bearer_auth(&account.token)
         .header("accept", "application/json")
         .header("anthropic-beta", "oauth-2025-04-20")
-        .header("user-agent", &account.claude_user_agent)
+        .header("user-agent", crate::claude_usage::USER_AGENT)
 }
 
 fn codex_headers(request: wreq::RequestBuilder, account: &Account) -> wreq::RequestBuilder {

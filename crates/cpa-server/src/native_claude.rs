@@ -260,6 +260,26 @@ impl State {
         })
         .await?
     }
+    /// Clears the native cooldowns of the account stored in credential `file_id`, after
+    /// a quota reset refilled its limits.
+    pub(crate) async fn clear_cooldowns(self: &Arc<Self>, file_id: &str) -> anyhow::Result<()> {
+        let Some(account) = self.accounts().await?.into_iter().find(|a| a.file_id == file_id) else {
+            return Ok(());
+        };
+        let s = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut routing = s.routing.lock().unwrap_or_else(PoisonError::into_inner);
+            if !routing.cooldowns.holds(&account.id) {
+                return Ok(());
+            }
+            let mut next = routing.clone();
+            next.cooldowns.clear(&account.id);
+            next.persist(&s.config.database)?;
+            *routing = next;
+            Ok(())
+        })
+        .await?
+    }
     fn allow_extra_usage(&self) -> bool {
         self.routing
             .lock()

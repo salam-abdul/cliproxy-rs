@@ -10,6 +10,10 @@ use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 
+/// What Claude Code sends to its own OAuth account endpoints. Every account read and
+/// reset call uses it, so one account presents one identity.
+pub(crate) const USER_AGENT: &str = "claude-code/2.1.296";
+
 #[derive(Default)]
 pub(crate) struct ClaudeUsage {
     cache: Cache,
@@ -34,7 +38,7 @@ impl ClaudeUsage {
                     .redirect(wreq::redirect::Policy::none())
                     .bearer_auth(token)
                     .header("anthropic-beta", "oauth-2025-04-20")
-                    .header("user-agent", "claude-code/2.1.296")
+                    .header("user-agent", USER_AGENT)
                     .timeout(Duration::from_secs(15))
                     .send()
                     .await

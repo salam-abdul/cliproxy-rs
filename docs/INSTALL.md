@@ -39,7 +39,7 @@ Client keys go in client settings; never share either key. For access from anoth
 
 ## Container
 
-CI publishes `ghcr.io/salam-abdul/cliproxy-rs` for linux/amd64 and linux/arm64 after the tests pass on `main` (`.github/workflows/docker.yml`). Tags are `latest` and `sha-<first 7 characters of the commit>`.
+CI publishes `ghcr.io/salam-abdul/cliproxy-rs` for linux/amd64 and linux/arm64 after the tests pass on `main` (`.github/workflows/docker.yml`). Tags are `sha-<first 7 characters of the commit>` and `latest`, which follows the newest commit on `main`.
 
 ```sh
 docker run --rm -p 127.0.0.1:8317:8317 -v /path/to/private/data:/data ghcr.io/salam-abdul/cliproxy-rs:latest
