@@ -61,7 +61,7 @@ Operation docs live only in these files. When a behavior changes, update the pag
 
 - [README](README.md): what the fork is, build and run, development checks.
 - [Configuration](docs/CONFIGURATION.md): settings, routing and environment variables.
-- [Installation](docs/INSTALL.md): prerequisites, builds, manual updates and the local container.
+- [Installation](docs/INSTALL.md): prerequisites, builds, manual updates and the container image.
 - [Native Claude](native/README.md): routing behavior, install, state and qualification.
 - [Upstream review](docs/UPSTREAM-REVIEW.md): reviewed upstream hashes and pending ports.
 - [Dashboard](ui/README.md): build, budgets and page layout.

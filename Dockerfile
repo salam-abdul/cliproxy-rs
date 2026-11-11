@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # Build stage. BoringSSL (through btls-sys) needs cmake and clang; bindgen needs libclang.
-FROM rust:1-bookworm AS build
+# Matches RUST_TOOLCHAIN in .github/workflows/ci.yml.
+FROM rust:1.99.0-bookworm AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake clang libclang-dev perl \
  && rm -rf /var/lib/apt/lists/*
