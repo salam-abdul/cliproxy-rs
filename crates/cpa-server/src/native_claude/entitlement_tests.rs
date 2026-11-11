@@ -192,6 +192,7 @@ impl Fixture {
             secret: "synthetic-secret".into(),
             routing: Default::default(),
             sessions: Default::default(),
+            skipped: Default::default(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -646,4 +647,34 @@ async fn a_client_that_leaves_before_the_headers_still_leaves_a_row() {
             .as_deref()
             .is_some_and(|b| b.contains("MODE_STALL"))
     );
+}
+
+/// A skipped account file is reported once per reason, not on every pool read.
+#[tokio::test]
+async fn a_skipped_account_file_is_reported_once_per_reason() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let reported = || -> Vec<Value> {
+        fixture.state.rt.native_events.snapshot()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "account-skipped")
+            .map(|e| json!([e["fileId"], e["reason"]]))
+            .collect()
+    };
+    let skip = |reason| vec![("synthetic.json".to_owned(), reason)];
+    fixture.state.report_skipped(skip(Skip::NotPrivate));
+    fixture.state.report_skipped(skip(Skip::NotPrivate));
+    assert_eq!(reported(), [json!(["synthetic.json", "not_private"])]);
+    fixture.state.report_skipped(skip(Skip::Unreadable));
+    assert_eq!(reported().len(), 2);
+    assert!(reported().contains(&json!(["synthetic.json", "unreadable"])));
+    fixture.state.report_skipped(Vec::new());
+    fixture.state.report_skipped(skip(Skip::Unreadable));
+    assert_eq!(reported().len(), 3);
 }

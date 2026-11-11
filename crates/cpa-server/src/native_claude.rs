@@ -26,6 +26,7 @@ use axum::{
 };
 use base64::Engine;
 use btls::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
+use cpa_core::credential::{Credential, Source};
 use futures_util::StreamExt;
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -134,6 +135,8 @@ pub(crate) struct State {
     secret: String,
     routing: Mutex<RoutingState>,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Account files the last pool read left out, with the reason reported for each.
+    skipped: Mutex<HashMap<String, Skip>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
 impl Drop for Running {
@@ -247,6 +250,115 @@ fn private(path: &Path) -> anyhow::Result<Vec<u8>> {
     }
     Ok(std::fs::read(path)?)
 }
+/// Why an account file was left out of the native pool. One bad file never takes the
+/// other accounts down with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skip {
+    OutsideAuthDir,
+    /// A symlink, not a regular file, or readable by group or others.
+    NotPrivate,
+    /// Missing (deleted mid-read) or unreadable.
+    Unreadable,
+    /// Not Claude credential JSON, or an invalid `native_route_id`.
+    Invalid,
+    /// Another file has the same identity; neither is routed, since either could be stale.
+    DuplicateIdentity,
+}
+impl Skip {
+    fn as_str(self) -> &'static str {
+        match self {
+            Skip::OutsideAuthDir => "outside_auth_dir",
+            Skip::NotPrivate => "not_private",
+            Skip::Unreadable => "unreadable",
+            Skip::Invalid => "invalid",
+            Skip::DuplicateIdentity => "duplicate_identity",
+        }
+    }
+}
+struct Pool {
+    accounts: Vec<Account>,
+    /// Credential ID and reason for each file left out.
+    skipped: Vec<(String, Skip)>,
+}
+/// Reads the native pool from the store's Claude account files. Fails as a whole only
+/// when the auth directory itself cannot be resolved.
+fn read_pool(credentials: Vec<Arc<Credential>>, auth_dir: &Path, settings: &Value) -> anyhow::Result<Pool> {
+    let mut accounts = Vec::new();
+    let mut skipped = Vec::new();
+    let mut root = None;
+    for c in credentials.into_iter().filter(|c| c.provider == "claude") {
+        let Source::File(ref path) = c.source else {
+            continue;
+        };
+        let root = match &root {
+            Some(root) => root,
+            None => root.insert(std::fs::canonicalize(auth_dir)?),
+        };
+        match read_account(&c, path, root, settings) {
+            Ok(a) => accounts.push(a),
+            Err(reason) => skipped.push((c.id.clone(), reason)),
+        }
+    }
+    let mut seen = HashMap::<String, usize>::new();
+    for a in &accounts {
+        *seen.entry(a.id.clone()).or_default() += 1;
+    }
+    let (mut accounts, duplicates): (Vec<_>, Vec<_>) = accounts.into_iter().partition(|a| seen[&a.id] == 1);
+    skipped.extend(duplicates.into_iter().map(|a| (a.file_id, Skip::DuplicateIdentity)));
+    let preferred = settings["preferredAccount"].as_str();
+    accounts.sort_by_key(|a| Some(a.id.as_str()) != preferred);
+    Ok(Pool { accounts, skipped })
+}
+fn read_account(c: &Credential, path: &Path, root: &Path, settings: &Value) -> Result<Account, Skip> {
+    let file = std::fs::canonicalize(path).map_err(|_| Skip::Unreadable)?;
+    if !file.starts_with(root) {
+        return Err(Skip::OutsideAuthDir);
+    }
+    let bytes = private(path).map_err(|e| {
+        if e.downcast_ref::<std::io::Error>().is_some() {
+            Skip::Unreadable
+        } else {
+            Skip::NotPrivate
+        }
+    })?;
+    let a: Value = serde_json::from_slice(&bytes).map_err(|_| Skip::Invalid)?;
+    if a["type"] != "claude" {
+        return Err(Skip::Invalid);
+    }
+    let fallback = hash(format!(
+        "claude:{}",
+        a["organization_uuid"]
+            .as_str()
+            .or(a["account_uuid"].as_str())
+            .unwrap_or(&c.id)
+    ));
+    let id = a["native_route_id"].as_str().unwrap_or(&fallback).to_owned();
+    if !valid_id(&id) {
+        return Err(Skip::Invalid);
+    }
+    let expired = a["expired"]
+        .as_str()
+        .or(a["expires_at"].as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .is_none_or(|d| d.timestamp_millis() <= now() as i64 + 30000);
+    let token = a["access_token"].as_str().unwrap_or_default().to_owned();
+    let disabled = c.disabled || a["disabled"].as_bool() == Some(true);
+    let name = settings["names"][&id]
+        .as_str()
+        .or(a["native_route_name"].as_str())
+        .unwrap_or(&c.label)
+        .to_owned();
+    Ok(Account {
+        id,
+        enabled: !disabled && !expired && !token.is_empty(),
+        token,
+        file_id: c.id.clone(),
+        name,
+        disabled,
+        expired,
+        quota: Value::Null,
+    })
+}
 impl State {
     pub(crate) async fn set_overage(self: &Arc<Self>, allow: bool) -> anyhow::Result<()> {
         let s = self.clone();
@@ -311,65 +423,28 @@ impl State {
         } else {
             json!({})
         };
-        let mut all = Vec::new();
-        let mut root = None;
-        for c in self
-            .rt
-            .store()
-            .snapshot()
-            .into_iter()
-            .filter(|c| c.provider == "claude")
-        {
-            let cpa_core::credential::Source::File(ref path) = c.source else {
-                continue;
-            };
-            let root = match &root {
-                Some(root) => root,
-                None => root.insert(std::fs::canonicalize(&self.config.auth_dir)?),
-            };
-            let file = std::fs::canonicalize(path)?;
-            anyhow::ensure!(file.starts_with(root), "Credential outside auth directory");
-            let a: Value = serde_json::from_slice(&private(path)?)?;
-            anyhow::ensure!(a["type"] == "claude", "Credential provider mismatch");
-            let fallback = hash(format!(
-                "claude:{}",
-                a["organization_uuid"]
-                    .as_str()
-                    .or(a["account_uuid"].as_str())
-                    .unwrap_or(&c.id)
-            ));
-            let id = a["native_route_id"].as_str().unwrap_or(&fallback).to_owned();
-            anyhow::ensure!(valid_id(&id), "Invalid account identity");
-            let expired = a["expired"]
-                .as_str()
-                .or(a["expires_at"].as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .is_none_or(|d| d.timestamp_millis() <= now() as i64 + 30000);
-            let token = a["access_token"].as_str().unwrap_or_default().to_owned();
-            let disabled = c.disabled || a["disabled"].as_bool() == Some(true);
-            let name = settings["names"][&id]
-                .as_str()
-                .or(a["native_route_name"].as_str())
-                .unwrap_or(&c.label)
-                .to_owned();
-            all.push(Account {
-                id,
-                token: token.clone(),
-                enabled: !disabled && !expired && !token.is_empty(),
-                file_id: c.id.clone(),
-                name,
-                disabled,
-                expired,
-                quota: Value::Null,
-            });
+        let pool = read_pool(self.rt.store().snapshot(), &self.config.auth_dir, &settings)?;
+        self.report_skipped(pool.skipped);
+        Ok(pool.accounts)
+    }
+    /// Reports each skipped account file once, and again only when its reason changes.
+    /// The event names the credential file and a reason, never its contents.
+    fn report_skipped(&self, skipped: Vec<(String, Skip)>) {
+        let changed: Vec<_> = {
+            let mut known = self.skipped.lock().unwrap_or_else(PoisonError::into_inner);
+            let next: HashMap<_, _> = skipped.into_iter().collect();
+            let changed = next
+                .iter()
+                .filter(|(file, reason)| known.get(*file) != Some(*reason))
+                .map(|(file, reason)| (file.clone(), *reason))
+                .collect();
+            *known = next;
+            changed
+        };
+        for (file, reason) in changed {
+            tracing::warn!(file = %file, reason = reason.as_str(), "Native Claude skipped an account file");
+            self.event(json!({"type":"account-skipped","fileId":file,"reason":reason.as_str()}));
         }
-        anyhow::ensure!(
-            all.iter().map(|a| &a.id).collect::<HashSet<_>>().len() == all.len(),
-            "Duplicate account identity"
-        );
-        let preferred = settings["preferredAccount"].as_str();
-        all.sort_by_key(|a| Some(a.id.as_str()) != preferred);
-        Ok(all)
     }
     fn included_available(&self, a: &Account, q: &Value, model: &str) -> bool {
         if !eligible(q, model) {
@@ -1062,6 +1137,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         secret,
         routing: Mutex::new(routing),
         sessions: Default::default(),
+        skipped: Default::default(),
     });
     let plain = TcpListener::bind(("127.0.0.1", c.http_proxy_port))
         .await
@@ -1297,6 +1373,49 @@ mod tests {
         assert_eq!(rx.recv().await, Some(1));
         assert_eq!(rx.recv().await, Some(2));
         task.abort();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn one_bad_account_file_leaves_the_rest_of_the_pool_routable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("native-pool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let write = |name: &str, organization: &str, mode: u32| {
+            let body = json!({"type":"claude","organization_uuid":organization,
+                "access_token":"synthetic-token","expired":"2099-01-01T00:00:00Z"});
+            let path = dir.join(name);
+            std::fs::write(&path, body.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Arc::new(Credential::from_file(&dir, &path, body.as_object().unwrap().clone()).unwrap())
+        };
+        let credentials = vec![
+            write("good.json", "org-good", 0o600),
+            write("loose.json", "org-loose", 0o644),
+            write("first.json", "org-shared", 0o600),
+            write("second.json", "org-shared", 0o600),
+            write("gone.json", "org-gone", 0o600),
+            write("garbage.json", "org-garbage", 0o600),
+        ];
+        std::fs::remove_file(dir.join("gone.json")).unwrap();
+        std::fs::write(dir.join("garbage.json"), "not json").unwrap();
+        let pool = read_pool(credentials, &dir, &json!({}));
+        assert!(pool.is_ok(), "a bad account file failed the whole pool");
+        let pool = pool.unwrap();
+        let routable: Vec<_> = pool.accounts.iter().map(|a| (a.file_id.as_str(), a.enabled)).collect();
+        assert_eq!(routable, [("good.json", true)]);
+        let mut skipped = pool.skipped;
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            [
+                ("first.json".to_owned(), Skip::DuplicateIdentity),
+                ("garbage.json".to_owned(), Skip::Invalid),
+                ("gone.json".to_owned(), Skip::Unreadable),
+                ("loose.json".to_owned(), Skip::NotPrivate),
+                ("second.json".to_owned(), Skip::DuplicateIdentity),
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn reset_ranking_uses_weekly_not_short_window_and_unknown_dates_rank_last() {

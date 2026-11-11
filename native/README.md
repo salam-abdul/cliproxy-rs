@@ -139,6 +139,8 @@ Do not set `ANTHROPIC_BASE_URL` to the proxy's management address. Custom base U
 
 OAuth files use the upstream JSON format, with directories at mode 0700 and files at 0600. Never commit this state.
 
+Routing leaves out an account file that is outside the auth directory, a symlink, readable by group or others, missing, or not Claude credential JSON, and every file of an identity that two files share. The other accounts keep routing. Each skipped file is logged and reported once, in `GET /v8/management/observability/native/events`, as an `account-skipped` event with its file name and reason; nothing from the file is recorded.
+
 Updates are manual and pinned. Stop the login service, then run:
 
 ```sh
