@@ -217,10 +217,12 @@ pub(super) fn client_for(
 
 /// [`client_for`] for an action that cannot be undone: the effective proxy, the
 /// credential's own and then the global one, must build. An unusable proxy yields no
-/// client instead of a fallback to another route.
+/// client instead of a fallback to another route. With none configured, Codex honours
+/// environment proxies as its own transport does, and Claude dials directly.
 pub(super) fn strict_client_for(state: &Management, c: &Credential) -> Option<wreq::Client> {
     match Proxy::effective(c, &state.rt.config()) {
         p @ (Proxy::Url(_) | Proxy::Direct) => state.clients.try_get(&p),
+        Proxy::Inherit if c.provider == "codex" => state.clients.try_get(&Proxy::Inherit),
         Proxy::Inherit => state.clients.try_get(&Proxy::Direct),
         Proxy::Invalid => None,
     }

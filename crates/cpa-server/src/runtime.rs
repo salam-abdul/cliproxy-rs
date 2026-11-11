@@ -727,10 +727,21 @@ impl Runtime {
         self.prepare_credential(id, &cfg, revision).await
     }
 
-    /// The credential with a usable token: prepared first only when its executor says
-    /// preparation is due, under the same single-flight lock as request preparation.
+    /// The credential prepared for a one-off account call, under the same single-flight
+    /// lock as request preparation. A due refresh ([`Readiness::RefreshSoon`], which
+    /// includes an expired token) is tried, and on failure the current token is used
+    /// as a request would use it; only [`Readiness::PrepareNow`] must succeed.
     pub(crate) async fn ready_credential(&self, id: &str) -> Result<Arc<Credential>, ExecError> {
-        self.prepare_credential(id, &self.config(), None).await
+        let cfg = self.config();
+        let credential = self
+            .store
+            .get(id)
+            .ok_or_else(|| ExecError::local(404, FailureScope::Request, "credential not found"))?;
+        match self.executors.readiness(&credential, &cfg) {
+            Readiness::Ready => Ok(credential),
+            Readiness::PrepareNow => self.prepare_credential(id, &cfg, None).await,
+            Readiness::RefreshSoon => Ok(self.prepare_credential(id, &cfg, None).await.unwrap_or(credential)),
+        }
     }
 }
 

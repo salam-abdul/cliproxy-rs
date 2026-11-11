@@ -83,6 +83,39 @@ fn claude_grants_list_one_row_per_reset_and_mark_what_cannot_be_used() {
 }
 
 #[test]
+fn claude_grant_ids_are_listed_only_when_a_claim_would_accept_them() {
+    let block = json!({"eligible": true, "grants": [
+        {"id": "Grant_AB12", "resets_left": 1, "usable_now": true},
+        {"id": "g/../x", "resets_left": 1, "usable_now": true},
+        {"id": "x".repeat(ID_LIMIT + 1), "resets_left": 1, "usable_now": true}
+    ]});
+    let status = claude_status(&block, at("2033-01-01T00:00:00Z"));
+    let ids: Vec<_> = status.resets.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["Grant_AB12"]);
+}
+
+#[test]
+fn resets_that_expired_while_cached_are_not_served_and_retry_after_reads_dates() {
+    let status = claude_status(
+        &json!({"eligible": true, "grants": [
+            {"id": "soon", "resets_left": 1, "ends_at": "2033-01-01T01:00:00Z", "usable_now": true},
+            {"id": "later", "resets_left": 1, "ends_at": "2033-01-03T00:00:00Z", "usable_now": true}
+        ]}),
+        at("2033-01-01T00:00:00Z"),
+    );
+    let served = unexpired(status, at("2033-01-02T00:00:00Z"));
+    let ids: Vec<_> = served.resets.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["later"]);
+    let now = at("2033-01-01T00:00:00Z");
+    assert_eq!(retry_after("120", now), Some(Duration::from_secs(120)));
+    assert_eq!(
+        retry_after("Sat, 01 Jan 2033 00:02:00 GMT", now),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(retry_after("soon", now), None);
+}
+
+#[test]
 fn claude_ineligible_accounts_list_nothing_and_say_why() {
     let now = at("2033-01-01T00:00:00Z");
     for (block, reason) in [
@@ -136,7 +169,13 @@ fn claim_answers_that_do_not_prove_the_outcome_are_unconfirmed() {
     assert_eq!(claude(200, r#"{"result":"something_new"}"#), Outcome::Unconfirmed);
     assert_eq!(claude(200, "not json"), Outcome::Unconfirmed);
     assert_eq!(claude(502, "{}"), Outcome::Unconfirmed);
-    assert_eq!(claude(408, "{}"), Outcome::Unconfirmed);
+    for status in [408, 409, 425, 429] {
+        assert_eq!(
+            claude(status, "{}"),
+            Outcome::Unconfirmed,
+            "HTTP {status} may mean the request is still being handled"
+        );
+    }
     assert_eq!(
         claude_claim(200, None).outcome,
         Outcome::Unconfirmed,
@@ -200,7 +239,7 @@ async fn upstream(state: Arc<Upstream>) -> String {
                 }
                 (
                     axum::http::StatusCode::OK,
-                    [("retry-after", "0")],
+                    [("cache-control", "no-store")],
                     axum::Json(json!({"five_hour": {"utilization": 100}, "cedar_ember": {
                     "eligible": true, "next_grant_id": "g-1",
                     "grants": [{"id": "g-1", "resets_left": 1, "ends_at": "2099-01-01T00:00:00Z",
@@ -453,6 +492,11 @@ async fn claims_refuse_before_sending_when_the_account_or_request_is_unsafe() {
             (status, Some(message)),
             "account {account}"
         );
+        assert_eq!(
+            body["code"] == "no_resets",
+            account == 2,
+            "only a refusal that always holds hides resets: account {account}"
+        );
     }
     assert!(
         h.upstream.claims.lock().unwrap().is_empty(),
@@ -463,16 +507,7 @@ async fn claims_refuse_before_sending_when_the_account_or_request_is_unsafe() {
 #[tokio::test]
 async fn one_claim_runs_per_account_at_a_time() {
     let h = harness().await;
-    let resets = &h.rt.quota_resets;
-    resets.claiming.lock().unwrap().insert(
-        h.rt.store()
-            .snapshot()
-            .into_iter()
-            .find(|c| auth_index(c) == h.indices[0])
-            .unwrap()
-            .id
-            .clone(),
-    );
+    h.rt.quota_resets.claiming.lock().unwrap().insert(h.id(0));
     let (status, body) = h.claim(0, "g-1", "req-1").await;
     assert_eq!(
         (status, body["error"].as_str()),
@@ -528,17 +563,49 @@ async fn an_unconfirmed_claim_keeps_the_quota_readings() {
 }
 
 #[tokio::test]
-async fn fresh_reads_skip_the_cache_unless_the_provider_asked_to_wait() {
+async fn fresh_reads_ask_again_at_most_every_few_minutes_and_honour_retry_after() {
     let h = harness().await;
+    let reads = || h.upstream.reads.load(Ordering::SeqCst);
     h.read(0).await;
     h.read_fresh(0).await;
-    assert_eq!(h.upstream.reads.load(Ordering::SeqCst), 2, "fresh=1 reads again");
+    assert_eq!(reads(), 1, "a fresh read right after a read is served from the cache");
+    h.rt.quota_resets.age_attempts().await;
+    h.read_fresh(0).await;
+    assert_eq!(reads(), 2, "fresh=1 reads again once the last attempt is old enough");
 
     h.upstream.read_limited.store(true, Ordering::SeqCst);
-    let (status, _) = h.read_fresh(0).await;
-    assert_eq!(status, 502);
+    h.rt.quota_resets.age_attempts().await;
+    let (status, body) = h.read_fresh(0).await;
+    assert_eq!(
+        (status, body["resets"][0]["id"].as_str()),
+        (200, Some("g-1")),
+        "a failed fresh read keeps serving the last good list"
+    );
+    assert_eq!(reads(), 3);
     h.upstream.read_limited.store(false, Ordering::SeqCst);
-    let (status, _) = h.read_fresh(0).await;
-    assert_eq!(status, 502, "Retry-After holds even for a fresh read");
-    assert_eq!(h.upstream.reads.load(Ordering::SeqCst), 3);
+    h.rt.quota_resets.age_attempts().await;
+    h.read_fresh(0).await;
+    assert_eq!(reads(), 3, "Retry-After holds even for a fresh read");
+}
+
+#[tokio::test]
+async fn a_failed_read_with_nothing_good_cached_is_served_until_it_expires() {
+    let h = harness().await;
+    h.upstream.read_limited.store(true, Ordering::SeqCst);
+    let (status, body) = h.read(0).await;
+    assert_eq!(status, 502, "{body}");
+    h.upstream.read_limited.store(false, Ordering::SeqCst);
+    let (status, _) = h.read(0).await;
+    assert_eq!(status, 502);
+    assert_eq!(h.upstream.reads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_finished_claim_frees_the_account_for_the_next_one() {
+    let h = harness().await;
+    for request in ["req-1", "req-2"] {
+        let (status, body) = h.claim(0, "g-1", request).await;
+        assert_eq!((status, body["outcome"].as_str()), (200, Some("applied")), "{body}");
+    }
+    assert_eq!(h.upstream.claims.lock().unwrap().len(), 2);
 }

@@ -26,6 +26,7 @@ Restart the binary to apply native configuration changes.
 | `maxAttempts` (accounts tried per request) | Default 3, range 1 to 16 |
 | Admission deadline | 60 seconds |
 | Cooldown on explicit 401, 403 or 429 | Whole account |
+| Quota reset used from the dashboard | Clears the account's cooldowns and stored limit readings |
 | Cooldown on 503 or 529 | Account and model pair; at 128 live model cooldowns on one account, further overloads cool the whole account |
 | Valid `Retry-After` | Bounded to 1 second to 15 minutes |
 | Cooldown without `Retry-After` | 60 seconds for quota, 15 seconds otherwise |

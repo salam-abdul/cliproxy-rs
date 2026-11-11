@@ -17,7 +17,7 @@ use crate::codex_json::{delete, set_raw, set_str};
 
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const USER_AGENT: &str = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)";
-pub(crate) const ORIGINATOR: &str = "codex-tui";
+pub const ORIGINATOR: &str = "codex-tui";
 pub(crate) const WS_BETA: &str = "responses_websockets=2026-02-06";
 const ROUTING_HINT: &str = "x-codex-routing-hint";
 const LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";

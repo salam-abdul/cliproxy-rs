@@ -89,12 +89,16 @@ await page.route("**/*", async route => {
     return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
   if (path === "/v8/management/quota/resets") {
-    if (request.method() === "POST") { resetClaims.push(request.postDataJSON()); return send({outcome:"applied",message:"Reset applied."}); }
+    if (request.method() === "POST") {
+      resetClaims.push(request.postDataJSON());
+      // The first claim's outcome is unknown; the retry lands.
+      return send(resetClaims.length === 1 ? {outcome:"unconfirmed",message:"The provider did not confirm the reset."} : {outcome:"applied",message:"Reset applied."});
+    }
     assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a", "disabled accounts are never asked for resets");
     resetReads++;
     resetFresh.push(new URL(request.url()).searchParams.get("fresh"));
-    if (resetRefused) return route.fulfill({status:400,json:{error:"Setup tokens cannot use resets. Connect Claude through the dashboard sign-in."}});
-    return send({eligible:true,resets:resetClaims.length ? [] : [{key:"g:0",id:"g",kind:"session",expires_at:"2099-01-01T00:00:00Z",usable:true,detail:"Refills your 5-hour limit now. This cannot be undone."}]});
+    if (resetRefused) return route.fulfill({status:400,json:{error:"Setup tokens cannot use resets. Connect Claude through the dashboard sign-in.",code:"no_resets"}});
+    return send({eligible:true,resets:resetClaims.length > 1 ? [] : [{key:"g:0",id:"g",kind:"session",expires_at:"2099-01-01T00:00:00Z",usable:true,detail:"Refills your 5-hour limit now. This cannot be undone."}]});
   }
   if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
   if (path === "/v8/management/observability/logs/errors") return send({files: [{name: "error-small.log", modified: 1893456000}, {name: "error-large.log", modified: 1893456000}]});
@@ -215,12 +219,16 @@ try {
   let resetQuestion = "";
   page.once("dialog", dialog => { resetQuestion = dialog.message(); dialog.accept(); });
   await page.getByRole("button", {name:"Use", exact:true}).click();
-  await page.getByText("No resets available.", {exact:true}).waitFor();
+  await page.getByText("The provider did not confirm the reset.").first().waitFor();
   assert.equal(resetQuestion, "Use this 5-hour reset? Refills your 5-hour limit now. This cannot be undone.");
-  assert.equal(resetClaims.length, 1);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", {name:"Use", exact:true}).click();
+  await page.getByText("No resets available.", {exact:true}).waitFor();
+  assert.equal(resetClaims.length, 2);
   assert.equal(resetClaims[0].auth_index, "a");
   assert.equal(resetClaims[0].reset_id, "g");
   assert.match(resetClaims[0].request_id, /^[\w-]{1,64}$/);
+  assert.equal(resetClaims[1].request_id, resetClaims[0].request_id, "a retry after an unconfirmed claim reuses its request id");
   await page.getByRole("button", {name:"Close",exact:true}).click();
   resetRefused = true;
   const refusedReads = resetReads;

@@ -1958,13 +1958,15 @@ async fn personal_scope_keeps_quota_probes_and_removes_plugin_routes() {
         "/v0/management/plugins",
         "/v0/resource/plugins/synthetic/file",
     ] {
-        let response = client
-            .get(format!("{base}{path}"))
-            .bearer_auth("fake-management-only")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 404, "{path}");
+        for method in [wreq::Method::GET, wreq::Method::POST] {
+            let response = client
+                .request(method.clone(), format!("{base}{path}"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404, "{method} {path}");
+        }
     }
     let before = f.file();
     let response = client

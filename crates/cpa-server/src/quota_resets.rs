@@ -16,12 +16,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 
-/// Anthropic rate-limits the grants read when it is polled, so each account is read at
-/// most once an hour.
+/// Anthropic rate-limits the grants read, which shares its endpoint with the usage read
+/// that native admission needs, so a read is served for an hour.
 const TTL: Duration = Duration::from_secs(3600);
-/// A failed read waits this long, or the provider's `Retry-After` up to [`TTL`].
+/// A fresh read asks the provider only when the last attempt is at least this old.
+const FRESH_AFTER: Duration = Duration::from_secs(300);
+/// A failed read is served this long, or for the provider's `Retry-After` up to [`TTL`].
 const FAILURE_TTL: Duration = Duration::from_secs(60);
 const CAPACITY: usize = 256;
+/// The longest grant or credit id listed or claimed.
+const ID_LIMIT: usize = 128;
 const BODY_LIMIT: usize = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,7 +101,7 @@ pub(crate) struct Claim {
 }
 
 impl Claim {
-    fn new(outcome: Outcome) -> Self {
+    pub(crate) fn new(outcome: Outcome) -> Self {
         let message = match outcome {
             Outcome::Applied => "Reset applied.",
             Outcome::NothingToReset => "This account's usage does not need a reset yet. Nothing was used.",
@@ -129,6 +133,8 @@ impl Claim {
 pub(crate) enum Refusal {
     Busy,
     Invalid(&'static str),
+    /// External requests are disabled.
+    External,
 }
 
 struct Endpoints {
@@ -145,12 +151,44 @@ impl Default for Endpoints {
     }
 }
 
+/// One account's reads, for one token.
 struct Cached {
-    expires: Instant,
     token: [u8; 32],
-    read: Result<Status, String>,
-    /// The provider asked to wait (`Retry-After`); a fresh read still waits.
-    backoff: bool,
+    attempted: Instant,
+    /// The last good read and when it stops being served.
+    good: Option<(Status, Instant)>,
+    /// The last failure and when it stops being served.
+    failure: Option<(String, Instant)>,
+    /// Until when the provider asked not to be read (`Retry-After`).
+    backoff: Option<Instant>,
+}
+
+impl Cached {
+    fn new(token: [u8; 32], now: Instant) -> Self {
+        Self {
+            token,
+            attempted: now,
+            good: None,
+            failure: None,
+            backoff: None,
+        }
+    }
+
+    /// What to answer without asking the provider, or `None` to ask it.
+    fn serve(&self, fresh: bool, now: Instant) -> Option<Result<Status, String>> {
+        let good = self.good.as_ref().filter(|(_, until)| *until > now).map(|(s, _)| s);
+        let failure = self.failure.as_ref().filter(|(_, until)| *until > now).map(|(e, _)| e);
+        let waiting = self.backoff.is_some_and(|until| until > now) || now < self.attempted + FRESH_AFTER;
+        if fresh && !waiting {
+            return None;
+        }
+        // A failure is served at least as long as its backoff lasts.
+        match (good, failure) {
+            (Some(good), _) => Some(Ok(good.clone())),
+            (None, Some(failure)) => Some(Err(failure.clone())),
+            (None, None) => None,
+        }
+    }
 }
 
 struct Slot {
@@ -237,6 +275,23 @@ impl QuotaResets {
         slot.value.clone()
     }
 
+    /// Moves every account's last attempt back past [`FRESH_AFTER`].
+    #[cfg(test)]
+    pub(crate) async fn age_attempts(&self) {
+        let slots: Vec<_> = self
+            .cache
+            .lock()
+            .unwrap()
+            .values()
+            .map(|slot| slot.value.clone())
+            .collect();
+        for slot in slots {
+            if let Some(cached) = slot.lock().await.as_mut() {
+                cached.attempted -= FRESH_AFTER;
+            }
+        }
+    }
+
     /// Drops the cached read so the next read asks the provider.
     pub(crate) async fn forget(&self, id: &str) {
         let value = self
@@ -250,33 +305,48 @@ impl QuotaResets {
         }
     }
 
-    /// The account's resets, from a read at most [`TTL`] old, or a new read when
-    /// `fresh` unless the provider asked to wait. Concurrent reads of one account share
-    /// a single upstream call.
+    /// The account's resets, from a read at most [`TTL`] old. With `fresh`, the provider
+    /// is asked again unless it was asked in the last [`FRESH_AFTER`] or asked to wait; a
+    /// failed fresh read keeps serving the last good one. Concurrent reads of one
+    /// account share a single upstream call.
     pub(crate) async fn status(&self, account: &Account, fresh: bool, deny_external: bool) -> Result<Status, String> {
+        // Checked before the cache, so turning external requests back on takes effect.
+        self.url(account.provider, "", deny_external)?;
         let token: [u8; 32] = Sha256::digest(account.token.as_bytes()).into();
         let slot = self.slot(&account.id);
         let mut cached = slot.lock().await;
-        if let Some(hit) = cached
+        let now = Instant::now();
+        if let Some(answer) = cached
             .as_ref()
-            .filter(|c| c.expires > Instant::now() && c.token == token && (!fresh || c.backoff))
+            .filter(|c| c.token == token)
+            .and_then(|c| c.serve(fresh, now))
         {
-            return hit.read.clone();
+            return answer.map(|status| unexpired(status, SystemTime::now()));
         }
-        let (read, ttl, backoff) = match self.read(account, deny_external).await {
-            Ok(status) => (Ok(status), TTL, false),
-            Err(e) => match e.retry_after {
-                Some(after) => (Err(e.message), after.clamp(FAILURE_TTL, TTL), true),
-                None => (Err(e.message), FAILURE_TTL, false),
-            },
-        };
-        *cached = Some(Cached {
-            expires: Instant::now() + ttl,
-            token,
-            read: read.clone(),
-            backoff,
-        });
-        read
+        if cached.as_ref().is_some_and(|c| c.token != token) {
+            *cached = None;
+        }
+        let entry = cached.get_or_insert_with(|| Cached::new(token, now));
+        let read = self.read(account, deny_external).await;
+        let now = Instant::now();
+        entry.attempted = now;
+        match read {
+            Ok(status) => {
+                entry.good = Some((status.clone(), now + TTL));
+                entry.failure = None;
+                entry.backoff = None;
+                Ok(status)
+            }
+            Err(e) => {
+                let wait = e.retry_after.map(|after| after.clamp(FAILURE_TTL, TTL));
+                entry.backoff = wait.map(|wait| now + wait);
+                entry.failure = Some((e.message.clone(), now + wait.unwrap_or(FAILURE_TTL)));
+                match entry.good.as_ref().filter(|(_, until)| *until > now) {
+                    Some((good, _)) => Ok(unexpired(good.clone(), SystemTime::now())),
+                    None => Err(e.message),
+                }
+            }
+        }
     }
 
     async fn read(&self, account: &Account, deny_external: bool) -> Result<Status, ReadError> {
@@ -309,8 +379,7 @@ impl QuotaResets {
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
+                .and_then(|v| retry_after(v, SystemTime::now()));
             return Err(ReadError {
                 message: match status {
                     401 => "The provider rejected the account's token (HTTP 401). Sign in again.".into(),
@@ -349,12 +418,7 @@ impl QuotaResets {
         }
         let (url, body) = match account.provider {
             Provider::Claude => {
-                if !reset
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-                    || reset.is_empty()
-                    || reset.len() > 40
-                {
+                if !token_like(reset, ID_LIMIT) {
                     return Err(Refusal::Invalid("reset_id is not a Claude grant id"));
                 }
                 let Some(organization) = account.organization.as_deref().filter(|o| uuid_like(o)) else {
@@ -368,19 +432,19 @@ impl QuotaResets {
                         &format!("/api/organizations/{organization}/reset_rate_limits"),
                         deny_external,
                     )
-                    .map_err(|_| Refusal::Invalid("External requests are disabled"))?;
+                    .map_err(|_| Refusal::External)?;
                 (
                     url,
                     json!({"program": "cedar_ember", "grant_id": reset, "request_id": request}),
                 )
             }
             Provider::Codex => {
-                if !token_like(reset, 128) {
+                if !token_like(reset, ID_LIMIT) {
                     return Err(Refusal::Invalid("reset_id is not a Codex credit id"));
                 }
                 let url = self
                     .url(Provider::Codex, "/rate-limit-reset-credits/consume", deny_external)
-                    .map_err(|_| Refusal::Invalid("External requests are disabled"))?;
+                    .map_err(|_| Refusal::External)?;
                 (url, json!({"credit_id": reset, "redeem_request_id": request}))
             }
         };
@@ -436,7 +500,7 @@ fn codex_headers(request: wreq::RequestBuilder, account: &Account) -> wreq::Requ
         .header("accept", "application/json")
         .header("user-agent", cpa_exec::codex::USER_AGENT)
         .header("openai-beta", "codex-1")
-        .header("originator", "Codex Desktop");
+        .header("originator", cpa_exec::codex::ORIGINATOR);
     match &account.chatgpt_account {
         Some(id) => request.header("chatgpt-account-id", id),
         None => request,
@@ -455,6 +519,27 @@ async fn read_body(response: wreq::Response) -> Option<Vec<u8>> {
         bytes.extend_from_slice(&chunk);
     }
     Some(bytes)
+}
+
+/// `Retry-After` as delta seconds or an HTTP date.
+fn retry_after(raw: &str, now: SystemTime) -> Option<Duration> {
+    let raw = raw.trim();
+    if let Ok(seconds) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    SystemTime::from(at).duration_since(now).ok()
+}
+
+/// `status` without the resets that expired while it was cached.
+fn unexpired(mut status: Status, now: SystemTime) -> Status {
+    status.resets.retain(|r| {
+        r.expires_at
+            .as_deref()
+            .and_then(crate::quota_time::rfc3339)
+            .is_none_or(|at| at > now)
+    });
+    status
 }
 
 fn token_like(s: &str, max: usize) -> bool {
@@ -503,7 +588,7 @@ fn claude_status(block: &Value, at: SystemTime) -> Status {
     }
     let next = block["next_grant_id"].as_str().filter(|s| !s.is_empty());
     for grant in block["grants"].as_array().into_iter().flatten() {
-        let Some(id) = grant["id"].as_str().filter(|s| !s.is_empty()) else {
+        let Some(id) = grant["id"].as_str().filter(|s| token_like(s, ID_LIMIT)) else {
             continue;
         };
         let left = grant["resets_left"].as_f64().unwrap_or(0.0).floor();
@@ -625,7 +710,9 @@ fn codex_status(body: &Value, at: SystemTime) -> Status {
     }
 }
 
-/// Status codes that prove the provider refused the claim before acting on it.
+/// Status codes that prove the provider refused the claim before acting on it. A
+/// timeout, a conflict, "too early" or a rate limit may mean the same request is still
+/// being handled, so they stay unconfirmed and the request id is kept for a retry.
 fn refused(status: u16, body: Option<&[u8]>) -> Option<Claim> {
     match status {
         401 => Some(Claim::failed(
@@ -634,7 +721,7 @@ fn refused(status: u16, body: Option<&[u8]>) -> Option<Claim> {
         403 if body.is_some_and(|b| String::from_utf8_lossy(b).contains("scope requirement")) => Some(Claim::failed(
             "This sign-in cannot use resets. Sign in again through the dashboard.",
         )),
-        400..=499 if status != 408 => Some(Claim::failed(format!(
+        400..=499 if !matches!(status, 408 | 409 | 425 | 429) => Some(Claim::failed(format!(
             "The provider refused the reset (HTTP {status})."
         ))),
         _ => None,

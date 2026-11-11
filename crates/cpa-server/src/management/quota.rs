@@ -205,6 +205,15 @@ fn refuse(status: StatusCode, message: &str) -> Box<Response> {
     Box::new(fail(status, message))
 }
 
+/// A refusal that holds for as long as the account exists: code `no_resets` tells the
+/// dashboard to stop offering resets for it.
+fn never(message: &str) -> Box<Response> {
+    Box::new(map_json(
+        StatusCode::BAD_REQUEST,
+        &json!({"error": message, "code": "no_resets"}),
+    ))
+}
+
 /// The account behind `index` with a usable token and its strict transport, or the
 /// refusal to send. Only enabled Claude and Codex sign-ins have resets.
 async fn reset_account(state: &Management, index: &str) -> Result<Account, Box<Response>> {
@@ -214,18 +223,17 @@ async fn reset_account(state: &Management, index: &str) -> Result<Account, Box<R
     let Some(auth) = credential(state, index) else {
         return Err(refuse(StatusCode::NOT_FOUND, "auth not found"));
     };
-    let Some(provider) = Provider::of(&auth.provider).filter(|_| !auth.disabled) else {
-        return Err(refuse(
-            StatusCode::BAD_REQUEST,
-            "An enabled Claude or Codex account is required",
-        ));
+    let Some(provider) = Provider::of(&auth.provider) else {
+        return Err(never("Only Claude and Codex accounts have resets"));
     };
+    if auth.disabled {
+        return Err(refuse(StatusCode::BAD_REQUEST, "The account is disabled"));
+    }
     if cpa_core::registry::dynamic::auth_kind(&auth) == Some("apikey") {
-        return Err(refuse(StatusCode::BAD_REQUEST, "API-key accounts have no resets"));
+        return Err(never("API-key accounts have no resets"));
     }
     if provider == Provider::Claude && cpa_exec::oauth::setup_token(&auth) {
-        return Err(refuse(
-            StatusCode::BAD_REQUEST,
+        return Err(never(
             "Setup tokens cannot use resets. Connect Claude through the dashboard sign-in.",
         ));
     }
@@ -269,7 +277,7 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Response {
 }
 
 /// `GET /quota/resets?auth_index=[&fresh=1]`: the account's available resets, from a
-/// read at most an hour old, or a new read with `fresh=1`.
+/// read at most an hour old; `fresh=1` asks for one at most five minutes old.
 pub(crate) async fn resets(
     State(state): State<Arc<Management>>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -327,10 +335,11 @@ pub(crate) async fn claim_reset(State(state): State<Arc<Management>>, body: Byte
         Ok(Ok(claim)) => json_reply(&claim),
         Ok(Err(Refusal::Busy)) => fail(StatusCode::CONFLICT, "A reset is already being applied to this account"),
         Ok(Err(Refusal::Invalid(message))) => fail(StatusCode::BAD_REQUEST, message),
-        Err(_) => fail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The reset claim stopped unexpectedly",
-        ),
+        Ok(Err(Refusal::External)) => fail(StatusCode::BAD_GATEWAY, "External requests are disabled"),
+        // The task may have stopped after the send.
+        Err(_) => json_reply(&crate::quota_resets::Claim::new(
+            crate::quota_resets::Outcome::Unconfirmed,
+        )),
     }
 }
 
@@ -351,6 +360,9 @@ async fn settle(state: &Management, account: &Account, claim: &crate::quota_rese
     let id = account.id.clone();
     // Clearing cooldowns may persist them to disk.
     let _ = tokio::task::spawn_blocking(move || rt.store().reset_cooldowns(&id)).await;
+    if account.provider != Provider::Claude {
+        return;
+    }
     let native = state
         .rt
         .native_state

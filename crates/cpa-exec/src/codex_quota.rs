@@ -455,7 +455,10 @@ impl QuotaSignals {
     /// Drops the credential's snapshots, so its quota counts as unknown until the next
     /// response reports it.
     pub fn forget(&self, credential_id: &str) {
-        self.snapshots.lock().expect("quota snapshots").remove(credential_id);
+        self.snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(credential_id);
     }
 
     /// Drops state for credentials that no longer exist.

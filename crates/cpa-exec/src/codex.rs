@@ -5,7 +5,7 @@
 //! upstream lives in `codex_ws`.
 
 /// The Codex CLI identity sent on Codex requests.
-pub use crate::codex_request::USER_AGENT;
+pub use crate::codex_request::{ORIGINATOR, USER_AGENT};
 use std::sync::Arc;
 use std::time::Instant;
 

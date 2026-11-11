@@ -1,5 +1,5 @@
 // Enforces the bundle budget after `vite build`; the build fails if either grows past it.
-// Gzip ceilings sit about 1% above the bundle; quota resets raised the JS ceiling.
+// Gzip ceilings sit about 1% above the bundle.
 import { readdirSync, readFileSync, copyFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 

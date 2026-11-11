@@ -1,7 +1,7 @@
 name: Docker image
 
 # Publishes ghcr.io/<owner>/cliproxy-rs for linux/amd64 and linux/arm64 after CI passes on a
-# push to main, or by hand. Each architecture builds on its own native runner and pushes by
+# push to main, or by hand from main. Each architecture builds on its own native runner and pushes by
 # digest; the merge job then tags one multi-architecture manifest.
 on:
   workflow_run:
@@ -22,7 +22,7 @@ jobs:
   build:
     name: build (${{ matrix.platform }})
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     strategy:
       fail-fast: true
