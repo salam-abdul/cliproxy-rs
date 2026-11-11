@@ -61,16 +61,20 @@ fn tls() -> Arc<SslAcceptor> {
 }
 impl Fixture {
     async fn new(reply: Reply) -> Self {
-        Self::build(reply, None, None).await
+        Self::build(reply, None, None, None).await
     }
     async fn with_history(reply: Reply, history: &Path) -> Self {
-        Self::build(reply, Some(history), None).await
+        Self::build(reply, Some(history), None, None).await
     }
     /// With history, and account `a` backed by `credential` in the runtime's store.
     async fn with_credential(reply: Reply, history: &Path, credential: Credential) -> Self {
-        Self::build(reply, Some(history), Some(credential)).await
+        Self::build(reply, Some(history), Some(credential), None).await
     }
-    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>) -> Self {
+    /// Account `a` uses the outbound proxy at `proxy`.
+    async fn with_proxy(reply: Reply, proxy: &str) -> Self {
+        Self::build(reply, None, None, Some(proxy)).await
+    }
+    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>, proxy: Option<&str>) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -141,7 +145,7 @@ impl Fixture {
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
             "fixtureAccounts":[
-                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default()},
+                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default(),"proxyUrl":proxy},
                 {"id":"b","token":"token-b","quota":quota}
             ],
             "upstream":{"hostname":"127.0.0.1","port":port}
@@ -177,17 +181,7 @@ impl Fixture {
             ),
             config: native,
             rt,
-            client: wreq::Client::builder()
-                .no_proxy()
-                .tls_cert_verification(false)
-                .retry(wreq::retry::Policy::never())
-                .redirect(wreq::redirect::Policy::none())
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .no_zstd()
-                .build()
-                .unwrap(),
+            clients: Clients::new(|| native_client().tls_cert_verification(false)).unwrap(),
             tls: std::sync::RwLock::new(tls),
             secret: "synthetic-secret".into(),
             routing: Default::default(),
@@ -677,4 +671,70 @@ async fn a_skipped_account_file_is_reported_once_per_reason() {
     fixture.state.report_skipped(Vec::new());
     fixture.state.report_skipped(skip(Skip::Unreadable));
     assert_eq!(reported().len(), 3);
+}
+
+/// A loopback HTTP CONNECT proxy that records each request line and tunnels to the
+/// requested loopback target.
+async fn connect_proxy() -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = requests.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if client.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                log.lock().unwrap().push(line.clone());
+                let Some(target) = line.strip_prefix("CONNECT ").and_then(|rest| rest.split(' ').next()) else {
+                    return;
+                };
+                let Ok(mut upstream) = TcpStream::connect(target).await else {
+                    return;
+                };
+                client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    (url, requests, task)
+}
+
+/// An account with its own proxy sends inference, and its token, only through it.
+#[tokio::test]
+async fn an_account_proxy_carries_its_inference() {
+    let (proxy, requests, task) = connect_proxy().await;
+    let fixture = Fixture::with_proxy(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        &proxy,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap(), SUCCESS);
+    assert_eq!(fixture.seen.lock().unwrap()[0].0, "Bearer token-a");
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].starts_with("CONNECT 127.0.0.1:"), "{requests:?}");
+    task.abort();
 }

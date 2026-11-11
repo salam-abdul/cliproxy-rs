@@ -9,6 +9,7 @@ Native routing keeps one Claude Code, Desktop or Zed conversation on one subscri
 - Inference uses a ten-minute read timeout, the native SDK's allowance.
 - A lost response or partial stream is never replayed. The proxy neither holds requests until quota resets nor resubmits conversation turns, and sends no inference keepalive requests.
 - Transport-failure diagnostics record only an error class and elapsed time, never raw error strings or request contents.
+- An account's inference and usage reads go through its `proxy_url`, or `requests.proxy-url` when it has none ([Configuration](../docs/CONFIGURATION.md)). Without either, or with `direct`, they connect directly and ignore `HTTPS_PROXY`. An account whose proxy setting is unusable is skipped, never sent directly. Requests that keep the native Claude login, and tunnels to other hosts, connect directly.
 
 ## Account selection
 
@@ -139,7 +140,7 @@ Do not set `ANTHROPIC_BASE_URL` to the proxy's management address. Custom base U
 
 OAuth files use the upstream JSON format, with directories at mode 0700 and files at 0600. Never commit this state.
 
-Routing leaves out an account file that is outside the auth directory, a symlink, readable by group or others, missing, or not Claude credential JSON, and every file of an identity that two files share. The other accounts keep routing. Each skipped file is logged and reported once, in `GET /v8/management/observability/native/events`, as an `account-skipped` event with its file name and reason; nothing from the file is recorded.
+Routing leaves out an account file that is outside the auth directory, a symlink, readable by group or others, missing, not Claude credential JSON, or set to an unusable proxy, and every file of an identity that two files share. The other accounts keep routing. Each skipped file is logged and reported once, in `GET /v8/management/observability/native/events`, as an `account-skipped` event with its file name and reason; nothing from the file is recorded.
 
 Updates are manual and pinned. Stop the login service, then run:
 

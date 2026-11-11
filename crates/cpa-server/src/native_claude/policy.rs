@@ -105,6 +105,7 @@ mod tests {
             disabled: false,
             expired: false,
             quota: json!({"five_hour":{"utilization":used},"seven_day":{"utilization":used,"resets_at":reset}}),
+            proxy_url: None,
         };
         let pool = vec![
             make("low", 98., "2033-05-18T04:33:20Z"),
