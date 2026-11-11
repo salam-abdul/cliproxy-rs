@@ -27,6 +27,7 @@ Out of scope: the plugin host, packaged releases, upstream CI, Go parity fixture
 
 - `cpa_core::config::go_url` follows Go 1.27.3 `parseHost` (a `[` only at the host start, strict colons for http and https only, no empty zone), not the older Go behind `xai_auth_go.json`: that parser accepts `https://attacker.example\[::1%25.x.ai]/` as an x.ai host while the HTTP client would contact `attacker.example`, so it now fails closed as `invalid IP-literal`; `xai_url::same_authority` stays as the second guard.
 
+- The Go `GET /v8/management/server/latest-version` and `/v0/management/latest-version` release checks are not served; this fork has no release feed. `POST /v0/management/quota/fetch` answers 400 for a `plugin_id` and 422 for a credential without a usable quota probe, where Go answered 501.
 - The Go `POST /v0/management/quota/reset` plugin hook is not served. `GET` and `POST /v8/management/quota/resets` list and spend the Claude grants and Codex credits that the providers expose, with no plugin layer.
 
 ## Next review

@@ -439,10 +439,6 @@ pub fn router(state: Arc<Management>) -> Router {
             );
     }
     for (path, route) in [
-        (
-            "server/latest-version",
-            methods().get(guarded!(s, observability::latest_version)),
-        ),
         ("requests/api-call", methods().post(guarded!(s, api_call::api_call))),
         (
             "routing/cooldown/reset",
@@ -514,10 +510,6 @@ pub fn router(state: Arc<Management>) -> Router {
         router = router.route(&format!("{v8}/{path}"), route);
     }
     for (path, route) in [
-        (
-            "latest-version",
-            methods().get(guarded!(s, observability::latest_version)),
-        ),
         ("api-call", methods().post(guarded!(s, api_call::api_call))),
         ("reset-quota", methods().post(guarded!(s, auth_files::cooldown_reset))),
         (

@@ -186,7 +186,7 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
         return fail(StatusCode::NOT_FOUND, "auth not found");
     };
     if !body.plugin_id.trim().is_empty() {
-        return fail(StatusCode::NOT_IMPLEMENTED, "plugins are not supported");
+        return fail(StatusCode::BAD_REQUEST, "plugin_id is not supported");
     }
     if let Some(probe) = auth.metadata.get("quota_probe").and_then(Value::as_object) {
         match super::quota_probe::execute(&state, &auth, probe).await {
@@ -196,8 +196,8 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
         }
     }
     fail(
-        StatusCode::NOT_IMPLEMENTED,
-        "no quota provider available for credential",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "This credential has no usable quota probe",
     )
 }
 
