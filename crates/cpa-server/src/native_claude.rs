@@ -1104,14 +1104,23 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         }
     });
     let s1 = s.clone();
-    let a = tokio::spawn(async move {
-        while let Ok((io, _)) = plain.accept().await {
-            let s = s1.clone();
-            tokio::spawn(connection(io, s, true));
-        }
-    });
-    let b = tokio::spawn(async move {
-        while let Ok((io, _)) = secure.accept().await {
+    let plain = Arc::new(plain);
+    let a = tokio::spawn(accept_loop(
+        move || {
+            let plain = plain.clone();
+            async move { plain.accept().await }
+        },
+        move |(io, _)| {
+            tokio::spawn(connection(io, s1.clone(), true));
+        },
+    ));
+    let secure = Arc::new(secure);
+    let b = tokio::spawn(accept_loop(
+        move || {
+            let secure = secure.clone();
+            async move { secure.accept().await }
+        },
+        move |(io, _)| {
             let s = s.clone();
             tokio::spawn(async move {
                 if let Ok(ssl) = new_ssl(&s)
@@ -1124,13 +1133,24 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
                     connection(tls, s, true).await;
                 }
             });
-        }
-    });
+        },
+    ));
     println!(
         "Native Claude transparent router ready on loopback:{}",
         c.http_proxy_port
     );
     Ok(Running(vec![a, b, certificate, health], owner))
+}
+
+/// Hands every connection `accept` yields to `handle`. An accept error never ends the
+/// loop, so one aborted handshake or a full descriptor table cannot stop native traffic.
+async fn accept_loop<T, F>(mut accept: impl FnMut() -> F, mut handle: impl FnMut(T))
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    loop {
+        handle(crate::listener::next_connection(&mut accept).await);
+    }
 }
 
 fn load_tls(c: &Config) -> anyhow::Result<Arc<SslAcceptor>> {
@@ -1250,6 +1270,33 @@ mod tests {
             choose_account("existing", &pool, &routing, &tried, at).unwrap().id,
             "sooner"
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn native_listeners_keep_accepting_after_accept_errors() {
+        use std::io::{Error, ErrorKind};
+        let mut script = std::collections::VecDeque::from([
+            Err(Error::from(ErrorKind::ConnectionAborted)),
+            Err(Error::other("descriptor table full")),
+            Ok(1),
+            Err(Error::from(ErrorKind::ConnectionReset)),
+            Ok(2),
+        ]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(accept_loop(
+            move || {
+                let next = script.pop_front();
+                async move {
+                    match next {
+                        Some(result) => result,
+                        None => std::future::pending().await,
+                    }
+                }
+            },
+            move |conn: u8| tx.send(conn).unwrap(),
+        ));
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        task.abort();
     }
     #[test]
     fn reset_ranking_uses_weekly_not_short_window_and_unknown_dates_rank_last() {

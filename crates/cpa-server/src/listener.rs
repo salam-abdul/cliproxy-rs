@@ -90,17 +90,7 @@ pub async fn serve_with_resp(
     management: Option<Arc<crate::management::Management>>,
 ) -> std::io::Result<()> {
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            // As axum's serve loop: connection errors are the peer's problem; anything
-            // else (EMFILE) backs off.
-            Err(e) if is_connection_error(&e) => continue,
-            Err(e) => {
-                tracing::error!("accept error: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                continue;
-            }
-        };
+        let (stream, peer) = next_connection(|| listener.accept()).await;
         go_socket_defaults(&stream);
         let (app, management, tls) = (app.clone(), management.clone(), tls.clone());
         let deadline = tokio::time::Instant::now() + HANDSHAKE_DEADLINE;
@@ -190,6 +180,25 @@ impl<I: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Prefixed<I> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// The next accepted connection. As axum's serve loop: connection errors are the peer's
+/// problem and are skipped; anything else (EMFILE) is logged and backs off one second.
+/// An accept loop never ends on an error.
+pub(crate) async fn next_connection<T, F>(mut accept: impl FnMut() -> F) -> T
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(conn) => return conn,
+            Err(e) if is_connection_error(&e) => {}
+            Err(e) => {
+                tracing::error!("accept error: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 
