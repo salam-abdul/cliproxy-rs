@@ -10,6 +10,7 @@ import {
   fieldPath,
   level,
   quotaColumns,
+  nextTheme,
   resetSummary,
   lineDiff,
   quotaWindows,
@@ -213,6 +214,10 @@ test("compact quota columns place each limit by window length, not by order", ()
   assert.deepEqual(quotaColumns(devin).map((w) => w?.label), ["Daily", "Weekly"]);
   const unknown = quotaWindows("kimi", { usages: { a: { used: 1, limit: 2 }, b: { used: 1, limit: 4 }, c: { used: 0, limit: 1 } } });
   assert.deepEqual(quotaColumns(unknown), unknown.slice(0, 2), "no stated lengths keep the first two in order");
+});
+
+test("the theme button cycles auto, light, dark and back to auto", () => {
+  assert.deepEqual([nextTheme("auto"), nextTheme("light"), nextTheme("dark"), nextTheme("anything")], ["light", "dark", "auto", "auto"]);
 });
 
 test("reset summary counts resets and names the soonest expiry", () => {

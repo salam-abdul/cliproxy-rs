@@ -110,6 +110,12 @@ try {
   await settle();
   assert.equal(checks, 0, "Overview never checks provider quotas on its own");
   assert.equal(resetReads, 0, "Overview never reads quota resets on its own");
+  const theme = () => page.evaluate(() => [document.documentElement.dataset.theme ?? "auto", localStorage.getItem("cliproxy-theme")]);
+  assert.deepEqual(await theme(), ["auto", null], "the theme follows the system until chosen");
+  for (const [label, expected] of [["Theme: auto. Use light", ["light", "light"]], ["Theme: light. Use dark", ["dark", "dark"]], ["Theme: dark. Use auto", ["auto", null]]]) {
+    await page.getByRole("button", {name: label, exact: true}).first().click();
+    assert.deepEqual(await theme(), expected, label);
+  }
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0);
   assert.equal(await page.locator(".toast").isVisible(), false, "an empty toast region is hidden");
   await page.getByRole("button", { name: "Check quotas", exact: true }).click();
