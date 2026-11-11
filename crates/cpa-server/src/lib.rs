@@ -30,6 +30,7 @@ pub mod native_claude;
 pub mod observability;
 mod openai;
 pub mod persist;
+mod quota_resets;
 mod quota_time;
 mod realtime;
 mod refresh;

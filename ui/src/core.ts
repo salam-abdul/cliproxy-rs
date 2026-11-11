@@ -285,6 +285,18 @@ export function claudeWindows(payload: Data): Window[] {
   return out;
 }
 
+/** One of an account's quota resets, as `/quota/resets` lists them. */
+export type Reset = { key: string; id: string; kind: string; expires_at: string | null; usable: boolean; blocked?: string; detail: string };
+const resetKinds: Data = { session: "5-hour reset", weekly: "Weekly reset", fable: "Fable reset", full: "Full reset" };
+export const resetLabel = (r: Reset) => resetKinds[r.kind] || "Reset";
+/** "2 resets · soonest expires in 3d", or "" when there are none. */
+export function resetSummary(resets: Reset[] | undefined, now: number): string {
+  if (!resets?.length) return "";
+  const soonest = Math.min(...resets.map((r) => Date.parse(r.expires_at || "") || Infinity));
+  const count = `${resets.length} reset${resets.length > 1 ? "s" : ""}`;
+  return soonest < Infinity ? `${count} · soonest expires in ${span(soonest - now)}` : count;
+}
+
 /** A Codex rate-limit window by its length, as the Codex CLI names them. */
 const codexWindow = (seconds: number, fallback: string) =>
   seconds === 18_000 ? "5-hour limit" : seconds === 604_800 ? "Weekly limit" : seconds > 0 ? `${span(seconds * 1000)} limit` : fallback;

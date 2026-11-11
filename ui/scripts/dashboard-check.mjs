@@ -15,6 +15,8 @@ let requireKey = false, quotaStarted, expired = false, availability = "included"
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
+let resetReads = 0;
+const resetClaims = [];
 const creds = [{ name: "account-a.json", auth_index: "a", provider: "claude", status: "active" },
   { name: "disabled.json", auth_index: "b", provider: "claude", disabled: true }];
 const access = (status, method, path, id = "0a1b2c3d") => `[2030-01-01 10:00:00] [${id}] [info ] ${status} |          12ms |       127.0.0.1 | ${method.padEnd(7)} "${path}"`;
@@ -84,6 +86,12 @@ await page.route("**/*", async route => {
     const body = { five_hour: { utilization: 23, resets_at: "2030-01-01T00:00:00Z" }, seven_day_opus: {utilization:42}, extra_usage:{is_enabled:true,used_credits:100,monthly_limit:1000} };
     return fail ? route.fulfill({status:502,json:{error:"Claude usage provider answered HTTP 503"}}) : send(body);
   }
+  if (path === "/v8/management/quota/resets") {
+    if (request.method() === "POST") { resetClaims.push(request.postDataJSON()); return send({outcome:"applied",message:"Reset applied."}); }
+    assert.equal(new URL(request.url()).searchParams.get("auth_index"), "a", "disabled accounts are never asked for resets");
+    resetReads++;
+    return send({eligible:true,resets:resetClaims.length ? [] : [{key:"g:0",id:"g",kind:"session",expires_at:"2099-01-01T00:00:00Z",usable:true,detail:"Refills your 5-hour limit now. This cannot be undone."}]});
+  }
   if (path === "/v8/management/observability/logs") return send({lines: logLines, "next-cursor": ""});
   if (path === "/v8/management/observability/logs/errors") return send({files: [{name: "error-small.log", modified: 1893456000}, {name: "error-large.log", modified: 1893456000}]});
   if (path === "/v8/management/observability/logs/errors/error-small.log") return route.fulfill({body: "upstream status 502"});
@@ -101,11 +109,14 @@ try {
   await page.clock.fastForward(120_000);
   await settle();
   assert.equal(checks, 0, "Overview never checks provider quotas on its own");
+  assert.equal(resetReads, 0, "Overview never reads quota resets on its own");
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0);
   assert.equal(await page.locator(".toast").isVisible(), false, "an empty toast region is hidden");
   await page.getByRole("button", { name: "Check quotas", exact: true }).click();
   await page.getByRole("meter", {name:"5-hour limit remaining"}).waitFor({timeout:5000});
   assert.equal(checks, 1, "a manual check reaches only the enabled account");
+  await page.getByText(/^1 reset · soonest expires in /).waitFor();
+  assert.equal(resetReads, 1, "a manual check reads resets for the enabled account only");
   await page.getByText("Updated just now", {exact:true}).waitFor();
   assert.deepEqual(await page.locator(".top .nav a").allInnerTexts(), ["Overview", "Accounts", "Activity", "Settings"]);
   await page.goto("http://dashboard.test/management.html#quotas/account-a.json");
@@ -188,6 +199,16 @@ try {
   await page.getByRole("button", {name:"account-a.json"}).first().click();
   await page.getByRole("dialog", {name:/account-a.json details/}).waitFor();
   assert.equal(await page.getByText("Extra usage", {exact:true}).count(), 1, "account details retain additional quota windows");
+  await page.getByText("5-hour reset", {exact:true}).waitFor();
+  let resetQuestion = "";
+  page.once("dialog", dialog => { resetQuestion = dialog.message(); dialog.accept(); });
+  await page.getByRole("button", {name:"Use", exact:true}).click();
+  await page.getByText("No resets available.", {exact:true}).waitFor();
+  assert.equal(resetQuestion, "Use this 5-hour reset? Refills your 5-hour limit now. This cannot be undone.");
+  assert.equal(resetClaims.length, 1);
+  assert.equal(resetClaims[0].auth_index, "a");
+  assert.equal(resetClaims[0].reset_id, "g");
+  assert.match(resetClaims[0].request_id, /^[\w-]{1,64}$/);
   await page.getByRole("button", {name:"Close",exact:true}).click();
 
   await page.setViewportSize({width:1280,height:900});

@@ -7,7 +7,8 @@
   import { accountStatus } from "../accounts";
   import { requestBuckets } from "../history";
   import { checkAll } from "../quota";
-  import { credName, provider, label, type Data } from "../core";
+  import { loadResets } from "../resets";
+  import { credName, provider, label, resetSummary, type Data } from "../core";
   $effect(() => every(15000, () => store.creds.load(true), true));
   const enabled = $derived(!!store.native.data?.enabled);
   $effect(() => {
@@ -30,6 +31,7 @@
     refreshing = true;
     try {
       await checkAll(store.creds.data || [], () => mounted);
+      for (const a of store.creds.data || []) if (mounted) await loadResets(a);
       if (mounted) await store.native.load(true);
     } finally {
       refreshing = false;
@@ -139,7 +141,9 @@
           <span class="account-state"
             ><span class="muted">{label(provider(a))}</span><span class="lamp {state.lamp}"
             ></span><span>{state.label}</span>{#if state.detail}<span class="muted">· {state.detail}</span>{/if}</span
-          >
+          >{#if resetSummary(store.resets[a.auth_index]?.resets, store.serverNow)}<span class="muted small"
+              >{resetSummary(store.resets[a.auth_index]?.resets, store.serverNow)}</span
+            >{/if}
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">

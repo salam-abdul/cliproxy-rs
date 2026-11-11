@@ -457,6 +457,12 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().get(guarded!(s, quota::claude_usage)),
         ),
         (
+            "quota/resets",
+            methods()
+                .get(guarded!(s, quota::resets))
+                .post(guarded!(s, quota::claim_reset)),
+        ),
+        (
             "observability/native/status",
             methods().get(guarded!(s, observability::native_status)),
         ),
@@ -535,8 +541,7 @@ pub fn router(state: Arc<Management>) -> Router {
             &format!("{v0}/quota/providers"),
             methods().get(guarded!(s, quota::providers)),
         )
-        .route(&format!("{v0}/quota/fetch"), methods().post(guarded!(s, quota::fetch)))
-        .route(&format!("{v0}/quota/reset"), methods().post(guarded!(s, quota::reset)));
+        .route(&format!("{v0}/quota/fetch"), methods().post(guarded!(s, quota::fetch)));
     // Go's remaining v0 routes, adapted over the v8 handlers (management/legacy.rs).
     router = router.route(&format!("{v0}/config"), methods().get(guarded!(s, legacy::config)));
     for path in legacy::FIELD_ROUTES {

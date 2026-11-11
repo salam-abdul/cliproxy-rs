@@ -215,6 +215,36 @@ pub(super) fn client_for(
         .or_else(direct)
 }
 
+/// [`client_for`] for an action that cannot be undone: the first configured proxy, the
+/// credential's own and then the global one, must build. An unusable proxy yields no
+/// client instead of a fallback to another route.
+pub(super) fn strict_client_for(state: &Management, c: &Credential) -> Option<wreq::Client> {
+    let own = c
+        .attributes
+        .get("proxy_url")
+        .map(String::as_str)
+        .or_else(|| c.str("proxy_url"))
+        .unwrap_or_default()
+        .to_owned();
+    let cfg = state.rt.config();
+    let global = cfg
+        .document
+        .get("requests")
+        .and_then(|r| r.get("proxy-url"))
+        .and_then(serde_yaml_ng::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let chosen = [own, global]
+        .into_iter()
+        .map(|raw| Proxy::parse(&raw))
+        .find(|p| *p != Proxy::Inherit)
+        .unwrap_or(Proxy::Direct);
+    match chosen {
+        p @ (Proxy::Url(_) | Proxy::Direct) => state.clients.try_get(&p),
+        Proxy::Inherit | Proxy::Invalid => None,
+    }
+}
+
 pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) -> Response {
     let Some(mut req) = decode(&body) else {
         return fail(StatusCode::BAD_REQUEST, "invalid body");

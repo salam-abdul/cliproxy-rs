@@ -10,6 +10,7 @@ import {
   fieldPath,
   level,
   quotaColumns,
+  resetSummary,
   lineDiff,
   quotaWindows,
   claudeWindows,
@@ -212,6 +213,15 @@ test("compact quota columns place each limit by window length, not by order", ()
   assert.deepEqual(quotaColumns(devin).map((w) => w?.label), ["Daily", "Weekly"]);
   const unknown = quotaWindows("kimi", { usages: { a: { used: 1, limit: 2 }, b: { used: 1, limit: 4 }, c: { used: 0, limit: 1 } } });
   assert.deepEqual(quotaColumns(unknown), unknown.slice(0, 2), "no stated lengths keep the first two in order");
+});
+
+test("reset summary counts resets and names the soonest expiry", () => {
+  const row = (expires_at: string | null) => ({ key: "k", id: "i", kind: "full", expires_at, usable: true, detail: "" });
+  const now = Date.parse("2033-01-01T00:00:00Z");
+  assert.equal(resetSummary([], now), "");
+  assert.equal(resetSummary(undefined, now), "");
+  assert.equal(resetSummary([row(null)], now), "1 reset");
+  assert.equal(resetSummary([row("2033-01-04T00:00:00Z"), row(null), row("2033-01-02T00:00:00Z")], now), "3 resets · soonest expires in 24h");
 });
 
 test("passive limits from Codex headers and Devin quota", () => {

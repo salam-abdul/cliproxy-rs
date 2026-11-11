@@ -456,7 +456,9 @@ fn refresh_due(credential: &Credential, now: DateTime<Utc>) -> bool {
             .is_some_and(|expiry| expiry <= now + chrono::Duration::hours(4))
 }
 
-fn setup_token(credential: &Credential) -> bool {
+/// A Claude setup token. Its scopes exclude the account profile, so account
+/// endpoints refuse it.
+pub fn setup_token(credential: &Credential) -> bool {
     ["skip_account_profile", "is_setup_token", "setup_token"]
         .iter()
         .any(|key| credential.metadata.get(*key).and_then(Value::as_bool) == Some(true))

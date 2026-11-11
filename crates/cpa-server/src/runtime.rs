@@ -56,6 +56,7 @@ pub struct Runtime {
     /// Usage records for `GET /observability/usage/queue` (management configures it).
     usage: Arc<crate::usage::UsageQueue>,
     pub(crate) claude_usage: crate::claude_usage::ClaudeUsage,
+    pub(crate) quota_resets: crate::quota_resets::QuotaResets,
     pub(crate) native_state: RwLock<std::sync::Weak<crate::native_claude::State>>,
     pub(crate) native_events: crate::native_claude::diagnostics::Diagnostics,
     /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
@@ -119,6 +120,7 @@ impl Runtime {
             native_events: Default::default(),
             native_state: Default::default(),
             claude_usage: Default::default(),
+            quota_resets: Default::default(),
             local_model: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
@@ -723,6 +725,12 @@ impl Runtime {
         let cfg = self.config();
         let revision = self.store.get(id).map(|c| c.revision);
         self.prepare_credential(id, &cfg, revision).await
+    }
+
+    /// The credential with a usable token: prepared first only when its executor says
+    /// preparation is due, under the same single-flight lock as request preparation.
+    pub(crate) async fn ready_credential(&self, id: &str) -> Result<Arc<Credential>, ExecError> {
+        self.prepare_credential(id, &self.config(), None).await
     }
 }
 

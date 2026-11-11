@@ -10,6 +10,7 @@ use cpa_core::credential::Credential;
 use serde_json::{Value, json};
 
 use super::Management;
+use crate::quota_resets::{Account, Provider, Refusal};
 
 fn map_json(status: StatusCode, value: &Value) -> Response {
     go_json(status, crate::gojson::sorted(value).into_bytes())
@@ -200,19 +201,125 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
     )
 }
 
-pub(crate) async fn reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
-    let Some(body) = QuotaBody::decode(&body) else {
-        return fail(StatusCode::BAD_REQUEST, "invalid request body");
-    };
-    let index = body.auth_index();
+fn refuse(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new(fail(status, message))
+}
+
+/// The account behind `index` with a usable token and its strict transport, or the
+/// refusal to send. Only enabled Claude and Codex sign-ins have resets.
+async fn reset_account(state: &Management, index: &str) -> Result<Account, Box<Response>> {
     if index.is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "auth_index is required");
+        return Err(refuse(StatusCode::BAD_REQUEST, "auth_index is required"));
     }
-    if credential(&state, &index).is_none() {
-        return fail(StatusCode::NOT_FOUND, "auth not found");
+    let Some(auth) = credential(state, index) else {
+        return Err(refuse(StatusCode::NOT_FOUND, "auth not found"));
+    };
+    let Some(provider) = Provider::of(&auth.provider).filter(|_| !auth.disabled) else {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "An enabled Claude or Codex account is required",
+        ));
+    };
+    if cpa_core::registry::dynamic::auth_kind(&auth) == Some("apikey") {
+        return Err(refuse(StatusCode::BAD_REQUEST, "API-key accounts have no resets"));
     }
-    fail(
-        StatusCode::NOT_IMPLEMENTED,
-        "no quota provider available for credential to reset",
-    )
+    if provider == Provider::Claude && cpa_exec::oauth::setup_token(&auth) {
+        return Err(refuse(
+            StatusCode::BAD_REQUEST,
+            "Setup tokens cannot use resets. Connect Claude through the dashboard sign-in.",
+        ));
+    }
+    let auth = state.rt.ready_credential(&auth.id).await.map_err(|_| {
+        refuse(
+            StatusCode::BAD_GATEWAY,
+            "The account's sign-in could not be refreshed. Sign in again.",
+        )
+    })?;
+    let token = super::api_call::token_for(&auth);
+    if token.is_empty() {
+        return Err(refuse(StatusCode::BAD_REQUEST, "The account has no access token"));
+    }
+    let Some(client) = super::api_call::strict_client_for(state, &auth) else {
+        return Err(refuse(StatusCode::BAD_GATEWAY, "The account's proxy cannot be used"));
+    };
+    let text = |key: &str| {
+        auth.str(key)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let account = Account {
+        provider,
+        id: auth.id.clone(),
+        token,
+        client,
+        claude_user_agent: cpa_exec::claude::user_agent(&state.rt.config()),
+        organization: text("organization_uuid"),
+        chatgpt_account: text("account_id"),
+    };
+    Ok(account)
+}
+
+fn deny_external(state: &Management) -> bool {
+    state.rt.deny_external.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn json_reply<T: serde::Serialize>(value: &T) -> Response {
+    let body = serde_json::to_vec(value).unwrap_or_default();
+    go_json(StatusCode::OK, body)
+}
+
+/// `GET /quota/resets?auth_index=`: the account's available resets, from a read at most
+/// an hour old.
+pub(crate) async fn resets(
+    State(state): State<Arc<Management>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let index = query.get("auth_index").map(|s| s.trim()).unwrap_or_default();
+    let account = match reset_account(&state, index).await {
+        Ok(account) => account,
+        Err(response) => return *response,
+    };
+    match state.rt.quota_resets.status(&account, deny_external(&state)).await {
+        Ok(status) => json_reply(&status),
+        Err(message) => fail(StatusCode::BAD_GATEWAY, &message),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimBody {
+    auth_index: String,
+    reset_id: String,
+    request_id: String,
+}
+
+/// `POST /quota/resets`: spends one reset. Any answer from the provider is a 200 whose
+/// `outcome` says what happened; an error status means nothing was sent.
+pub(crate) async fn claim_reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+    let Ok(body) = serde_json::from_slice::<ClaimBody>(&body) else {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "auth_index, reset_id and request_id are required",
+        );
+    };
+    let account = match reset_account(&state, body.auth_index.trim()).await {
+        Ok(account) => account,
+        Err(response) => return *response,
+    };
+    let claim = state
+        .rt
+        .quota_resets
+        .claim(&account, &body.reset_id, &body.request_id, deny_external(&state))
+        .await;
+    match claim {
+        Ok(claim) => {
+            if account.provider == Provider::Claude {
+                // Native admission reads this cache; a refilled window must show now.
+                state.rt.claude_usage.invalidate(&account.token).await;
+            }
+            json_reply(&claim)
+        }
+        Err(Refusal::Busy) => fail(StatusCode::CONFLICT, "A reset is already being applied to this account"),
+        Err(Refusal::Invalid(message)) => fail(StatusCode::BAD_REQUEST, message),
+    }
 }

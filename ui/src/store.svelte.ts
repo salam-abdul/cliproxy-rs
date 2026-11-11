@@ -6,7 +6,7 @@ import {
   ApiError,
   requests,
 } from "./api";
-import { clockSkew, equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
+import { clockSkew, equal, fieldPath, newKey, reconcile, type Data, type Reset, type Window } from "./core";
 
 /** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
@@ -112,6 +112,8 @@ class Store {
       { at: number; windows: Window[]; error?: string } | { error: string }
     >
   >({});
+  /** Quota resets read in this tab, by auth index. */
+  resets = $state<Record<string, { resets?: Reset[]; reason?: string; error?: string }>>({});
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
