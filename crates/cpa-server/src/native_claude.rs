@@ -756,15 +756,17 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
-    let lock = {
+    // Holding this handle marks the session active, which keeps its affinity binding from
+    // being pruned or evicted, until the response stream ends. Its lock is held only for
+    // admission and affinity binding: same-session requests wait for each other's account
+    // choice, never for each other's responses.
+    let session = {
         let mut sessions = s.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
         sessions.entry(sid.clone()).or_default().clone()
     };
     let preparation_ms = request_started.elapsed().as_millis();
-    let waiting = Instant::now();
-    let guard = lock.lock_owned().await;
-    let session_wait_ms = waiting.elapsed().as_millis();
+    let mut session_wait_ms = 0u128;
     let mut admission_ms = 0u128;
     let mut upstream_headers_ms = 0u128;
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -779,9 +781,18 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"attempt_limit","status":503,"attempts":tried.len()}));
             return Ok(error(503, "Native routing attempt limit reached; retry later"));
         }
-        let admission_started = Instant::now();
-        let admitted = tokio::time::timeout_at(admission_deadline, s.admit(&sid, &model, &mut tried)).await;
-        admission_ms += admission_started.elapsed().as_millis();
+        let attempt_started = Instant::now();
+        let mut waited = None;
+        let admitted = tokio::time::timeout_at(admission_deadline, async {
+            let _admission = session.lock().await;
+            waited = Some(attempt_started.elapsed().as_millis());
+            s.admit(&sid, &model, &mut tried).await
+        })
+        .await;
+        let attempt_ms = attempt_started.elapsed().as_millis();
+        let wait_ms = waited.unwrap_or(attempt_ms);
+        session_wait_ms += wait_ms;
+        admission_ms += attempt_ms - wait_ms;
         let a = match admitted {
             Ok(Ok((Some(a), _))) => a,
             other => {
@@ -964,8 +975,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             o.finish("complete").await;
         }
         let stream = futures_util::stream::unfold(
-            (stream, record, guard, declared),
-            |(mut stream, mut record, guard, mut remaining)| async move {
+            (stream, record, session, declared),
+            |(mut stream, mut record, session, mut remaining)| async move {
                 match stream.next().await {
                     Some(item) => {
                         if let Some(o) = record.as_mut()
@@ -983,7 +994,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         {
                             o.finish("complete").await;
                         }
-                        Some((item, (stream, record, guard, remaining)))
+                        Some((item, (stream, record, session, remaining)))
                     }
                     None => {
                         if let Some(o) = record.take() {

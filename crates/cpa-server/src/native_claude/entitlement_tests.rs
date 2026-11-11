@@ -101,7 +101,16 @@ impl Fixture {
                             if cpa_common::gostr::contains(&body, b"MODE_STALL") {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
-                            let response = if token == "Bearer token-a"
+                            let response = if cpa_common::gostr::contains(&body, b"MODE_OPEN_STREAM") {
+                                let stream = futures_util::stream::once(async {
+                                    Ok::<_, std::io::Error>(Bytes::from_static(b"event: ping\n\n"))
+                                })
+                                .chain(futures_util::stream::pending());
+                                Response::builder()
+                                    .header("content-type", "text/event-stream")
+                                    .body(Body::from_stream(stream))
+                                    .unwrap()
+                            } else if token == "Bearer token-a"
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
                                 let zstd = reply.body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
@@ -737,4 +746,31 @@ async fn an_account_proxy_carries_its_inference() {
     assert_eq!(requests.len(), 1, "{requests:?}");
     assert!(requests[0].starts_with("CONNECT 127.0.0.1:"), "{requests:?}");
     task.abort();
+}
+
+/// A request waits for another request of its session only while that one chooses an
+/// account, not while its response streams; the streaming session stays active.
+#[tokio::test]
+async fn a_streaming_turn_does_not_hold_back_its_session() {
+    const OPEN: &[u8] =
+        br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[],"mode":"MODE_OPEN_STREAM"}"#;
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let open = fixture.request_body(OPEN).await;
+    assert_eq!(open.status(), 200);
+    let mut stream = open.bytes_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap(), &b"event: ping\n\n"[..]);
+    let next = tokio::time::timeout(Duration::from_secs(5), fixture.request())
+        .await
+        .expect("a same-session request waited for an open stream");
+    assert_eq!(next.status(), 200);
+    assert_eq!(next.bytes().await.unwrap(), SUCCESS);
+    let sid = hash("synthetic-session");
+    let active = fixture.state.sessions.lock().unwrap().get(&sid).map(Arc::strong_count);
+    assert_eq!(active, Some(2), "the open stream no longer marks its session active");
+    drop(stream);
 }
