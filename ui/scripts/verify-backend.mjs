@@ -45,7 +45,7 @@ try {
   await call("/observability/usage/queue?count=50");
   await call("/plugins", "GET", undefined, 404);
   await call("/plugins/store", "GET", undefined, 404);
-  await call("/server/latest-version", "GET", undefined, 501);
+  await call("/server/latest-version", "GET", undefined, 404);
   const upstream = await call("/requests/api-call", "POST", {
     method: "GET",
     url: base + "/healthz",

@@ -1,14 +1,15 @@
 <script lang="ts">
   import { store } from "./store.svelte";
   import { quotaSummary } from "./quota";
-  import { ago, span, type Data } from "./core";
+  import { ago, span, quotaColumns, type Data } from "./core";
   let { a, compact = false }: { a: Data; compact?: boolean } = $props();
   const quota = $derived(quotaSummary(a));
-  const windows = $derived(compact ? quota.windows.slice(0, 2) : quota.windows);
+  const windows = $derived(compact ? quotaColumns(quota.windows) : quota.windows);
 </script>
 
 <span class="quota-meters" class:quota-compact={compact} class:quota-stale={quota.failed || quota.stale}>
   {#each windows as w}
+    {#if !w}<span class="quota-meter"><span class="quota-caption muted">None</span></span>{:else}
     {@const remaining = w.used === null ? null : Math.max(0, 100 - w.used)}
     {@const resetsAt = Date.parse(w.reset)}
     <span class="quota-meter">
@@ -43,7 +44,7 @@
             : "Reset passed · awaiting update"}
         </time>{/if}
       {#if w.detail}<span class="muted">{w.detail}</span>{/if}
-    </span>
+    </span>{/if}
   {:else}<span class="muted quota-unreported">Quota not reported</span>{/each}
   {#if quota.failed}<span class="warning-text">Last reading · check failed</span>
   {:else if quota.at}<span class="muted">Updated {ago(quota.at, store.serverNow)}</span>

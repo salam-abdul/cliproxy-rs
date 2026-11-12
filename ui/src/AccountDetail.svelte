@@ -6,7 +6,8 @@
   import { api, download } from "./api";
   import { accountStatus } from "./accounts";
   import { accountHealth, requestBuckets } from "./history";
-  import { credName, credRef, label, provider, span, type Data } from "./core";
+  import { credName, credRef, label, provider, resetLabel, span, type Data } from "./core";
+  import { applyReset, hasResets, loadResets } from "./resets";
 
   // One account's details, opened as a modal drawer from Overview and Accounts. The parent
   // remounts it per account, so the form starts from the account as it was when opened.
@@ -67,6 +68,8 @@
         .models || [],
   );
   models.load();
+  untrack(() => loadResets(a));
+  const resets = $derived(store.resets[a.auth_index]);
 
   const facts = $derived(
     [
@@ -171,6 +174,23 @@
           conversations · not necessarily active
         </p>{/if}
     </section>
+    {#if hasResets(a)}
+      <section class="card">
+        <h3>Quota resets</h3>
+        {#if !resets}<p class="muted small">Checking…</p>
+        {:else if resets.error}<p class="warning-text">{resets.error}</p>
+        {:else}
+          {#each resets.resets || [] as r (r.key)}
+            {@const ends = Date.parse(r.expires_at || "")}
+            <div class="row">
+              <strong>{resetLabel(r)}</strong>
+              <span class="muted small">{ends ? `Expires in ${span(ends - store.serverNow)}` : "No expiry"}{r.blocked ? ` · ${r.blocked}` : ""}</span>
+              <button class="key" disabled={!r.usable || store.busy} title={r.detail} onclick={() => applyReset(a, r)}>Use</button>
+            </div>
+          {:else}<p class="muted small">{resets.reason || "No resets available."}</p>{/each}
+        {/if}
+      </section>
+    {/if}
     {#if n?.id}
       <section class="card">
         <div class="section-head">

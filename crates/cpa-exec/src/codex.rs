@@ -4,6 +4,8 @@
 //! HTTP paths port codex_executor_execute.go and codex_executor_stream.go. The WebSocket
 //! upstream lives in `codex_ws`.
 
+/// The Codex CLI identity sent on Codex requests.
+pub use crate::codex_request::{ORIGINATOR, USER_AGENT};
 use std::sync::Arc;
 use std::time::Instant;
 

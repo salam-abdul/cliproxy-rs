@@ -10,6 +10,7 @@ use cpa_core::credential::Credential;
 use serde_json::{Value, json};
 
 use super::Management;
+use crate::quota_resets::{Account, Provider, Refusal};
 
 fn map_json(status: StatusCode, value: &Value) -> Response {
     go_json(status, crate::gojson::sorted(value).into_bytes())
@@ -185,7 +186,7 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
         return fail(StatusCode::NOT_FOUND, "auth not found");
     };
     if !body.plugin_id.trim().is_empty() {
-        return fail(StatusCode::NOT_IMPLEMENTED, "plugins are not supported");
+        return fail(StatusCode::BAD_REQUEST, "plugin_id is not supported");
     }
     if let Some(probe) = auth.metadata.get("quota_probe").and_then(Value::as_object) {
         match super::quota_probe::execute(&state, &auth, probe).await {
@@ -195,24 +196,182 @@ pub(crate) async fn fetch(State(state): State<Arc<Management>>, body: Bytes) -> 
         }
     }
     fail(
-        StatusCode::NOT_IMPLEMENTED,
-        "no quota provider available for credential",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "This credential has no usable quota probe",
     )
 }
 
-pub(crate) async fn reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
-    let Some(body) = QuotaBody::decode(&body) else {
-        return fail(StatusCode::BAD_REQUEST, "invalid request body");
-    };
-    let index = body.auth_index();
+fn refuse(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new(fail(status, message))
+}
+
+/// A refusal that holds for as long as the account exists: code `no_resets` tells the
+/// dashboard to stop offering resets for it.
+fn never(message: &str) -> Box<Response> {
+    Box::new(map_json(
+        StatusCode::BAD_REQUEST,
+        &json!({"error": message, "code": "no_resets"}),
+    ))
+}
+
+/// The account behind `index` with a usable token and its strict transport, or the
+/// refusal to send. Only enabled Claude and Codex sign-ins have resets.
+async fn reset_account(state: &Management, index: &str) -> Result<Account, Box<Response>> {
     if index.is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "auth_index is required");
+        return Err(refuse(StatusCode::BAD_REQUEST, "auth_index is required"));
     }
-    if credential(&state, &index).is_none() {
-        return fail(StatusCode::NOT_FOUND, "auth not found");
+    let Some(auth) = credential(state, index) else {
+        return Err(refuse(StatusCode::NOT_FOUND, "auth not found"));
+    };
+    let Some(provider) = Provider::of(&auth.provider) else {
+        return Err(never("Only Claude and Codex accounts have resets"));
+    };
+    if auth.disabled {
+        return Err(refuse(StatusCode::BAD_REQUEST, "The account is disabled"));
     }
-    fail(
-        StatusCode::NOT_IMPLEMENTED,
-        "no quota provider available for credential to reset",
-    )
+    if cpa_core::registry::dynamic::auth_kind(&auth) == Some("apikey") {
+        return Err(never("API-key accounts have no resets"));
+    }
+    if provider == Provider::Claude && cpa_exec::oauth::setup_token(&auth) {
+        return Err(never(
+            "Setup tokens cannot use resets. Connect Claude through the dashboard sign-in.",
+        ));
+    }
+    let auth = state.rt.ready_credential(&auth.id).await.map_err(|_| {
+        refuse(
+            StatusCode::BAD_GATEWAY,
+            "The account's sign-in could not be refreshed. Sign in again.",
+        )
+    })?;
+    let token = super::api_call::token_for(&auth);
+    if token.is_empty() {
+        return Err(refuse(StatusCode::BAD_REQUEST, "The account has no access token"));
+    }
+    let Some(client) = super::api_call::strict_client_for(state, &auth) else {
+        return Err(refuse(StatusCode::BAD_GATEWAY, "The account's proxy cannot be used"));
+    };
+    let text = |key: &str| {
+        auth.str(key)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let account = Account {
+        provider,
+        id: auth.id.clone(),
+        token,
+        client,
+        organization: text("organization_uuid"),
+        chatgpt_account: text("account_id"),
+    };
+    Ok(account)
+}
+
+fn deny_external(state: &Management) -> bool {
+    state.rt.deny_external.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn json_reply<T: serde::Serialize>(value: &T) -> Response {
+    let body = serde_json::to_vec(value).unwrap_or_default();
+    go_json(StatusCode::OK, body)
+}
+
+/// `GET /quota/resets?auth_index=[&fresh=1]`: the account's available resets, from a
+/// read at most an hour old; `fresh=1` asks for one at most five minutes old.
+pub(crate) async fn resets(
+    State(state): State<Arc<Management>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let index = query.get("auth_index").map(|s| s.trim()).unwrap_or_default();
+    let account = match reset_account(&state, index).await {
+        Ok(account) => account,
+        Err(response) => return *response,
+    };
+    let fresh = query.get("fresh").is_some_and(|v| v == "1");
+    match state
+        .rt
+        .quota_resets
+        .status(&account, fresh, deny_external(&state))
+        .await
+    {
+        Ok(status) => json_reply(&status),
+        Err(message) => fail(StatusCode::BAD_GATEWAY, &message),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimBody {
+    auth_index: String,
+    reset_id: String,
+    request_id: String,
+}
+
+/// `POST /quota/resets`: spends one reset. Any answer from the provider is a 200 whose
+/// `outcome` says what happened; an error status means nothing was sent. The claim and
+/// its cleanup run to the end even when the dashboard stops waiting.
+pub(crate) async fn claim_reset(State(state): State<Arc<Management>>, body: Bytes) -> Response {
+    let Ok(body) = serde_json::from_slice::<ClaimBody>(&body) else {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            "auth_index, reset_id and request_id are required",
+        );
+    };
+    let account = match reset_account(&state, body.auth_index.trim()).await {
+        Ok(account) => account,
+        Err(response) => return *response,
+    };
+    let task = tokio::spawn(async move {
+        let claim = state
+            .rt
+            .quota_resets
+            .claim(&account, &body.reset_id, &body.request_id, deny_external(&state))
+            .await;
+        if let Ok(claim) = &claim {
+            settle(&state, &account, claim).await;
+        }
+        claim
+    });
+    match task.await {
+        Ok(Ok(claim)) => json_reply(&claim),
+        Ok(Err(Refusal::Busy)) => fail(StatusCode::CONFLICT, "A reset is already being applied to this account"),
+        Ok(Err(Refusal::Invalid(message))) => fail(StatusCode::BAD_REQUEST, message),
+        Ok(Err(Refusal::External)) => fail(StatusCode::BAD_GATEWAY, "External requests are disabled"),
+        // The task may have stopped after the send.
+        Err(_) => json_reply(&crate::quota_resets::Claim::new(
+            crate::quota_resets::Outcome::Unconfirmed,
+        )),
+    }
+}
+
+/// After a claim: refreshes what admission reads. An applied reset refilled the
+/// account's limits, so its stored quota readings and cooldowns no longer hold.
+async fn settle(state: &Management, account: &Account, claim: &crate::quota_resets::Claim) {
+    if account.provider == Provider::Claude {
+        state.rt.claude_usage.invalidate(&account.token).await;
+    }
+    if claim.outcome != crate::quota_resets::Outcome::Applied {
+        return;
+    }
+    match account.provider {
+        Provider::Claude => state.rt.executors.claude.quota().forget(&account.id),
+        Provider::Codex => state.rt.executors.codex.quota().forget(&account.id),
+    }
+    let rt = state.rt.clone();
+    let id = account.id.clone();
+    // Clearing cooldowns may persist them to disk.
+    let _ = tokio::task::spawn_blocking(move || rt.store().reset_cooldowns(&id)).await;
+    if account.provider != Provider::Claude {
+        return;
+    }
+    let native = state
+        .rt
+        .native_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .upgrade();
+    if let Some(native) = native
+        && let Err(error) = native.clear_cooldowns(&account.id).await
+    {
+        tracing::warn!(%error, "native cooldowns were not cleared after a quota reset");
+    }
 }

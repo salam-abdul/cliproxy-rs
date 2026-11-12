@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, type Component } from "svelte";
   import { store, sections, every } from "./store.svelte";
+  import { nextTheme } from "./core";
   import Overview from "./pages/Overview.svelte";
   import Use from "./pages/Use.svelte";
   import Credentials from "./pages/Credentials.svelte";
@@ -125,9 +126,9 @@
 {#snippet theme()}<button
     class="key quiet round"
     onclick={() => store.toggleTheme()}
-    aria-label={store.theme === "dark" ? "Use light theme" : "Use dark theme"}
+    aria-label={`Theme: ${store.theme}. Use ${nextTheme(store.theme)}`}
     ><svg class="i" aria-hidden="true"
-      ><use href={`#i-${store.theme === "dark" ? "sun" : "moon"}`} /></svg
+      ><use href={`#i-${store.theme === "auto" ? "auto" : store.theme === "dark" ? "moon" : "sun"}`} /></svg
     ></button
   >{/snippet}
 

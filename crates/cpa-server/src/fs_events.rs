@@ -1205,7 +1205,10 @@ mod sys {
 
     impl Watch {
         pub fn new(_: &Targets) -> io::Result<Self> {
-            Err(io::Error::new(io::ErrorKind::Unsupported, "not implemented on this OS"))
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file change notifications are unavailable on this OS",
+            ))
         }
         pub fn retarget(&mut self, _: &Targets) -> io::Result<bool> {
             match *self {}

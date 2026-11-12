@@ -1944,6 +1944,7 @@ async fn personal_scope_keeps_quota_probes_and_removes_plugin_routes() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-cpa-support-plugin"], "0");
     assert_eq!(
         response.json::<Value>().await.unwrap()["groups"][0]["buckets"][0]["remainingFraction"],
         0.75
@@ -1951,25 +1952,22 @@ async fn personal_scope_keeps_quota_probes_and_removes_plugin_routes() {
     for path in [
         "/v8/management/plugins",
         "/v8/management/plugins/store",
+        "/v8/management/server/latest-version",
+        "/v0/management/latest-version",
+        "/v0/management/quota/reset",
         "/v0/management/plugins",
         "/v0/resource/plugins/synthetic/file",
     ] {
-        let response = client
-            .get(format!("{base}{path}"))
-            .bearer_auth("fake-management-only")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 404, "{path}");
+        for method in [wreq::Method::GET, wreq::Method::POST] {
+            let response = client
+                .request(method.clone(), format!("{base}{path}"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404, "{method} {path}");
+        }
     }
-    let response = client
-        .get(format!("{base}/v8/management/server/latest-version"))
-        .bearer_auth("fake-management-only")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 501);
-    assert_eq!(response.headers()["x-cpa-support-plugin"], "0");
     let before = f.file();
     let response = client
         .put(format!("{base}/v8/management/config/plugins/enabled"))

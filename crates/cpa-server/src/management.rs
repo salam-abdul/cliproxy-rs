@@ -439,10 +439,6 @@ pub fn router(state: Arc<Management>) -> Router {
             );
     }
     for (path, route) in [
-        (
-            "server/latest-version",
-            methods().get(guarded!(s, observability::latest_version)),
-        ),
         ("requests/api-call", methods().post(guarded!(s, api_call::api_call))),
         (
             "routing/cooldown/reset",
@@ -455,6 +451,12 @@ pub fn router(state: Arc<Management>) -> Router {
         (
             "observability/claude/usage",
             methods().get(guarded!(s, quota::claude_usage)),
+        ),
+        (
+            "quota/resets",
+            methods()
+                .get(guarded!(s, quota::resets))
+                .post(guarded!(s, quota::claim_reset)),
         ),
         (
             "observability/native/status",
@@ -508,10 +510,6 @@ pub fn router(state: Arc<Management>) -> Router {
         router = router.route(&format!("{v8}/{path}"), route);
     }
     for (path, route) in [
-        (
-            "latest-version",
-            methods().get(guarded!(s, observability::latest_version)),
-        ),
         ("api-call", methods().post(guarded!(s, api_call::api_call))),
         ("reset-quota", methods().post(guarded!(s, auth_files::cooldown_reset))),
         (
@@ -535,8 +533,7 @@ pub fn router(state: Arc<Management>) -> Router {
             &format!("{v0}/quota/providers"),
             methods().get(guarded!(s, quota::providers)),
         )
-        .route(&format!("{v0}/quota/fetch"), methods().post(guarded!(s, quota::fetch)))
-        .route(&format!("{v0}/quota/reset"), methods().post(guarded!(s, quota::reset)));
+        .route(&format!("{v0}/quota/fetch"), methods().post(guarded!(s, quota::fetch)));
     // Go's remaining v0 routes, adapted over the v8 handlers (management/legacy.rs).
     router = router.route(&format!("{v0}/config"), methods().get(guarded!(s, legacy::config)));
     for path in legacy::FIELD_ROUTES {

@@ -1,9 +1,9 @@
 // Enforces the bundle budget after `vite build`; the build fails if either grows past it.
-// Gzip ceilings sit about 1% above the bundle after the Go-support, polling and dead-code removals.
+// Gzip ceilings sit about 1% above the bundle.
 import { readdirSync, readFileSync, copyFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
-const BUDGET = { js: 55_500, css: 6_550 };
+const BUDGET = { js: 56_800, css: 6_550 };
 
 copyFileSync("dist/index.html", "dist/management.html");
 const html = readFileSync("dist/index.html", "utf8");

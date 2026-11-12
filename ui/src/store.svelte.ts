@@ -6,7 +6,7 @@ import {
   ApiError,
   requests,
 } from "./api";
-import { clockSkew, equal, fieldPath, newKey, reconcile, type Data, type Window } from "./core";
+import { clockSkew, equal, fieldPath, newKey, nextTheme, reconcile, type Data, type Reset, type Window } from "./core";
 
 /** Top navigation. Each section opens its first page; one with several pages shows them as tabs. */
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
@@ -68,11 +68,8 @@ function parse(hash: string) {
 class Store {
   logged = $state(false);
   localDashboard = $state(false);
-  /** The saved override, else the system theme. */
-  theme = $state(
-    document.documentElement.dataset.theme ||
-      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
-  );
+  /** The saved override, else "auto", which follows the system. */
+  theme = $state(document.documentElement.dataset.theme || "auto");
   route = $state(parse(location.hash));
   meta = $state({ version: "", commit: "", built: "" });
   online = $state(true);
@@ -112,6 +109,8 @@ class Store {
       { at: number; windows: Window[]; error?: string } | { error: string }
     >
   >({});
+  /** Quota resets read in this tab, by auth index. */
+  resets = $state<Record<string, { resets?: Reset[]; reason?: string; error?: string; unsupported?: boolean }>>({});
   #timer: ReturnType<typeof setTimeout> | undefined;
 
   async login(secret: string, localDashboard = false) {
@@ -192,10 +191,13 @@ class Store {
     this.route = next;
   }
   toggleTheme() {
-    this.theme = this.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = this.theme;
+    this.theme = nextTheme(this.theme);
+    const auto = this.theme === "auto";
+    if (auto) delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = this.theme;
     try {
-      localStorage.setItem("cliproxy-theme", this.theme);
+      if (auto) localStorage.removeItem("cliproxy-theme");
+      else localStorage.setItem("cliproxy-theme", this.theme);
     } catch {}
   }
   notify(text: string, bad = false) {

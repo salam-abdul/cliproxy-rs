@@ -20,7 +20,7 @@ node scripts/dashboard-check.mjs
 
 The top navigation has four sections. Each opens its first page; a section with several pages shows them as tabs.
 
-- **Overview:** current accounts, quota windows, the default new-session order, and 24-hour, 7-day or 30-day native Claude history. Provider quotas are checked only with Check quotas; between checks each account shows the server's passive readings and their age.
+- **Overview:** current accounts, quota windows, the default new-session order, and 24-hour, 7-day or 30-day native Claude history. Provider quotas and Claude and Codex quota resets are checked only with Check quotas or when an account drawer opens; Check quotas reads resets at most five minutes old, and the drawer accepts a read up to an hour old. Between checks each account shows the server's passive readings and their age. The drawer lists each reset with its expiry and spends one with Use after a confirmation; a used reset clears the account's stored limit readings and cooldowns.
 - **Accounts:** every account by provider, enabling, disabling, downloading or deleting several at once, the paid-overage policy, sign-in and file import. Overview and Accounts open the same account drawer.
 - **Activity:** recent request attempts grouped into outcomes and errors, and the server logs, filtered by text, method, status class and path.
 - **Settings:** client setup, provider keys (an OpenAI-compatible group can import the model list its provider offers), client keys, models, payload rules, configuration and system facts.

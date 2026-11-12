@@ -159,6 +159,17 @@ impl Cooldowns {
         self.account_until(account).max(self.model_until(account, model))
     }
 
+    /// Whether `account` has any cooldown entry, expired or not.
+    pub fn holds(&self, account: &str) -> bool {
+        self.accounts.contains_key(account) || self.models.contains_key(account)
+    }
+
+    /// Drops every cooldown of `account`.
+    pub fn clear(&mut self, account: &str) {
+        self.accounts.remove(account);
+        self.models.remove(account);
+    }
+
     fn prune(&mut self, at: u64) {
         self.accounts.retain(|_, until| *until > at);
         self.models.retain(|_, models| {
@@ -220,6 +231,19 @@ mod tests {
             assert!(cooldowns.until("a", "sonnet") > 1000);
             assert_eq!(cooldowns.until("b", "opus"), 0);
         }
+    }
+    #[test]
+    fn clearing_an_account_drops_its_cooldowns_only() {
+        let mut cooldowns = Cooldowns::default();
+        cooldowns.cool("a", "opus", 429, Some(5000), 1000);
+        cooldowns.cool_model("a", "sonnet", Some(5000), 1000);
+        cooldowns.cool("b", "opus", 429, Some(5000), 1000);
+        assert!(cooldowns.holds("a"));
+        cooldowns.clear("a");
+        assert!(!cooldowns.holds("a"));
+        assert_eq!(cooldowns.until("a", "opus"), 0);
+        assert_eq!(cooldowns.until("a", "sonnet"), 0);
+        assert_eq!(cooldowns.until("b", "opus"), 6000);
     }
     #[test]
     fn routing_state_keeps_legacy_disk_format_and_private_atomic_writes() {

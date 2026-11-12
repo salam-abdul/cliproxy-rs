@@ -1,5 +1,5 @@
-//! `GET /server/latest-version`, `GET /observability/usage/api-keys` and
-//! `GET /observability/usage/queue` (Go config_basic.go, api_key_usage.go, usage.go).
+//! `GET /observability/usage/api-keys` and `GET /observability/usage/queue` (Go
+//! api_key_usage.go, usage.go).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,17 +10,7 @@ use axum::response::Response;
 use serde_json::{Map, Value, json};
 
 use super::Management;
-use super::auth_files::{Query, auth_kind, fail, recent_requests, reply};
-
-pub(crate) async fn latest_version() -> Response {
-    reply(
-        StatusCode::NOT_IMPLEMENTED,
-        [
-            ("error", "source_build_only".into()),
-            ("message", "Build and update this personal fork from source.".into()),
-        ],
-    )
-}
+use super::auth_files::{Query, auth_kind, fail, recent_requests};
 
 /// Go `GetAPIKeyUsage`: API-key credentials grouped by provider (the OpenAI-compatible
 /// name when set) and keyed by `base_url|api_key`, with summed counters.
@@ -212,17 +202,6 @@ pub(crate) async fn native_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn release_checks_are_local_and_unsupported() {
-        let response = latest_version().await;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap()["error"],
-            "source_build_only"
-        );
-    }
 
     #[test]
     fn same_base_and_key_sum_bucket_by_bucket() {

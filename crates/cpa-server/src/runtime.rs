@@ -56,6 +56,7 @@ pub struct Runtime {
     /// Usage records for `GET /observability/usage/queue` (management configures it).
     usage: Arc<crate::usage::UsageQueue>,
     pub(crate) claude_usage: crate::claude_usage::ClaudeUsage,
+    pub(crate) quota_resets: crate::quota_resets::QuotaResets,
     pub(crate) native_state: RwLock<std::sync::Weak<crate::native_claude::State>>,
     pub(crate) native_events: crate::native_claude::diagnostics::Diagnostics,
     /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
@@ -119,6 +120,7 @@ impl Runtime {
             native_events: Default::default(),
             native_state: Default::default(),
             claude_usage: Default::default(),
+            quota_resets: Default::default(),
             local_model: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
@@ -723,6 +725,23 @@ impl Runtime {
         let cfg = self.config();
         let revision = self.store.get(id).map(|c| c.revision);
         self.prepare_credential(id, &cfg, revision).await
+    }
+
+    /// The credential prepared for a one-off account call, under the same single-flight
+    /// lock as request preparation. A due refresh ([`Readiness::RefreshSoon`], which
+    /// includes an expired token) is tried, and on failure the current token is used
+    /// as a request would use it; only [`Readiness::PrepareNow`] must succeed.
+    pub(crate) async fn ready_credential(&self, id: &str) -> Result<Arc<Credential>, ExecError> {
+        let cfg = self.config();
+        let credential = self
+            .store
+            .get(id)
+            .ok_or_else(|| ExecError::local(404, FailureScope::Request, "credential not found"))?;
+        match self.executors.readiness(&credential, &cfg) {
+            Readiness::Ready => Ok(credential),
+            Readiness::PrepareNow => self.prepare_credential(id, &cfg, None).await,
+            Readiness::RefreshSoon => Ok(self.prepare_credential(id, &cfg, None).await.unwrap_or(credential)),
+        }
     }
 }
 

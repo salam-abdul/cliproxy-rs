@@ -37,11 +37,19 @@ Updates are manual. Build and qualify the candidate, then stop the installed ser
 
 Client keys go in client settings; never share either key. For access from another machine, bind to a private interface, require client keys and list trusted proxies explicitly. `--local-model` turns off model catalog downloads.
 
-## Local container
+## Container
+
+CI publishes `ghcr.io/salam-abdul/cliproxy-rs` for linux/amd64 and linux/arm64 after the tests pass on `main` (`.github/workflows/docker.yml`). You can also run the workflow by hand from `main`, which publishes without waiting for CI. Tags are `sha-<first 7 characters of the commit>` and `latest`, which moves only to a published commit that is still the tip of `main`. While the package is private, run `docker login ghcr.io` first.
+
+```sh
+docker run --rm -p 127.0.0.1:8317:8317 -v /path/to/private/data:/data ghcr.io/salam-abdul/cliproxy-rs:latest
+```
+
+To build the same image locally:
 
 ```sh
 docker build -t cliproxy-local .
 docker run --rm -p 127.0.0.1:8317:8317 -v /path/to/private/data:/data cliproxy-local
 ```
 
-The image runs as UID and GID 10001 and reads `/data/config.yaml`. Give that identity access to the mounted directory, and set a listener address the port mapping can reach. The Dockerfile builds a local image only.
+The image runs as UID and GID 10001 and reads `/data/config.yaml`. Give that identity access to the mounted directory, and set a listener address the port mapping can reach.
