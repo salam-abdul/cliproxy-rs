@@ -265,7 +265,8 @@ enum Skip {
     Unreadable,
     /// Not Claude credential JSON, or an invalid `native_route_id`.
     Invalid,
-    /// Another file has the same identity; neither is routed, since either could be stale.
+    /// Another otherwise routable file has the same identity; neither is routed, since
+    /// either could be stale.
     DuplicateIdentity,
     /// The account's `proxy_url` (or `requests.proxy-url`) is unusable. Routing it
     /// directly would send its token from the host address.
@@ -329,13 +330,6 @@ fn read_account(
     settings: &Value,
     cfg: &cpa_core::config::Config,
 ) -> Result<Account, Skip> {
-    // As the Claude executor: the account's proxy, then `requests.proxy-url`; without
-    // either, Claude accounts connect directly and ignore environment proxies.
-    let proxy_url = match Proxy::effective(c, cfg) {
-        Proxy::Url(url) => Some(url),
-        Proxy::Inherit | Proxy::Direct => None,
-        Proxy::Invalid => return Err(Skip::InvalidProxy),
-    };
     let file = std::fs::canonicalize(path).map_err(|_| Skip::Unreadable)?;
     if !file.starts_with(root) {
         return Err(Skip::OutsideAuthDir);
@@ -362,6 +356,14 @@ fn read_account(
     if !valid_id(&id) {
         return Err(Skip::Invalid);
     }
+    // Resolved as the Claude executor resolves it: the account's proxy, then
+    // `requests.proxy-url`; without either, the account connects directly and ignores
+    // environment proxies. Unlike the executor, an unusable proxy skips the account.
+    let proxy_url = match Proxy::effective(c, cfg) {
+        Proxy::Url(url) => Some(url),
+        Proxy::Inherit | Proxy::Direct => None,
+        Proxy::Invalid => return Err(Skip::InvalidProxy),
+    };
     let expired = a["expired"]
         .as_str()
         .or(a["expires_at"].as_str())
@@ -456,7 +458,10 @@ impl State {
             &settings,
             &self.rt.config(),
         )?;
+        let none_routable = pool.accounts.is_empty() && !pool.skipped.is_empty();
         self.report_skipped(pool.skipped);
+        // A routing error, not an empty pool that admission would report as exhausted quota.
+        anyhow::ensure!(!none_routable, "Every native account file was skipped");
         Ok(pool.accounts)
     }
     /// Reports each skipped account file once, and again only when its reason changes.
@@ -1490,6 +1495,16 @@ mod tests {
             write("gone.json", "org-gone", 0o600),
             write("garbage.json", "org-garbage", 0o600),
         ];
+        // A file that fails several checks reports the first: file checks before its proxy.
+        let mut credentials = credentials;
+        let body = json!({"type":"claude","organization_uuid":"org-loose-proxy","proxy_url":"ftp://unusable-proxy.invalid",
+            "access_token":"synthetic-token","expired":"2099-01-01T00:00:00Z"});
+        let path = dir.join("loose-proxy.json");
+        std::fs::write(&path, body.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        credentials.push(Arc::new(
+            Credential::from_file(&dir, &path, body.as_object().unwrap().clone()).unwrap(),
+        ));
         std::fs::remove_file(dir.join("gone.json")).unwrap();
         std::fs::write(dir.join("garbage.json"), "not json").unwrap();
         let pool = read_pool(
@@ -1510,6 +1525,7 @@ mod tests {
                 ("first.json".to_owned(), Skip::DuplicateIdentity),
                 ("garbage.json".to_owned(), Skip::Invalid),
                 ("gone.json".to_owned(), Skip::Unreadable),
+                ("loose-proxy.json".to_owned(), Skip::NotPrivate),
                 ("loose.json".to_owned(), Skip::NotPrivate),
                 ("second.json".to_owned(), Skip::DuplicateIdentity),
             ]
