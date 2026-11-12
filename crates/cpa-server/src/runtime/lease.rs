@@ -188,7 +188,7 @@ impl CredentialStore {
             drop(scheduler);
             drop(inner);
             if changed {
-                self.persist_cooldowns();
+                self.persist_cooldowns_of(&lease.credential.id);
             }
             // Go persists on every recorded result, a client-cancelled stream included.
             self.persist_credential(&lease.credential);

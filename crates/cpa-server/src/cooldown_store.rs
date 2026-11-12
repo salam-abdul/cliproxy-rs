@@ -120,9 +120,26 @@ pub fn load(dir: &Path) -> Result<Vec<Record>, String> {
     Ok(records)
 }
 
+/// The `.cds` files one save left in place.
+pub(crate) type Written = std::collections::BTreeSet<PathBuf>;
+
 /// Go `FileCooldownStateStore.Save`: one atomically replaced file per credential, records
 /// sorted by model; `.cds` files no longer backed by a record are removed.
 pub fn save(dir: &Path, records: Vec<Record>, now: SystemTime) -> Result<(), String> {
+    save_changed(dir, records, now, None, None).map(drop)
+}
+
+/// [`save`] after an earlier save to `dir` left `previous`: a file is written only when
+/// it is new or its credential is in `changed` (every credential when `None`), and only
+/// files of `previous` that lost their records are removed, without listing `dir`.
+/// Returns the files this save left, for the next one.
+pub(crate) fn save_changed(
+    dir: &Path,
+    records: Vec<Record>,
+    now: SystemTime,
+    previous: Option<&Written>,
+    changed: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Written, String> {
     let mut groups: std::collections::BTreeMap<PathBuf, Vec<Record>> = Default::default();
     for record in records {
         if record.auth_id.trim().is_empty() {
@@ -132,6 +149,11 @@ pub fn save(dir: &Path, records: Vec<Record>, now: SystemTime) -> Result<(), Str
         groups.entry(dir.join(rel)).or_default().push(record);
     }
     for (path, mut records) in groups.clone() {
+        let unchanged = previous.is_some_and(|p| p.contains(&path))
+            && changed.is_some_and(|ids| !ids.contains(&records[0].auth_id));
+        if unchanged {
+            continue;
+        }
         records.sort_by(|a, b| a.model.cmp(&b.model));
         let envelope = Envelope {
             version: 1,
@@ -145,15 +167,18 @@ pub fn save(dir: &Path, records: Vec<Record>, now: SystemTime) -> Result<(), Str
         crate::runtime::write_bytes_atomic(&path, &marshal_indent(&envelope))
             .map_err(|e| format!("replace cooldown state file: {e}"))?;
     }
-    for path in cds_files(dir) {
-        if !groups.contains_key(&path)
-            && let Err(e) = std::fs::remove_file(&path)
+    let stale: Vec<PathBuf> = match previous {
+        Some(previous) => previous.iter().filter(|p| !groups.contains_key(*p)).cloned().collect(),
+        None => cds_files(dir).into_iter().filter(|p| !groups.contains_key(p)).collect(),
+    };
+    for path in stale {
+        if let Err(e) = std::fs::remove_file(&path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             return Err(format!("remove stale cooldown state {}: {e}", path.display()));
         }
     }
-    Ok(())
+    Ok(groups.into_keys().collect())
 }
 
 fn create_private_dir(dir: &Path) -> Result<(), String> {

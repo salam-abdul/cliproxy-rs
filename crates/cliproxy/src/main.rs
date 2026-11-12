@@ -1330,6 +1330,9 @@ async fn serve(
     }
     let history = rt.clone();
     let _ = tokio::task::spawn_blocking(move || history.history().shutdown(Duration::from_secs(5))).await;
+    // Cooldown changes are saved off the request threads: the last one lands before exit.
+    let cooldowns = rt.clone();
+    let _ = tokio::task::spawn_blocking(move || cooldowns.store().flush_cooldowns()).await;
     served
 }
 

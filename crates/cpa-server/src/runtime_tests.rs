@@ -819,6 +819,119 @@ fn cooldowns_persist_restore_and_reset_through_cds_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A private, empty directory for one cooldown test.
+fn cooldown_test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A cooldown change on a request thread hands the snapshot over and returns; the
+/// save runs elsewhere, so a slow disk or store never holds a request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cooldown_saves_never_block_the_caller() {
+    struct Gated {
+        armed: std::sync::atomic::AtomicBool,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        saves: std::sync::Mutex<Vec<bool>>,
+    }
+    impl crate::cooldown_store::Backend for Gated {
+        fn load(&self) -> Result<Vec<crate::cooldown_store::Record>, String> {
+            Ok(Vec::new())
+        }
+        fn save(&self, _: Vec<crate::cooldown_store::Record>, _: std::time::SystemTime) -> Result<(), String> {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                let released = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .is_ok();
+                self.saves.lock().unwrap().push(released);
+            }
+            Ok(())
+        }
+    }
+    let dir = cooldown_test_dir("cds-async");
+    let (release, waiting) = std::sync::mpsc::channel();
+    let backend = Arc::new(Gated {
+        armed: Default::default(),
+        release: std::sync::Mutex::new(waiting),
+        saves: Default::default(),
+    });
+    let store = CredentialStore::new(Vec::new());
+    store.set_cooldown_backend(backend.clone());
+    store.configure_cooldown_store(Some(dir.clone()));
+    store.flush_cooldowns();
+    backend.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    store.persist_cooldowns();
+    release.send(()).unwrap();
+    store.flush_cooldowns();
+    assert_eq!(*backend.saves.lock().unwrap(), [true], "the save waited for release");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cooldown change on one credential rewrites only that credential's `.cds` file.
+#[test]
+fn a_cooldown_change_leaves_other_credentials_files_alone() {
+    let dir = cooldown_test_dir("cds-one");
+    let config = Config::parse(&format!(
+        "auth-dir: {}\nrouting:\n  cooldown:\n    save-cooldown-status: true\n",
+        dir.display()
+    ))
+    .unwrap();
+    let metadata = || {
+        let mut m = Map::new();
+        m.insert("type".into(), "claude".into());
+        m
+    };
+    let creds = vec![
+        Credential::from_file(&dir, &dir.join("a.json"), metadata()).unwrap(),
+        Credential::from_file(&dir, &dir.join("b.json"), metadata()).unwrap(),
+    ];
+    let executors = Executors {
+        claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+        codex: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+        devices: Default::default(),
+    };
+    let rt = crate::testing::runtime(config, creds, executors);
+    let fail = |id: &str, model: &str| {
+        let mut selection = Selection::new("claude", model);
+        selection
+            .exclude
+            .push(if id == "a.json" { "b.json" } else { "a.json" }.into());
+        let mut quota = ExecError::local(429, FailureScope::Model, "rate limited");
+        quota.retry_after = Some(Duration::from_secs(120));
+        rt.store.select(selection).unwrap().complete(Outcome::Failure(quota));
+    };
+    fail("a.json", "m1");
+    fail("b.json", "m1");
+    std::fs::write(dir.join("b.cds"), "untouched by a's change").unwrap();
+    fail("a.json", "m2");
+    let a = std::fs::read_to_string(dir.join("a.cds")).unwrap();
+    assert!(a.contains("\"m1\"") && a.contains("\"m2\""), "{a}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("b.cds")).unwrap(),
+        "untouched by a's change"
+    );
+    rt.store.reset_cooldown("a.json");
+    assert!(!dir.join("a.cds").exists(), "a cleared credential's file is removed");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("b.cds")).unwrap(),
+        "untouched by a's change"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn preparation_waiter_observes_deletion_and_refresh_loop_is_replaceable() {
     let rt = Arc::new(crate::testing::runtime(

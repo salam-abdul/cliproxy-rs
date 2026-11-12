@@ -26,6 +26,7 @@ use crate::refresh::RefreshState;
 use crate::registry::Registry;
 use crate::scheduler::{Candidate, Policy, Profile, Scheduler};
 
+mod cooldown_writer;
 mod credential_updates;
 mod lease;
 mod selection;
