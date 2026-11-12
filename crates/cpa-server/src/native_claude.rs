@@ -458,10 +458,7 @@ impl State {
             &settings,
             &self.rt.config(),
         )?;
-        let none_routable = pool.accounts.is_empty() && !pool.skipped.is_empty();
         self.report_skipped(pool.skipped);
-        // A routing error, not an empty pool that admission would report as exhausted quota.
-        anyhow::ensure!(!none_routable, "Every native account file was skipped");
         Ok(pool.accounts)
     }
     /// Reports each skipped account file once, and again only when its reason changes.
@@ -601,9 +598,13 @@ impl State {
             if tried.len() >= self.config.max_attempts {
                 return Ok((None, None));
             }
-            let accounts = self
-                .accounts()
-                .await?
+            let accounts = self.accounts().await?;
+            // A routing error, not an empty pool that would read as exhausted quota.
+            anyhow::ensure!(
+                !accounts.is_empty() || self.skipped.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+                "Every native account file was skipped"
+            );
+            let accounts = accounts
                 .into_iter()
                 .filter(|a| a.enabled && !tried.contains(&a.id))
                 .collect();

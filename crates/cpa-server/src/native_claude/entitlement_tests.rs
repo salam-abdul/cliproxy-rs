@@ -63,6 +63,10 @@ impl Fixture {
     async fn new(reply: Reply) -> Self {
         Self::build(reply, None, None, None).await
     }
+    /// No native accounts at all.
+    async fn without_accounts(reply: Reply) -> Self {
+        Self::build_with(reply, None, None, None, false).await
+    }
     async fn with_history(reply: Reply, history: &Path) -> Self {
         Self::build(reply, Some(history), None, None).await
     }
@@ -75,6 +79,15 @@ impl Fixture {
         Self::build(reply, None, None, Some(proxy)).await
     }
     async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>, proxy: Option<&str>) -> Self {
+        Self::build_with(reply, history, credential, proxy, true).await
+    }
+    async fn build_with(
+        reply: Reply,
+        history: Option<&Path>,
+        credential: Option<Credential>,
+        proxy: Option<&str>,
+        accounts: bool,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -153,10 +166,10 @@ impl Fixture {
         let native: Config = serde_json::from_value(json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":[
+            "fixtureAccounts":if accounts {json!([
                 {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default(),"proxyUrl":proxy},
                 {"id":"b","token":"token-b","quota":quota}
-            ],
+            ])} else {json!([])},
             "upstream":{"hostname":"127.0.0.1","port":port}
         }))
         .unwrap();
@@ -833,8 +846,31 @@ async fn same_session_requests_choose_their_account_one_at_a_time() {
         "a request chose its account while another request of its session was choosing"
     );
     assert!(fixture.seen.lock().unwrap().is_empty());
+    let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+    assert!(
+        !events.as_array().unwrap().iter().any(|e| e["type"] == "selection"),
+        "an account was chosen while another request of its session was choosing: {events}"
+    );
     drop(choosing);
     let response = request.await;
     assert_eq!(response.status(), 200);
     assert_eq!(fixture.seen.lock().unwrap().len(), 1);
+}
+
+/// When every account file was skipped, a request fails as a routing error, not as
+/// exhausted quota, and nothing is sent.
+#[tokio::test]
+async fn a_pool_of_only_skipped_files_is_a_routing_error() {
+    let fixture = Fixture::without_accounts(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    fixture
+        .state
+        .report_skipped(vec![("synthetic.json".to_owned(), Skip::InvalidProxy)]);
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 502);
+    assert!(fixture.seen.lock().unwrap().is_empty());
 }
