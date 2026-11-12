@@ -185,11 +185,13 @@ fn response_tool_calls(payload: &str) -> Vec<(String, String, String)> {
         .into_iter()
         .filter_map(|raw| {
             let item = gjson::parse(&raw);
+            // Upstream items are replayed as input later, so they are sanitized here;
+            // client items recorded by `repair_items` must round-trip unchanged.
             is_complete_tool_call(&item).then(|| {
                 (
                     item.get("type").str().trim().to_owned(),
                     item.get("call_id").str().trim().to_owned(),
-                    raw.clone(),
+                    crate::websocket_requests::replay_sanitized(&raw).unwrap_or_else(|| raw.clone()),
                 )
             })
         })
@@ -390,6 +392,44 @@ mod tests {
         assert!(caches().calls.contains_key(key));
         drop(second);
         assert!(!caches().calls.contains_key(key));
+    }
+
+    #[test]
+    fn upstream_calls_are_cached_without_content_token_count() {
+        let key = "tools-test-upstream-replay";
+        let _retained = Retained::new(key.into());
+        record_calls(
+            key,
+            r#"{"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{}","\u0069nternal_chat_message_metadata_passthrough":{"turn_id":"t","content_token_count":9}},{"type":"function_call","id":"fc-2","call_id":"call-2","name":"grep","arguments":"{}","internal_chat_message_metadata_passthrough":{"content_token_count":2}}]}}"#,
+        );
+        let (repaired, _) = prepare_fallback_turn(
+            key,
+            r#"{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"function_call_output","call_id":"call-2","output":"ok"}]}"#.into(),
+        );
+        assert!(
+            repaired.contains(r#""\u0069nternal_chat_message_metadata_passthrough":{"turn_id":"t"}"#),
+            "{repaired}"
+        );
+        assert!(
+            repaired
+                .contains(r#"{"type":"function_call","id":"fc-2","call_id":"call-2","name":"grep","arguments":"{}"}"#),
+            "{repaired}"
+        );
+        assert!(!repaired.contains("content_token_count"), "{repaired}");
+    }
+
+    #[test]
+    fn client_tool_outputs_are_cached_unchanged() {
+        let key = "tools-test-client-replay";
+        let _retained = Retained::new(key.into());
+        let client = r#"{"type":"function_call_output","call_id":"call-1","id":"fco-1","output":"ok","internal_chat_message_metadata_passthrough":{"content_token_count":42,"turn_id":"client"}}"#;
+        let (_, turn) = prepare_fallback_turn(key, format!(r#"{{"input":[{client}]}}"#));
+        turn.expect("a session key records the turn").commit();
+        let (repaired, _) = prepare_fallback_turn(
+            key,
+            r#"{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}"#.into(),
+        );
+        assert!(repaired.contains(client), "{repaired}");
     }
 
     #[test]
