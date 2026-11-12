@@ -6,7 +6,7 @@
 //! new snapshot. The store is bounded by the number of credentials that have been used.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;
 
 use gjson::Kind;
@@ -414,7 +414,7 @@ impl QuotaSignals {
             return;
         }
         let snapshot = Snapshot { observed_at, signals };
-        let mut snapshots = self.snapshots.lock().expect("quota snapshots");
+        let mut snapshots = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = snapshots.entry(credential_id.to_owned()).or_default();
         let model = cpa_core::registry::dynamic::canonical_model(model);
         if !model.is_empty() {
@@ -427,7 +427,7 @@ impl QuotaSignals {
     pub fn snapshot(&self, credential_id: &str) -> Option<Snapshot> {
         self.snapshots
             .lock()
-            .expect("quota snapshots")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(credential_id)
             .and_then(|e| e.credential.clone())
     }
@@ -436,7 +436,7 @@ impl QuotaSignals {
     pub fn with_snapshot<R>(&self, credential_id: &str, f: impl FnOnce(&Snapshot) -> R) -> Option<R> {
         self.snapshots
             .lock()
-            .expect("quota snapshots")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(credential_id)
             .and_then(|e| e.credential.as_ref())
             .map(f)
@@ -446,7 +446,7 @@ impl QuotaSignals {
     pub fn model_snapshots(&self, credential_id: &str) -> BTreeMap<String, Snapshot> {
         self.snapshots
             .lock()
-            .expect("quota snapshots")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(credential_id)
             .map(|e| e.models.clone())
             .unwrap_or_default()
@@ -454,7 +454,10 @@ impl QuotaSignals {
 
     /// Drops state for credentials that no longer exist.
     pub fn retain(&self, keep: impl Fn(&str) -> bool) {
-        self.snapshots.lock().expect("quota snapshots").retain(|id, _| keep(id));
+        self.snapshots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|id, _| keep(id));
     }
 }
 
@@ -467,5 +470,30 @@ pub(crate) fn merge(target: &mut HeaderMap, headers: &Headers) {
         ) {
             target.insert(name, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_poisoned_snapshot_lock_still_records_and_reads() {
+        let quota = Arc::new(QuotaSignals::default());
+        let poisoner = quota.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.snapshots.lock();
+            panic!("poison the snapshot lock");
+        })
+        .join();
+        assert!(quota.snapshots.is_poisoned());
+        let signals = BTreeMap::from([("x-codex-primary-used-percent".to_owned(), "40".to_owned())]);
+        quota.record("cred", "gpt-5", signals.clone(), SystemTime::UNIX_EPOCH);
+        assert_eq!(quota.snapshot("cred").map(|s| s.signals), Some(signals));
+        assert_eq!(quota.with_snapshot("cred", |s| s.signals.len()), Some(1));
+        assert_eq!(quota.model_snapshots("cred").len(), 1);
+        quota.retain(|_| false);
+        assert_eq!(quota.snapshot("cred"), None);
     }
 }

@@ -9,7 +9,7 @@
 //! the request fails with Anthropic's own 404.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use cpa_core::exec::{ExecError, FailureScope};
 
@@ -41,12 +41,12 @@ struct State {
 
 impl Aliases {
     fn load(&self, key: &str) -> Option<Arc<Reverse>> {
-        let state = self.0.lock().expect("thread alias store");
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.entries.get(key).cloned()
     }
 
     fn save(&self, keys: &[String], aliases: &Arc<Reverse>) {
-        let mut state = self.0.lock().expect("thread alias store");
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         for key in keys {
             if !state.entries.contains_key(key) {
                 state.order.push_back(key.clone());

@@ -7,7 +7,7 @@
 //! The billing `cc_version` and the native-client version floor derive from it.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use http::HeaderMap;
@@ -202,7 +202,10 @@ pub(crate) fn note_refused(
     let seen = version(user_agent);
     let bit = 1u64 << (hash64(&seen) % 64);
     {
-        let mut logged = REFUSED.get_or_init(Mutex::default).lock().expect("refused versions");
+        let mut logged = REFUSED
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mask = logged.entry(hash64(&credential.id)).or_default();
         if *mask & bit != 0 {
             return false;
@@ -542,7 +545,7 @@ pub(crate) fn resolve(credential_id: &str, api_key: &str, headers: &HeaderMap, s
         api_key,
         candidate.as_ref().unwrap_or(&Profile::default()),
     );
-    let mut cache = cache().lock().expect("device profile cache");
+    let mut cache = cache().lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|_, e| e.expires > now);
     let cached = cache.get_mut(&key).filter(|e| !e.profile.user_agent.is_empty());
     match (candidate, cached) {

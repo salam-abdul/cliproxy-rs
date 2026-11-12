@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -314,7 +314,7 @@ impl CodexOAuth {
         }
         let key: [u8; 32] = Sha256::digest(refresh_token.as_bytes()).into();
         let shared = {
-            let mut table = self.refreshes.lock().expect("refresh table");
+            let mut table = self.refreshes.lock().unwrap_or_else(PoisonError::into_inner);
             table.retain(|_, (until, _)| *until > Instant::now());
             if let Some((_, result)) = table.get(&key) {
                 result.clone()
@@ -338,7 +338,12 @@ impl CodexOAuth {
                     let result = oauth.refresh_with_retry(&token).await;
                     // Results are retained for 5 minutes, matching Go's refresh
                     // failure backoff; success retention absorbs stale duplicate snapshots.
-                    if let Some((until, _)) = oauth.refreshes.lock().expect("refresh table").get_mut(&key) {
+                    if let Some((until, _)) = oauth
+                        .refreshes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get_mut(&key)
+                    {
                         *until = Instant::now() + Duration::from_secs(300);
                     }
                     result
