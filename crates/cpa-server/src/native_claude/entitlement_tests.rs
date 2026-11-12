@@ -804,3 +804,37 @@ async fn a_streaming_turn_does_not_hold_back_its_session() {
     assert_eq!(active, Some(2), "the open stream no longer marks its session active");
     drop(stream);
 }
+
+/// Requests of one session choose their account one at a time, so a new session binds
+/// one account.
+#[tokio::test]
+async fn same_session_requests_choose_their_account_one_at_a_time() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let session = fixture
+        .state
+        .sessions
+        .lock()
+        .unwrap()
+        .entry(hash("synthetic-session"))
+        .or_default()
+        .clone();
+    let choosing = session.lock().await;
+    let request = fixture.request();
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut request)
+            .await
+            .is_err(),
+        "a request chose its account while another request of its session was choosing"
+    );
+    assert!(fixture.seen.lock().unwrap().is_empty());
+    drop(choosing);
+    let response = request.await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(fixture.seen.lock().unwrap().len(), 1);
+}

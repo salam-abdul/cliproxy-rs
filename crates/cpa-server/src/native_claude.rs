@@ -836,7 +836,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         "Native routing state unavailable; no request sent",
                     ),
                 };
-                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"admissionMs":admission_ms}}));
+                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}}));
                 let mut response = error(status, message);
                 if status == 429 {
                     quota::retry_headers(response.headers_mut(), reset, now());
