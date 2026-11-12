@@ -185,6 +185,7 @@ async fn early_reset_is_noticed_after_the_bound(save: bool) {
 
     let cds = dir.join("claude-q.cds");
     let url = if save {
+        rt.store().flush_cooldowns();
         assert!(cds.exists(), "save-cooldown-status writes the cooldown");
         let saved = cpa_server::cooldown_store::load(&dir).unwrap();
         let next = saved[0].next_retry_after.unwrap();
@@ -288,6 +289,7 @@ async fn a_saved_trust_count_restores_its_window() {
         .expect("stated reset kept");
     assert!(stated > SIX_DAYS - Duration::from_secs(60), "{stated:?}");
     // The restore rewrote the file from the restored state: the count is still there.
+    rt.store().flush_cooldowns();
     let rewritten = cpa_server::cooldown_store::load(&dir).unwrap();
     assert_eq!(rewritten.len(), 1);
     assert_eq!(rewritten[0].quota.trust_windows, Some(3));

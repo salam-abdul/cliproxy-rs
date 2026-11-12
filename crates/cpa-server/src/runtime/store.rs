@@ -69,7 +69,8 @@ pub struct CredentialStore {
     pub(super) cooldown_dir: RwLock<Option<std::path::PathBuf>>,
     /// Replaces the `.cds` files while set (Go's token-store cooldown provider).
     cooldown_backend: RwLock<Option<Arc<dyn crate::cooldown_store::Backend>>>,
-    /// Serializes cooldown snapshots with their hand-over, so the last write is the newest.
+    /// Held from taking a cooldown snapshot to handing it to the writer, so snapshots
+    /// reach the writer, and the files, in the order they were taken.
     cooldown_write: Mutex<()>,
     cooldown_writer: Arc<super::cooldown_writer::CooldownWriter>,
     activity: Mutex<HashMap<String, CredentialActivity>>,
@@ -199,16 +200,16 @@ impl CredentialStore {
     /// Go `persistCooldownStates`: saves the live cooldowns. The snapshot is taken here
     /// and written off this thread (see [`super::cooldown_writer`]).
     pub fn persist_cooldowns(&self) {
-        self.persist_cooldowns_changed(None);
+        self.persist_cooldowns_changed(crate::cooldown_store::Changed::All);
     }
 
     /// [`Self::persist_cooldowns`] after a change to one credential's cooldowns only:
-    /// the other credentials' files are left as they are.
+    /// files holding only other credentials' records are not rewritten.
     pub(super) fn persist_cooldowns_of(&self, id: &str) {
-        self.persist_cooldowns_changed(Some(std::collections::BTreeSet::from([id.to_owned()])));
+        self.persist_cooldowns_changed(crate::cooldown_store::Changed::Only([id.to_owned()].into()));
     }
 
-    fn persist_cooldowns_changed(&self, changed: Option<std::collections::BTreeSet<String>>) {
+    fn persist_cooldowns_changed(&self, changed: crate::cooldown_store::Changed) {
         let Some(dir) = self.cooldown_dir.read().unwrap_or_else(PoisonError::into_inner).clone() else {
             return;
         };

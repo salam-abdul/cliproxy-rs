@@ -2499,11 +2499,13 @@ async fn buffer(mut stream: ExecStream, limit: usize) -> Result<Bytes, Fault> {
             reached,
         })?;
         if body.len() + event.len() > limit {
+            // The proxy refused a response it received: no account error rule matches it.
             let error = ExecError::local(
-                502,
+                500,
                 cpa_core::exec::FailureScope::Request,
                 format!("upstream response is larger than {limit} bytes"),
-            );
+            )
+            .accepted(AfterAccept::Unprocessed);
             return Err(Fault {
                 error,
                 bootstrap: None,
@@ -3116,7 +3118,9 @@ mod tests {
         let Err(fault) = buffer(events, 25).await else {
             panic!("a body past the cap must fail")
         };
-        assert_eq!(fault.error.status, 502);
+        assert_eq!(fault.error.after_accept, Some(AfterAccept::Unprocessed));
+        assert!(classify::upstream_attempted(&fault.error), "the upstream answered");
+        assert_eq!(classify::response_status(&fault.error), 500);
         assert!(fault.terminal());
         assert_eq!(polled.load(Ordering::SeqCst), 3);
         let events = futures_util::stream::iter(vec![Ok(chunk.clone()), Ok(chunk.clone())]).boxed();
