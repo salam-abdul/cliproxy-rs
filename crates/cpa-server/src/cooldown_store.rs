@@ -120,10 +120,48 @@ pub fn load(dir: &Path) -> Result<Vec<Record>, String> {
     Ok(records)
 }
 
+/// The `.cds` files one save left in place, each with the credentials it holds.
+pub(crate) type Written = std::collections::BTreeMap<PathBuf, std::collections::BTreeSet<String>>;
+
+/// Which credentials' cooldowns changed since the last save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Changed {
+    All,
+    Only(std::collections::BTreeSet<String>),
+}
+
+impl Changed {
+    /// The changes of this save and of a `newer` one that replaces it before it is written.
+    pub(crate) fn merge(self, newer: Changed) -> Changed {
+        match (self, newer) {
+            (Changed::Only(mut older), Changed::Only(newer)) => {
+                older.extend(newer);
+                Changed::Only(older)
+            }
+            _ => Changed::All,
+        }
+    }
+}
+
 /// Go `FileCooldownStateStore.Save`: one atomically replaced file per credential, records
 /// sorted by model; `.cds` files no longer backed by a record are removed.
 pub fn save(dir: &Path, records: Vec<Record>, now: SystemTime) -> Result<(), String> {
+    save_changed(dir, records, now, &Changed::All, None).map(drop)
+}
+
+/// [`save`], except that after an earlier save to `dir` left `previous`, a change to
+/// `Only` some credentials writes just the files that hold or held their records
+/// and removes just the files of `previous` that lost their records, without listing
+/// `dir`. Returns the files this save left, for the next one.
+pub(crate) fn save_changed(
+    dir: &Path,
+    records: Vec<Record>,
+    now: SystemTime,
+    changed: &Changed,
+    previous: Option<&Written>,
+) -> Result<Written, String> {
     let mut groups: std::collections::BTreeMap<PathBuf, Vec<Record>> = Default::default();
+    let mut written = Written::new();
     for record in records {
         if record.auth_id.trim().is_empty() {
             continue;
@@ -131,29 +169,48 @@ pub fn save(dir: &Path, records: Vec<Record>, now: SystemTime) -> Result<(), Str
         let rel = relative_path(dir, &record).ok_or("cooldown state path: missing auth identity")?;
         groups.entry(dir.join(rel)).or_default().push(record);
     }
-    for (path, mut records) in groups.clone() {
+    let partial = match changed {
+        Changed::Only(ids) => previous.map(|previous| (ids, previous)),
+        Changed::All => None,
+    };
+    for (path, records) in &mut groups {
+        let unchanged = partial.is_some_and(|(ids, previous)| {
+            previous.get(path).is_some_and(|held| {
+                !held
+                    .iter()
+                    .chain(records.iter().map(|r| &r.auth_id))
+                    .any(|id| ids.contains(id))
+            })
+        });
+        written.insert(path.clone(), records.iter().map(|r| r.auth_id.clone()).collect());
+        if unchanged {
+            continue;
+        }
         records.sort_by(|a, b| a.model.cmp(&b.model));
         let envelope = Envelope {
             version: 1,
             auth_id: records[0].auth_id.clone(),
             provider: records[0].provider.clone(),
             updated_at: Some(now),
-            records,
+            records: std::mem::take(records),
         };
         create_private_dir(path.parent().unwrap_or(dir))?;
         // Go `os.CreateTemp` + rename: an exclusively created 0600 temporary file.
-        crate::runtime::write_bytes_atomic(&path, &marshal_indent(&envelope))
+        crate::runtime::write_bytes_atomic(path, &marshal_indent(&envelope))
             .map_err(|e| format!("replace cooldown state file: {e}"))?;
     }
-    for path in cds_files(dir) {
-        if !groups.contains_key(&path)
-            && let Err(e) = std::fs::remove_file(&path)
+    let stale: Vec<PathBuf> = match partial {
+        Some((_, previous)) => previous.keys().filter(|p| !groups.contains_key(*p)).cloned().collect(),
+        None => cds_files(dir).into_iter().filter(|p| !groups.contains_key(p)).collect(),
+    };
+    for path in stale {
+        if let Err(e) = std::fs::remove_file(&path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             return Err(format!("remove stale cooldown state {}: {e}", path.display()));
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 fn create_private_dir(dir: &Path) -> Result<(), String> {
@@ -214,6 +271,52 @@ mod tests {
     /// masked. Go also writes an aggregate credential-level record derived from its model
     /// states (`updateAggregatedAvailability`); Go recomputes it on restore, so Rust
     /// writes only the credential-wide quota record and the comparison skips the rest.
+    /// Two credentials whose file names sanitize alike share one `.cds` file; a change
+    /// to either one rewrites it, including one that clears all its records.
+    #[test]
+    fn a_change_to_either_credential_of_a_shared_file_rewrites_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "cds-shared-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rec = |file: &str, id: &str, model: &str| Record {
+            auth_id: id.into(),
+            auth_file: Some(dir.join(file)),
+            provider: "claude".into(),
+            model: model.into(),
+            ..Default::default()
+        };
+        let now = SystemTime::now();
+        let first = vec![rec("user@x.json", "a", "m1"), rec("user_x.json", "b", "m1")];
+        let written = save_changed(&dir, first, now, &Changed::All, None).unwrap();
+        assert_eq!(written.len(), 1, "both credentials share one file");
+        let path = written.keys().next().unwrap().clone();
+        std::fs::write(&path, "stale").unwrap();
+        let second = vec![rec("user@x.json", "a", "m1"), rec("user_x.json", "b", "m2")];
+        let only_b = Changed::Only(["b".to_owned()].into());
+        save_changed(&dir, second, now, &only_b, Some(&written)).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"m2\""));
+        let written = save_changed(
+            &dir,
+            vec![rec("user@x.json", "a", "m1"), rec("user_x.json", "b", "m2")],
+            now,
+            &only_b,
+            Some(&written),
+        )
+        .unwrap();
+        save_changed(&dir, vec![rec("user@x.json", "a", "m1")], now, &only_b, Some(&written)).unwrap();
+        let left = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !left.contains("\"b\""),
+            "a credential that lost its records leaves the shared file: {left}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn files_match_go_store() {
         use crate::scheduler::{Policy, Scheduler};

@@ -69,8 +69,10 @@ pub struct CredentialStore {
     pub(super) cooldown_dir: RwLock<Option<std::path::PathBuf>>,
     /// Replaces the `.cds` files while set (Go's token-store cooldown provider).
     cooldown_backend: RwLock<Option<Arc<dyn crate::cooldown_store::Backend>>>,
-    /// Serializes cooldown snapshots with their writes, so the last write is the newest.
+    /// Held from taking a cooldown snapshot to handing it to the writer, so snapshots
+    /// reach the writer, and the files, in the order they were taken.
     cooldown_write: Mutex<()>,
+    cooldown_writer: Arc<super::cooldown_writer::CooldownWriter>,
     activity: Mutex<HashMap<String, CredentialActivity>>,
     /// Credential revisions whose file already holds Go's persisted form.
     persisted: Mutex<HashMap<String, u64>>,
@@ -107,6 +109,7 @@ impl CredentialStore {
             cooldown_dir: RwLock::default(),
             cooldown_backend: RwLock::default(),
             cooldown_write: Mutex::default(),
+            cooldown_writer: Arc::default(),
             activity: Mutex::default(),
             persisted: Mutex::default(),
             error_events: std::sync::OnceLock::new(),
@@ -161,6 +164,7 @@ impl CredentialStore {
     /// Go `RestoreCooldownStates`: live records of live credentials whose cooling is
     /// enabled, then a rewrite that drops everything else.
     fn restore_cooldowns(&self, dir: &std::path::Path) {
+        self.flush_cooldowns();
         let loaded = match self.cooldown_backend() {
             Some(backend) => backend.load(),
             None => crate::cooldown_store::load(dir),
@@ -193,8 +197,19 @@ impl CredentialStore {
         self.persist_cooldowns();
     }
 
-    /// Go `persistCooldownStates`: rewrites the `.cds` files from the live cooldowns.
+    /// Go `persistCooldownStates`: saves the live cooldowns. The snapshot is taken here
+    /// and written off this thread (see [`super::cooldown_writer`]).
     pub fn persist_cooldowns(&self) {
+        self.persist_cooldowns_changed(crate::cooldown_store::Changed::All);
+    }
+
+    /// [`Self::persist_cooldowns`] after a change to one credential's cooldowns only:
+    /// files holding only other credentials' records are not rewritten.
+    pub(super) fn persist_cooldowns_of(&self, id: &str) {
+        self.persist_cooldowns_changed(crate::cooldown_store::Changed::Only([id.to_owned()].into()));
+    }
+
+    fn persist_cooldowns_changed(&self, changed: crate::cooldown_store::Changed) {
         let Some(dir) = self.cooldown_dir.read().unwrap_or_else(PoisonError::into_inner).clone() else {
             return;
         };
@@ -213,13 +228,21 @@ impl CredentialStore {
                 .collect::<Vec<_>>()
         };
         records.sort_by(|a, b| (&a.provider, &a.auth_id, &a.model).cmp(&(&b.provider, &b.auth_id, &b.model)));
-        let saved = match self.cooldown_backend() {
-            Some(backend) => backend.save(records, wall),
-            None => crate::cooldown_store::save(&dir, records, wall),
+        let target = match self.cooldown_backend() {
+            Some(backend) => super::cooldown_writer::Target::Backend(backend),
+            None => super::cooldown_writer::Target::Files(dir),
         };
-        if let Err(error) = saved {
-            tracing::warn!(%error, "failed to persist cooldown state");
-        }
+        self.cooldown_writer.submit(super::cooldown_writer::Snapshot {
+            target,
+            records,
+            now: wall,
+            changed,
+        });
+    }
+
+    /// Blocks until every cooldown change so far is saved.
+    pub fn flush_cooldowns(&self) {
+        self.cooldown_writer.flush();
     }
 
     /// Go `Manager.persist` after a result (`FileTokenStore.Save`, metadata branch): the
@@ -538,7 +561,7 @@ impl CredentialStore {
             .reset_cooldowns(id);
         if had {
             // Go `ResetQuota` persists the cleared state.
-            self.persist_cooldowns();
+            self.persist_cooldowns_of(id);
         }
         models
     }

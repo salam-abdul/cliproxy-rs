@@ -11,7 +11,7 @@
 //! identity for a key; the continuity store stays process-local.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use cpa_common::session::{self as shared, Meta};
@@ -92,7 +92,10 @@ type KeyedCache = Mutex<HashMap<[u8; 32], (String, Instant)>>;
 fn cached(cache: &'static OnceLock<KeyedCache>, api_key: &str, make: impl FnOnce() -> String) -> String {
     let key: [u8; 32] = Sha256::digest(api_key.as_bytes()).into();
     let now = Instant::now();
-    let mut cache = cache.get_or_init(KeyedCache::default).lock().expect("id cache");
+    let mut cache = cache
+        .get_or_init(KeyedCache::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     cache.retain(|_, (_, until)| *until > now);
     let entry = cache.entry(key).or_insert_with(|| (make(), now));
     entry.1 = now + Duration::from_secs(3600);
@@ -277,7 +280,7 @@ pub(crate) fn begin(credential: &str, session: &str, new_turn: bool, explicit_pr
     }
     let key = cpa_core::hex::encode(Sha256::digest(format!("{credential}\0{session}").as_bytes()));
     let now = Instant::now();
-    let mut s = store().lock().expect("continuity store");
+    let mut s = store().lock().unwrap_or_else(PoisonError::into_inner);
     if s.last_cleanup
         .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(900))
     {
@@ -339,7 +342,7 @@ pub(crate) fn pin_date(key: &str, date: &str) -> String {
     if key.is_empty() || date.is_empty() {
         return date.to_owned();
     }
-    let mut s = store().lock().expect("continuity store");
+    let mut s = store().lock().unwrap_or_else(PoisonError::into_inner);
     let Some(entry) = s.entries.get_mut(key) else {
         return date.to_owned();
     };
@@ -356,7 +359,7 @@ pub(crate) fn commit(key: &str, sequence: u64, message_id: &str, request_id: &st
         return;
     }
     let now = Instant::now();
-    let mut s = store().lock().expect("continuity store");
+    let mut s = store().lock().unwrap_or_else(PoisonError::into_inner);
     s.next_access += 1;
     let access = s.next_access;
     let Some(entry) = s.entries.get_mut(key) else { return };

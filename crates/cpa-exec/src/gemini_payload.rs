@@ -174,33 +174,147 @@ fn white_pngs() -> &'static [(u16, u16, Vec<u8>)] {
 
 /// `sanitizeGeminiInteractionsUnsupportedInputIDs`: function calls carry `id` (copied
 /// from `call_id`) and never `call_id`; other steps and every content part lose `id`.
-pub(crate) fn sanitize_interactions_input_ids(mut body: Vec<u8>) -> Vec<u8> {
+/// Each edited item is spliced back at its own offset in one copy of the body, so the
+/// cost stays linear in the body size.
+pub(crate) fn sanitize_interactions_input_ids(body: Vec<u8>) -> Vec<u8> {
     let input = gj::get(&body, "input");
     if !input.is_array() {
         return body;
     }
-    let items: Vec<gj::Res<'static>> = input.array().into_iter().map(gj::Res::into_owned).collect();
-    for (i, item) in items.iter().enumerate() {
-        if *item.get("type").bytes() == *b"function_call" {
-            let call_id = item.get("call_id");
-            if !item.get("id").exists() && call_id.exists() {
-                gj::set_str(&mut body, &format!("input.{i}.id"), call_id.bytes());
-            }
-            if call_id.exists() {
-                gj::delete(&mut body, &format!("input.{i}.call_id"));
-            }
-        } else if item.get("id").exists() {
-            gj::delete(&mut body, &format!("input.{i}.id"));
-        }
-        let content = item.get("content");
-        if !content.is_array() {
-            continue;
-        }
-        for (j, part) in content.array().iter().enumerate() {
-            if part.get("id").exists() {
-                gj::delete(&mut body, &format!("input.{i}.content.{j}.id"));
-            }
-        }
+    let edits: Vec<_> = input
+        .array()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| sanitize_interactions_item(item).map(|edited| (i, item.clone(), edited)))
+        .collect();
+    if edits.is_empty() {
+        return body;
     }
-    body
+    let edited = splice_at_offsets(
+        &body,
+        0,
+        edits.iter().map(|(_, item, edited)| (item, edited.as_slice())),
+    );
+    edited.unwrap_or_else(|| {
+        let mut body = body.clone();
+        for (i, _, edited) in &edits {
+            gj::set_raw(&mut body, &format!("input.{i}"), edited);
+        }
+        body
+    })
+}
+
+/// One `input` item with the id rules applied, `None` when it needs no change.
+fn sanitize_interactions_item(item: &gj::Res<'_>) -> Option<Vec<u8>> {
+    let content = item.get("content");
+    let parts: Vec<_> = if content.is_array() {
+        content
+            .array()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, part)| part.get("id").exists())
+            .map(|(j, part)| {
+                let mut edited = part.raw().to_vec();
+                gj::delete(&mut edited, "id");
+                (j, part, edited)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut raw = if parts.is_empty() {
+        item.raw().to_vec()
+    } else {
+        let spliced = splice_at_offsets(
+            item.raw(),
+            item.index,
+            parts.iter().map(|(_, part, edited)| (part, edited.as_slice())),
+        );
+        spliced.unwrap_or_else(|| {
+            let mut raw = item.raw().to_vec();
+            for (j, _, edited) in &parts {
+                gj::set_raw(&mut raw, &format!("content.{j}"), edited);
+            }
+            raw
+        })
+    };
+    let mut changed = !parts.is_empty();
+    if *item.get("type").bytes() == *b"function_call" {
+        let call_id = item.get("call_id");
+        if !item.get("id").exists() && call_id.exists() {
+            changed |= gj::set_str(&mut raw, "id", call_id.bytes());
+        }
+        if call_id.exists() {
+            changed |= gj::delete(&mut raw, "call_id");
+        }
+    } else if item.get("id").exists() {
+        changed |= gj::delete(&mut raw, "id");
+    }
+    changed.then_some(raw)
+}
+
+/// `doc` with each value replaced by its edited bytes, in one copy. `base` is the offset
+/// of `doc` in the document the values were read from. `None` when an offset does not
+/// point at its value's bytes, so the caller edits by path instead.
+fn splice_at_offsets<'v>(
+    doc: &[u8],
+    base: usize,
+    edits: impl Iterator<Item = (&'v gj::Res<'v>, &'v [u8])>,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(doc.len());
+    let mut cursor = 0;
+    for (value, edited) in edits {
+        let start = value.index.checked_sub(base)?;
+        let end = start + value.raw().len();
+        if start < cursor || value.raw().is_empty() || doc.get(start..end) != Some(value.raw()) {
+            return None;
+        }
+        out.extend_from_slice(&doc[cursor..start]);
+        out.extend_from_slice(edited);
+        cursor = end;
+    }
+    out.extend_from_slice(&doc[cursor..]);
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactions_ids_are_rewritten_and_everything_else_keeps_its_bytes() {
+        let body = br#"{"input": [
+  {"type":"function_call","call_id":"c1","name":"f"},
+  {"type":"function_call", "id":"keep", "call_id":"c2"},
+  {"type":"message","id":"m1","content":[ {"type":"text","id":"p1","text":"a"}, {"type":"text","text":"b"} ]},
+  {"type":"message","content":[{"type":"text","text":"c"}]}
+ ], "model":"x"}"#;
+        let want = br#"{"input": [
+  {"type":"function_call","name":"f","id":"c1"},
+  {"type":"function_call", "id":"keep"},
+  {"type":"message","content":[ {"type":"text","text":"a"}, {"type":"text","text":"b"} ]},
+  {"type":"message","content":[{"type":"text","text":"c"}]}
+ ], "model":"x"}"#;
+        assert_eq!(
+            String::from_utf8_lossy(&sanitize_interactions_input_ids(body.to_vec())),
+            String::from_utf8_lossy(want)
+        );
+    }
+
+    #[test]
+    fn interactions_input_without_ids_is_returned_unchanged() {
+        let body = br#"{"input":[ {"type":"message","content":[{"type":"text","text":"c"}]} ]}"#.to_vec();
+        assert_eq!(sanitize_interactions_input_ids(body.clone()), body);
+        let body = br#"{"input":"text"}"#.to_vec();
+        assert_eq!(sanitize_interactions_input_ids(body.clone()), body);
+    }
+
+    #[test]
+    fn splicing_refuses_an_offset_that_misses_its_value() {
+        let doc = br#"{"a":{"id":1},"b":{"id":2}}"#;
+        let mut value = gj::get(doc, "b");
+        assert!(splice_at_offsets(doc, 0, [(&value, b"{}".as_slice())].into_iter()).is_some());
+        value.index -= 1;
+        assert!(splice_at_offsets(doc, 0, [(&value, b"{}".as_slice())].into_iter()).is_none());
+    }
 }

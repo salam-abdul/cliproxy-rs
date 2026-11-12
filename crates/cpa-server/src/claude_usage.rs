@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 use tokio::{sync::Mutex as AsyncMutex, time::Instant};
@@ -102,7 +102,12 @@ struct Cache(Mutex<HashMap<String, Entry>>);
 
 impl Cache {
     async fn invalidate(&self, key: &str) {
-        let value = self.0.lock().unwrap().get(key).map(|entry| entry.value.clone());
+        let value = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .map(|entry| entry.value.clone());
         if let Some(value) = value {
             *value.lock().await = None;
         }
@@ -113,7 +118,7 @@ impl Cache {
         F: Future<Output = anyhow::Result<Value>>,
     {
         let value = {
-            let mut entries = self.0.lock().unwrap();
+            let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
             if !entries.contains_key(&key) && entries.len() == CAPACITY {
                 let oldest = entries
                     .iter()
@@ -147,6 +152,21 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::future::IntoFuture;
+
+    #[tokio::test]
+    async fn a_poisoned_cache_lock_still_serves_and_invalidates() {
+        let cache = Arc::new(Cache::default());
+        let poisoner = cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.0.lock();
+            panic!("poison the cache lock");
+        })
+        .join();
+        assert!(cache.0.is_poisoned());
+        assert_eq!(cache.get("a".into(), async { Ok(json!(1)) }).await.unwrap(), json!(1));
+        cache.invalidate("a").await;
+        assert_eq!(cache.get("a".into(), async { Ok(json!(2)) }).await.unwrap(), json!(2));
+    }
 
     #[tokio::test]
     async fn management_preserves_token_forms_and_proxy_and_shares_the_native_cache() {

@@ -281,7 +281,7 @@ impl CredentialStore {
     pub fn reset_cooldown(&self, id: &str) -> Vec<String> {
         let models = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner).reset(id);
         if !models.is_empty() {
-            self.persist_cooldowns();
+            self.persist_cooldowns_of(id);
         }
         models
     }

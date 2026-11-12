@@ -12,7 +12,7 @@
 //! aborts it and sends a close frame. No task outlives its session.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -141,7 +141,7 @@ impl Upstream {
 
     pub(crate) fn activate(&self) -> mpsc::Receiver<Read> {
         let (tx, rx) = mpsc::channel(TURN_BUFFER);
-        let mut link = self.link.lock().expect("link");
+        let mut link = self.link.lock().unwrap_or_else(PoisonError::into_inner);
         match &link.lost {
             Some(error) => {
                 let _ = tx.try_send(Read::Failed(turn_error(error)));
@@ -152,7 +152,7 @@ impl Upstream {
     }
 
     pub(crate) fn deactivate(&self) {
-        self.link.lock().expect("link").active.take();
+        self.link.lock().unwrap_or_else(PoisonError::into_inner).active.take();
     }
 
     /// `writeCodexWebsocketMessage` + `mapCodexWebsocketWriteError`: a write after the
@@ -169,11 +169,11 @@ impl Upstream {
         match sent {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(write_error(
-                self.link.lock().expect("link").lost.as_ref(),
+                self.link.lock().unwrap_or_else(PoisonError::into_inner).lost.as_ref(),
                 "codex websockets executor: write failed",
             )),
             Err(_) => Err(write_error(
-                self.link.lock().expect("link").lost.as_ref(),
+                self.link.lock().unwrap_or_else(PoisonError::into_inner).lost.as_ref(),
                 "codex websockets executor: write timed out",
             )),
         }
@@ -191,7 +191,7 @@ impl Upstream {
         if self
             .lease
             .lock()
-            .expect("lease")
+            .unwrap_or_else(PoisonError::into_inner)
             .1
             .as_ref()
             .is_some_and(|l| l.same(lease))
@@ -214,7 +214,7 @@ impl Upstream {
             return Err(unbound());
         }
         let previous = {
-            let mut slot = self.lease.lock().expect("lease");
+            let mut slot = self.lease.lock().unwrap_or_else(PoisonError::into_inner);
             if slot.0 {
                 drop(slot);
                 lease.0.end();
@@ -230,12 +230,12 @@ impl Upstream {
 
     /// Stops the reader and closes the socket, ending the Home pick it kept. Idempotent.
     pub(crate) fn shutdown(self: &Arc<Self>) {
-        if let Some(reader) = self.reader.lock().expect("reader handle").take() {
+        if let Some(reader) = self.reader.lock().unwrap_or_else(PoisonError::into_inner).take() {
             reader.abort();
         }
         self.deactivate();
         let lease = {
-            let mut slot = self.lease.lock().expect("lease");
+            let mut slot = self.lease.lock().unwrap_or_else(PoisonError::into_inner);
             slot.0 = true;
             slot.1.take()
         };
@@ -266,18 +266,18 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) fn current(&self) -> Option<Arc<Upstream>> {
-        self.conn.lock().expect("session conn").clone()
+        self.conn.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn steering(&self) -> Option<Arc<SteeringInput>> {
-        self.steering.lock().expect("session steering").clone()
+        self.steering.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// `invalidateUpstreamConn`: only the session's current socket is dropped, so a stale
     /// reader cannot tear down its replacement. `notify` tells the downstream handler.
     pub(crate) fn invalidate(&self, conn: &Arc<Upstream>, error: &ExecError, notify: bool) {
         {
-            let mut current = self.conn.lock().expect("session conn");
+            let mut current = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
             if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, conn)) {
                 return;
             }
@@ -334,7 +334,7 @@ impl Pool {
     pub(crate) fn session(&self, id: &str) -> Arc<Session> {
         self.sessions
             .lock()
-            .expect("sessions")
+            .unwrap_or_else(PoisonError::into_inner)
             .entry(id.to_owned())
             .or_insert_with(|| {
                 Arc::new(Session {
@@ -349,20 +349,25 @@ impl Pool {
 
     /// `WithWebsocketInput`: binds the downstream connection's frames to its session.
     pub fn attach_steering(&self, id: &str, input: SteeringInput) {
-        *self.session(id).steering.lock().expect("session steering") = Some(Arc::new(input));
+        *self.session(id).steering.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(input));
     }
 
     /// `CloseExecutionSession`: the downstream connection ended.
     pub fn close(&self, id: &str) {
-        let session = self.sessions.lock().expect("sessions").remove(id);
-        if let Some(conn) = session.and_then(|s| s.conn.lock().expect("session conn").take()) {
+        let session = self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(id);
+        if let Some(conn) = session.and_then(|s| s.conn.lock().unwrap_or_else(PoisonError::into_inner).take()) {
             conn.shutdown();
         }
     }
 
     /// The error that lost the session's upstream socket, if it was lost.
     pub fn loss(&self, id: &str) -> Option<ExecError> {
-        let session = self.sessions.lock().expect("sessions").get(id).cloned()?;
+        let session = self
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()?;
         session.closed.borrow().clone()
     }
 
@@ -383,7 +388,7 @@ impl Pool {
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.sessions.lock().expect("sessions").len()
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 }
 
@@ -903,7 +908,7 @@ impl CodexExecutor {
                 return Ok((current, None));
             }
             // target_changed: another credential, URL or proxy now serves this session.
-            let mut slot = session.conn.lock().expect("session conn");
+            let mut slot = session.conn.lock().unwrap_or_else(PoisonError::into_inner);
             if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &current)) {
                 *slot = None;
             }
@@ -916,8 +921,8 @@ impl CodexExecutor {
         // Publish before the reader runs, so a reader that fails at once still finds its
         // socket current and invalidates it; holding the handle slot keeps a concurrent
         // shutdown from missing the abort handle.
-        let mut reader = conn.reader.lock().expect("reader handle");
-        *session.conn.lock().expect("session conn") = Some(conn.clone());
+        let mut reader = conn.reader.lock().unwrap_or_else(PoisonError::into_inner);
+        *session.conn.lock().unwrap_or_else(PoisonError::into_inner) = Some(conn.clone());
         let task = tokio::spawn(read_loop(stream, Arc::downgrade(session), conn.clone(), self.ws.idle));
         *reader = Some(task.abort_handle());
         drop(reader);
@@ -1206,14 +1211,14 @@ pub(crate) async fn read_loop(
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
             }
         };
-        let active = conn.link.lock().expect("link").active.clone();
+        let active = conn.link.lock().unwrap_or_else(PoisonError::into_inner).active.clone();
         if let Some(tx) = active {
             // Waits while the turn is busy: backpressure instead of unbounded queueing.
             let _ = tx.send(Read::Text(text)).await;
         }
     };
     let active = {
-        let mut link = conn.link.lock().expect("link");
+        let mut link = conn.link.lock().unwrap_or_else(PoisonError::into_inner);
         link.lost = Some(error.clone());
         link.active.clone()
     };

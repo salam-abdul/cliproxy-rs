@@ -1007,7 +1007,13 @@ impl Turn {
                 // The reader's terminal error did not fit a full queue (Go's
                 // `sendTerminalWebsocketRead` waits for room); it is kept on the socket.
                 None => {
-                    let lost = self.conn.link.lock().expect("link").lost.clone();
+                    let lost = self
+                        .conn
+                        .link
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .lost
+                        .clone();
                     self.read_failed(
                         lost.unwrap_or_else(|| plain("xai websockets executor: session read channel closed")),
                     );
@@ -1248,7 +1254,7 @@ impl XaiExecutor {
                 return Ok((current, None));
             }
             // target_changed: another credential, URL or proxy now serves this session.
-            let mut slot = session.conn.lock().expect("session conn");
+            let mut slot = session.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, &current)) {
                 *slot = None;
             }
@@ -1260,8 +1266,8 @@ impl XaiExecutor {
         let (sink, stream) = socket.split();
         let conn = Upstream::new(target.clone(), sink, self.ws.pool.write);
         // Publish before the reader runs, as the Codex executor does.
-        let mut reader = conn.reader.lock().expect("reader handle");
-        *session.conn.lock().expect("session conn") = Some(conn.clone());
+        let mut reader = conn.reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *session.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(conn.clone());
         let task = tokio::spawn(codex_ws::read_loop(
             stream,
             Arc::downgrade(session),

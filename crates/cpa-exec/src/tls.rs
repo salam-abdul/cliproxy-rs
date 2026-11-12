@@ -7,7 +7,7 @@
 //! never crosses proxy boundaries. OAuth acquisition has its own compact profile.
 //! Every other origin uses Go's standard transport from [`crate::proxy`].
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use cpa_core::config::Config;
@@ -73,7 +73,7 @@ impl Transport {
     /// `handshake` bounds the native client's TLS establishment ([`handshake_timeout`]);
     /// the OAuth profile is not Go's shared uTLS client and ignores it.
     pub(crate) fn clients(&self, proxy: &Proxy, handshake: Option<Duration>) -> wreq::Result<Arc<Clients>> {
-        let mut cache = self.cache.lock().expect("transport cache");
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(i) = cache.iter().position(|((p, h), _)| p == proxy && *h == handshake) {
             let entry = cache.remove(i);
             let clients = entry.1.clone();
