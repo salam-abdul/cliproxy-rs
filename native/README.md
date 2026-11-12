@@ -9,12 +9,14 @@ Native routing keeps one Claude Code, Desktop or Zed conversation on one subscri
 - Inference uses a ten-minute read timeout, the native SDK's allowance.
 - A lost response or partial stream is never replayed. The proxy neither holds requests until quota resets nor resubmits conversation turns, and sends no inference keepalive requests.
 - Transport-failure diagnostics record only an error class and elapsed time, never raw error strings or request contents.
+- An account's inference and usage reads go through its `proxy_url`, or `requests.proxy-url` when it has none ([Configuration](../docs/CONFIGURATION.md)). Without either, or with `direct`, they connect directly and ignore `HTTPS_PROXY`. An account whose proxy setting is unusable is skipped, never sent directly. Requests that keep the native Claude login, and tunnels to other hosts, connect directly.
 
 ## Account selection
 
 - **New sessions** choose the eligible account whose confirmed weekly reset is soonest. Unknown or past reset dates rank last; the configured preferred account breaks ties.
 - **Minimum remaining quota.** New sessions prefer an account with at least `newSessionMinRemaining` percent remaining when an eligible alternative exists. This never displaces an eligible pinned session or rejects the only eligible account. `selectionShadow: true` records the preference without applying it.
 - **Existing sessions** stay pinned to their account until it is disabled, unavailable or out of included quota, even when another account resets sooner. Failover chooses the soonest eligible replacement and pins the session to it. Failover can cost one cold prompt cache.
+- **Concurrent requests in one session** wait for each other only while an account is chosen and the session is pinned, within the admission deadline. A response that is still streaming does not hold back the next request.
 - **Limits checked:** five-hour, weekly and applicable model limits. Exhausted response headers override cached quota and affinity on the next request. Elapsed time alone never establishes that quota is available.
 - **Paid overage.** The dashboard's **Allow paid overage** switch defaults to off and saves at once through `PATCH /v8/management/routing/native-policy` with `{"allowExtraUsage": true}` or `false`. When on, confirmed extra credits are used only when no account with included quota is usable. Disabled accounts stay excluded. Usage reporting and concurrent requests can cross a limit before it is observed, so this is not an absolute billing cap.
 
@@ -139,6 +141,8 @@ Do not set `ANTHROPIC_BASE_URL` to the proxy's management address. Custom base U
 | `~/.local/share/cliproxy-native/releases/` | Immutable releases |
 
 OAuth files use the upstream JSON format, with directories at mode 0700 and files at 0600. Never commit this state.
+
+Routing leaves out an account file that is outside the auth directory, a symlink, readable by group or others, missing, not Claude credential JSON, or set to an unusable proxy, and both files of an identity that two otherwise routable files share. The other accounts keep routing; when every file is left out, requests fail with a routing error and nothing is sent. Each skipped file is logged and reported once, in `GET /v8/management/observability/native/events`, as an `account-skipped` event with its file name and reason; nothing from the file is recorded.
 
 Updates are manual and pinned. Stop the login service, then run:
 

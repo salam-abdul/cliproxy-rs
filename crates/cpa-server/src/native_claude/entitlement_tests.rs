@@ -61,16 +61,33 @@ fn tls() -> Arc<SslAcceptor> {
 }
 impl Fixture {
     async fn new(reply: Reply) -> Self {
-        Self::build(reply, None, None).await
+        Self::build(reply, None, None, None).await
+    }
+    /// No native accounts at all.
+    async fn without_accounts(reply: Reply) -> Self {
+        Self::build_with(reply, None, None, None, false).await
     }
     async fn with_history(reply: Reply, history: &Path) -> Self {
-        Self::build(reply, Some(history), None).await
+        Self::build(reply, Some(history), None, None).await
     }
     /// With history, and account `a` backed by `credential` in the runtime's store.
     async fn with_credential(reply: Reply, history: &Path, credential: Credential) -> Self {
-        Self::build(reply, Some(history), Some(credential)).await
+        Self::build(reply, Some(history), Some(credential), None).await
     }
-    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>) -> Self {
+    /// Account `a` uses the outbound proxy at `proxy`.
+    async fn with_proxy(reply: Reply, proxy: &str) -> Self {
+        Self::build(reply, None, None, Some(proxy)).await
+    }
+    async fn build(reply: Reply, history: Option<&Path>, credential: Option<Credential>, proxy: Option<&str>) -> Self {
+        Self::build_with(reply, history, credential, proxy, true).await
+    }
+    async fn build_with(
+        reply: Reply,
+        history: Option<&Path>,
+        credential: Option<Credential>,
+        proxy: Option<&str>,
+        accounts: bool,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -97,7 +114,16 @@ impl Fixture {
                             if cpa_common::gostr::contains(&body, b"MODE_STALL") {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
-                            let response = if token == "Bearer token-a"
+                            let response = if cpa_common::gostr::contains(&body, b"MODE_OPEN_STREAM") {
+                                let stream = futures_util::stream::once(async {
+                                    Ok::<_, std::io::Error>(Bytes::from_static(b"event: ping\n\n"))
+                                })
+                                .chain(futures_util::stream::pending());
+                                Response::builder()
+                                    .header("content-type", "text/event-stream")
+                                    .body(Body::from_stream(stream))
+                                    .unwrap()
+                            } else if token == "Bearer token-a"
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
                                 let zstd = reply.body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
@@ -140,10 +166,10 @@ impl Fixture {
         let native: Config = serde_json::from_value(json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":[
-                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default()},
+            "fixtureAccounts":if accounts {json!([
+                {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default(),"proxyUrl":proxy},
                 {"id":"b","token":"token-b","quota":quota}
-            ],
+            ])} else {json!([])},
             "upstream":{"hostname":"127.0.0.1","port":port}
         }))
         .unwrap();
@@ -177,21 +203,12 @@ impl Fixture {
             ),
             config: native,
             rt,
-            client: wreq::Client::builder()
-                .no_proxy()
-                .tls_cert_verification(false)
-                .retry(wreq::retry::Policy::never())
-                .redirect(wreq::redirect::Policy::none())
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .no_zstd()
-                .build()
-                .unwrap(),
+            clients: Clients::new(|| native_client().tls_cert_verification(false)).unwrap(),
             tls: std::sync::RwLock::new(tls),
             secret: "synthetic-secret".into(),
             routing: Default::default(),
             sessions: Default::default(),
+            skipped: Default::default(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -646,4 +663,214 @@ async fn a_client_that_leaves_before_the_headers_still_leaves_a_row() {
             .as_deref()
             .is_some_and(|b| b.contains("MODE_STALL"))
     );
+}
+
+/// A skipped account file is reported once per reason, not on every pool read.
+#[tokio::test]
+async fn a_skipped_account_file_is_reported_once_per_reason() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let reported = || -> Vec<Value> {
+        fixture.state.rt.native_events.snapshot()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "account-skipped")
+            .map(|e| json!([e["fileId"], e["reason"]]))
+            .collect()
+    };
+    let skip = |reason| vec![("synthetic.json".to_owned(), reason)];
+    fixture.state.report_skipped(skip(Skip::NotPrivate));
+    fixture.state.report_skipped(skip(Skip::NotPrivate));
+    assert_eq!(reported(), [json!(["synthetic.json", "not_private"])]);
+    fixture.state.report_skipped(skip(Skip::Unreadable));
+    assert_eq!(reported().len(), 2);
+    assert!(reported().contains(&json!(["synthetic.json", "unreadable"])));
+    fixture.state.report_skipped(Vec::new());
+    fixture.state.report_skipped(skip(Skip::Unreadable));
+    assert_eq!(reported().len(), 3);
+}
+
+/// A loopback HTTP CONNECT proxy that records each request line and tunnels to the
+/// requested loopback target.
+async fn connect_proxy() -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let log = requests.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if client.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                log.lock().unwrap().push(line.clone());
+                let Some(target) = line.strip_prefix("CONNECT ").and_then(|rest| rest.split(' ').next()) else {
+                    return;
+                };
+                let Ok(mut upstream) = TcpStream::connect(target).await else {
+                    return;
+                };
+                client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    (url, requests, task)
+}
+
+/// An account with its own proxy sends inference, and its token, only through it.
+#[tokio::test]
+async fn an_account_proxy_carries_its_inference() {
+    let (proxy, requests, task) = connect_proxy().await;
+    let fixture = Fixture::with_proxy(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        &proxy,
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap(), SUCCESS);
+    assert_eq!(fixture.seen.lock().unwrap()[0].0, "Bearer token-a");
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].starts_with("CONNECT 127.0.0.1:"), "{requests:?}");
+    task.abort();
+}
+
+/// An account whose proxy cannot be used fails before the send; its token never goes
+/// out directly.
+#[tokio::test]
+async fn an_unusable_account_proxy_fails_before_the_send() {
+    let fixture = Fixture::with_proxy(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        "ftp://unusable-proxy.invalid",
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 502);
+    assert!(
+        fixture.seen.lock().unwrap().is_empty(),
+        "the token was sent without its proxy"
+    );
+    let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+    assert!(
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "rejected" && e["outcome"] == "routing_error" && e["account"] == "a"),
+        "{events}"
+    );
+}
+
+/// A request waits for another request of its session only while that one chooses an
+/// account, not while its response streams; the streaming session stays active.
+#[tokio::test]
+async fn a_streaming_turn_does_not_hold_back_its_session() {
+    const OPEN: &[u8] =
+        br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[],"mode":"MODE_OPEN_STREAM"}"#;
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let open = fixture.request_body(OPEN).await;
+    assert_eq!(open.status(), 200);
+    let mut stream = open.bytes_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap(), &b"event: ping\n\n"[..]);
+    let next = tokio::time::timeout(Duration::from_secs(5), fixture.request())
+        .await
+        .expect("a same-session request waited for an open stream");
+    assert_eq!(next.status(), 200);
+    assert_eq!(next.bytes().await.unwrap(), SUCCESS);
+    let sid = hash("synthetic-session");
+    let active = fixture.state.sessions.lock().unwrap().get(&sid).map(Arc::strong_count);
+    assert_eq!(active, Some(2), "the open stream no longer marks its session active");
+    drop(stream);
+}
+
+/// Requests of one session choose their account one at a time, so a new session binds
+/// one account.
+#[tokio::test]
+async fn same_session_requests_choose_their_account_one_at_a_time() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let session = fixture
+        .state
+        .sessions
+        .lock()
+        .unwrap()
+        .entry(hash("synthetic-session"))
+        .or_default()
+        .clone();
+    let choosing = session.lock().await;
+    let request = fixture.request();
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut request)
+            .await
+            .is_err(),
+        "a request chose its account while another request of its session was choosing"
+    );
+    assert!(fixture.seen.lock().unwrap().is_empty());
+    let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+    assert!(
+        !events.as_array().unwrap().iter().any(|e| e["type"] == "selection"),
+        "an account was chosen while another request of its session was choosing: {events}"
+    );
+    drop(choosing);
+    let response = request.await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(fixture.seen.lock().unwrap().len(), 1);
+}
+
+/// When every account file was skipped, a request fails as a routing error, not as
+/// exhausted quota, and nothing is sent.
+#[tokio::test]
+async fn a_pool_of_only_skipped_files_is_a_routing_error() {
+    let fixture = Fixture::without_accounts(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    fixture
+        .state
+        .report_skipped(vec![("synthetic.json".to_owned(), Skip::InvalidProxy)]);
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 502);
+    assert!(fixture.seen.lock().unwrap().is_empty());
 }

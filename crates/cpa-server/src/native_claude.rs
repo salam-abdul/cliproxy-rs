@@ -26,6 +26,8 @@ use axum::{
 };
 use base64::Engine;
 use btls::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod};
+use cpa_core::credential::{Credential, Source};
+use cpa_exec::proxy::Proxy;
 use futures_util::StreamExt;
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -106,6 +108,9 @@ struct Account {
     expired: bool,
     #[serde(default)]
     quota: Value,
+    /// The account's effective outbound proxy; `None` connects directly.
+    #[serde(default)]
+    proxy_url: Option<String>,
 }
 impl Account {
     fn quota_id(&self) -> &str {
@@ -129,11 +134,13 @@ pub(crate) struct State {
     events: diagnostics::Writer,
     history: Option<history::History>,
     rt: Arc<Runtime>,
-    client: wreq::Client,
+    clients: Clients,
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
     secret: String,
     routing: Mutex<RoutingState>,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Account files the last pool read left out, with the reason reported for each.
+    skipped: Mutex<HashMap<String, Skip>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
 impl Drop for Running {
@@ -247,6 +254,140 @@ fn private(path: &Path) -> anyhow::Result<Vec<u8>> {
     }
     Ok(std::fs::read(path)?)
 }
+/// Why an account file was left out of the native pool. One bad file never takes the
+/// other accounts down with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skip {
+    OutsideAuthDir,
+    /// A symlink, not a regular file, or readable by group or others.
+    NotPrivate,
+    /// Missing (deleted mid-read) or unreadable.
+    Unreadable,
+    /// Not Claude credential JSON, or an invalid `native_route_id`.
+    Invalid,
+    /// Another otherwise routable file has the same identity; neither is routed, since
+    /// either could be stale.
+    DuplicateIdentity,
+    /// The account's `proxy_url` (or `requests.proxy-url`) is unusable. Routing it
+    /// directly would send its token from the host address.
+    InvalidProxy,
+}
+impl Skip {
+    fn as_str(self) -> &'static str {
+        match self {
+            Skip::OutsideAuthDir => "outside_auth_dir",
+            Skip::NotPrivate => "not_private",
+            Skip::Unreadable => "unreadable",
+            Skip::Invalid => "invalid",
+            Skip::DuplicateIdentity => "duplicate_identity",
+            Skip::InvalidProxy => "invalid_proxy",
+        }
+    }
+}
+struct Pool {
+    accounts: Vec<Account>,
+    /// Credential ID and reason for each file left out.
+    skipped: Vec<(String, Skip)>,
+}
+/// Reads the native pool from the store's Claude account files. Fails as a whole only
+/// when the auth directory itself cannot be resolved.
+fn read_pool(
+    credentials: Vec<Arc<Credential>>,
+    auth_dir: &Path,
+    settings: &Value,
+    cfg: &cpa_core::config::Config,
+) -> anyhow::Result<Pool> {
+    let mut accounts = Vec::new();
+    let mut skipped = Vec::new();
+    let mut root = None;
+    for c in credentials.into_iter().filter(|c| c.provider == "claude") {
+        let Source::File(ref path) = c.source else {
+            continue;
+        };
+        let root = match &root {
+            Some(root) => root,
+            None => root.insert(std::fs::canonicalize(auth_dir)?),
+        };
+        match read_account(&c, path, root, settings, cfg) {
+            Ok(a) => accounts.push(a),
+            Err(reason) => skipped.push((c.id.clone(), reason)),
+        }
+    }
+    let mut seen = HashMap::<String, usize>::new();
+    for a in &accounts {
+        *seen.entry(a.id.clone()).or_default() += 1;
+    }
+    let (mut accounts, duplicates): (Vec<_>, Vec<_>) = accounts.into_iter().partition(|a| seen[&a.id] == 1);
+    skipped.extend(duplicates.into_iter().map(|a| (a.file_id, Skip::DuplicateIdentity)));
+    let preferred = settings["preferredAccount"].as_str();
+    accounts.sort_by_key(|a| Some(a.id.as_str()) != preferred);
+    Ok(Pool { accounts, skipped })
+}
+fn read_account(
+    c: &Credential,
+    path: &Path,
+    root: &Path,
+    settings: &Value,
+    cfg: &cpa_core::config::Config,
+) -> Result<Account, Skip> {
+    let file = std::fs::canonicalize(path).map_err(|_| Skip::Unreadable)?;
+    if !file.starts_with(root) {
+        return Err(Skip::OutsideAuthDir);
+    }
+    let bytes = private(path).map_err(|e| {
+        if e.downcast_ref::<std::io::Error>().is_some() {
+            Skip::Unreadable
+        } else {
+            Skip::NotPrivate
+        }
+    })?;
+    let a: Value = serde_json::from_slice(&bytes).map_err(|_| Skip::Invalid)?;
+    if a["type"] != "claude" {
+        return Err(Skip::Invalid);
+    }
+    let fallback = hash(format!(
+        "claude:{}",
+        a["organization_uuid"]
+            .as_str()
+            .or(a["account_uuid"].as_str())
+            .unwrap_or(&c.id)
+    ));
+    let id = a["native_route_id"].as_str().unwrap_or(&fallback).to_owned();
+    if !valid_id(&id) {
+        return Err(Skip::Invalid);
+    }
+    // Resolved as the Claude executor resolves it: the account's proxy, then
+    // `requests.proxy-url`; without either, the account connects directly and ignores
+    // environment proxies. Unlike the executor, an unusable proxy skips the account.
+    let proxy_url = match Proxy::effective(c, cfg) {
+        Proxy::Url(url) => Some(url),
+        Proxy::Inherit | Proxy::Direct => None,
+        Proxy::Invalid => return Err(Skip::InvalidProxy),
+    };
+    let expired = a["expired"]
+        .as_str()
+        .or(a["expires_at"].as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .is_none_or(|d| d.timestamp_millis() <= now() as i64 + 30000);
+    let token = a["access_token"].as_str().unwrap_or_default().to_owned();
+    let disabled = c.disabled || a["disabled"].as_bool() == Some(true);
+    let name = settings["names"][&id]
+        .as_str()
+        .or(a["native_route_name"].as_str())
+        .unwrap_or(&c.label)
+        .to_owned();
+    Ok(Account {
+        id,
+        enabled: !disabled && !expired && !token.is_empty(),
+        token,
+        file_id: c.id.clone(),
+        name,
+        disabled,
+        expired,
+        quota: Value::Null,
+        proxy_url,
+    })
+}
 impl State {
     pub(crate) async fn set_overage(self: &Arc<Self>, allow: bool) -> anyhow::Result<()> {
         let s = self.clone();
@@ -331,65 +472,33 @@ impl State {
         } else {
             json!({})
         };
-        let mut all = Vec::new();
-        let mut root = None;
-        for c in self
-            .rt
-            .store()
-            .snapshot()
-            .into_iter()
-            .filter(|c| c.provider == "claude")
-        {
-            let cpa_core::credential::Source::File(ref path) = c.source else {
-                continue;
-            };
-            let root = match &root {
-                Some(root) => root,
-                None => root.insert(std::fs::canonicalize(&self.config.auth_dir)?),
-            };
-            let file = std::fs::canonicalize(path)?;
-            anyhow::ensure!(file.starts_with(root), "Credential outside auth directory");
-            let a: Value = serde_json::from_slice(&private(path)?)?;
-            anyhow::ensure!(a["type"] == "claude", "Credential provider mismatch");
-            let fallback = hash(format!(
-                "claude:{}",
-                a["organization_uuid"]
-                    .as_str()
-                    .or(a["account_uuid"].as_str())
-                    .unwrap_or(&c.id)
-            ));
-            let id = a["native_route_id"].as_str().unwrap_or(&fallback).to_owned();
-            anyhow::ensure!(valid_id(&id), "Invalid account identity");
-            let expired = a["expired"]
-                .as_str()
-                .or(a["expires_at"].as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .is_none_or(|d| d.timestamp_millis() <= now() as i64 + 30000);
-            let token = a["access_token"].as_str().unwrap_or_default().to_owned();
-            let disabled = c.disabled || a["disabled"].as_bool() == Some(true);
-            let name = settings["names"][&id]
-                .as_str()
-                .or(a["native_route_name"].as_str())
-                .unwrap_or(&c.label)
-                .to_owned();
-            all.push(Account {
-                id,
-                token: token.clone(),
-                enabled: !disabled && !expired && !token.is_empty(),
-                file_id: c.id.clone(),
-                name,
-                disabled,
-                expired,
-                quota: Value::Null,
-            });
+        let pool = read_pool(
+            self.rt.store().snapshot(),
+            &self.config.auth_dir,
+            &settings,
+            &self.rt.config(),
+        )?;
+        self.report_skipped(pool.skipped);
+        Ok(pool.accounts)
+    }
+    /// Reports each skipped account file once, and again only when its reason changes.
+    /// The event names the credential file and a reason, never its contents.
+    fn report_skipped(&self, skipped: Vec<(String, Skip)>) {
+        let changed: Vec<_> = {
+            let mut known = self.skipped.lock().unwrap_or_else(PoisonError::into_inner);
+            let next: HashMap<_, _> = skipped.into_iter().collect();
+            let changed = next
+                .iter()
+                .filter(|(file, reason)| known.get(*file) != Some(*reason))
+                .map(|(file, reason)| (file.clone(), *reason))
+                .collect();
+            *known = next;
+            changed
+        };
+        for (file, reason) in changed {
+            tracing::warn!(file = %file, reason = reason.as_str(), "Native Claude skipped an account file");
+            self.event(json!({"type":"account-skipped","fileId":file,"reason":reason.as_str()}));
         }
-        anyhow::ensure!(
-            all.iter().map(|a| &a.id).collect::<HashSet<_>>().len() == all.len(),
-            "Duplicate account identity"
-        );
-        let preferred = settings["preferredAccount"].as_str();
-        all.sort_by_key(|a| Some(a.id.as_str()) != preferred);
-        Ok(all)
     }
     fn included_available(&self, a: &Account, q: &Value, model: &str) -> bool {
         if !eligible(q, model) {
@@ -417,7 +526,7 @@ impl State {
             .claude_usage
             .get(
                 &a.token,
-                &self.client,
+                &self.clients.for_account(a)?,
                 self.rt.deny_external.load(std::sync::atomic::Ordering::Relaxed),
             )
             .await
@@ -509,9 +618,13 @@ impl State {
             if tried.len() >= self.config.max_attempts {
                 return Ok((None, None));
             }
-            let accounts = self
-                .accounts()
-                .await?
+            let accounts = self.accounts().await?;
+            // A routing error, not an empty pool that would read as exhausted quota.
+            anyhow::ensure!(
+                !accounts.is_empty() || self.skipped.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+                "Every native account file was skipped"
+            );
+            let accounts = accounts
                 .into_iter()
                 .filter(|a| a.enabled && !tried.contains(&a.id))
                 .collect();
@@ -634,7 +747,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         .unwrap_or_else(|| "https://api.anthropic.com".into());
     if !infer {
         let r = s
-            .client
+            .clients
+            .direct
             .request(parts.method, format!("{target}{path}"))
             .headers(headers(&parts.headers, None))
             .body(raw)
@@ -668,15 +782,17 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
-    let lock = {
+    // Holding this handle marks the session active, which keeps its affinity binding from
+    // being pruned or evicted, until the response stream ends. Its lock is held only for
+    // admission and affinity binding: same-session requests wait for each other's account
+    // choice, never for each other's responses.
+    let session = {
         let mut sessions = s.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
         sessions.entry(sid.clone()).or_default().clone()
     };
     let preparation_ms = request_started.elapsed().as_millis();
-    let waiting = Instant::now();
-    let guard = lock.lock_owned().await;
-    let session_wait_ms = waiting.elapsed().as_millis();
+    let mut session_wait_ms = 0u128;
     let mut admission_ms = 0u128;
     let mut upstream_headers_ms = 0u128;
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -691,9 +807,18 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"attempt_limit","status":503,"attempts":tried.len()}));
             return Ok(error(503, "Native routing attempt limit reached; retry later"));
         }
-        let admission_started = Instant::now();
-        let admitted = tokio::time::timeout_at(admission_deadline, s.admit(&sid, &model, &mut tried)).await;
-        admission_ms += admission_started.elapsed().as_millis();
+        let attempt_started = Instant::now();
+        let mut waited = None;
+        let admitted = tokio::time::timeout_at(admission_deadline, async {
+            let _admission = session.lock().await;
+            waited = Some(attempt_started.elapsed().as_millis());
+            s.admit(&sid, &model, &mut tried).await
+        })
+        .await;
+        let attempt_ms = attempt_started.elapsed().as_millis();
+        let wait_ms = waited.unwrap_or(attempt_ms);
+        session_wait_ms += wait_ms;
+        admission_ms += attempt_ms - wait_ms;
         let a = match admitted {
             Ok(Ok((Some(a), _))) => a,
             other => {
@@ -732,13 +857,19 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         "Native routing state unavailable; no request sent",
                     ),
                 };
-                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"admissionMs":admission_ms}}));
+                s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}}));
                 let mut response = error(status, message);
                 if status == 429 {
                     quota::retry_headers(response.headers_mut(), reset, now());
                 }
                 return Ok(response);
             }
+        };
+        // Resolved before the send: a proxy client that cannot be built fails the request
+        // rather than sending the account's token directly.
+        let Ok(client) = s.clients.for_account(&a) else {
+            s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"account":a.id,"outcome":"routing_error","status":502,"attempts":tried.len()}));
+            return Ok(error(502, "Native routing state unavailable; no request sent"));
         };
         let started = Instant::now();
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
@@ -758,8 +889,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             },
             &raw,
         );
-        let result = s
-            .client
+        let result = client
             .request(parts.method.clone(), format!("{target}{path}"))
             .headers(headers(&parts.headers, Some(&a.token)))
             .body(raw.clone())
@@ -874,8 +1004,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             o.finish("complete").await;
         }
         let stream = futures_util::stream::unfold(
-            (stream, record, guard, declared),
-            |(mut stream, mut record, guard, mut remaining)| async move {
+            (stream, record, session, declared),
+            |(mut stream, mut record, session, mut remaining)| async move {
                 match stream.next().await {
                     Some(item) => {
                         if let Some(o) = record.as_mut()
@@ -893,7 +1023,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         {
                             o.finish("complete").await;
                         }
-                        Some((item, (stream, record, guard, remaining)))
+                        Some((item, (stream, record, session, remaining)))
                     }
                     None => {
                         if let Some(o) = record.take() {
@@ -1051,18 +1181,17 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     let routing = RoutingState::load(&c.database, now())?;
     renew_certificate(&c)?;
     let tls = load_tls(&c)?;
-    let mut client = wreq::Client::builder()
-        .no_proxy()
-        .retry(wreq::retry::Policy::never())
-        .connect_timeout(Duration::from_secs(15))
-        .redirect(wreq::redirect::Policy::none())
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd();
-    if let Some(ca) = c.upstream.as_ref().and_then(|u| u.ca.as_ref()) {
-        client = client.tls_cert_store(wreq::tls::trust::CertStore::from_pem_stack(std::fs::read(ca)?)?);
-    }
+    let ca = match c.upstream.as_ref().and_then(|u| u.ca.as_ref()) {
+        Some(ca) => Some(wreq::tls::trust::CertStore::from_pem_stack(std::fs::read(ca)?)?),
+        None => None,
+    };
+    let clients = Clients::new(move || {
+        let builder = native_client();
+        match &ca {
+            Some(ca) => builder.tls_cert_store(ca.clone()),
+            None => builder,
+        }
+    })?;
     let s = Arc::new(State {
         events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
         history: match history::History::start(
@@ -1077,11 +1206,12 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         },
         config: c.clone(),
         rt,
-        client: client.build()?,
+        clients,
         tls: std::sync::RwLock::new(tls),
         secret,
         routing: Mutex::new(routing),
         sessions: Default::default(),
+        skipped: Default::default(),
     });
     let plain = TcpListener::bind(("127.0.0.1", c.http_proxy_port))
         .await
@@ -1124,14 +1254,23 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         }
     });
     let s1 = s.clone();
-    let a = tokio::spawn(async move {
-        while let Ok((io, _)) = plain.accept().await {
-            let s = s1.clone();
-            tokio::spawn(connection(io, s, true));
-        }
-    });
-    let b = tokio::spawn(async move {
-        while let Ok((io, _)) = secure.accept().await {
+    let plain = Arc::new(plain);
+    let a = tokio::spawn(accept_loop(
+        move || {
+            let plain = plain.clone();
+            async move { plain.accept().await }
+        },
+        move |(io, _)| {
+            tokio::spawn(connection(io, s1.clone(), true));
+        },
+    ));
+    let secure = Arc::new(secure);
+    let b = tokio::spawn(accept_loop(
+        move || {
+            let secure = secure.clone();
+            async move { secure.accept().await }
+        },
+        move |(io, _)| {
             let s = s.clone();
             tokio::spawn(async move {
                 if let Ok(ssl) = new_ssl(&s)
@@ -1144,13 +1283,74 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
                     connection(tls, s, true).await;
                 }
             });
-        }
-    });
+        },
+    ));
     println!(
         "Native Claude transparent router ready on loopback:{}",
         c.http_proxy_port
     );
     Ok(Running(vec![a, b, certificate, health], owner))
+}
+
+/// Hands every connection `accept` yields to `handle`. An accept error never ends the
+/// loop, so one aborted handshake or a full descriptor table cannot stop native traffic.
+async fn accept_loop<T, F>(mut accept: impl FnMut() -> F, mut handle: impl FnMut(T))
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    loop {
+        handle(crate::listener::next_connection(&mut accept).await);
+    }
+}
+
+/// The native transport's client settings: no retries, redirects or decompression, so
+/// response bytes reach the client as sent.
+fn native_client() -> wreq::ClientBuilder {
+    wreq::Client::builder()
+        .retry(wreq::retry::Policy::never())
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(wreq::redirect::Policy::none())
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+}
+/// Native clients: one direct, and one per account proxy, built on first use.
+struct Clients {
+    base: Box<dyn Fn() -> wreq::ClientBuilder + Send + Sync>,
+    /// Requests that carry no account token, and accounts without a proxy.
+    direct: wreq::Client,
+    proxied: Mutex<HashMap<String, wreq::Client>>,
+}
+impl Clients {
+    /// Bounds the proxy clients kept when account proxies keep changing.
+    const CAPACITY: usize = 64;
+    fn new(base: impl Fn() -> wreq::ClientBuilder + Send + Sync + 'static) -> anyhow::Result<Self> {
+        Ok(Self {
+            direct: base().no_proxy().build()?,
+            base: Box::new(base),
+            proxied: Mutex::default(),
+        })
+    }
+    /// The client for the account's own proxy. Fails, rather than falling back to the
+    /// direct client, when that proxy is unusable or its client cannot be built.
+    fn for_account(&self, a: &Account) -> anyhow::Result<wreq::Client> {
+        let Some(url) = &a.proxy_url else {
+            return Ok(self.direct.clone());
+        };
+        if let Some(client) = self.proxied.lock().unwrap_or_else(PoisonError::into_inner).get(url) {
+            return Ok(client.clone());
+        }
+        let proxy = Proxy::parse(url);
+        anyhow::ensure!(matches!(proxy, Proxy::Url(_)), "Unusable account proxy");
+        let client = proxy.apply((self.base)(), false)?.build()?;
+        let mut proxied = self.proxied.lock().unwrap_or_else(PoisonError::into_inner);
+        if proxied.len() >= Self::CAPACITY {
+            proxied.clear();
+        }
+        proxied.insert(url.clone(), client.clone());
+        Ok(client)
+    }
 }
 
 fn load_tls(c: &Config) -> anyhow::Result<Arc<SslAcceptor>> {
@@ -1237,6 +1437,7 @@ mod tests {
             disabled: false,
             expired: false,
             quota: json!({"seven_day":{"resets_at":reset}}),
+            proxy_url: None,
         };
         let pool = vec![
             account("later", "2033-05-19T04:33:20Z"),
@@ -1270,6 +1471,135 @@ mod tests {
             choose_account("existing", &pool, &routing, &tried, at).unwrap().id,
             "sooner"
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn native_listeners_keep_accepting_after_accept_errors() {
+        use std::io::{Error, ErrorKind};
+        let mut script = std::collections::VecDeque::from([
+            Err(Error::from(ErrorKind::ConnectionAborted)),
+            Err(Error::other("descriptor table full")),
+            Ok(1),
+            Err(Error::from(ErrorKind::ConnectionReset)),
+            Ok(2),
+        ]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(accept_loop(
+            move || {
+                let next = script.pop_front();
+                async move {
+                    match next {
+                        Some(result) => result,
+                        None => std::future::pending().await,
+                    }
+                }
+            },
+            move |conn: u8| tx.send(conn).unwrap(),
+        ));
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+        task.abort();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn one_bad_account_file_leaves_the_rest_of_the_pool_routable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("native-pool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let write = |name: &str, organization: &str, mode: u32| {
+            let body = json!({"type":"claude","organization_uuid":organization,
+                "access_token":"synthetic-token","expired":"2099-01-01T00:00:00Z"});
+            let path = dir.join(name);
+            std::fs::write(&path, body.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Arc::new(Credential::from_file(&dir, &path, body.as_object().unwrap().clone()).unwrap())
+        };
+        let credentials = vec![
+            write("good.json", "org-good", 0o600),
+            write("loose.json", "org-loose", 0o644),
+            write("first.json", "org-shared", 0o600),
+            write("second.json", "org-shared", 0o600),
+            write("gone.json", "org-gone", 0o600),
+            write("garbage.json", "org-garbage", 0o600),
+        ];
+        // A file that fails several checks reports the first: file checks before its proxy.
+        let mut credentials = credentials;
+        let body = json!({"type":"claude","organization_uuid":"org-loose-proxy","proxy_url":"ftp://unusable-proxy.invalid",
+            "access_token":"synthetic-token","expired":"2099-01-01T00:00:00Z"});
+        let path = dir.join("loose-proxy.json");
+        std::fs::write(&path, body.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        credentials.push(Arc::new(
+            Credential::from_file(&dir, &path, body.as_object().unwrap().clone()).unwrap(),
+        ));
+        std::fs::remove_file(dir.join("gone.json")).unwrap();
+        std::fs::write(dir.join("garbage.json"), "not json").unwrap();
+        let pool = read_pool(
+            credentials,
+            &dir,
+            &json!({}),
+            &cpa_core::config::Config::parse("").unwrap(),
+        );
+        assert!(pool.is_ok(), "a bad account file failed the whole pool");
+        let pool = pool.unwrap();
+        let routable: Vec<_> = pool.accounts.iter().map(|a| (a.file_id.as_str(), a.enabled)).collect();
+        assert_eq!(routable, [("good.json", true)]);
+        let mut skipped = pool.skipped;
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            [
+                ("first.json".to_owned(), Skip::DuplicateIdentity),
+                ("garbage.json".to_owned(), Skip::Invalid),
+                ("gone.json".to_owned(), Skip::Unreadable),
+                ("loose-proxy.json".to_owned(), Skip::NotPrivate),
+                ("loose.json".to_owned(), Skip::NotPrivate),
+                ("second.json".to_owned(), Skip::DuplicateIdentity),
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn account_proxies_resolve_like_the_claude_executor_and_unusable_ones_are_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("native-proxy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let write = |name: &str, proxy: Option<&str>| {
+            let mut body = json!({"type":"claude","organization_uuid":name,
+                "access_token":"synthetic-token","expired":"2099-01-01T00:00:00Z"});
+            if let Some(proxy) = proxy {
+                body["proxy_url"] = json!(proxy);
+            }
+            let path = dir.join(name);
+            std::fs::write(&path, body.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            Arc::new(Credential::from_file(&dir, &path, body.as_object().unwrap().clone()).unwrap())
+        };
+        let credentials = vec![
+            write("own.json", Some("socks5://own-proxy.invalid:1080")),
+            write("direct.json", Some("direct")),
+            write("inherited.json", None),
+            write("unusable.json", Some("ftp://unusable-proxy.invalid")),
+        ];
+        let cfg =
+            cpa_core::config::Config::parse("requests:\n  proxy-url: http://shared-proxy.invalid:3128\n").unwrap();
+        let pool = read_pool(credentials, &dir, &json!({}), &cfg).unwrap();
+        let mut proxies: Vec<_> = pool
+            .accounts
+            .iter()
+            .map(|a| (a.file_id.as_str(), a.proxy_url.as_deref()))
+            .collect();
+        proxies.sort();
+        assert_eq!(
+            proxies,
+            [
+                ("direct.json", None),
+                ("inherited.json", Some("http://shared-proxy.invalid:3128")),
+                ("own.json", Some("socks5://own-proxy.invalid:1080")),
+            ]
+        );
+        assert_eq!(pool.skipped, [("unusable.json".to_owned(), Skip::InvalidProxy)]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn reset_ranking_uses_weekly_not_short_window_and_unknown_dates_rank_last() {
