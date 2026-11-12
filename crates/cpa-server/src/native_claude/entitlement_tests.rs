@@ -748,6 +748,36 @@ async fn an_account_proxy_carries_its_inference() {
     task.abort();
 }
 
+/// An account whose proxy cannot be used fails before the send; its token never goes
+/// out directly.
+#[tokio::test]
+async fn an_unusable_account_proxy_fails_before_the_send() {
+    let fixture = Fixture::with_proxy(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        "ftp://unusable-proxy.invalid",
+    )
+    .await;
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 502);
+    assert!(
+        fixture.seen.lock().unwrap().is_empty(),
+        "the token was sent without its proxy"
+    );
+    let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+    assert!(
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "rejected" && e["outcome"] == "routing_error" && e["account"] == "a"),
+        "{events}"
+    );
+}
+
 /// A request waits for another request of its session only while that one chooses an
 /// account, not while its response streams; the streaming session stays active.
 #[tokio::test]

@@ -846,7 +846,10 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         };
         // Resolved before the send: a proxy client that cannot be built fails the request
         // rather than sending the account's token directly.
-        let client = s.clients.for_account(&a)?;
+        let Ok(client) = s.clients.for_account(&a) else {
+            s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"account":a.id,"outcome":"routing_error","status":502,"attempts":tried.len()}));
+            return Ok(error(502, "Native routing state unavailable; no request sent"));
+        };
         let started = Instant::now();
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
             &s.rt,
@@ -1309,7 +1312,7 @@ impl Clients {
         })
     }
     /// The client for the account's own proxy. Fails, rather than falling back to the
-    /// direct client, when that proxy's client cannot be built.
+    /// direct client, when that proxy is unusable or its client cannot be built.
     fn for_account(&self, a: &Account) -> anyhow::Result<wreq::Client> {
         let Some(url) = &a.proxy_url else {
             return Ok(self.direct.clone());
@@ -1317,7 +1320,9 @@ impl Clients {
         if let Some(client) = self.proxied.lock().unwrap_or_else(PoisonError::into_inner).get(url) {
             return Ok(client.clone());
         }
-        let client = Proxy::parse(url).apply((self.base)(), false)?.build()?;
+        let proxy = Proxy::parse(url);
+        anyhow::ensure!(matches!(proxy, Proxy::Url(_)), "Unusable account proxy");
+        let client = proxy.apply((self.base)(), false)?.build()?;
         let mut proxied = self.proxied.lock().unwrap_or_else(PoisonError::into_inner);
         if proxied.len() >= Self::CAPACITY {
             proxied.clear();
