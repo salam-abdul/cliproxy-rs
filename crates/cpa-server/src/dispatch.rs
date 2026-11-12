@@ -2473,25 +2473,46 @@ async fn finish(call: &Call, response: cpa_core::exec::ExecResponse) -> Result<D
                 rest: stream,
             })
         }
-        ResponseBody::Stream(mut stream) => {
-            let mut body = BytesMut::new();
-            while let Some(event) = stream.next().await {
-                body.extend_from_slice(&event.map_err(|error| Fault {
-                    error,
-                    bootstrap: None,
-                    reached: if body.is_empty() {
-                        Reached::NoOutput
-                    } else {
-                        Reached::Output
-                    },
-                })?);
-            }
-            Ok(Done::Buffered {
-                headers: response.headers,
-                body: body.freeze(),
-            })
-        }
+        ResponseBody::Stream(stream) => Ok(Done::Buffered {
+            headers: response.headers,
+            body: buffer(stream, MAX_BUFFERED_RESPONSE).await?,
+        }),
     }
+}
+
+/// The most of an upstream stream a non-stream answer holds in memory.
+const MAX_BUFFERED_RESPONSE: usize = 256 << 20;
+
+/// The whole stream for a non-stream client. Past `limit` the upstream is no longer
+/// read, and the request ends: the upstream already answered, so it is not resent.
+async fn buffer(mut stream: ExecStream, limit: usize) -> Result<Bytes, Fault> {
+    let mut body = BytesMut::new();
+    while let Some(event) = stream.next().await {
+        let reached = if body.is_empty() {
+            Reached::NoOutput
+        } else {
+            Reached::Output
+        };
+        let event = event.map_err(|error| Fault {
+            error,
+            bootstrap: None,
+            reached,
+        })?;
+        if body.len() + event.len() > limit {
+            let error = ExecError::local(
+                502,
+                cpa_core::exec::FailureScope::Request,
+                format!("upstream response is larger than {limit} bytes"),
+            );
+            return Err(Fault {
+                error,
+                bootstrap: None,
+                reached: Reached::Output,
+            });
+        }
+        body.extend_from_slice(&event);
+    }
+    Ok(body.freeze())
 }
 
 /// Go's force-mapped model rewrite: `rewriteModelInResponse` over a buffered body and
@@ -3074,6 +3095,35 @@ mod tests {
             };
             assert_eq!(fault.terminal(), terminal);
         }
+    }
+
+    /// A stream buffered for a non-stream client stops being read at the cap, and the
+    /// request ends without trying another account: the upstream already answered.
+    #[tokio::test]
+    async fn a_buffered_stream_past_the_cap_ends_the_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let chunk = Bytes::from_static(b"0123456789");
+        let polled = Arc::new(AtomicUsize::new(0));
+        let events = {
+            let (chunk, polled) = (chunk.clone(), polled.clone());
+            futures_util::stream::repeat_with(move || {
+                polled.fetch_add(1, Ordering::SeqCst);
+                Ok(chunk.clone())
+            })
+            .take(10)
+            .boxed()
+        };
+        let Err(fault) = buffer(events, 25).await else {
+            panic!("a body past the cap must fail")
+        };
+        assert_eq!(fault.error.status, 502);
+        assert!(fault.terminal());
+        assert_eq!(polled.load(Ordering::SeqCst), 3);
+        let events = futures_util::stream::iter(vec![Ok(chunk.clone()), Ok(chunk.clone())]).boxed();
+        assert_eq!(
+            buffer(events, 20).await.ok(),
+            Some(Bytes::from_static(b"01234567890123456789"))
+        );
     }
 
     /// A connection fault after a response was accepted is a break, so it fails over

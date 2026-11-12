@@ -99,6 +99,8 @@ These settings control translating-proxy account selection. Native CONNECT has [
 
 A Claude stream whose first event is an upstream error fails over before the client receives any of it, as the same status returned as an HTTP error would: the status is the one Anthropic answers with for the event's `error.type`, such as 529 for `overloaded_error`, 429 for `rate_limit_error` and 500 for `api_error`, and the account cools down as it would for that status. Such an account is tried once per request, by local and Home dispatch alike. When no other account remains, the client receives the last account's stream as it arrived: HTTP 200 with the error event. An `invalid_request_error`, an unknown error type, an error after the stream's first event, and any error on a fast request end the request on the account that sent it.
 
+A non-stream request whose upstream answers with a stream is held in memory until the stream ends, up to 256 MiB. A larger answer ends the request with a 502 on the account that sent it, without trying another.
+
 ### Optional preset: fail over only on 429
 
 This commented preset keeps 429 cooldown and failover for Claude and Codex OAuth accounts. It stops ordinary failover after a failed attempt for the listed non-429 statuses, without adding a cooldown. Credential-preparation failures can still cause another attempt, and so can `requests.streaming.bootstrap-retries` for an error the upstream sent before a stream's first payload. Unlisted statuses keep normal handling. The preset applies only to OAuth accounts and leaves plan limits and provider checks unchanged. A credential's own `request_scoped_errors` rules take precedence.
