@@ -1405,7 +1405,7 @@ impl Clients {
         }
         let proxy = Proxy::parse(url);
         anyhow::ensure!(matches!(proxy, Proxy::Url(_)), "Unusable account proxy");
-        let client = proxy.apply((self.base)(), false)?.build()?;
+        let client = proxy.apply((self.base)())?.build()?;
         let mut proxied = self.proxied.lock().unwrap_or_else(PoisonError::into_inner);
         if proxied.len() >= Self::CAPACITY {
             proxied.clear();

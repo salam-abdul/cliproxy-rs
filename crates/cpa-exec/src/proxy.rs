@@ -125,14 +125,14 @@ impl Proxy {
             .to_owned()
     }
 
-    /// Applies this proxy to a client. `inherit_env` mirrors Go's standard transport,
-    /// which honours environment proxies when nothing is configured; the Claude uTLS
-    /// transports dial directly instead.
-    pub fn apply(&self, builder: wreq::ClientBuilder, inherit_env: bool) -> wreq::Result<wreq::ClientBuilder> {
-        self.apply_env(builder, inherit_env.then(EnvProxy::current))
+    /// Applies this proxy to a client that never inherits environment proxies (the
+    /// Claude uTLS, Chrome and native transports): with nothing configured it dials
+    /// directly. Go's standard transport ([`GoClients`], [`default_client`]) inherits them.
+    pub fn apply(&self, builder: wreq::ClientBuilder) -> wreq::Result<wreq::ClientBuilder> {
+        self.apply_env(builder, None)
     }
 
-    /// [`Proxy::apply`] with the environment proxies to inherit, if any.
+    /// Applies this proxy; with nothing configured the client inherits `env`, if given.
     fn apply_env(&self, builder: wreq::ClientBuilder, env: Option<&EnvProxy>) -> wreq::Result<wreq::ClientBuilder> {
         match (self, env) {
             (Proxy::Url(url), _) => Ok(builder.proxy(wreq::Proxy::all(wreq_proxy_url(url).as_str())?)),

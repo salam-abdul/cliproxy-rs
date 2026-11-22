@@ -298,9 +298,8 @@ async fn environment_proxy_bypasses_loopback_and_proxies_the_rest() {
     assert_eq!(proxied.await.unwrap(), "POST http://upstream.invalid/v1 HTTP/1.1");
 }
 
-/// A resolve hook pins a host to a local mock, and an environment proxy would resolve
-/// that host itself. The environment here is passed in, not set, so no other test sees
-/// it: its proxy is a loopback port where nothing listens.
+/// The environment is passed in, not set, so no other test sees it: its proxy is a
+/// loopback port where nothing listens.
 #[tokio::test]
 async fn a_pinned_host_is_reached_whatever_the_environment_proxies_are() {
     use std::sync::atomic::Ordering::SeqCst;
@@ -325,8 +324,7 @@ async fn a_pinned_host_is_reached_whatever_the_environment_proxies_are() {
     assert_eq!(response.text().await.unwrap(), "ok");
     assert_eq!(accepted.load(SeqCst), 1);
 
-    // A configured proxy still applies to a pinned host: the test runtime's deny proxy
-    // keeps refusing.
+    // A configured proxy still applies to a pinned host.
     let configured = pinned.build(&Proxy::Url(DEAD.into()), &env).unwrap();
     refused(configured.post(&url).body("{}").send().await.unwrap_err());
 
