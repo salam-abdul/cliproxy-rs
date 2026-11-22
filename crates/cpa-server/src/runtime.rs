@@ -501,11 +501,19 @@ impl Runtime {
                     "credential removed or disabled during preparation",
                 )
             })?;
+        match trigger {
+            Trigger::Unauthorized(revision) | Trigger::Management(revision) if current.revision != revision => {
+                return Ok(current);
+            }
+            Trigger::Due if self.executors.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
+            Trigger::Unauthorized(_) | Trigger::Management(_) | Trigger::Due => {}
+        }
+        // After a 401 on this revision the access token is refused too.
+        let unauthorized = matches!(trigger, Trigger::Unauthorized(_));
         if let Some(refusal) = self.store.tokens_refused(&current)
             && !matches!(trigger, Trigger::Management(_))
         {
-            // The same tokens, so a 401 rejected the access token whose refresh was refused.
-            if matches!(trigger, Trigger::Unauthorized(_)) {
+            if unauthorized {
                 self.record_refusal(&current, version, refusal, None);
             }
             return Err(ExecError::local(
@@ -514,25 +522,16 @@ impl Runtime {
                 "credential refresh token was refused; sign in again",
             ));
         }
-        match trigger {
-            Trigger::Unauthorized(revision) | Trigger::Management(revision) if current.revision != revision => {
-                return Ok(current);
-            }
-            Trigger::Unauthorized(_) | Trigger::Management(_) => {}
-            Trigger::Due if self.executors.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
-            Trigger::Due => {}
-        }
         let patch = match self.executors.prepare(&self.for_executor(&current), cfg).await {
             Ok(patch) => patch,
             Err(error) => {
-                if let Some(refusal) = crate::refresh::definite(&current, &error, trigger) {
-                    // After a 401 the access token is refused too.
-                    let until = match trigger {
-                        Trigger::Unauthorized(_) => None,
-                        Trigger::Due | Trigger::Management(_) => {
-                            self.executors.access_expiry(&current).map(std::time::SystemTime::from)
-                        }
-                    };
+                let until = self
+                    .executors
+                    .access_expiry(&current)
+                    .and_then(system_time)
+                    .filter(|_| !unauthorized);
+                let serves = until.is_some_and(|until| until > std::time::SystemTime::now());
+                if let Some(refusal) = crate::refresh::definite(&current, &error, serves) {
                     self.record_refusal(&current, version, refusal, until);
                 }
                 return Err(error);
@@ -591,6 +590,10 @@ impl Runtime {
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
     /// executor reports a refresh credential, prepare it once (due or not) and return the
     /// committed replacement to retry with.
+    /// ponytail: Codex `prepare` refreshes only inside its 24-hour lead, so a Codex token
+    /// revoked earlier gets no refresh here, no refusal is recorded and the account stays
+    /// in rotation on its 401 cooldowns. Refresh past the lead in `CodexExecutor::prepare`
+    /// when the caller saw a 401 to recover or refuse it at once.
     pub async fn refresh_after_unauthorized(&self, credential: &Credential, cfg: &Config) -> Option<Arc<Credential>> {
         if !self.executors.has_refresh_credential(credential) {
             return None;
@@ -600,6 +603,18 @@ impl Runtime {
             .await
             .ok()?;
         (refreshed.revision != credential.revision).then_some(refreshed)
+    }
+
+    /// [`Self::refresh_after_unauthorized`] for a path that answers the 401 without
+    /// retrying on the same account (native Claude routing, Codex live and Alpha
+    /// Search). It runs in the background, so that answer is not delayed and the next
+    /// request finds the new tokens or the recorded refusal.
+    pub(crate) fn refresh_unauthorized(self: &Arc<Self>, credential: Arc<Credential>) {
+        let rt = self.clone();
+        tokio::spawn(async move {
+            let cfg = rt.config();
+            rt.refresh_after_unauthorized(&credential, &cfg).await;
+        });
     }
 
     /// One replaceable refresh loop. Uses the same preparation lock and atomic
@@ -704,9 +719,9 @@ impl Runtime {
                                 Instant::now(),
                             );
                             // The error body can echo request fields, so only its classification is logged.
-                            // A definite refusal was logged when it was recorded.
+                            // A refusal was logged when it was recorded, here or by a request.
                             if let Err(error) = &result
-                                && crate::refresh::definite(&current, error, Trigger::Due).is_none()
+                                && rt.store.tokens_refused(&current).is_none()
                             {
                                 tracing::warn!(
                                     "credential refresh failed: {} ({}) status={} scope={:?} invalid_grant={} retry_in={}s",
@@ -778,6 +793,14 @@ fn cooldown_dir(cfg: &Config, policy: &Policy) -> Option<std::path::PathBuf> {
     policy.save_cooldown_status.then(|| cfg.auth_dir.clone())
 }
 
+/// `at` as a `SystemTime`, or `None` before 1970 and past what the platform can hold:
+/// `SystemTime::from` panics on Windows for Go's zero time. Both read as an access token
+/// that no longer serves.
+fn system_time(at: chrono::DateTime<chrono::Utc>) -> Option<std::time::SystemTime> {
+    let seconds = u64::try_from(at.timestamp()).ok()?;
+    std::time::SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, at.timestamp_subsec_nanos()))
+}
+
 /// `oauth.auth-auto-refresh-workers`: non-positive means Go's default of 16.
 fn refresh_workers(cfg: &Config) -> usize {
     cfg.document
@@ -789,8 +812,9 @@ fn refresh_workers(cfg: &Config) -> usize {
 }
 
 impl Runtime {
-    /// Runs the executor's single-flighted preparation now, due or not (management
-    /// refresh, Go `RefreshAuthFile`). Returns the committed credential.
+    /// Runs the executor's single-flighted preparation now for a management refresh (Go
+    /// `RefreshAuthFile`), due or not, except that Codex refreshes only inside its
+    /// 24-hour lead. Returns the committed credential.
     pub async fn refresh_credential(&self, id: &str) -> Result<Arc<Credential>, ExecError> {
         let cfg = self.config();
         let revision = self.store.get(id).map(|c| c.revision).ok_or_else(|| {

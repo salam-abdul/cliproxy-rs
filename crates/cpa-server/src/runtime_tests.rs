@@ -1402,14 +1402,16 @@ async fn a_refusal_in_the_refresh_loop_stops_refreshes_and_rotation_follows_the_
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A transient refresh failure, and an `invalid_grant` while the access token was never
-/// refused, keep the account in rotation and refreshing.
+/// A transient refresh failure, and an `invalid_grant` while the access token still
+/// works, keep the account in rotation and refreshing.
 #[tokio::test]
 async fn transient_and_unconfirmed_refresh_failures_keep_refreshing() {
-    let past = chrono::Duration::hours(-1);
     let (rt, dir, sent) = oauth_accounts(
         "claude",
-        &[("busy", past), ("grant", past)],
+        &[
+            ("busy", chrono::Duration::hours(-1)),
+            ("grant", chrono::Duration::hours(1)),
+        ],
         answer(|token| match token {
             "fake-rt-busy" => (429, "{}"),
             _ => (400, r#"{"error":"invalid_grant"}"#),
@@ -1488,6 +1490,140 @@ async fn a_401_on_a_refused_account_takes_it_out_of_rotation() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `invalid_grant` for an access token that has already expired leaves nothing to keep
+/// retrying for: refreshes stop and the account is out of rotation, with no 401 needed.
+#[tokio::test]
+async fn an_invalid_grant_is_final_once_the_access_token_has_expired() {
+    let (rt, dir, sent) = oauth_accounts(
+        "claude",
+        &[("dead", chrono::Duration::hours(-1))],
+        answer(|_| (400, r#"{"error":"invalid_grant"}"#)),
+    )
+    .await;
+    let cfg = rt.config();
+    assert!(rt.prepare_credential("dead.json", &cfg, Trigger::Due).await.is_err());
+    let dead = rt.store.get("dead.json").unwrap();
+    assert_eq!(
+        rt.store.tokens_refused(&dead),
+        Some(cpa_core::exec::Refusal::InvalidGrant)
+    );
+    assert!(rt.store.select(pinned("claude", "dead.json")).is_none());
+    assert!(rt.prepare_credential("dead.json", &cfg, Trigger::Due).await.is_err());
+    assert_eq!(
+        sends(&sent, "fake-rt-dead"),
+        1,
+        "a refused refresh token was sent again"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A 401 that answered tokens a sign-in has since replaced says nothing about the new
+/// ones: their own refusal keeps its time, and the caller retries on them.
+#[tokio::test]
+async fn a_401_on_replaced_tokens_leaves_their_replacement_in_rotation() {
+    let (rt, dir, sent) = oauth_accounts(
+        "claude",
+        &[("swapped", chrono::Duration::hours(1))],
+        answer(|_| (400, EXPIRED)),
+    )
+    .await;
+    let cfg = rt.config();
+    let old = rt.store.get("swapped.json").unwrap();
+    write_account(
+        &dir,
+        "claude",
+        "swapped",
+        "sk-ant-oat-b-fake",
+        "fake-rt-b",
+        chrono::Duration::hours(1),
+    );
+    reload_auth_dir(&rt);
+    assert!(rt.prepare_credential("swapped.json", &cfg, Trigger::Due).await.is_err());
+    let new = rt.store.get("swapped.json").unwrap();
+    assert!(rt.store.tokens_refused(&new).is_some());
+    let retry = rt.refresh_after_unauthorized(&old, &cfg).await;
+    assert_eq!(
+        retry.and_then(|c| c.str("access_token").map(str::to_owned)).as_deref(),
+        Some("sk-ant-oat-b-fake")
+    );
+    assert!(
+        rt.store.select(pinned("claude", "swapped.json")).is_some(),
+        "a 401 on the old tokens removed the new ones"
+    );
+    assert_eq!(*sent.lock().unwrap(), ["fake-rt-b"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A management refresh that is refused first records the refusal like a due one: the
+/// account keeps serving while its access token works.
+#[tokio::test]
+async fn a_refused_management_refresh_keeps_the_account_while_its_access_token_works() {
+    let (rt, dir, _) = oauth_accounts(
+        "claude",
+        &[("asked", chrono::Duration::hours(8))],
+        answer(|_| (400, EXPIRED)),
+    )
+    .await;
+    assert!(rt.refresh_credential("asked.json").await.is_err());
+    let asked = rt.store.get("asked.json").unwrap();
+    assert_eq!(rt.store.tokens_refused(&asked), Some(cpa_core::exec::Refusal::Expired));
+    assert!(rt.store.select(pinned("claude", "asked.json")).is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A later record for the same tokens only shortens how long the access token serves,
+/// and a credential out of rotation offers no retry wait.
+#[tokio::test]
+async fn a_recorded_refusal_only_shortens_and_offers_no_retry_wait() {
+    let (rt, dir, _) = oauth_accounts(
+        "claude",
+        &[("kept", chrono::Duration::hours(1))],
+        answer(|_| (500, "{}")),
+    )
+    .await;
+    let (kept, version) = rt.store.get_versioned("kept.json").unwrap();
+    let refusal = cpa_core::exec::Refusal::Expired;
+    let now = std::time::SystemTime::now();
+    let (soon, later) = (now + Duration::from_secs(3600), now + Duration::from_secs(7200));
+    let policy = Policy {
+        request_retry: 1,
+        max_retry_interval: Duration::from_secs(3600),
+        ..Policy::default()
+    };
+    let admit_all = |_: &Credential| Some(String::new());
+    let mut error = ExecError::local(429, FailureScope::Model, "cooling");
+    error.retry_after = Some(Duration::from_secs(60));
+    rt.store
+        .scheduler
+        .lock()
+        .unwrap()
+        .record(&kept, "", &Outcome::Failure(error), &policy, Instant::now());
+    let retry_wait = || rt.store.retry_wait(&sel("claude"), &policy, 429, &[], &admit_all);
+
+    assert!(rt.store.refuse_tokens("kept.json", version, refusal, Some(soon)));
+    assert!(!rt.store.refuse_tokens("kept.json", version, refusal, Some(later)));
+    assert_eq!(rt.store.read().refused("kept.json").unwrap().usable_until, Some(soon));
+    assert!(!rt.store.out_of_rotation(&kept));
+    assert!(retry_wait().is_some(), "a serving account can be waited for");
+
+    assert!(rt.store.refuse_tokens("kept.json", version, refusal, None));
+    assert!(!rt.store.refuse_tokens("kept.json", version, refusal, Some(later)));
+    assert!(rt.store.out_of_rotation(&kept));
+    assert_eq!(retry_wait(), None, "waited for an account out of rotation");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Go's zero time, like any expiry before 1970, reads as no longer serving. Its
+/// conversion to a `SystemTime` would panic on Windows.
+#[test]
+fn an_expiry_outside_the_clock_range_is_no_longer_serving() {
+    let at = |text: &str| chrono::DateTime::parse_from_rfc3339(text).unwrap().to_utc();
+    assert_eq!(system_time(at("0001-01-01T00:00:00Z")), None);
+    assert_eq!(system_time(at("1969-12-31T23:59:59Z")), None);
+    let future = at("2099-01-01T00:00:00Z");
+    assert_eq!(system_time(future), Some(std::time::SystemTime::from(future)));
+}
+
 /// A refusal recorded for tokens a sign-in has since replaced blocks nothing.
 #[tokio::test]
 async fn a_refusal_never_lands_on_tokens_that_replaced_the_refused_ones() {
@@ -1547,11 +1683,20 @@ async fn codex_reports_a_refusal_while_its_access_token_still_works() {
         rt.store.select(pinned("codex", "valid.json")).is_some(),
         "left rotation with a usable token"
     );
-    assert!(rt.prepare_credential("valid.json", &cfg, Trigger::Due).await.is_err());
+    // The Codex OAuth service would answer a second refresh from its five-minute result
+    // cache, with the refusal set; the runtime's own answer shows it never asked.
+    let again = rt
+        .prepare_credential("valid.json", &cfg, Trigger::Due)
+        .await
+        .unwrap_err();
     assert_eq!(
-        sends(&sent, "fake-rt-valid"),
-        3,
-        "a refused refresh token was sent again"
+        again.refusal, None,
+        "a refused refresh token reached the executor again"
+    );
+    assert_eq!(sends(&sent, "fake-rt-valid"), 3);
+    assert!(
+        Instant::now() < expires_at,
+        "the test ran too slowly to check a usable token"
     );
     assert!(rt.prepare_credential("stale.json", &cfg, Trigger::Due).await.is_err());
     assert!(

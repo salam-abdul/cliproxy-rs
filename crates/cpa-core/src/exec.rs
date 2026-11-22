@@ -766,3 +766,32 @@ impl ExecError {
             && self.body.as_ref() == Self::REPLAY_REQUIRED.as_bytes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Refusal;
+
+    #[test]
+    fn only_a_refresh_token_refusal_code_is_a_refusal() {
+        for (code, description, refusal) in [
+            ("invalid_grant", "", Some(Refusal::InvalidGrant)),
+            ("invalid_grant", "Refresh token not found", Some(Refusal::InvalidGrant)),
+            ("invalid_grant", "Refresh token expired", Some(Refusal::Expired)),
+            ("invalid_grant", "REFRESH TOKEN EXPIRED.", Some(Refusal::Expired)),
+            ("refresh_token_expired", "", Some(Refusal::Expired)),
+            ("refresh_token_reused", "", Some(Refusal::Reused)),
+            ("refresh_token_invalidated", "", Some(Refusal::Invalidated)),
+            ("token_revoked", "", Some(Refusal::Revoked)),
+            ("invalid_request", "Refresh token expired", None),
+            ("invalid_client", "invalid_grant", None),
+            ("Invalid_Grant", "", None),
+            ("", "", None),
+        ] {
+            assert_eq!(
+                Refusal::from_oauth(code, description),
+                refusal,
+                "{code} / {description}"
+            );
+        }
+    }
+}

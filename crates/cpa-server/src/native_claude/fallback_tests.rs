@@ -169,7 +169,16 @@ fn mapped(to: &str) -> Value {
 }
 
 async fn fixture(reply: Reply, accounts: Option<Value>, native: Value, yaml: String) -> Fixture {
-    Fixture::custom(reply, Setup { accounts, native, yaml }).await
+    Fixture::custom(
+        reply,
+        Setup {
+            accounts,
+            native,
+            yaml,
+            ..Setup::default()
+        },
+    )
+    .await
 }
 
 async fn post(fixture: &Fixture, body: &'static [u8]) -> wreq::Response {
