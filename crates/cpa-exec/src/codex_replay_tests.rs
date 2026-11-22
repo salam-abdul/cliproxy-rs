@@ -27,6 +27,7 @@ fn request(scenario: &Value, turn: &Value) -> ExecRequest {
     }
     let body = Bytes::from(turn["payload"].as_str().unwrap().to_owned());
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::Claude,
         response_format: Format::Claude,

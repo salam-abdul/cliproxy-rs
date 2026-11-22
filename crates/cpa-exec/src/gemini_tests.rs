@@ -374,6 +374,7 @@ fn request(s: &Value) -> ExecRequest {
         );
     }
     ExecRequest {
+        portable_output: false,
         operation: if op == "count" {
             Operation::CountTokens
         } else {
@@ -912,6 +913,32 @@ async fn claude_target_eof_requires_gemini_finish_signal() {
             assert!(!String::from_utf8_lossy(&forwarded).contains("message_stop"));
         } else {
             assert!(out.iter().all(Result::is_ok), "{out:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn portable_request_gets_no_thinking_blocks() {
+    const THOUGHT: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"pondering","thought":true,"thoughtSignature":"c2ln"}]}}]}"#;
+    const ANSWER: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"visible"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#;
+    const BODY: &[u8] = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"pondering","thought":true,"thoughtSignature":"c2ln"},{"text":"visible"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#;
+    for portable in [true, false] {
+        let mut req =
+            request(&serde_json::json!({"op":"stream","source":"claude","model":"gemini-2.5-flash","payload":"{}"}));
+        req.portable_output = portable;
+        let output = Output::new(&req, Format::Gemini, b"{}");
+        let lines = [THOUGHT, ANSWER].map(|line| Ok(Bytes::from(format!("data: {line}"))));
+        let streamed: Vec<u8> = gemini_lines(futures_util::stream::iter(lines).boxed(), output, Format::Gemini)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flat_map(|item| item.unwrap())
+            .collect();
+        let buffered = translate_non_stream(&req, Format::Gemini, b"{}", BODY).unwrap();
+        for out in [streamed.as_slice(), buffered.as_ref()] {
+            let out = String::from_utf8_lossy(out);
+            assert!(out.contains("visible"), "portable {portable}: {out}");
+            assert_eq!(out.contains("thinking"), !portable, "portable {portable}: {out}");
         }
     }
 }

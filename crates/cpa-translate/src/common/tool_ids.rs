@@ -43,6 +43,18 @@ pub fn sanitize_claude_tool_id(id: &[u8]) -> Vec<u8> {
     s
 }
 
+/// The tool-use ID a client is given: the upstream's, sanitized, or a fresh `toolu_` ID
+/// when `portable`. An upstream that numbers its IDs per response or per process repeats
+/// them within a conversation, and a longer ID would not fit the 40 characters OpenAI
+/// accepts when the turn is sent back.
+pub fn claude_tool_id(id: &[u8], portable: bool) -> Vec<u8> {
+    if portable {
+        generate_claude_tool_call_id()
+    } else {
+        sanitize_claude_tool_id(id)
+    }
+}
+
 pub fn sanitize_claude_function_name(name: &[u8]) -> Vec<u8> {
     if name.is_empty() {
         return vec![];

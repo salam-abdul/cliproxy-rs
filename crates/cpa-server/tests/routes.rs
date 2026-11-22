@@ -1211,6 +1211,7 @@ async fn session_turns_honour_pin_callback_and_session() {
         })
     };
     let call = |turn| Call {
+        portable_output: false,
         entry: Format::Claude,
         response: Format::Claude,
         operation: Operation::Generate,

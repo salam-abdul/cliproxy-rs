@@ -307,6 +307,7 @@ impl OpenAICompatExecutor {
                     model: &req.model,
                     original_request: &original,
                     translated_request: &body,
+                    portable: req.portable_output,
                 }),
                 None => Box::new(Identity),
             };
@@ -342,6 +343,7 @@ impl OpenAICompatExecutor {
                     model: &req.model,
                     original_request: &original,
                     translated_request: &body,
+                    portable: req.portable_output,
                 },
                 &raw,
             )

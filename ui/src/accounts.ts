@@ -66,7 +66,7 @@ export function requestOutcomes(events: Data[]): Data[] {
     .map((group): Data => {
       group.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
       const final = group.find((e) =>
-        ["inference", "rejected", "transport-failure"].includes(e.type),
+        ["inference", "rejected", "transport-failure", "fallback"].includes(e.type),
       );
       return {
         ...(final || group[0]),

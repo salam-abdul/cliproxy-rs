@@ -92,6 +92,22 @@ test("request outcomes keep recovered attempts together and pending distinct fro
   );
 });
 
+test("a served fallback is the request's final outcome", () => {
+  const out = requestOutcomes([
+    {
+      type: "fallback",
+      requestId: "f",
+      at: "2033-05-18T03:33:22Z",
+      outcome: "fallback_served",
+      fallbackModel: "local-test",
+    },
+    { type: "failover", requestId: "f", at: "2033-05-18T03:33:20Z", account: "a", status: 429 },
+  ]);
+  assert.equal(out[0].outcome, "fallback_served");
+  assert.equal(out[0].fallbackModel, "local-test");
+  assert.equal(out[0].events.length, 2);
+});
+
 test("account switches include failed requests that reached another account", () => {
   const switched = requestOutcomes([
     { type: "rejected", requestId: "r", at: "2033-05-18T03:33:22Z", outcome: "attempt_limit" },

@@ -195,6 +195,7 @@ fn request(s: &Value, usage: cpa_core::exec::UsageSink) -> (ExecRequest, String)
         .filter(|id| !id.is_empty())
         .map(|id| cpa_common::session::bound_session_identity(&id));
     let req = ExecRequest {
+        portable_output: false,
         operation: if op == "count" {
             Operation::CountTokens
         } else {
@@ -735,4 +736,65 @@ async fn translation_failures_are_terminal_and_an_early_close_broke_off() {
     let error = out.last().unwrap().as_ref().expect_err("closed before [DONE]");
     assert_eq!(error.body.as_ref(), b"upstream stream closed before [DONE]");
     assert_eq!(error.after_accept, Some(cpa_core::exec::AfterAccept::Truncated));
+}
+
+#[tokio::test]
+async fn portable_request_gets_no_thinking_blocks() {
+    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    let base = fixture["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "claude_is_compat_keeps_thinking")
+        .unwrap();
+    let executor = OpenAICompatExecutor::default();
+    for stream in [false, true] {
+        for portable in [true, false] {
+            let mut s = base.clone();
+            s["stream"] = stream.into();
+            (s["payload"], s["upstream"]["headers"][0][1], s["upstream"]["body"]) = if stream {
+                (
+                    r#"{"model":"cc","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#.into(),
+                    "text/event-stream".into(),
+                    concat!(
+                        r#"data: {"id":"c","model":"acme-chat","choices":[{"index":0,"delta":{"reasoning_content":"pondering"}}]}"#,
+                        "\n\n",
+                        r#"data: {"id":"c","model":"acme-chat","choices":[{"index":0,"delta":{"content":"visible"}}]}"#,
+                        "\n\n",
+                        r#"data: {"id":"c","model":"acme-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+                        "\n\ndata: [DONE]\n\n"
+                    )
+                    .into(),
+                )
+            } else {
+                (
+                    r#"{"model":"cc","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#.into(),
+                    "application/json".into(),
+                    r#"{"id":"c","model":"acme-chat","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"pondering","content":"visible"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#.into(),
+                )
+            };
+            let mock = Mock::start(&s["upstream"]).await;
+            let cfg = Config::parse(&s["config"].as_str().unwrap().replace("UPSTREAM", &mock.addr)).unwrap();
+            let cred = credential(&s, &cfg, &mock.addr);
+            let (mut req, _) = request(&s, Default::default());
+            req.portable_output = portable;
+            let out = match executor.execute(&cred, req, &cfg).await.unwrap().body {
+                ResponseBody::Buffered(bytes) => bytes.to_vec(),
+                ResponseBody::Stream(mut items) => {
+                    let mut out = Vec::new();
+                    while let Some(item) = items.next().await {
+                        out.extend_from_slice(&item.unwrap());
+                    }
+                    out
+                }
+            };
+            let out = String::from_utf8_lossy(&out);
+            assert!(out.contains("visible"), "stream {stream} portable {portable}: {out}");
+            assert_eq!(
+                out.contains("thinking"),
+                !portable,
+                "stream {stream} portable {portable}: {out}"
+            );
+        }
+    }
 }

@@ -118,6 +118,13 @@ pub enum Readiness {
     PrepareNow,
 }
 
+/// Whether `provider`'s executor honors [`cpa_core::exec::ExecRequest::portable_output`]
+/// for a Claude client: Gemini API keys on the generateContent path and
+/// OpenAI-compatible providers. Kept beside the executors so the set changes with them.
+pub fn translates_portable_output(provider: &str) -> bool {
+    provider == "gemini" || openai_compat::handles(provider)
+}
+
 pub struct Executors {
     pub claude: claude::ClaudeExecutor,
     pub codex: codex::CodexExecutor,
@@ -290,6 +297,18 @@ impl Executors {
         credential.provider.trim().eq_ignore_ascii_case("meta")
             && (filled(credential.str("dca_token"))
                 || filled(credential.attributes.get("dca_token").map(String::as_str)))
+    }
+
+    /// Until when `credential`'s access token serves requests without a refresh, for
+    /// the providers whose refresh can report a [`cpa_core::exec::Refusal`]. `None` when
+    /// it has none, its expiry is unreadable, or the provider reports no refusals.
+    pub fn access_expiry(&self, credential: &Credential) -> Option<chrono::DateTime<chrono::Utc>> {
+        match credential.provider.as_str() {
+            "claude" => oauth::access_expiry(credential),
+            "codex" => codex_oauth::access_expiry(credential),
+            antigravity::PROVIDER => antigravity_auth::access_expiry(credential),
+            _ => None,
+        }
     }
 
     /// Whether `credential` needs preparation, and whether requests must wait for it.

@@ -42,6 +42,7 @@ fn request(r: &Value) -> ExecRequest {
     }
     let optional = |v: &Value| Some(s(v).to_owned()).filter(|v| !v.is_empty());
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::parse(s(&r["source"])).unwrap_or(Format::Gemini),
         response_format: Format::Gemini,

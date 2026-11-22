@@ -494,6 +494,7 @@ impl Prepared {
     /// `WithDisallowFreeAuth`.
     fn call(&self, model: &str, body: Vec<u8>, stream: bool, sse: bool, routed: bool) -> Call {
         Call {
+            portable_output: false,
             entry: Format::OpenAI,
             response: Format::OpenAI,
             operation: Operation::Generate,
