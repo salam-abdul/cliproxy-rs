@@ -54,6 +54,7 @@ fn request(case: &Value) -> ExecRequest {
     .filter(|s| !s.is_empty())
     .map(|s| cpa_common::session::bound_session_identity(&s));
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: source,
         response_format: response,
@@ -504,6 +505,7 @@ fn oauth_credential(base_url: &str) -> Credential {
 fn plain_request(stream: bool, alt: Option<&str>) -> ExecRequest {
     let body = Bytes::from_static(br#"{"model":"gpt-5.4","input":[]}"#);
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::Codex,
         response_format: Format::Codex,
@@ -751,6 +753,7 @@ async fn images_match_go_on_every_fixture_case() {
         let request_path = case["request_path"].as_str().unwrap();
         let model = case["model"].as_str().unwrap();
         let req = ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,
@@ -1192,6 +1195,7 @@ async fn image_responses_the_upstream_worked_on_are_never_resent() {
         let request_path = case["request_path"].as_str().unwrap();
         let model = case["model"].as_str().unwrap();
         let req = ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,

@@ -1,10 +1,11 @@
 //! Claude Code software identity (helps/claude_device_profile.go).
 //!
-//! The measured CLI release lives in exactly one place: [`BASELINE`]. Anthropic
-//! rejected the older 2.1.220 identity on 2026-09-12 and required 2.1.251 or newer;
-//! bumping the CLI version is a one-line change to `BASELINE.user_agent` plus the
-//! matching Stainless/runtime values when a fresh native capture shows they moved.
-//! The billing `cc_version` and the native-client version floor derive from it.
+//! Two values: [`BASELINE`] is the measured release the cloak identifies as, and the
+//! billing `cc_version` derives from it; bumping it changes `BASELINE.user_agent` plus
+//! the matching Stainless/runtime values from a fresh native capture. [`NATIVE_FLOOR`]
+//! is the oldest Claude Code passed through natively, and stays put when the identity
+//! moves so that native clients between the two keep their own identity. A configured
+//! `header-defaults` user-agent sets both.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -13,17 +14,24 @@ use std::time::{Duration, Instant};
 use http::HeaderMap;
 use sha2::{Digest, Sha256};
 
-use super::detect::{NATIVE_ENTRYPOINTS, header, native_user_agent, raw_header, user_agent_details};
+use super::detect::{NATIVE_ENTRYPOINTS, header, parse_user_agent, raw_header, user_agent_entrypoint};
 use super::settings::Settings;
 
-/// Claude Code 2.1.280 / @anthropic-ai/sdk 0.112.1 on Node v26.3.0, macOS arm64.
+/// Claude Code 2.1.321 / @anthropic-ai/sdk 0.128.0 on Node v26.12.1, macOS arm64,
+/// measured on 2026-11-09 from the official release. Anthropic refuses 2.1.280 for
+/// claude-fable-5-2, which needs 2.1.290 or newer.
 pub(crate) const BASELINE: Baseline = Baseline {
-    user_agent: "claude-cli/2.1.280 (external, cli)",
-    package_version: "0.112.1",
-    runtime_version: "v26.3.0",
+    user_agent: "claude-cli/2.1.321 (external, cli)",
+    package_version: "0.128.0",
+    runtime_version: "v26.12.1",
     os: "MacOS",
     arch: "arm64",
 };
+
+/// The oldest Claude Code release passed through natively, unless `header-defaults`
+/// configures a user-agent. It stays below [`BASELINE`] so the qualified native release
+/// (2.1.296) keeps its own identity; Anthropic rejected 2.1.220 on 2026-09-12.
+pub(crate) const NATIVE_FLOOR: Version = (2, 1, 280);
 
 /// Stabilized profiles live for seven days after last use.
 pub(crate) const PROFILE_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -95,35 +103,63 @@ impl Profile {
 
 /// `DefaultClaudeVersion`: the billing `cc_version` prefix.
 pub(crate) fn default_version(settings: &Settings) -> String {
-    match Profile::default_for(settings).version() {
-        Some((a, b, c)) => format!("{a}.{b}.{c}"),
-        None => "2.1.280".into(),
+    let (a, b, c) = Profile::default_for(settings)
+        .version()
+        .or_else(|| version(BASELINE.user_agent))
+        .unwrap_or_default();
+    format!("{a}.{b}.{c}")
+}
+
+/// [`NATIVE_FLOOR`], or the configured `header-defaults` user-agent's version.
+fn native_floor(settings: &Settings) -> Option<Version> {
+    let configured = settings.header_defaults.user_agent.trim();
+    if configured.is_empty() {
+        Some(NATIVE_FLOOR)
+    } else {
+        version(configured)
     }
 }
 
-/// Native Claude Code at or above the baseline within the baseline's major version
-/// keeps native passthrough. Go accepts only patch releases of the baseline's
-/// major.minor line, so a newer minor release was rewritten to the older baseline
-/// identity and cloaked like a third-party client.
-/// With `stabilize-device-profile` Go's rule stays: a stabilized profile forwards only
-/// the exact baseline tuple, so a newer release would send its body under baseline
-/// headers.
+/// Native Claude Code at or above the native floor within the floor's major version
+/// keeps native passthrough. Go accepts only patch releases of its baseline's
+/// major.minor line and uses the baseline as the floor, so a newer minor release, or
+/// one below a bumped baseline, was rewritten to the baseline identity and cloaked like
+/// a third-party client.
+/// With `stabilize-device-profile` Go's patch rule stays, against the same floor: a
+/// stabilized profile forwards only the exact baseline tuple, so any other release
+/// would send its body under baseline headers.
 pub(crate) fn plausible_user_agent(user_agent: &str, settings: &Settings) -> bool {
-    let user_agent = user_agent.trim();
-    if !native_user_agent(user_agent) {
+    let (Some(c), Some(b)) = (
+        parse_user_agent(user_agent).map(|ua| ua.version),
+        native_floor(settings),
+    ) else {
         return false;
+    };
+    if settings.header_defaults.stabilize_device_profile {
+        c.0 == b.0 && c.1 == b.1 && c.2 >= b.2
+    } else {
+        c.0 == b.0 && c >= b
     }
-    match (version(user_agent), Profile::default_for(settings).version()) {
-        (Some(c), Some(b)) if settings.header_defaults.stabilize_device_profile => {
-            c.0 == b.0 && c.1 == b.1 && c.2 >= b.2
-        }
-        (Some(c), Some(b)) => c.0 == b.0 && c >= b,
-        _ => false,
+}
+
+/// Go `ApplyClaudeDeviceProfileHeaders` with the caller's User-Agent: the stored
+/// identity, plus the request fields of this request's own User-Agent.
+pub(crate) fn with_request_fields(stable: &str, incoming: &str) -> String {
+    let (Some(stable), Some(current)) = (parse_user_agent(stable), parse_user_agent(incoming)) else {
+        return stable.to_owned();
+    };
+    let mut user_agent = stable.profile_user_agent;
+    if !current.request_fields.is_empty() {
+        user_agent.pop();
+        user_agent.push(',');
+        user_agent.push_str(&current.request_fields.join(","));
+        user_agent.push(')');
     }
+    user_agent
 }
 
 /// Both Stainless version headers are well formed in their first value, the one
-/// forwarding reads. A forwarded release newer than the baseline needs them, so its SDK
+/// forwarding reads. A forwarded release other than the baseline's needs them, so its SDK
 /// and runtime versions go upstream with its User-Agent instead of baseline values
 /// that release never sends.
 pub(crate) fn stainless_versions_ok(headers: &HeaderMap) -> bool {
@@ -141,31 +177,31 @@ fn stainless_versions(headers: &HeaderMap) -> (bool, bool) {
 }
 
 /// The one rule for treating a caller's User-Agent as Claude Code's own: a plausible
-/// native release, and for one newer than the baseline also well-formed Stainless
+/// native release, and for one other than the baseline's also well-formed Stainless
 /// version headers. Detection and the refused-version log both use it.
 pub(crate) fn accepted_user_agent(headers: &HeaderMap, user_agent: &str, settings: &Settings) -> bool {
     plausible_user_agent(user_agent, settings)
-        && (!newer_than_baseline(user_agent, settings) || stainless_versions_ok(headers))
+        && (!forwards_own_versions(user_agent, settings) || stainless_versions_ok(headers))
 }
 
 /// The `cc_version` of a billing block cliproxy-rs adds: the forwarded release's own
-/// version for a confirmed caller newer than the baseline, else the baseline's.
+/// version for a confirmed caller other than the baseline's release, else the baseline's.
 pub(crate) fn billing_version(user_agent: &str, confirmed: bool, settings: &Settings) -> String {
     match version(user_agent.trim()) {
-        Some((a, b, c)) if confirmed && newer_than_baseline(user_agent, settings) => format!("{a}.{b}.{c}"),
+        Some((a, b, c)) if confirmed && forwards_own_versions(user_agent, settings) => format!("{a}.{b}.{c}"),
         _ => default_version(settings),
     }
 }
 
-/// A passed-through caller newer than the baseline: its own Stainless package and
-/// runtime versions go upstream with its User-Agent, so the three agree. Go pins both
-/// to the baseline values whatever the User-Agent says. Never with
-/// `stabilize-device-profile`: a stabilized profile sends only the baseline tuple, so
-/// nothing newer is forwarded and Go's rules apply.
-pub(crate) fn newer_than_baseline(user_agent: &str, settings: &Settings) -> bool {
+/// A passed-through caller whose release is not the baseline's, older or newer: its
+/// own Stainless package and runtime versions go upstream with its User-Agent, so the
+/// three agree. Go pins both to the baseline values whatever the User-Agent says.
+/// Never with `stabilize-device-profile`: a stabilized profile sends only the baseline
+/// tuple, so nothing else is forwarded and Go's rules apply.
+pub(crate) fn forwards_own_versions(user_agent: &str, settings: &Settings) -> bool {
     !settings.header_defaults.stabilize_device_profile
         && plausible_user_agent(user_agent, settings)
-        && version(user_agent.trim()) > Profile::default_for(settings).version()
+        && version(user_agent.trim()) != Profile::default_for(settings).version()
 }
 
 /// Refused `claude-cli` versions already logged, by a 64-bit hash of the credential
@@ -228,15 +264,16 @@ pub(crate) fn note_refused(
             _ => ("X-Stainless-Runtime-Version header", "this header", "it"),
         };
         format!(
-            "It is missing a well-formed {missing}, which a release newer than that one needs. \
+            "It is missing a well-formed {missing}, which a release other than that one needs. \
              Claude Code sends {these}, so the client or a proxy in front of cliproxy-rs is \
              stripping or rewriting {them}."
         )
     } else {
+        let floor = native_floor(settings).map_or_else(String::new, |(a, b, c)| format!(" {a}.{b}.{c}"));
         let rule = if settings.header_defaults.stabilize_device_profile {
-            "at or above that version within the same major and minor version (stabilize-device-profile)"
+            format!("at or above{floor} within the same major and minor version (stabilize-device-profile)")
         } else {
-            "at or above that version within the same major version"
+            format!("at or above{floor} within the same major version")
         };
         format!(
             "Native passthrough needs a native claude-cli User-Agent {rule}. Update Claude Code, \
@@ -309,11 +346,8 @@ pub(crate) fn runtime_version_ok(s: &str) -> bool {
 
 /// `extractClaudeDeviceProfile`: a native-looking caller's own software tuple.
 fn candidate(headers: &HeaderMap, settings: &Settings) -> Option<Profile> {
-    let user_agent = header(headers, "user-agent").trim().to_owned();
-    version(&user_agent)?;
-    if !native_user_agent(&user_agent) {
-        return None;
-    }
+    // Request fields describe one request and never become the stored identity.
+    let user_agent = parse_user_agent(header(headers, "user-agent"))?.profile_user_agent;
     let baseline = Profile::default_for(settings);
     let or = |name: &str, fallback: &str| {
         let value = header(headers, name).trim();
@@ -360,7 +394,7 @@ fn scope_string(credential_id: &str, api_key: &str, profile: &Profile) -> String
         "global".into()
     };
     // Distinct first-party subclients keep separate stabilized profiles.
-    let (entrypoint, _) = user_agent_details(&profile.user_agent);
+    let entrypoint = user_agent_entrypoint(&profile.user_agent);
     if !entrypoint.is_empty() && entrypoint != "cli" {
         key.push_str("|subclient:");
         key.push_str(if NATIVE_ENTRYPOINTS.contains(&entrypoint.as_str()) {
@@ -579,6 +613,19 @@ pub(crate) fn resolve(credential_id: &str, api_key: &str, headers: &HeaderMap, s
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::GO_BASELINE;
+
+    /// Anthropic refuses Claude Code releases that are too old for a model:
+    /// claude-fable-5-2 needs 2.1.290 or newer, so the cloaked identity stays above it.
+    #[test]
+    fn baseline_meets_anthropic_model_floor() {
+        assert!(
+            version(BASELINE.user_agent) >= Some((2, 1, 290)),
+            "{}",
+            BASELINE.user_agent
+        );
+        assert_eq!(default_version(&Settings::default()), "2.1.321");
+    }
 
     #[test]
     fn stainless_host_names() {
@@ -591,26 +638,35 @@ mod tests {
 
     #[test]
     fn version_parsing_and_patch_floor() {
-        assert_eq!(version("claude-cli/2.1.280 (external, cli)"), Some((2, 1, 280)));
+        assert_eq!(version("claude-cli/2.1.321 (external, cli)"), Some((2, 1, 321)));
         assert_eq!(version(" claude-cli/10.0.3x"), Some((10, 0, 3)));
         assert_eq!(version("claude-cli/2.1"), None);
         let s = Settings::default();
-        assert!(plausible_user_agent("claude-cli/2.1.280 (external, cli)", &s));
-        assert!(plausible_user_agent("claude-cli/2.1.299 (external, sdk-cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.321 (external, cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.330 (external, sdk-cli)", &s));
         // The rejected 2.1.220 identity and other release lines are not native.
         assert!(!plausible_user_agent("claude-cli/2.1.220 (external, cli)", &s));
+        // The native floor stays at 2.1.280 below the 2.1.321 identity: the qualified
+        // native release (2.1.296) is still Claude Code.
         assert!(!plausible_user_agent("claude-cli/2.1.279 (external, cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.280 (external, cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.296 (external, cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.320 (external, cli)", &s));
         // Newer minor releases of the same major pass (Go refuses them); another major
         // and non-native shapes do not.
         assert!(plausible_user_agent("claude-cli/2.2.0 (external, cli)", &s));
         assert!(plausible_user_agent("claude-cli/2.10.3 (external, cli)", &s));
         assert!(!plausible_user_agent("claude-cli/3.0.0 (external, cli)", &s));
         assert!(!plausible_user_agent("claude-cli/1.9.999 (external, cli)", &s));
-        assert!(!plausible_user_agent("claude-cli/2.1.280", &s));
-        assert!(!newer_than_baseline("claude-cli/2.1.280 (external, cli)", &s));
-        assert!(newer_than_baseline("claude-cli/2.1.281 (external, cli)", &s));
-        assert!(newer_than_baseline("claude-cli/2.2.0 (external, cli)", &s));
-        assert!(!newer_than_baseline("claude-cli/3.0.0 (external, cli)", &s));
+        assert!(!plausible_user_agent("claude-cli/2.1.321", &s));
+        // Every native release but the identity's own forwards its own versions.
+        assert!(!forwards_own_versions("claude-cli/2.1.321 (external, cli)", &s));
+        assert!(forwards_own_versions("claude-cli/2.1.280 (external, cli)", &s));
+        assert!(forwards_own_versions("claude-cli/2.1.296 (external, cli)", &s));
+        assert!(forwards_own_versions("claude-cli/2.1.322 (external, cli)", &s));
+        assert!(forwards_own_versions("claude-cli/2.2.0 (external, cli)", &s));
+        assert!(!forwards_own_versions("claude-cli/3.0.0 (external, cli)", &s));
+        assert!(!forwards_own_versions("claude-cli/2.1.279 (external, cli)", &s));
         // Refused claude-cli versions are logged at most once per credential and version.
         let ua_headers = |ua: &str, extra: &[(&str, &str)]| -> HeaderMap {
             let mut h = HeaderMap::new();
@@ -728,7 +784,7 @@ mod tests {
             &ua_headers("claude-cli/2.2.4 (external, cli)", &full),
             &s
         ));
-        assert_eq!(default_version(&s), "2.1.280");
+        assert_eq!(default_version(&s), "2.1.321");
     }
 
     /// A stabilized device profile forwards only the exact baseline tuple, so Go's
@@ -738,13 +794,13 @@ mod tests {
         let mut s = Settings::default();
         s.header_defaults.stabilize_device_profile = true;
         assert!(!plausible_user_agent("claude-cli/2.2.0 (external, cli)", &s));
-        assert!(plausible_user_agent("claude-cli/2.1.290 (external, cli)", &s));
-        assert!(!newer_than_baseline("claude-cli/2.2.0 (external, cli)", &s));
+        assert!(plausible_user_agent("claude-cli/2.1.330 (external, cli)", &s));
+        assert!(!forwards_own_versions("claude-cli/2.2.0 (external, cli)", &s));
         // Nothing newer is forwarded under a stabilized profile, so Go's rules apply:
         // baseline billing, and no Stainless requirement.
-        let newer_patch = "claude-cli/2.1.290 (external, cli)";
-        assert!(!newer_than_baseline(newer_patch, &s));
-        assert_eq!(billing_version(newer_patch, true, &s), "2.1.280");
+        let newer_patch = "claude-cli/2.1.330 (external, cli)";
+        assert!(!forwards_own_versions(newer_patch, &s));
+        assert_eq!(billing_version(newer_patch, true, &s), "2.1.321");
         let mut bare = HeaderMap::new();
         bare.insert("user-agent", newer_patch.parse().unwrap());
         assert!(accepted_user_agent(&bare, newer_patch, &s));
@@ -757,14 +813,14 @@ mod tests {
         assert_eq!(billing_version(newer, true, &s), "2.2.3");
         assert_eq!(
             billing_version(newer, false, &s),
-            "2.1.280",
+            "2.1.321",
             "cloaked keeps the baseline"
         );
         assert_eq!(
-            billing_version("claude-cli/2.1.280 (external, cli)", true, &s),
-            "2.1.280"
+            billing_version("claude-cli/2.1.321 (external, cli)", true, &s),
+            "2.1.321"
         );
-        assert_eq!(billing_version("OpenAI/Python 1.0", true, &s), "2.1.280");
+        assert_eq!(billing_version("OpenAI/Python 1.0", true, &s), "2.1.321");
     }
 
     /// Go `resolveClaudeDeviceProfileHome` against the same scenarios, recorded by
@@ -787,8 +843,11 @@ mod tests {
             let client = home.client();
             let mut settings = Settings::default();
             let config = |key: &str| scenario["config"][key].as_str().unwrap_or_default().to_owned();
-            settings.header_defaults.user_agent = config("user-agent");
-            settings.header_defaults.package_version = config("package-version");
+            // Go recorded its own baseline (v8.0.35: 2.1.280) where the scenario sets none.
+            let or_go = |value: String, go: &str| if value.is_empty() { go.to_owned() } else { value };
+            settings.header_defaults.user_agent = or_go(config("user-agent"), GO_BASELINE.user_agent);
+            settings.header_defaults.package_version = or_go(config("package-version"), GO_BASELINE.package_version);
+            settings.header_defaults.runtime_version = GO_BASELINE.runtime_version.to_owned();
             settings.header_defaults.os = config("os");
             settings.header_defaults.arch = config("arch");
             let steps = scenario["steps"].as_array().unwrap();

@@ -220,6 +220,7 @@ fn request(turn: &Value, session: &str, usage: cpa_core::exec::UsageSink) -> Exe
     let id = cpa_common::session::extract_session_id(&headers, &payload, &meta);
     let model = turn["model"].as_str().unwrap_or("grok-4.3").to_owned();
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::OpenAIResponse,
         response_format: turn["response"]

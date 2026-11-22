@@ -8,7 +8,7 @@ use crate::claude_tool_args::{OpenTool, clean_claude_tool_arguments_with_transla
 
 use crate::{
     Error, ResponseCtx,
-    common::{self, map_tool_name, restore_sanitized_tool_name, sanitize_claude_tool_id},
+    common::{self, claude_tool_id, map_tool_name, restore_sanitized_tool_name},
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Res};
@@ -51,6 +51,7 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
         sanitized: common::sanitized_tool_name_map(ctx.original_request),
         original: ctx.original_request.to_vec(),
         translated: ctx.translated_request.to_vec(),
+        portable: ctx.portable,
         ..State::default()
     })
 }
@@ -68,12 +69,15 @@ struct State {
     tool: OpenTool,
     saw_tool_call: bool,
     final_sent: bool,
+    /// [`ResponseCtx::portable`]: thought parts are dropped and a signed part that is not
+    /// a thought is answer text.
+    portable: bool,
 }
 
 impl GoStream for State {
     fn line(&mut self, raw: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         if raw == b"[DONE]" {
-            if !self.has_content {
+            if !self.has_content && !(self.portable && self.started) {
                 return Ok(vec![]);
             }
             let mut out = vec![];
@@ -121,7 +125,7 @@ impl GoStream for State {
         }
         let usage = gj::get(raw, "usageMetadata");
         let has_finish = cpa_common::gostr::contains(raw, br#""finishReason""#);
-        if usage.exists() && has_finish && !self.final_sent && self.has_content {
+        if usage.exists() && has_finish && !self.final_sent && (self.has_content || self.portable) {
             if self.block != NONE {
                 self.stop_block(&mut out);
                 self.block = NONE;
@@ -218,7 +222,11 @@ impl State {
         }
         if text.exists() {
             let text = text.bytes();
-            let (kind, field, block) = if part.get("thought").bool() || has_sig {
+            let thought = part.get("thought").bool();
+            if self.portable && (thought || text.is_empty()) {
+                return;
+            }
+            let (kind, field, block) = if !self.portable && (thought || has_sig) {
                 if has_sig && text.is_empty() {
                     self.signature_delta(&sig_text, out);
                     return;
@@ -274,7 +282,7 @@ impl State {
                 self.index
             )
             .into_bytes();
-            let id = sanitize_claude_tool_id(&[&upstream[..], format!("-{n}").as_bytes()].concat());
+            let id = claude_tool_id(&[&upstream[..], format!("-{n}").as_bytes()].concat(), self.portable);
             gj::set_str(&mut start, "content_block.id", id);
             gj::set_str(&mut start, "content_block.name", &client);
             self.tool.open(&client, &self.original);
@@ -350,7 +358,11 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
         for part in parts.array() {
             let sig = signature(&part);
             let has_sig = sig.exists() && !sig.bytes().is_empty();
-            if has_sig {
+            let thought = part.get("thought").bool();
+            if ctx.portable && thought {
+                continue;
+            }
+            if has_sig && !ctx.portable {
                 thinking_sig = sig.bytes().into_owned();
             }
             let part_text = part.get("text");
@@ -360,7 +372,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
                 continue;
             }
             if part_text.exists() && !value.is_empty() {
-                if part.get("thought").bool() || has_sig {
+                if !ctx.portable && (thought || has_sig) {
                     flush_text(&mut blocks, &mut text);
                     thinking.extend_from_slice(&value);
                 } else {
@@ -377,7 +389,10 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
                 let client = map_tool_name(tool_names.as_ref(), &upstream);
                 tool_ids += 1;
                 let mut block = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
-                let id = sanitize_claude_tool_id(&[&upstream[..], format!("-{tool_ids}").as_bytes()].concat());
+                let id = claude_tool_id(
+                    &[&upstream[..], format!("-{tool_ids}").as_bytes()].concat(),
+                    ctx.portable,
+                );
                 gj::set_str(&mut block, "id", id);
                 gj::set_str(&mut block, "name", &client);
                 let args = call.get("args");

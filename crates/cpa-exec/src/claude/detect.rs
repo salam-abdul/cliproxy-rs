@@ -1,6 +1,6 @@
 //! Native Claude Code detection (helps/claude_client_detection.go).
 //!
-//! A request is confirmed native only with all strong signals (x-app=cli, a native
+//! A request is confirmed native only with all strong signals (x-app=cli or cli-bg, a native
 //! User-Agent, the claude-code beta and a valid metadata.user_id; count_tokens omits
 //! the last) from a verified entrypoint, or as one of the exactly measured Haiku helper
 //! shapes. Without `stabilize-device-profile` the User-Agent may be any release at or
@@ -53,79 +53,91 @@ pub(crate) fn header_values<'a>(headers: &'a HeaderMap, name: &str) -> Vec<&'a s
         .collect()
 }
 
-/// `(?i)^claude-cli/\S+\s+\(external,\s*([^,)]+)(?:,\s*agent-sdk/([^,)]+))?`
-pub(crate) fn user_agent_details(user_agent: &str) -> (String, String) {
-    let ua = user_agent.trim();
-    let Some(rest) = strip_prefix_ci(ua, "claude-cli/") else {
-        return Default::default();
-    };
-    let Some(space) = rest.find(char::is_whitespace) else {
-        return Default::default();
-    };
-    if space == 0 {
-        return Default::default();
+/// The entrypoint of a well-formed Claude Code User-Agent, or an empty string.
+pub(crate) fn user_agent_entrypoint(user_agent: &str) -> String {
+    parse_user_agent(user_agent).map_or_else(String::new, |ua| ua.entrypoint)
+}
+
+/// A Claude Code User-Agent: `claude-cli/N.N.N (external, <entrypoint>[, name/value]...)`.
+/// Well-formed is not native: the version and entrypoint rules still apply.
+#[derive(Debug)]
+pub(crate) struct ClaudeUserAgent {
+    pub version: profile::Version,
+    pub entrypoint: String,
+    /// The User-Agent without its request fields: the identity a stabilized profile
+    /// may store.
+    pub profile_user_agent: String,
+    /// `name/value` fields other than `agent-sdk` (`workload/cron`), as sent with their
+    /// leading space. They describe one request, never the client.
+    pub request_fields: Vec<String>,
+}
+
+/// Go `parseClaudeCodeUserAgent`.
+pub(crate) fn parse_user_agent(user_agent: &str) -> Option<ClaudeUserAgent> {
+    if user_agent.chars().any(|c| (c < ' ' && c != '\t') || c == '\x7f') {
+        return None;
     }
-    let rest = rest[space..].trim_start();
-    let Some(rest) = strip_prefix_ci(rest, "(external,") else {
-        return Default::default();
-    };
-    let rest = rest.trim_start();
-    let end = rest.find([',', ')']).unwrap_or(rest.len());
-    if end == 0 {
-        return Default::default();
+    let user_agent = user_agent.trim();
+    let (prefix, comment) = user_agent.split_once('(')?;
+    let comment = comment.strip_suffix(')')?;
+    if prefix == prefix.trim() || comment.contains(['(', ')']) {
+        return None;
     }
-    let entrypoint = rest[..end].trim().to_ascii_lowercase();
-    let mut sdk = String::new();
-    if let Some(after) = rest[end..].strip_prefix(',')
-        && let Some(v) = strip_prefix_ci(after.trim_start(), "agent-sdk/")
+    let product = prefix.trim();
+    if !product
+        .strip_prefix("claude-cli/")
+        .is_some_and(profile::package_version_ok)
     {
-        let end = v.find([',', ')']).unwrap_or(v.len());
-        if end > 0 {
-            sdk = v[..end].trim().to_owned();
+        return None;
+    }
+    let version = profile::version(product)?;
+    let fields: Vec<&str> = comment.split(',').collect();
+    if fields.len() < 2 || !fields[0].eq_ignore_ascii_case("external") {
+        return None;
+    }
+    let entrypoint = fields[1].trim().to_lowercase();
+    if entrypoint.is_empty() {
+        return None;
+    }
+    let mut parsed = ClaudeUserAgent {
+        version,
+        entrypoint,
+        profile_user_agent: user_agent.to_owned(),
+        request_fields: Vec::new(),
+    };
+    let mut stable = vec![fields[0], fields[1]];
+    let mut seen = std::collections::HashSet::new();
+    for field in &fields[2..] {
+        let (name, value) = field.trim().split_once('/')?;
+        if !token(name) || value.trim().is_empty() || !seen.insert(name.to_lowercase()) {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("agent-sdk") {
+            if !profile::package_version_ok(value) {
+                return None;
+            }
+            stable.push(field);
+        } else {
+            parsed.request_fields.push((*field).to_owned());
         }
     }
-    (entrypoint, sdk)
+    if !parsed.request_fields.is_empty() {
+        parsed.profile_user_agent = format!("{prefix}({})", stable.join(","));
+    }
+    Some(parsed)
 }
 
-fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    (s.len() >= prefix.len() && s.is_char_boundary(prefix.len()) && s[..prefix.len()].eq_ignore_ascii_case(prefix))
-        .then(|| &s[prefix.len()..])
+/// An HTTP token: field names are tokens, values stay opaque.
+fn token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
-/// `(?i)^claude-cli/N.N.N\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/N.N.N)?\)$`
-pub(crate) fn native_user_agent(user_agent: &str) -> bool {
-    let Some(rest) = strip_prefix_ci(user_agent, "claude-cli/") else {
-        return false;
-    };
-    let semver = |s: &str| {
-        let p: Vec<_> = s.split('.').collect();
-        p.len() == 3 && p.iter().all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()))
-    };
-    let Some(ws) = rest.find(char::is_whitespace) else {
-        return false;
-    };
-    if !semver(&rest[..ws]) {
-        return false;
-    }
-    let Some(rest) = strip_prefix_ci(rest[ws..].trim_start(), "(external,") else {
-        return false;
-    };
-    let Some(inner) = rest.strip_suffix(')') else {
-        return false;
-    };
-    let inner = inner.trim_start();
-    let (entry, sdk) = match inner.find([',', ')']) {
-        Some(i) if inner.as_bytes()[i] == b',' => (&inner[..i], Some(inner[i + 1..].trim_start())),
-        Some(_) => return false,
-        None => (inner, None),
-    };
-    if entry.is_empty() {
-        return false;
-    }
-    match sdk {
-        None => true,
-        Some(sdk) => strip_prefix_ci(sdk, "agent-sdk/").is_some_and(semver),
-    }
+/// `X-App` values Claude Code sends: `cli`, and `cli-bg` from background sessions.
+fn native_x_app(value: &str) -> bool {
+    matches!(value, "cli" | "cli-bg")
 }
 
 fn has_claude_code_beta(headers: &HeaderMap) -> bool {
@@ -159,8 +171,8 @@ pub(crate) fn valid_user_id(user_id: &str) -> bool {
 
 pub(crate) fn detect(headers: &HeaderMap, payload: &str, count_tokens: bool, settings: &Settings) -> Detection {
     let user_agent = raw_header(headers, "user-agent");
-    let (entrypoint, _) = user_agent_details(user_agent);
-    let x_app = raw_header(headers, "x-app") == "cli";
+    let entrypoint = user_agent_entrypoint(user_agent);
+    let x_app = native_x_app(raw_header(headers, "x-app"));
     // A newer release counts only with its own well-formed SDK and runtime versions:
     // otherwise its forwarded User-Agent would go upstream with baseline versions.
     let ua = profile::accepted_user_agent(headers, user_agent, settings);
@@ -293,7 +305,7 @@ fn helper_headers(headers: &HeaderMap, settings: &Settings) -> bool {
         && candidate.2 == baseline.runtime_version;
     // A newer release's helper is confirmed with its own versions, as its main requests
     // are; the measured beta and body shapes still guard.
-    let newer = profile::newer_than_baseline(user_agent, settings) && profile::stainless_versions_ok(headers);
+    let newer = profile::forwards_own_versions(user_agent, settings) && profile::stainless_versions_ok(headers);
     if !exact && !newer {
         return false;
     }
@@ -542,14 +554,14 @@ mod tests {
             d.confirmed && d.helper_profile
         };
         assert!(
-            confirmed("claude-cli/2.1.280 (external, cli)", "0.112.1", "v26.3.0"),
+            confirmed("claude-cli/2.1.321 (external, cli)", "0.128.0", "v26.12.1"),
             "baseline"
         );
         assert!(confirmed("claude-cli/2.2.3 (external, cli)", "0.120.4", "v27.0.1"));
         assert!(!confirmed("claude-cli/2.2.3 (external, cli)", "", "v27.0.1"));
         assert!(!confirmed("claude-cli/2.2.3 (external, cli)", "0.120", "v27.0.1"));
         // The baseline release still needs the exact baseline tuple (Go).
-        assert!(!confirmed("claude-cli/2.1.280 (external, cli)", "0.120.4", "v27.0.1"));
+        assert!(!confirmed("claude-cli/2.1.321 (external, cli)", "0.120.4", "v27.0.1"));
         // A changed shape falls back to cloaking.
         let (h, body) = helper("claude-cli/2.2.3 (external, cli)", "0.120.4", "v27.0.1");
         let body = body.replace(r#""max_tokens":80"#, r#""max_tokens":81"#);
@@ -587,7 +599,7 @@ mod tests {
                 ("x-stainless-runtime-version", "27.0.1")
             ]
         ));
-        assert!(confirmed("claude-cli/2.1.280 (external, cli)", &[]));
+        assert!(confirmed("claude-cli/2.1.321 (external, cli)", &[]));
         // Forwarding reads each header's first value: an empty first value with a valid
         // second one would send the baseline SDK version under the 2.2.3 User-Agent.
         let mut h = headers(&[
@@ -602,7 +614,7 @@ mod tests {
     }
 
     /// With a stabilized profile nothing newer is forwarded, so Go's rules apply: a
-    /// 2.1.290 request is Claude Code without Stainless headers, and its helper is
+    /// 2.1.330 request is Claude Code without Stainless headers, and its helper is
     /// confirmed only with the exact baseline tuple.
     #[test]
     fn stabilized_profiles_keep_go_detection() {
@@ -613,13 +625,151 @@ mod tests {
             user_id()
         );
         let h = headers(&[
-            ("user-agent", "claude-cli/2.1.290 (external, cli)"),
+            ("user-agent", "claude-cli/2.1.330 (external, cli)"),
             ("x-app", "cli"),
             ("anthropic-beta", "claude-code-20250219"),
         ]);
         assert!(detect(&h, &body, false, &s).confirmed);
         assert!(detect(&h, &body, true, &s).confirmed, "count_tokens");
-        let (h, body) = helper("claude-cli/2.1.290 (external, cli)", "0.120.4", "v27.0.1");
+        let (h, body) = helper("claude-cli/2.1.330 (external, cli)", "0.120.4", "v27.0.1");
         assert!(!detect(&h, &body, false, &s).confirmed);
+    }
+
+    /// Headers of a standard request from a release newer than the baseline.
+    fn standard(user_agent: &str, x_app: &str) -> HeaderMap {
+        headers(&[
+            ("user-agent", user_agent),
+            ("x-app", x_app),
+            ("anthropic-beta", "claude-code-20250219"),
+            ("x-stainless-package-version", "0.130.2"),
+            ("x-stainless-runtime-version", "v26.14.0"),
+        ])
+    }
+
+    fn standard_body() -> String {
+        format!(
+            r#"{{"model":"claude-sonnet-4-6","metadata":{{"user_id":{}}},"messages":[]}}"#,
+            user_id()
+        )
+    }
+
+    /// Claude Code background sessions send `X-App: cli-bg`; they are as native as `cli`
+    /// on Messages, count_tokens and the measured helpers. Other values are not.
+    #[test]
+    fn background_sessions_are_native_claude_code() {
+        let s = Settings::default();
+        let ua = "claude-cli/2.1.330 (external, cli)";
+        let body = standard_body();
+        assert!(detect(&standard(ua, "cli-bg"), &body, false, &s).confirmed, "messages");
+        assert!(
+            detect(&standard(ua, "cli-bg"), r#"{"messages":[]}"#, true, &s).confirmed,
+            "count_tokens"
+        );
+        let (mut h, helper_body) = helper(ua, "0.130.2", "v26.14.0");
+        h.insert("x-app", "cli-bg".parse().unwrap());
+        let d = detect(&h, &helper_body, false, &s);
+        assert!(d.confirmed && d.helper_profile, "helper");
+        for other in ["cli-other", "web", "sdk", "CLI-BG", ""] {
+            assert!(!detect(&standard(ua, other), &body, false, &s).confirmed, "{other}");
+        }
+    }
+
+    /// Request fields after the entrypoint (`workload/cron`) keep a request native;
+    /// every other native guard still applies.
+    #[test]
+    fn user_agent_request_fields_keep_native_detection() {
+        let s = Settings::default();
+        let body = standard_body();
+        for ua in [
+            "claude-cli/2.1.330 (external, cli, workload/cron)",
+            "claude-cli/2.1.330 (external, cli, workload/cron, agent-sdk/0.2.133)",
+            "claude-cli/2.1.330 (external, cli, agent-sdk/0.2.133, workload/cron)",
+            "claude-cli/2.1.330 (external, cli, future-feature/value, workload/background)",
+        ] {
+            let d = detect(&standard(ua, "cli"), &body, false, &s);
+            assert!(d.confirmed && d.entrypoint == "cli", "{ua}");
+            assert!(
+                detect(&standard(ua, "cli"), r#"{"messages":[]}"#, true, &s).confirmed,
+                "{ua} count_tokens"
+            );
+        }
+        for refused in [
+            "claude-cli/2.1.279 (external, cli, workload/cron)",
+            "claude-cli/3.0.0 (external, cli, workload/cron)",
+            "claude-cli/2.1.330 (external, other-client, workload/cron)",
+            "claude-cli/2.1.330 (external, cli, foo)",
+        ] {
+            assert!(
+                !detect(&standard(refused, "cli"), &body, false, &s).confirmed,
+                "{refused}"
+            );
+        }
+        let ua = "claude-cli/2.1.330 (external, cli, workload/cron)";
+        let mut h = standard(ua, "cli");
+        h.remove("anthropic-beta");
+        assert!(!detect(&h, &body, false, &s).confirmed, "missing beta");
+        let mut h = standard(ua, "cli");
+        h.remove("x-app");
+        assert!(!detect(&h, &body, false, &s).confirmed, "missing x-app");
+        assert!(
+            !detect(&standard(ua, "cli"), "{}", false, &s).confirmed,
+            "missing metadata"
+        );
+    }
+
+    #[test]
+    fn user_agent_parsing_separates_request_fields() {
+        for (ua, entrypoint, profile) in [
+            ("claude-cli/2.1.312 (external, cli)", "cli", None),
+            (
+                "claude-cli/2.1.312 (external, sdk-ts, agent-sdk/0.2.133)",
+                "sdk-ts",
+                None,
+            ),
+            (
+                "claude-cli/2.1.312 (external, cli, workload/cron)",
+                "cli",
+                Some("claude-cli/2.1.312 (external, cli)"),
+            ),
+            (
+                "claude-cli/2.1.312 (external, sdk-ts, workload/cron, agent-sdk/0.2.133, future-feature/value)",
+                "sdk-ts",
+                Some("claude-cli/2.1.312 (external, sdk-ts, agent-sdk/0.2.133)"),
+            ),
+            (
+                "claude-cli/2.1.312 (external, cli, future_field.v2/value/path)",
+                "cli",
+                Some("claude-cli/2.1.312 (external, cli)"),
+            ),
+        ] {
+            let parsed = parse_user_agent(ua).unwrap_or_else(|| panic!("{ua}"));
+            assert_eq!(parsed.version, (2, 1, 312), "{ua}");
+            assert_eq!(parsed.entrypoint, entrypoint, "{ua}");
+            assert_eq!(parsed.profile_user_agent, profile.unwrap_or(ua), "{ua}");
+            assert_eq!(user_agent_entrypoint(ua), entrypoint, "{ua}");
+        }
+    }
+
+    #[test]
+    fn malformed_user_agents_are_refused() {
+        for ua in [
+            "claude-cli/2.1.312(external, cli)",
+            "claude-cli/2.1.312-extra (external, cli)",
+            "claude-cli/999999999999999999999999.1.0 (external, cli)",
+            "claude-cli/2.1.312 (external, )",
+            "claude-cli/2.1.312 (external, cli, foo)",
+            "claude-cli/2.1.312 (external, cli, /cron)",
+            "claude-cli/2.1.312 (external, cli, workload/)",
+            "claude-cli/2.1.312 (external, cli, bad name/value)",
+            "claude-cli/2.1.312 (external, cli, workload/(cron))",
+            "claude-cli/2.1.312 (external, cli, workload/cron, WORKLOAD/background)",
+            "claude-cli/2.1.312 (external, cli, agent-sdk/dev)",
+            "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, agent-sdk/0.2.134)",
+            "claude-cli/2.1.312 (external, cli, workload/cron) trailing",
+            "claude-cli/2.1.312 (external, cli, workload/cr\non)",
+            "claude-cli/2.1.312 (external, cli)\r\n",
+        ] {
+            assert!(parse_user_agent(ua).is_none(), "{ua:?}");
+        }
     }
 }

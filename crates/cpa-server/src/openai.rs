@@ -30,6 +30,7 @@ struct Request {
 
 fn call(req: Request, entry: Format, model: String, body: Bytes, stream: bool, alt: Option<String>) -> Call {
     Call {
+        portable_output: false,
         entry,
         response: entry,
         operation: Operation::Generate,

@@ -740,6 +740,7 @@ fn upstream_error(
             addon: None,
             after_accept: None,
             held: None,
+            refusal: None,
         };
     }
     let error = ExecError {
@@ -756,6 +757,7 @@ fn upstream_error(
         addon: None,
         after_accept: None,
         held: None,
+        refusal: None,
     };
     quota::classify(error, model_level_cooling)
 }

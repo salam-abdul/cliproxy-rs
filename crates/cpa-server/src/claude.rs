@@ -154,6 +154,7 @@ async fn handle(
     // Go: anything but a missing or literal-false `stream` takes the streaming path.
     let stream = operation == Operation::Generate && !matches!(fields.get("stream"), None | Some(Value::Bool(false)));
     let call = Call {
+        portable_output: false,
         entry: Format::Claude,
         response: Format::Claude,
         operation,
@@ -187,7 +188,7 @@ async fn handle(
     .await
 }
 
-struct ClaudeSse;
+pub(crate) struct ClaudeSse;
 
 impl Writer for ClaudeSse {
     fn chunk(&mut self, event: Bytes) -> Vec<Bytes> {

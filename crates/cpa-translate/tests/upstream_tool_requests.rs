@@ -64,6 +64,7 @@ fn claude_terminal_context_window_preserves_partial_output() {
         model: "m",
         original_request: b"{}",
         translated_request: b"{}",
+        portable: false,
     };
     for stop in ["max_tokens", "model_context_window_exceeded"] {
         let events = truncation_events(stop);

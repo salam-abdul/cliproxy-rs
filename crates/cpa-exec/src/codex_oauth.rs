@@ -538,26 +538,30 @@ fn oauth_error(status: u16, message: &str) -> ExecError {
 /// kept: token endpoints may echo request material, and refresh backoff keys on
 /// `invalid_grant` / `refresh_token_reused`.
 fn token_error(status: u16, body: &[u8]) -> ExecError {
-    let code = serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|v| match &v["error"] {
-            Value::String(s) => Some(s.clone()),
-            Value::Object(o) => o.get("code").and_then(Value::as_str).map(str::to_owned),
-            _ => None,
-        })
-        .filter(|c| c.len() <= 64 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.'))
-        .unwrap_or_default();
+    let value = serde_json::from_slice::<Value>(body).unwrap_or_default();
+    let code = match &value["error"] {
+        Value::String(s) => Some(s.clone()),
+        Value::Object(o) => o.get("code").and_then(Value::as_str).map(str::to_owned),
+        _ => None,
+    }
+    .filter(|c| c.len() <= 64 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.'))
+    .unwrap_or_default();
     // A rejected grant makes the credential unusable (401, cooled and failed over); server
     // and rate-limit faults are transport-like and must not poison the credential.
     let (status_out, scope) = match status {
         400..=403 => (401, FailureScope::Credential),
         _ => (502, FailureScope::Transport),
     };
-    ExecError::local(
+    let mut error = ExecError::local(
         status_out,
         scope,
         format!("token refresh failed with status {status}: {code}"),
-    )
+    );
+    if (400..=403).contains(&status) {
+        let description = value["error_description"].as_str().unwrap_or_default();
+        error.refusal = cpa_core::exec::Refusal::from_oauth(&code, description);
+    }
+    error
 }
 
 /// Refresh token from metadata (`Refresh` reads only `refresh_token`).
@@ -616,6 +620,14 @@ pub(crate) fn refresh_due(credential: &Credential, now: DateTime<Utc>) -> bool {
         .iter()
         .find_map(|k| credential.metadata.get(*k).and_then(parse_time))
         .is_none_or(|last| now - last >= REFRESH_LEAD)
+}
+
+/// When the access token expires, if it has one and its expiry is known.
+pub(crate) fn access_expiry(credential: &Credential) -> Option<DateTime<Utc>> {
+    if credential.str("access_token").unwrap_or_default().is_empty() {
+        return None;
+    }
+    expiry(credential)
 }
 
 /// The access token is present and not expired.

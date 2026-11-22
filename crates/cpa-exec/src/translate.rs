@@ -95,6 +95,7 @@ async fn transform(
         model: &req.model,
         original_request: &req.original_body,
         translated_request: &translated,
+        portable: req.portable_output,
     };
     // EnsureResponsesUsageDetails on every translated Responses payload.
     let responses = req.response_format == Format::OpenAIResponse && req.operation == Operation::Generate;
@@ -274,6 +275,7 @@ mod tests {
 
     fn req(stream: bool, operation: Operation) -> ExecRequest {
         ExecRequest {
+            portable_output: false,
             operation,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,

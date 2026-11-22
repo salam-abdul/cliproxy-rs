@@ -30,6 +30,7 @@ fn request(s: &Value) -> ExecRequest {
     }
     let model = s["model"].as_str().unwrap().to_owned();
     ExecRequest {
+        portable_output: false,
         operation: if op == "count" {
             Operation::CountTokens
         } else {
