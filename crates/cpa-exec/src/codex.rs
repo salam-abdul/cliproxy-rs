@@ -177,6 +177,7 @@ impl CodexExecutor {
     /// Refreshes tokens. Go refreshes Codex only in the background and never blocks a
     /// request on it, so a failed refresh while the access token is still valid keeps the
     /// credential usable; the failure is cached for five minutes by the OAuth service.
+    /// A refused refresh token is returned as an error either way.
     pub async fn prepare(&self, credential: &Credential, cfg: &Config) -> Result<MetadataPatch, ExecError> {
         let now = Utc::now();
         if !codex_oauth::refresh_due(credential, now) {
@@ -188,7 +189,9 @@ impl CodexExecutor {
         let oauth = self.oauth.with_client(self.transport.standard(&proxy));
         match oauth.refresh_patch(codex_oauth::refresh_token(credential)).await {
             Ok(patch) => Ok(patch),
-            Err(error) if codex_oauth::access_usable(credential, now) => {
+            // A refused refresh token is reported even while the access token works, so
+            // the runtime stops sending it.
+            Err(error) if error.refusal.is_none() && codex_oauth::access_usable(credential, now) => {
                 tracing::warn!(
                     credential = %credential.id,
                     status = error.status,

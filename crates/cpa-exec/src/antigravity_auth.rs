@@ -491,6 +491,11 @@ impl OAuth {
                 )
             };
             let mut error = crate::upstream::status_error(status, message);
+            if (400..500).contains(&status) {
+                let description = gj::get(&data, "error_description");
+                error.refusal =
+                    cpa_core::exec::Refusal::from_oauth(&String::from_utf8_lossy(&code), &description.str());
+            }
             if status == 429 {
                 error.retry_after = parse_retry_delay(&data);
             }
@@ -621,6 +626,15 @@ pub(crate) fn must_prepare(credential: &Credential) -> bool {
 fn token_fresh(credential: &Credential, now: DateTime<Utc>) -> bool {
     !meta_string(credential, "access_token").is_empty()
         && crate::kimi_http::expiration(credential).is_some_and(|e| e > now + TOKEN_SAFETY_WINDOW)
+}
+
+/// When the access token stops serving requests without a refresh: Go's
+/// `ensureAccessToken` refreshes it five minutes before its expiry.
+pub(crate) fn access_expiry(credential: &Credential) -> Option<DateTime<Utc>> {
+    if meta_string(credential, "access_token").is_empty() {
+        return None;
+    }
+    crate::kimi_http::expiration(credential).map(|e| e - TOKEN_SAFETY_WINDOW)
 }
 
 /// Whether the credential needs preparation at `now`: a missing project, a token Go's
