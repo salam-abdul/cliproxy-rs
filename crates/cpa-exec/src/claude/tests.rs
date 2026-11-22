@@ -4,6 +4,50 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
+/// The Claude Code identity Go v8.0.35 cloaks with. Its recorded captures carry it and
+/// `BASELINE` has moved on, so comparisons against Go pin it as header defaults unless
+/// the scenario configures its own.
+pub(super) const GO_BASELINE: [(&str, &str); 3] = [
+    ("user-agent", "claude-cli/2.1.280 (external, cli)"),
+    ("package-version", "0.112.1"),
+    ("runtime-version", "v26.3.0"),
+];
+
+pub(super) fn go_settings() -> Settings {
+    Settings::from_config(&go_config(""))
+}
+
+/// `yaml` parsed, with each [`GO_BASELINE`] header default it leaves unset filled in.
+pub(super) fn go_config(yaml: &str) -> Config {
+    use serde_yaml_ng::{Mapping, Value as Yaml};
+    let mut cfg = Config::parse(yaml).unwrap();
+    let mut node = &mut cfg.document;
+    for key in ["oauth", "providers", "claude", "header-defaults"] {
+        if !node.is_mapping() {
+            *node = Yaml::Mapping(Mapping::new());
+        }
+        node = node
+            .as_mapping_mut()
+            .unwrap()
+            .entry(Yaml::from(key))
+            .or_insert(Yaml::Null);
+    }
+    if !node.is_mapping() {
+        *node = Yaml::Mapping(Mapping::new());
+    }
+    let defaults = node.as_mapping_mut().unwrap();
+    for (key, value) in GO_BASELINE {
+        let set = defaults
+            .get(key)
+            .and_then(Yaml::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if !set {
+            defaults.insert(Yaml::from(key), Yaml::from(value));
+        }
+    }
+    cfg
+}
+
 thread_local! {
     /// The clock requests prepared on this test thread read, when set.
     static CLOCK: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>> = const { std::cell::Cell::new(None) };
@@ -104,7 +148,7 @@ async fn pipeline_reproduces_go_upstream_captures() {
     let captures: Value = serde_json::from_str(include_str!("testdata/go_captures.json")).unwrap();
     let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
     let credential = harness_credential();
-    let cfg = Config::parse("").unwrap();
+    let cfg = go_config("");
     for case in captures["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let req = enrich(request(case));
@@ -599,7 +643,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
         if let Some(auth) = scenario["auth_file"].as_str().filter(|s| !s.is_empty()) {
             std::fs::write(dir.join("auth").join("fixture.json"), auth).unwrap();
         }
-        let cfg = Config::parse(&text).unwrap();
+        let cfg = go_config(&text);
         let mut credential = cpa_core::config::credentials::load(&cfg)
             .into_iter()
             .find(|c| c.provider == "claude")
@@ -996,6 +1040,231 @@ async fn cloaked_conversation_prefix_holds_for_warm_changed_and_idle_turns() {
     assert_eq!(breakpoints(changed), with("messages.3.content.0"));
     assert_eq!(breakpoints(idle), with("messages.5.content.0"));
     assert_eq!(breakpoints(fresh), fixed);
+}
+
+/// A loopback Messages upstream that keeps the headers and body of every request and
+/// answers each with a minimal streamed message.
+async fn recording_upstream_with_headers() -> (String, Arc<std::sync::Mutex<Vec<(http::HeaderMap, String)>>>) {
+    use axum::response::IntoResponse;
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = sent.clone();
+    let router = axum::Router::new().fallback(move |headers: http::HeaderMap, body: String| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().unwrap().push((headers, body));
+            let message = serde_json::json!({"id": "msg_native", "type": "message", "role": "assistant",
+                "model": "claude-opus-5-5", "content": [], "usage": {"input_tokens": 3, "output_tokens": 0}});
+            let events = [
+                serde_json::json!({"type": "message_start", "message": message}),
+                serde_json::json!({"type": "message_stop"}),
+            ];
+            let sse: String = events
+                .iter()
+                .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+                .collect();
+            ([(http::header::CONTENT_TYPE, "text/event-stream")], sse).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (base, sent)
+}
+
+/// Claude Code's own `metadata.user_id`: a fixed device and session identity.
+fn native_user_id() -> String {
+    serde_json::to_string(&format!(
+        r#"{{"device_id":"{}","account_uuid":"","session_id":"5f0c8a52-3d1e-4b7a-9c26-7e41d8b0a913"}}"#,
+        "a".repeat(64)
+    ))
+    .unwrap()
+}
+
+/// Native Claude Code newer than the baseline keeps its own identity under default
+/// settings: a background session (`X-App: cli-bg`) and a User-Agent with request
+/// fields (`workload/cron`) go upstream with the User-Agent, X-App and Stainless
+/// versions they sent, and the caller's messages, tools and system prompt unchanged.
+#[tokio::test]
+async fn native_claude_code_identity_and_bytes_go_up_unchanged() {
+    let system = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.330.abc; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"Native caller system","cache_control":{"type":"ephemeral","ttl":"1h"}}]"#;
+    let tools = r#"[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]"#;
+    let messages = r#"[{"role":"user","content":[{"type":"text","text":"Read the README.","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]"#;
+    let body = format!(
+        r#"{{"model":"claude-sonnet-4-6","max_tokens":64,"stream":true,"metadata":{{"user_id":{}}},"system":{system},"tools":{tools},"messages":{messages}}}"#,
+        native_user_id()
+    );
+    let cfg = Config::parse("").unwrap();
+    let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+    let _pins = Pins;
+    set_clock(Some("2026-11-21T12:00:00Z"));
+    for (i, (user_agent, x_app)) in [
+        ("claude-cli/2.1.330 (external, cli)", "cli"),
+        ("claude-cli/2.1.330 (external, cli)", "cli-bg"),
+        ("claude-cli/2.1.330 (external, cli, workload/cron)", "cli"),
+        (
+            "claude-cli/2.1.330 (external, cli, agent-sdk/0.2.133, request-phase/background)",
+            "cli-bg",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (base, sent) = recording_upstream_with_headers().await;
+        let mut credential = harness_credential();
+        credential.id = format!("native-identity-{i}.json");
+        credential.attributes.insert("base_url".into(), base);
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in [
+            ("user-agent", user_agent),
+            ("x-app", x_app),
+            ("x-stainless-package-version", "0.130.2"),
+            ("x-stainless-runtime-version", "v26.14.0"),
+            (
+                "anthropic-beta",
+                "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14",
+            ),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        drain(&executor, &credential, &cfg, client_request(body.clone(), headers)).await;
+        let sent = sent.lock().unwrap();
+        let [(upstream, sent_body)] = &sent[..] else {
+            panic!("{user_agent}: {} requests", sent.len());
+        };
+        let get = |name: &str| upstream.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        assert_eq!(
+            (
+                get("user-agent"),
+                get("x-app"),
+                get("x-stainless-package-version"),
+                get("x-stainless-runtime-version")
+            ),
+            (user_agent, x_app, "0.130.2", "v26.14.0"),
+            "{user_agent} {x_app}"
+        );
+        for path in ["messages", "tools", "system.1"] {
+            assert_eq!(
+                rawjson::get(sent_body, path).json(),
+                rawjson::get(&body, path).json(),
+                "{user_agent} {x_app}: {path}"
+            );
+        }
+        assert_eq!(
+            rawjson::get(sent_body, "system").array().len(),
+            2,
+            "{user_agent} {x_app}"
+        );
+    }
+}
+
+/// Claude Code 2.1.280 to 2.1.320 is below the 2.1.321 baseline, so under default
+/// settings it is cloaked like any other client, including its tool continuations:
+/// the tool call and its result pass unchanged under the Claude Code identity, and the
+/// cached prefix of the first turn holds on the second. Under Go's 2.1.280 header
+/// defaults the same requests are a newer release and are forwarded natively.
+#[tokio::test]
+async fn older_claude_code_tool_continuation_is_cloaked_with_a_stable_prefix() {
+    let tools = r#"[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]"#;
+    let system = r#"[{"type":"text","text":"Native caller system"}]"#;
+    let first = r#"{"role":"user","content":[{"type":"text","text":"Read the README."}]}"#;
+    let call = r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01native","name":"Read","input":{"path":"README.md"}}]}"#;
+    let result =
+        r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01native","content":"Title"}]}"#;
+    let continuation = format!("{first},{call},{result}");
+    let user_id = native_user_id();
+    let turn = |messages: &str| {
+        format!(
+            r#"{{"model":"claude-opus-5-5","max_tokens":64,"stream":true,"metadata":{{"user_id":{user_id}}},"system":{system},"tools":{tools},"messages":[{messages}]}}"#
+        )
+    };
+    let send = async |cfg: Config, id: &str| -> Vec<String> {
+        let (base, sent) = recording_upstream().await;
+        let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
+        let mut credential = harness_credential();
+        credential.id = id.into();
+        credential.attributes.insert("base_url".into(), base);
+        let headers = || {
+            let mut h = http::HeaderMap::new();
+            for (name, value) in [
+                ("user-agent", "claude-cli/2.1.300 (external, cli)"),
+                ("x-app", "cli"),
+                ("x-stainless-package-version", "0.118.0"),
+                ("x-stainless-runtime-version", "v26.5.0"),
+                ("anthropic-beta", "claude-code-20250219,interleaved-thinking-2025-05-14"),
+            ] {
+                h.insert(name, value.parse().unwrap());
+            }
+            h
+        };
+        set_clock(Some("2026-11-09T12:00:00Z"));
+        drain(&executor, &credential, &cfg, client_request(turn(first), headers())).await;
+        set_clock(Some("2026-11-09T12:00:10Z"));
+        drain(
+            &executor,
+            &credential,
+            &cfg,
+            client_request(turn(&continuation), headers()),
+        )
+        .await;
+        sent.lock().unwrap().clone()
+    };
+    let _pins = Pins;
+
+    // Go's 2.1.280 baseline: 2.1.300 is a newer release, confirmed and forwarded as sent.
+    let forwarded = send(go_config(""), "older-native-go.json").await;
+    let [native_cold, native_warm] = &forwarded[..] else {
+        panic!("{} requests", forwarded.len());
+    };
+    // Signing adds the billing block an OAuth login needs, with the caller's own
+    // version; the caller's system prompt and tool names go up unchanged.
+    for body in [native_cold, native_warm] {
+        let billing = rawjson::string(body, "system.0.text");
+        assert!(billing.starts_with(cloak::BILLING_PREFIX), "{billing}");
+        assert!(billing.contains("cc_version=2.1.300."), "{billing}");
+        let rest: Vec<String> = rawjson::get(body, "system")
+            .array()
+            .iter()
+            .skip(1)
+            .map(|b| rawjson::string(b.json(), "text"))
+            .collect();
+        assert_eq!(rest, ["Native caller system"], "no Claude Code identity added");
+        assert_eq!(rawjson::string(body, "tools.0.name"), "Read", "no tool alias");
+    }
+
+    // Default settings: 2.1.300 is below the baseline, so it is cloaked.
+    let sent = send(Config::parse("").unwrap(), "older-native.json").await;
+    let [cold, warm] = &sent[..] else {
+        panic!("{} requests", sent.len());
+    };
+    for body in [cold, warm] {
+        assert!(rawjson::string(body, "system.0.text").starts_with(cloak::BILLING_PREFIX));
+        assert!(rawjson::string(body, "system.0.text").contains("cc_version=2.1.321."));
+        assert_eq!(rawjson::string(body, "system.1.text"), cloak::CLI_IDENTITY);
+    }
+    // The tool call keeps its id and input under the session's alias for the tool, the
+    // same name the request declares; the result goes up as sent, carrying the rolling
+    // breakpoint of the last turn.
+    const ROLLING: &str = r#","cache_control":{"type":"ephemeral","ttl":"1h"}"#;
+    let alias = rawjson::string(warm, "tools.0.name");
+    assert!(alias.starts_with("mcp__") && alias.ends_with("_Read"), "{alias}");
+    assert_eq!(
+        rawjson::get(warm, "messages.2").json(),
+        call.replace(r#""name":"Read""#, &format!(r#""name":"{alias}""#))
+    );
+    assert_eq!(rawjson::get(warm, "messages.3").json().replace(ROLLING, ""), result);
+    // The cold request, less its rolling breakpoint, prefixes the continuation.
+    let prefix = |body: &str| {
+        let mut out = rawjson::get(body, "tools").json().to_owned();
+        for block in rawjson::get(body, "system").array().iter().skip(1) {
+            out.push_str(block.json());
+        }
+        for message in rawjson::get(body, "messages").array().iter().take(2) {
+            out.push_str(message.json());
+        }
+        out.replace(ROLLING, "")
+    };
+    assert_eq!(rawjson::get(cold, "messages").array().len(), 2);
+    assert_eq!(prefix(warm), prefix(cold));
 }
 
 /// A cloaked API key keeps the caller's system prompt where the next turn finds it:
@@ -1679,7 +1948,7 @@ async fn compat_replay_sequence_matches_go() {
             .as_str()
             .unwrap()
             .replace("AUTH_DIR", root.to_str().unwrap());
-        let cfg = Config::parse(&text).unwrap();
+        let cfg = go_config(&text);
         let credential = cpa_core::config::credentials::load(&cfg)
             .into_iter()
             .find(|c| c.provider == "claude")
