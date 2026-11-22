@@ -10,6 +10,7 @@
 
 - Every server test builds its runtime with `cpa_server::testing::runtime` and a private `auth-dir` in a temp directory. That runtime sends every non-local credential to a dead loopback proxy. Never let a test resolve the default auth directory or read real credentials.
 - Upstreams are local mocks on loopback. CI runs the tests in a network namespace with only loopback up, so a test that reaches a real host fails there.
+- A test that requests a hostname pins it to its mock with a resolve hook (`cpa_exec::proxy::Hooks`). A client built with one ignores proxy environment variables, so the shell's `HTTPS_PROXY` cannot carry the request to the real host.
 - PostgreSQL store tests start a throwaway cluster from local server binaries; set `CPA_TEST_PG_BIN` to their directory. Without binaries they skip and pass. `CPA_TEST_NO_SKIP=1` turns that skip into a failure, as CI does.
 
 ## Traps
