@@ -7,11 +7,13 @@ use std::time::Duration;
 /// The Claude Code identity Go v8.0.35 cloaks with. Its recorded captures carry it and
 /// `BASELINE` has moved on, so comparisons against Go pin it as header defaults unless
 /// the scenario configures its own.
-pub(super) const GO_BASELINE: [(&str, &str); 3] = [
-    ("user-agent", "claude-cli/2.1.280 (external, cli)"),
-    ("package-version", "0.112.1"),
-    ("runtime-version", "v26.3.0"),
-];
+pub(super) const GO_BASELINE: profile::Baseline = profile::Baseline {
+    user_agent: "claude-cli/2.1.280 (external, cli)",
+    package_version: "0.112.1",
+    runtime_version: "v26.3.0",
+    os: "MacOS",
+    arch: "arm64",
+};
 
 pub(super) fn go_settings() -> Settings {
     Settings::from_config(&go_config(""))
@@ -36,7 +38,11 @@ pub(super) fn go_config(yaml: &str) -> Config {
         *node = Yaml::Mapping(Mapping::new());
     }
     let defaults = node.as_mapping_mut().unwrap();
-    for (key, value) in GO_BASELINE {
+    for (key, value) in [
+        ("user-agent", GO_BASELINE.user_agent),
+        ("package-version", GO_BASELINE.package_version),
+        ("runtime-version", GO_BASELINE.runtime_version),
+    ] {
         let set = defaults
             .get(key)
             .and_then(Yaml::as_str)
@@ -1080,8 +1086,9 @@ fn native_user_id() -> String {
     .unwrap()
 }
 
-/// Native Claude Code newer than the baseline keeps its own identity under default
-/// settings: a background session (`X-App: cli-bg`) and a User-Agent with request
+/// Native Claude Code at or above the 2.1.280 floor keeps its own identity under
+/// default settings, below the 2.1.321 cloak identity (2.1.296, the qualified native
+/// release) as above it: a background session (`X-App: cli-bg`) and a User-Agent with request
 /// fields (`workload/cron`) go upstream with the User-Agent, X-App and Stainless
 /// versions they sent, and the caller's messages, tools and system prompt unchanged.
 #[tokio::test]
@@ -1098,6 +1105,7 @@ async fn native_claude_code_identity_and_bytes_go_up_unchanged() {
     let _pins = Pins;
     set_clock(Some("2026-11-21T12:00:00Z"));
     for (i, (user_agent, x_app)) in [
+        ("claude-cli/2.1.296 (external, cli)", "cli"),
         ("claude-cli/2.1.330 (external, cli)", "cli"),
         ("claude-cli/2.1.330 (external, cli)", "cli-bg"),
         ("claude-cli/2.1.330 (external, cli, workload/cron)", "cli"),
@@ -1157,13 +1165,13 @@ async fn native_claude_code_identity_and_bytes_go_up_unchanged() {
     }
 }
 
-/// Claude Code 2.1.280 to 2.1.320 is below the 2.1.321 baseline, so under default
-/// settings it is cloaked like any other client, including its tool continuations:
-/// the tool call and its result pass unchanged under the Claude Code identity, and the
-/// cached prefix of the first turn holds on the second. Under Go's 2.1.280 header
-/// defaults the same requests are a newer release and are forwarded natively.
+/// Under default settings the cloak identity (2.1.321) and the native floor (2.1.280)
+/// differ. Claude Code 2.1.300 sits between them and its tool continuation is forwarded
+/// natively: the caller's system prompt and tool names go up unchanged, with a billing
+/// block carrying its own version. Claude Code 2.1.279 is below the floor and is
+/// cloaked as 2.1.321, and the cached prefix of its first turn holds on the second.
 #[tokio::test]
-async fn older_claude_code_tool_continuation_is_cloaked_with_a_stable_prefix() {
+async fn claude_code_between_floor_and_identity_stays_native_and_older_is_cloaked() {
     let tools = r#"[{"name":"Read","description":"Read a file","input_schema":{"type":"object"}}]"#;
     let system = r#"[{"type":"text","text":"Native caller system"}]"#;
     let first = r#"{"role":"user","content":[{"type":"text","text":"Read the README."}]}"#;
@@ -1177,16 +1185,17 @@ async fn older_claude_code_tool_continuation_is_cloaked_with_a_stable_prefix() {
             r#"{{"model":"claude-opus-5-5","max_tokens":64,"stream":true,"metadata":{{"user_id":{user_id}}},"system":{system},"tools":{tools},"messages":[{messages}]}}"#
         )
     };
-    let send = async |cfg: Config, id: &str| -> Vec<String> {
+    let send = async |user_agent: &str, id: &str| -> Vec<String> {
         let (base, sent) = recording_upstream().await;
         let executor = ClaudeExecutor::with_client(wreq::Client::new(), DEFAULT_BASE_URL);
         let mut credential = harness_credential();
         credential.id = id.into();
         credential.attributes.insert("base_url".into(), base);
+        let cfg = Config::parse("").unwrap();
         let headers = || {
             let mut h = http::HeaderMap::new();
             for (name, value) in [
-                ("user-agent", "claude-cli/2.1.300 (external, cli)"),
+                ("user-agent", user_agent),
                 ("x-app", "cli"),
                 ("x-stainless-package-version", "0.118.0"),
                 ("x-stainless-runtime-version", "v26.5.0"),
@@ -1210,13 +1219,10 @@ async fn older_claude_code_tool_continuation_is_cloaked_with_a_stable_prefix() {
     };
     let _pins = Pins;
 
-    // Go's 2.1.280 baseline: 2.1.300 is a newer release, confirmed and forwarded as sent.
-    let forwarded = send(go_config(""), "older-native-go.json").await;
+    let forwarded = send("claude-cli/2.1.300 (external, cli)", "between-floor-and-identity.json").await;
     let [native_cold, native_warm] = &forwarded[..] else {
         panic!("{} requests", forwarded.len());
     };
-    // Signing adds the billing block an OAuth login needs, with the caller's own
-    // version; the caller's system prompt and tool names go up unchanged.
     for body in [native_cold, native_warm] {
         let billing = rawjson::string(body, "system.0.text");
         assert!(billing.starts_with(cloak::BILLING_PREFIX), "{billing}");
@@ -1228,11 +1234,11 @@ async fn older_claude_code_tool_continuation_is_cloaked_with_a_stable_prefix() {
             .map(|b| rawjson::string(b.json(), "text"))
             .collect();
         assert_eq!(rest, ["Native caller system"], "no Claude Code identity added");
-        assert_eq!(rawjson::string(body, "tools.0.name"), "Read", "no tool alias");
+        assert_eq!(rawjson::get(body, "tools").json(), tools, "no tool alias");
     }
+    assert_eq!(rawjson::get(native_warm, "messages.1").json(), call);
 
-    // Default settings: 2.1.300 is below the baseline, so it is cloaked.
-    let sent = send(Config::parse("").unwrap(), "older-native.json").await;
+    let sent = send("claude-cli/2.1.279 (external, cli)", "below-floor.json").await;
     let [cold, warm] = &sent[..] else {
         panic!("{} requests", sent.len());
     };
