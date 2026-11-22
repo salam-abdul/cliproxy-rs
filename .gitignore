@@ -1,4 +1,5 @@
 /target
+vendor/gjson/target/
 ui/node_modules/
 ui/.amp/
 .claude/worktrees/
