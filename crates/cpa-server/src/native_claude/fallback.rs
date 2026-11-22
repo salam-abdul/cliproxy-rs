@@ -1,5 +1,6 @@
-//! Quota fallback: a request that native routing refuses because no account has quota is
-//! served by the translating proxy on the model mapped to the requested Claude model.
+//! Quota fallback: a request that native routing refuses because every account is out of
+//! quota is served by the translating proxy on the model mapped to the requested Claude
+//! model.
 
 use super::*;
 
@@ -13,18 +14,21 @@ impl<'de> Deserialize<'de> for Mapping {
     /// `claude-` models this transport serves, and an empty target.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        let entries = std::collections::BTreeMap::<String, String>::deserialize(deserializer)?;
-        for (prefix, target) in &entries {
+        let entries = Option::<std::collections::BTreeMap<String, String>>::deserialize(deserializer)?;
+        let mut mapping = Vec::new();
+        for (prefix, target) in entries.unwrap_or_default() {
             if !prefix.starts_with("claude-") {
                 return Err(D::Error::custom(format!(
                     "quotaFallback key {prefix:?} must start with \"claude-\""
                 )));
             }
-            if target.trim().is_empty() {
+            let target = target.trim();
+            if target.is_empty() {
                 return Err(D::Error::custom(format!("quotaFallback {prefix:?} names no model")));
             }
+            mapping.push((prefix, target.to_owned()));
         }
-        Ok(Self(entries.into_iter().collect()))
+        Ok(Self(mapping))
     }
 }
 
@@ -39,8 +43,8 @@ impl Mapping {
     }
 }
 
-/// Client headers that carry a credential. None reaches a fallback provider: credential
-/// header templates, payload rules and Home dispatch can all read client headers.
+/// Client headers that carry a credential. A provider entry's header templates and
+/// payload rules can copy client headers, so none of these is handed to dispatch.
 const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "x-api-key", "cookie", "proxy-authorization"];
 
 /// A request native routing is about to refuse with the quota 429.
@@ -54,23 +58,24 @@ pub(super) struct Refused<'a> {
     pub(super) attempts: usize,
 }
 
-pub(super) enum Fallback {
-    /// The mapped model answered: the response to return in place of the 429.
-    Served(Response),
-    /// The mapped model was tried and produced no output; the 429 stands.
-    Failed(String),
-    /// No mapping for the model, or the refusal is not about quota.
-    Unused,
+/// Why a mapped model did not answer. The 429 stands in every case.
+#[derive(Clone, Copy)]
+enum Failure {
+    /// The translating proxy serves no such model.
+    UnknownModel,
+    /// A provider that would serve the model is not one a fallback may use.
+    ProviderNotAllowed,
+    /// The request reached dispatch and ended without output.
+    NoOutput,
 }
 
-impl Fallback {
-    /// The request's `rejected` event, naming a fallback that was tried and failed.
-    pub(super) fn annotate(&self, mut event: Value) -> Value {
-        if let Self::Failed(model) = self {
-            event["fallbackModel"] = json!(model);
-            event["fallbackOutcome"] = json!("failed");
+impl Failure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownModel => "unknown_model",
+            Self::ProviderNotAllowed => "provider_not_allowed",
+            Self::NoOutput => "no_output",
         }
-        event
     }
 }
 
@@ -79,35 +84,37 @@ pub(super) fn body(raw: &[u8], target: &str) -> Option<axum::body::Bytes> {
     cpa_common::json::try_set_str(raw, "model", target).ok().map(Into::into)
 }
 
-/// The providers a fallback may use. Others are left out because only these translate
-/// with [`crate::dispatch::Call::portable_output`], and a `claude` provider would serve
-/// the request outside native admission.
-fn allowed(provider: &str) -> bool {
-    provider == "gemini" || provider == "openai-compatibility" || provider.starts_with("openai-compatible-")
-}
-
 impl State {
-    /// Serves a quota-refused request on its mapped model, when it has one and
-    /// [`State::quota_blocked`] holds. Reads no cooldown and writes no routing state.
-    pub(super) async fn fall_back(self: &Arc<Self>, refused: Refused<'_>) -> Fallback {
-        let Some(target) = self.config.quota_fallback.target(refused.model) else {
-            return Fallback::Unused;
+    /// Serves a quota-refused request on its mapped model and returns the response.
+    /// Otherwise records `rejected`, the request's rejection event, and returns `None`:
+    /// the caller answers as it would without a fallback. Writes no routing state.
+    pub(super) async fn fall_back(self: &Arc<Self>, refused: Refused<'_>, mut rejected: Value) -> Option<Response> {
+        let attempt = match self.config.quota_fallback.target(refused.model) {
+            Some(target) if self.out_of_quota(refused.model).await => {
+                Some((target, self.dispatch(&refused, target).await))
+            }
+            _ => None,
         };
-        if !self.quota_blocked(refused.model).await {
-            return Fallback::Unused;
+        match attempt {
+            Some((target, Ok(response))) => {
+                self.event(json!({"type":"fallback","requestId":refused.request_id,"session":refused.sid,"model":refused.model,"fallbackModel":target,"outcome":"fallback_served","status":200,"attempts":refused.attempts}));
+                return Some(response);
+            }
+            Some((target, Err(failure))) => {
+                rejected["fallbackModel"] = json!(target);
+                rejected["fallbackFailure"] = json!(failure.as_str());
+            }
+            None => {}
         }
-        let Some(response) = self.translate(&refused, target).await else {
-            return Fallback::Failed(target.to_owned());
-        };
-        self.event(json!({"type":"fallback","requestId":refused.request_id,"session":refused.sid,"model":refused.model,"fallbackModel":target,"outcome":"fallback_served","status":200,"attempts":refused.attempts}));
-        Fallback::Served(response)
+        self.event(rejected);
+        None
     }
 
-    /// The translating proxy's answer to `refused` on `target`, or `None` when it
-    /// produced no output, so the caller can still return the 429 with its reset headers.
-    async fn translate(&self, refused: &Refused<'_>, target: &str) -> Option<Response> {
+    /// The translating proxy's answer to `refused` on `target`. An error means no output
+    /// was produced, so the caller can still return the 429 with its reset headers.
+    async fn dispatch(&self, refused: &Refused<'_>, target: &str) -> Result<Response, Failure> {
         use crate::dispatch::{self, Done};
-        let body = body(refused.raw, target)?;
+        let body = body(refused.raw, target).ok_or(Failure::NoOutput)?;
         let mut headers = refused.headers.clone();
         for name in CREDENTIAL_HEADERS {
             headers.remove(name);
@@ -135,32 +142,35 @@ impl State {
             media: None,
             portable_output: true,
         };
-        if !dispatch::providers(&self.rt, &call).ok()?.iter().all(|p| allowed(p)) {
-            return None;
+        // A provider outside this set would answer with thinking blocks Anthropic rejects
+        // later, and a `claude` provider would serve the request outside native admission.
+        let providers = dispatch::providers(&self.rt, &call).map_err(|_| Failure::UnknownModel)?;
+        if !providers.iter().all(|p| cpa_exec::translates_portable_output(p)) {
+            return Err(Failure::ProviderNotAllowed);
         }
-        let trace = dispatch::Trace::with_request_id(Some(refused.request_id.to_owned()));
+        // Its own trace ID: the Claude attempts are already recorded under the request's.
+        let trace = dispatch::Trace::with_request_id(None);
         // Not `dispatch::serve`: its keep-alive commits a 200 before the result exists and
         // its header passthrough would replace the 429's reset headers.
-        match dispatch::run_with_bootstrap_retries(&self.rt, call, &trace)
-            .await
-            .ok()?
-        {
-            Done::Buffered { body, .. } => Some(crate::respond::json(200, "application/json", body)),
-            Done::Stream { first, rest, .. } => Some(crate::respond::sse(crate::respond::stream(
+        match dispatch::run_with_bootstrap_retries(&self.rt, call, &trace).await {
+            Ok(Done::Buffered { body, .. }) => Ok(crate::respond::json(200, "application/json", body)),
+            Ok(Done::Stream { first, rest, .. }) => Ok(crate::respond::sse(crate::respond::stream(
                 first,
                 rest,
                 crate::claude::ClaudeSse,
                 crate::respond::keepalive(&self.rt.config()),
             ))),
+            Err(_) => Err(Failure::NoOutput),
         }
     }
 
-    /// Whether Claude is unusable for `model` because of quota alone: at least one account
-    /// is enabled, and none has included quota or allowed paid overage by its reading. An
-    /// unknown reading counts as no quota, as admission refuses it. Cooldowns are not
-    /// consulted, so an account that has quota but is resting after a sign-in, overload
-    /// or transport failure makes this false.
-    pub(super) async fn quota_blocked(self: &Arc<Self>, model: &str) -> bool {
+    /// Whether every enabled account is confirmed out of quota for `model`, and at least
+    /// one is enabled. An account counts only when its usage reading or its last response
+    /// headers name a used-up window with a reset still ahead, and allowed paid overage
+    /// does not read as available. An unreadable reading confirms nothing: a usage read
+    /// fails for a revoked sign-in as it does for an outage. Cooldowns are not consulted,
+    /// so an account that has quota but is resting keeps this false.
+    pub(super) async fn out_of_quota(self: &Arc<Self>, model: &str) -> bool {
         let Ok(accounts) = self.accounts().await else {
             return false;
         };
@@ -169,10 +179,18 @@ impl State {
             return false;
         }
         let overage = self.allow_extra_usage();
-        self.quota_accounts(enabled)
-            .await
-            .iter()
-            .all(|a| !self.included_available(a, &a.quota, model) && !(overage && quota::extra_available(&a.quota)))
+        let at = now();
+        self.quota_accounts(enabled).await.iter().all(|a| {
+            let limited = quota::recovery(&a.quota, model, at).reset().is_some()
+                || self
+                    .rt
+                    .executors
+                    .claude
+                    .quota()
+                    .snapshot(a.quota_id())
+                    .is_some_and(|snapshot| quota::header_recovery(&snapshot.signals, at).reset().is_some());
+            limited && !(overage && quota::extra_available(&a.quota))
+        })
     }
 }
 
@@ -202,5 +220,12 @@ mod tests {
         assert!(mapping(json!({"claude-opus-":"  "})).is_err());
         assert!(mapping(json!({"gpt-":"a"})).is_err());
         assert!(mapping(json!({"claude-opus-":7})).is_err());
+    }
+
+    #[test]
+    fn null_is_no_mapping_and_targets_are_trimmed() {
+        assert_eq!(mapping(Value::Null).unwrap().target("claude-opus-test"), None);
+        let padded = mapping(json!({"claude-opus-":" local-test "})).unwrap();
+        assert_eq!(padded.target("claude-opus-test"), Some("local-test"));
     }
 }

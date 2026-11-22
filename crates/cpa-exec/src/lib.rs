@@ -118,6 +118,13 @@ pub enum Readiness {
     PrepareNow,
 }
 
+/// Whether `provider`'s executor honors [`cpa_core::exec::ExecRequest::portable_output`]
+/// for a Claude client: Gemini API keys on the generateContent path and
+/// OpenAI-compatible providers. Kept beside the executors so the set changes with them.
+pub fn translates_portable_output(provider: &str) -> bool {
+    provider == "gemini" || openai_compat::handles(provider)
+}
+
 pub struct Executors {
     pub claude: claude::ClaudeExecutor,
     pub codex: codex::CodexExecutor,

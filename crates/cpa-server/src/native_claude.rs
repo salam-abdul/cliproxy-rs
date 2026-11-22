@@ -12,7 +12,6 @@ mod policy;
 mod quota;
 mod routing;
 mod status;
-use fallback::Fallback;
 #[cfg(test)]
 use observation::UsageScanner;
 use observation::{Exchange, Observation};
@@ -807,21 +806,23 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
     loop {
         if tried.len() >= s.config.max_attempts {
             if let Some(rejection) = rejection {
-                let fallback = match s
-                    .fall_back(fallback::Refused {
-                        request_id: &request_id,
-                        sid: &sid,
-                        model: &model,
-                        raw: &raw,
-                        headers: &parts.headers,
-                        attempts: tried.len(),
-                    })
+                let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()});
+                if let Some(response) = s
+                    .fall_back(
+                        fallback::Refused {
+                            request_id: &request_id,
+                            sid: &sid,
+                            model: &model,
+                            raw: &raw,
+                            headers: &parts.headers,
+                            attempts: tried.len(),
+                        },
+                        rejected,
+                    )
                     .await
                 {
-                    Fallback::Served(response) => return Ok(response),
-                    other => other,
-                };
-                s.event(fallback.annotate(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()})));
+                    return Ok(response);
+                }
                 return Ok(rejection.response(now()));
             }
             s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"attempt_limit","status":503,"attempts":tried.len()}));
@@ -848,68 +849,77 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     let rejection = reset.map_or(rejection, |reset| {
                         rejection.earliest(quota::Rejection::new(Some(reset), None, now()))
                     });
-                    let fallback = match s
-                        .fall_back(fallback::Refused {
-                            request_id: &request_id,
-                            sid: &sid,
-                            model: &model,
-                            raw: &raw,
-                            headers: &parts.headers,
-                            attempts: tried.len(),
-                        })
+                    let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()});
+                    if let Some(response) = s
+                        .fall_back(
+                            fallback::Refused {
+                                request_id: &request_id,
+                                sid: &sid,
+                                model: &model,
+                                raw: &raw,
+                                headers: &parts.headers,
+                                attempts: tried.len(),
+                            },
+                            rejected,
+                        )
                         .await
                     {
-                        Fallback::Served(response) => return Ok(response),
-                        other => other,
-                    };
-                    s.event(fallback.annotate(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()})));
+                        return Ok(response);
+                    }
                     return Ok(rejection.response(now()));
                 }
                 let reset = match &other {
                     Ok(Ok((None, reset))) => *reset,
                     _ => None,
                 };
-                let (status, outcome, message) = match other {
+                // The last field marks the quota refusal, the only one a fallback may serve.
+                let (status, outcome, message, quota) = match other {
                     Ok(Ok((None, None))) if !tried.is_empty() => (
                         503,
                         "routing_unavailable",
                         "No remaining account is available for this model; retry later",
+                        false,
                     ),
                     Ok(Ok((None, _))) => (
                         429,
                         "quota_unavailable",
                         "No account has confirmed available quota under the proxy policy; retry after reset",
+                        true,
                     ),
                     Err(_) => (
                         503,
                         "admission_timeout",
                         "Native quota admission timed out; retry later",
+                        false,
                     ),
                     _ => (
                         502,
                         "routing_error",
                         "Native routing state unavailable; no request sent",
+                        false,
                     ),
                 };
-                let fallback = if outcome == "quota_unavailable" {
-                    match s
-                        .fall_back(fallback::Refused {
-                            request_id: &request_id,
-                            sid: &sid,
-                            model: &model,
-                            raw: &raw,
-                            headers: &parts.headers,
-                            attempts: tried.len(),
-                        })
+                let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}});
+                if quota {
+                    if let Some(response) = s
+                        .fall_back(
+                            fallback::Refused {
+                                request_id: &request_id,
+                                sid: &sid,
+                                model: &model,
+                                raw: &raw,
+                                headers: &parts.headers,
+                                attempts: tried.len(),
+                            },
+                            rejected,
+                        )
                         .await
                     {
-                        Fallback::Served(response) => return Ok(response),
-                        other => other,
+                        return Ok(response);
                     }
                 } else {
-                    Fallback::Unused
-                };
-                s.event(fallback.annotate(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}})));
+                    s.event(rejected);
+                }
                 let mut response = error(status, message);
                 if status == 429 {
                     quota::retry_headers(response.headers_mut(), reset, now());

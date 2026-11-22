@@ -203,8 +203,8 @@ pub struct ResponseCtx<'a> {
     pub original_request: &'a [u8],
     pub translated_request: &'a [u8],
     /// The client will replay this output to another provider: emit no thinking blocks
-    /// and make tool-use IDs unique across responses. Honored by the Claude-facing
-    /// Gemini and OpenAI translators.
+    /// and give each tool use a fresh ID. Honored by the Claude-facing Gemini and OpenAI
+    /// translators.
     pub portable: bool,
 }
 

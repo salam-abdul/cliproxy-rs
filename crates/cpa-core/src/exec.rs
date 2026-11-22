@@ -102,8 +102,8 @@ pub struct ExecRequest {
     /// no-op.
     pub usage: UsageSink,
     /// The client will replay the response to another provider: the Gemini and
-    /// OpenAI-compatible executors then translate it without thinking blocks and with
-    /// tool-use IDs that are unique across responses (`cpa_translate::ResponseCtx::portable`).
+    /// OpenAI-compatible executors then translate it without thinking blocks and with a
+    /// fresh ID for each tool use (`cpa_translate::ResponseCtx::portable`).
     pub portable_output: bool,
 }
 

@@ -11,8 +11,11 @@ fn ok() -> Reply {
     }
 }
 
+/// A usage reading; a used-up window names a reset four hours ahead, as Anthropic's does.
 fn quota(utilization: u64) -> Value {
-    json!({"five_hour":{"utilization":utilization},"seven_day":{"utilization":utilization}})
+    let resets_at = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+    let window = json!({"utilization":utilization,"resets_at":resets_at});
+    json!({"five_hour":window,"seven_day":window})
 }
 
 fn accounts(quotas: [Value; 2]) -> Option<Value> {
@@ -32,20 +35,27 @@ async fn blocked(accounts: Option<Value>) -> bool {
         },
     )
     .await;
-    fixture.state.quota_blocked(MODEL).await
+    fixture.state.out_of_quota(MODEL).await
 }
 
 #[tokio::test]
-async fn quota_blocked_requires_every_enabled_account_exhausted() {
+async fn out_of_quota_requires_every_enabled_account_exhausted() {
     assert!(blocked(accounts([quota(100), quota(100)])).await);
     assert!(!blocked(accounts([quota(100), quota(1)])).await);
-    // Unknown quota refuses Claude, so it counts as no quota.
-    assert!(blocked(accounts([Value::Null, Value::Null])).await);
-    assert!(blocked(accounts([quota(100), Value::Null])).await);
+}
+
+/// A usage read fails for a revoked sign-in as it does for an outage, so an unreadable
+/// reading must not send the conversation elsewhere.
+#[tokio::test]
+async fn unknown_quota_is_not_out_of_quota() {
+    assert!(!blocked(accounts([Value::Null, Value::Null])).await);
+    assert!(!blocked(accounts([quota(100), Value::Null])).await);
+    let no_reset = json!({"five_hour":{"utilization":100},"seven_day":{"utilization":100}});
+    assert!(!blocked(accounts([no_reset.clone(), no_reset])).await);
 }
 
 #[tokio::test]
-async fn quota_blocked_is_false_without_an_enabled_account() {
+async fn out_of_quota_is_false_without_an_enabled_account() {
     assert!(!blocked(Some(json!([]))).await);
     assert!(
         !blocked(Some(json!([
@@ -65,7 +75,7 @@ async fn quota_blocked_is_false_without_an_enabled_account() {
 }
 
 #[tokio::test]
-async fn quota_blocked_is_false_while_allowed_paid_overage_is_available() {
+async fn out_of_quota_is_false_while_allowed_paid_overage_is_available() {
     let mut extra = quota(100);
     extra["extra_usage"] = json!({"is_enabled":true,"monthly_limit":100,"used_credits":1});
     let fixture = Fixture::custom(
@@ -76,9 +86,9 @@ async fn quota_blocked_is_false_while_allowed_paid_overage_is_available() {
         },
     )
     .await;
-    assert!(fixture.state.quota_blocked(MODEL).await, "overage is off by default");
+    assert!(fixture.state.out_of_quota(MODEL).await, "overage is off by default");
     fixture.state.set_overage(true).await.unwrap();
-    assert!(!fixture.state.quota_blocked(MODEL).await);
+    assert!(!fixture.state.out_of_quota(MODEL).await);
 }
 
 const SSE: &str = concat!(
@@ -263,6 +273,7 @@ async fn no_mapping_and_an_unmapped_model_keep_the_429() {
     let baseline = fixture(ok(), exhausted(), Value::Null, String::new()).await;
     let want = refusal(&baseline, REQUEST).await;
     assert_eq!(want.0, 429);
+    assert!(want.1.is_some(), "the refusal names when to retry");
     for native in [
         Value::Null,
         json!({"quotaFallback": {}}),
@@ -326,14 +337,15 @@ async fn a_lost_response_is_not_sent_to_the_fallback() {
 async fn a_failed_fallback_returns_the_original_429() {
     let baseline = fixture(ok(), exhausted(), Value::Null, String::new()).await;
     let want = refusal(&baseline, REQUEST).await;
+    assert!(want.1.is_some(), "the refusal names when to retry");
     let local = Local::start(500).await;
     let fixture = fixture(ok(), exhausted(), mapped("local-test"), local.yaml()).await;
     assert_eq!(refusal(&fixture, REQUEST).await, want);
-    assert!(local.count() >= 1, "the fallback was tried");
+    assert_eq!(local.count(), 1, "the fallback was tried once");
     assert!(events(&fixture, "fallback").is_empty());
     let rejected = events(&fixture, "rejected");
     assert_eq!(rejected[0]["fallbackModel"], "local-test");
-    assert_eq!(rejected[0]["fallbackOutcome"], "failed");
+    assert_eq!(rejected[0]["fallbackFailure"], "no_output");
 }
 
 #[tokio::test]
@@ -342,7 +354,69 @@ async fn an_unknown_fallback_model_returns_the_original_429() {
     let fixture = fixture(ok(), exhausted(), mapped("no-such-model"), local.yaml()).await;
     assert_eq!(post(&fixture, REQUEST).await.status(), 429);
     assert_eq!(local.count(), 0);
-    assert_eq!(events(&fixture, "rejected")[0]["fallbackOutcome"], "failed");
+    assert_eq!(events(&fixture, "rejected")[0]["fallbackFailure"], "unknown_model");
+}
+
+#[tokio::test]
+async fn unknown_quota_keeps_the_429() {
+    let local = Local::start(200).await;
+    let unknown = accounts([Value::Null, Value::Null]);
+    let fixture = fixture(ok(), unknown, mapped("local-test"), local.yaml()).await;
+    assert_eq!(post(&fixture, REQUEST).await.status(), 429);
+    assert_eq!(local.count(), 0);
+    assert!(events(&fixture, "rejected")[0].get("fallbackModel").is_none());
+}
+
+/// The refusal at the attempt limit, after the last account answered an exhausting 429.
+#[tokio::test]
+async fn a_429_at_the_attempt_limit_falls_back() {
+    let local = Local::start(200).await;
+    let limited = Reply {
+        status: 429,
+        body: br#"{"type":"error","error":{"type":"rate_limit_error","message":"Limited"}}"#.to_vec(),
+        broken: false,
+    };
+    let mut native = mapped("local-test");
+    native["maxAttempts"] = json!(1);
+    let fixture = fixture(limited, only_a(), native, local.yaml()).await;
+    assert_eq!(post(&fixture, EXHAUSTING).await.status(), 200);
+    assert_eq!(fixture.seen.lock().unwrap().len(), 1);
+    assert_eq!(local.count(), 1);
+}
+
+#[tokio::test]
+async fn a_gemini_key_serves_the_fallback() {
+    use axum::response::IntoResponse;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Requests::default();
+    let captured = seen.clone();
+    let app = axum::Router::new().fallback(move |headers: HeaderMap, body: axum::body::Bytes| {
+        captured.lock().unwrap().push((headers, body.to_vec()));
+        async {
+            (
+                [("content-type", "application/json")],
+                r#"{"responseId":"r","modelVersion":"gemini-test","candidates":[{"content":{"role":"model","parts":[{"text":"pondering","thought":true,"thoughtSignature":"c2ln"},{"text":"visible"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#,
+            )
+                .into_response()
+        }
+    });
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let yaml = format!(
+        "api-keys:\n  gemini:\n    - base-url: http://127.0.0.1:{port}\n      keys: [{{api-key: synthetic-key}}]\n      models:\n        - name: gemini-test\n"
+    );
+    let fixture = fixture(ok(), exhausted(), mapped("gemini-test"), yaml).await;
+    let response = post(&fixture, REQUEST).await;
+    assert_eq!(response.status(), 200);
+    let message: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(message["content"], json!([{"type":"text","text":"visible"}]));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0["x-goog-api-key"], "synthetic-key");
+    assert!(!seen[0].0.contains_key("authorization"));
+    server.abort();
 }
 
 /// A Claude API key in the translating proxy would serve the request outside native
@@ -357,7 +431,10 @@ async fn a_claude_fallback_target_is_refused() {
     let fixture = fixture(ok(), exhausted(), mapped("claude-other-test"), yaml).await;
     assert_eq!(post(&fixture, REQUEST).await.status(), 429);
     assert_eq!(local.count(), 0);
-    assert_eq!(events(&fixture, "rejected")[0]["fallbackOutcome"], "failed");
+    assert_eq!(
+        events(&fixture, "rejected")[0]["fallbackFailure"],
+        "provider_not_allowed"
+    );
 }
 
 #[tokio::test]

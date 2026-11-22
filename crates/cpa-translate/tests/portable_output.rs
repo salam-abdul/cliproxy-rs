@@ -185,10 +185,48 @@ fn portable_tool_ids_differ_across_responses() {
             .unwrap()
             .to_owned()
     };
-    let first = id(&stream(Format::OpenAI, &openai_lines(), true));
-    let second = id(&stream(Format::OpenAI, &openai_lines(), true));
-    assert_ne!(first, second);
-    assert!(first.starts_with("call_1-") && valid_tool_id(&first), "{first}");
+    for upstream in [Format::OpenAI, Format::Gemini] {
+        let lines = if upstream == Format::OpenAI {
+            openai_lines()
+        } else {
+            gemini_lines()
+        };
+        let first = id(&stream(upstream, &lines, true));
+        let second = id(&stream(upstream, &lines, true));
+        assert_ne!(first, second, "{upstream:?}");
+        assert!(valid_tool_id(&first), "{first}");
+    }
+}
+
+/// OpenAI accepts a tool-call ID of at most 40 characters when the turn is sent back, and
+/// its own IDs are 29 long, so a portable ID cannot be the upstream's with a suffix.
+#[test]
+fn a_portable_tool_id_fits_when_replayed_to_openai() {
+    let upstream = String::from_utf8_lossy(OPENAI_BODY).replace("call_1", "call_abcdefghijklmnopqrstuvwx");
+    let message = buffered(Format::OpenAI, upstream.as_bytes(), true);
+    let id = tool_ids(&message).remove(0);
+    assert!(id.len() <= 40 && valid_tool_id(&id), "{id}");
+    let next = serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": message["content"]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": "ok"}]}
+        ]
+    });
+    let request = (pair(Format::Claude, Format::OpenAI).unwrap().request)(
+        &cpa_translate::RequestCtx {
+            model: "m",
+            stream: false,
+        },
+        next.to_string().as_bytes(),
+    )
+    .unwrap();
+    let request: Value = serde_json::from_slice(&request).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    let call = messages.iter().find_map(|m| m["tool_calls"][0]["id"].as_str()).unwrap();
+    let result = messages.iter().find_map(|m| m["tool_call_id"].as_str()).unwrap();
+    assert_eq!((call, result), (id.as_str(), id.as_str()));
 }
 
 #[test]

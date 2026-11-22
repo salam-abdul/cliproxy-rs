@@ -18,11 +18,14 @@ test("a failed fallback is noted on the rejected request", () => {
   const rejected = {
     outcome: "quota_unavailable",
     fallbackModel: "local-test",
-    fallbackOutcome: "failed",
+    fallbackFailure: "unknown_model",
   };
   assert.equal(isFailure(rejected), true);
   assert.equal(outcomeLabel(rejected), "No account has available quota");
-  assert.equal(fallbackNote(rejected), "Fallback to local-test failed");
+  assert.equal(
+    fallbackNote(rejected),
+    "Fallback to local-test failed: no provider serves it",
+  );
   assert.equal(fallbackNote({ outcome: "quota_unavailable" }), undefined);
 });
 

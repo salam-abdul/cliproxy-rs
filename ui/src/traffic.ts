@@ -26,10 +26,15 @@ const outcomes: Record<string, string> = {
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
 };
-/** A quota fallback that was tried and produced no output, on the rejected request. */
+const fallbackFailures: Record<string, string> = {
+  unknown_model: "no provider serves it",
+  provider_not_allowed: "its provider cannot serve a fallback",
+  no_output: "it gave no answer",
+};
+/** Why a rejected request's quota fallback did not answer. */
 export const fallbackNote = (e: Data) =>
-  e.fallbackOutcome === "failed" && e.fallbackModel
-    ? `Fallback to ${e.fallbackModel} failed`
+  e.fallbackFailure && e.fallbackModel
+    ? `Fallback to ${e.fallbackModel} failed: ${fallbackFailures[e.fallbackFailure] || e.fallbackFailure}`
     : undefined;
 export const outcomeLabel = (e: Data) =>
   e.recovered

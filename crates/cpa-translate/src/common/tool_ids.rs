@@ -43,15 +43,16 @@ pub fn sanitize_claude_tool_id(id: &[u8]) -> Vec<u8> {
     s
 }
 
-/// A sanitized tool-use ID, with 12 random hex characters appended when `portable`: an
-/// upstream that numbers its IDs per response, or per process, repeats them within one
-/// conversation.
+/// The tool-use ID a client is given: the upstream's, sanitized, or a fresh `toolu_` ID
+/// when `portable`. An upstream that numbers its IDs per response or per process repeats
+/// them within a conversation, and a longer ID would not fit the 40 characters OpenAI
+/// accepts when the turn is sent back.
 pub fn claude_tool_id(id: &[u8], portable: bool) -> Vec<u8> {
-    let mut id = sanitize_claude_tool_id(id);
     if portable {
-        id.extend_from_slice(format!("-{:012x}", rand::rng().random_range(0..1u64 << 48)).as_bytes());
+        generate_claude_tool_call_id()
+    } else {
+        sanitize_claude_tool_id(id)
     }
-    id
 }
 
 pub fn sanitize_claude_function_name(name: &[u8]) -> Vec<u8> {
