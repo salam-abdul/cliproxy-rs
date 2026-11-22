@@ -153,6 +153,7 @@ fn request(s: &Value, usage: cpa_core::exec::UsageSink) -> ExecRequest {
         .map(|id| cpa_common::session::bound_session_identity(&id));
     let model = s["model"].as_str().unwrap().to_owned();
     ExecRequest {
+        portable_output: false,
         operation: if op == "count" {
             Operation::CountTokens
         } else {

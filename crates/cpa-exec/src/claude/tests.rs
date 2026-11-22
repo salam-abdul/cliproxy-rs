@@ -122,6 +122,7 @@ fn request(case: &Value) -> ExecRequest {
         .collect();
     let count = case["path"].as_str().unwrap().ends_with("count_tokens");
     ExecRequest {
+        portable_output: false,
         operation: if count {
             Operation::CountTokens
         } else {
@@ -217,6 +218,7 @@ async fn custom_origin_counts_locally_without_sending_credentials() {
     credential.attributes.insert("base_url".into(), base);
     let body = Bytes::from_static(br#"{"model":"claude","messages":[{"role":"user","content":"Hello."}]}"#);
     let req = ExecRequest {
+        portable_output: false,
         operation: Operation::CountTokens,
         source_format: Format::Claude,
         response_format: Format::Claude,
@@ -310,6 +312,7 @@ async fn messages_responses_record_the_quota_snapshot() {
     let request = |operation| {
         let body = Bytes::from_static(br#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#);
         ExecRequest {
+            portable_output: false,
             operation,
             source_format: Format::Claude,
             response_format: Format::Claude,
@@ -675,6 +678,7 @@ async fn scenarios_match_go(fixture: &str, run: &str, selected: fn(&str) -> bool
         let count = scenario["count"].as_bool().unwrap();
         let stream = scenario["stream"].as_bool().unwrap();
         let req = ExecRequest {
+            portable_output: false,
             operation: if count {
                 Operation::CountTokens
             } else {
@@ -890,6 +894,7 @@ fn client_request(body: String, headers: http::HeaderMap) -> ExecRequest {
     let stream = rawjson::get(&body, "stream").bool();
     let body = Bytes::from(body);
     enrich(ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::Claude,
         response_format: Format::Claude,
@@ -1458,6 +1463,7 @@ async fn unrestorable_tool_alias_error() -> (ExecError, Arc<Usage>) {
     );
     let usage = Arc::new(Usage::default());
     let req = enrich(ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::Claude,
         response_format: Format::Claude,
@@ -1527,6 +1533,7 @@ async fn non_stream_replies_keep_their_bytes_around_restored_aliases() {
             r#"{{"model":"claude-sonnet-4-6","max_tokens":8,"messages":[{{"role":"user","content":"hi"}}]{tools}}}"#
         ));
         let req = enrich(ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::Claude,
             response_format: Format::Claude,
@@ -1605,6 +1612,7 @@ async fn usage_reports_follow_go_reporter_calls() {
             Bytes::from_static(br#"{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}"#)
         };
         let req = ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: source,
             response_format: source,
@@ -1776,6 +1784,7 @@ async fn request_logs_follow_go_capture_sites() {
             r#"{{"model":"claude-sonnet-4-6","max_tokens":8,"stream":{stream},"messages":[{{"role":"user","content":"{text}"}}]}}"#
         ));
         let req = ExecRequest {
+            portable_output: false,
             operation,
             source_format: Format::Claude,
             response_format: Format::Claude,
@@ -1972,6 +1981,7 @@ async fn compat_replay_sequence_matches_go() {
             })
             .collect();
         let req = enrich(ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::Claude,
             response_format: Format::Claude,
@@ -2115,6 +2125,7 @@ async fn refused_versions_log_only_when_the_identity_is_replaced() {
         let mut headers = http::HeaderMap::new();
         headers.insert("user-agent", "claude-cli/2.1.220 (external, cli)".parse().unwrap());
         ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::Claude,
             response_format: Format::Claude,

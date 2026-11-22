@@ -101,6 +101,10 @@ pub struct ExecRequest {
     /// should forward the upstream payloads Go parses; `UsageSink::default()` is a
     /// no-op.
     pub usage: UsageSink,
+    /// The client will replay the response to another provider: the Gemini and
+    /// OpenAI-compatible executors then translate it without thinking blocks and with a
+    /// fresh ID for each tool use (`cpa_translate::ResponseCtx::portable`).
+    pub portable_output: bool,
 }
 
 /// Receives the upstream payloads Go's executors feed their usage reporter.

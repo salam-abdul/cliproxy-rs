@@ -24,7 +24,9 @@ pub use claude_system::{
 };
 pub use claude_user_id::{derive_claude_user_id, is_gemini_thought_part};
 pub use openai_tools::{align_openai_tool_call_messages, align_openai_tool_call_messages_with};
-pub use tool_ids::{generate_claude_tool_call_id, sanitize, sanitize_claude_function_name, sanitize_claude_tool_id};
+pub use tool_ids::{
+    claude_tool_id, generate_claude_tool_call_id, sanitize, sanitize_claude_function_name, sanitize_claude_tool_id,
+};
 pub use tool_schema::normalize_claude_tool_input_schema;
 
 /// Trimmed, lowercased text for comparisons (strings.ToLower(strings.TrimSpace(x))).

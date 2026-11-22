@@ -1432,6 +1432,7 @@ mod tests {
             ..Settings::default()
         };
         let request = |model: &str| ExecRequest {
+            portable_output: false,
             operation: cpa_core::exec::Operation::Generate,
             source_format: Format::Codex,
             response_format: Format::Codex,

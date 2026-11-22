@@ -297,7 +297,7 @@ fn set_meta(conn: &Connection, key: &str, value: i64) -> rusqlite::Result<()> {
 
 impl RequestRow {
     fn from_event(event: &Value) -> Option<Self> {
-        if !["inference", "rejected", "transport-failure"].contains(&event["type"].as_str()?) {
+        if !["inference", "rejected", "transport-failure", "fallback"].contains(&event["type"].as_str()?) {
             return None;
         }
         let usage = &event["usage"];
@@ -450,7 +450,7 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
     let bucket_ms = range.bucket();
     let mut statement = conn.prepare(
         "SELECT (at_ms / ?3) * ?3, COUNT(*),
-        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled') THEN 1 ELSE 0 END)
+        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled','fallback_served') THEN 1 ELSE 0 END)
         FROM requests WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?4 IS NULL OR account = ?4)
         GROUP BY 1 ORDER BY 1",
     )?;
@@ -464,7 +464,7 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut statement = conn.prepare(
         "SELECT account, (at_ms / ?3) * ?3, COUNT(*),
-        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled') THEN 1 ELSE 0 END)
+        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled','fallback_served') THEN 1 ELSE 0 END)
         FROM requests WHERE at_ms >= ?1 AND at_ms <= ?2 AND account IS NOT NULL
         AND (?4 IS NULL OR account = ?4) GROUP BY account, 2 ORDER BY account, 2",
     )?;
@@ -479,7 +479,7 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
     let mut statement = conn.prepare(
         "SELECT outcome, COUNT(*) FROM requests
         WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR account = ?3)
-        AND outcome NOT IN ('success','client_cancelled')
+        AND outcome NOT IN ('success','client_cancelled','fallback_served')
         GROUP BY outcome ORDER BY COUNT(*) DESC LIMIT 5",
     )?;
     let errors = statement
@@ -624,6 +624,31 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_served_fallback_is_a_request_and_not_a_failure() {
+        let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("history.sqlite");
+        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let stamp = chrono::Utc::now().to_rfc3339();
+        history.record_event(
+            &json!({"type":"fallback","requestId":"one","at":stamp,"model":"claude-opus-test",
+            "fallbackModel":"local-test","outcome":"fallback_served","status":200,"attempts":0}),
+        );
+        history.record_event(
+            &json!({"type":"rejected","requestId":"two","at":stamp,"model":"claude-opus-test",
+            "outcome":"quota_unavailable","status":429,"attempts":0}),
+        );
+        history.flush();
+        let all = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        assert_eq!(all["buckets"][0]["requests"], 2);
+        assert_eq!(all["buckets"][0]["failures"], 1);
+        assert_eq!(all["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(all["errors"][0]["outcome"], "quota_unavailable");
+        drop(history);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
