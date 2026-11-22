@@ -1547,8 +1547,9 @@ fn unique_file(dir: &Path, filename: &str) -> io::Result<File> {
         };
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
+        // Bodies are unredacted, so only the owner may read the file, like its spools.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         match options.open(dir.join(name)) {
             Ok(file) => return Ok(file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -2390,6 +2391,21 @@ mod tests {
                 unique_file(&dir, &name).unwrap();
             }
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_logs_are_readable_only_by_their_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch();
+        let name = "v1-messages-2026-10-03T040506-a1b2c3d4.log";
+        // The second file takes the collision name.
+        for _ in 0..2 {
+            let file = unique_file(&dir, name).unwrap();
+            assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

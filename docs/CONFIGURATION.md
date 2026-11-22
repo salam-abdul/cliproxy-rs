@@ -140,7 +140,7 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 |---|---|
 | `logs.logging-to-file` | `true` writes the log to `main.log` in a `logs` folder, rotated, instead of standard output. |
 | `logs.logs-max-total-size-mb` | The most disk space the log files may use. |
-| `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. |
+| `logs.request-log` | `true` writes one file per request with client and upstream request/response sections. Recognised sensitive headers and URL fields are masked, but bodies can contain credentials, including Realtime client secrets, as well as private prompts and output. Keep the logs private. On Unix each file is created `0600`; the folder is not restricted, so other local users can list file names but not read the files. |
 | `usage.claude-cache-telemetry` | `false` by default. With usage collection and management on, `true` adds content-free cache observations of the final request bytes to the usage queue and RESP channel. It costs parsing and hashing per request, sends no extra requests and changes no cache markers or request bytes. |
 | `history.enable` | `false` by default. `true` records every request sent to a model and its response in Parquet files under `history.dir`. See [history](#history). |
 | `history.dir` | The history folder, an absolute path outside any repository or synced folder; `~` is the home directory. Required: with `enable: true` and no `dir` or a relative one, history stays off and the log says so. |
