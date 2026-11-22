@@ -5,8 +5,9 @@
 //! `X-Api-Key`, then the first `key` and `auth_token` query values. Comparison is on raw
 //! bytes, like Go strings, in constant time per key. With no keys configured the
 //! provider is unregistered and access is open, which [`refuse_open_access`] allows on
-//! an exposed listener only with `access.allow-unauthenticated`. On a loopback listener
-//! open access admits only requests that name this machine and come from no other origin.
+//! an exposed listener only with `access.allow-unauthenticated`. Deliberate difference:
+//! on a loopback listener open access admits only requests that name this machine and
+//! come from no other origin.
 
 use std::sync::Arc;
 
@@ -46,9 +47,8 @@ fn loopback_authority(authority: &[u8]) -> bool {
         && loopback_host(host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host))
 }
 
-pub(crate) const FOREIGN_HOST: &str =
-    "Host is not this machine: add a client key to access.api-keys to use another name";
-pub(crate) const FOREIGN_ORIGIN: &str =
+const FOREIGN_HOST: &str = "Host is not this machine: add a client key to access.api-keys to use another name";
+const FOREIGN_ORIGIN: &str =
     "Origin is not this machine: add a client key to access.api-keys to call from another site";
 
 /// Open access on a loopback listener is meant for programs on this machine. A browser
