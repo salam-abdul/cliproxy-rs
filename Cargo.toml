@@ -8,7 +8,7 @@ exclude = ["vendor"]
 version = "0.2.6"
 edition = "2024"
 license = "MIT"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
 cpa-common = { path = "crates/cpa-common" }
