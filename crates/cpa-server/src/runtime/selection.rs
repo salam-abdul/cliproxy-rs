@@ -171,6 +171,7 @@ impl CredentialStore {
     ) -> Result<Lease, AcquireError> {
         let excluded: std::collections::HashSet<&str> = selection.exclude.iter().map(String::as_str).collect();
         let now = Instant::now();
+        let wall = std::time::SystemTime::now();
         let (credential, execution_model, lcp, picked) = {
             let inner = self.read();
             let mut scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
@@ -179,7 +180,7 @@ impl CredentialStore {
                 .iter()
                 .filter(|c| {
                     !c.disabled
-                        && !inner.refused(&c.id)
+                        && !inner.out_of_rotation(&c.id, wall)
                         && selection.pinned.as_ref().is_none_or(|id| *id == c.id)
                         && selection.accept.is_none_or(|accept| accept(c))
                         && !excluded.contains(c.id.as_str())
@@ -270,11 +271,11 @@ impl CredentialStore {
         Suspension::None
     }
 
-    /// Whether `model` is cooling for this credential right now, or its refresh token was
-    /// refused for good. A probe reservation does not count: the lease that holds it is
-    /// the one asking.
+    /// Whether `model` is cooling for this credential right now, or it is out of rotation
+    /// ([`Self::out_of_rotation`]). A probe reservation does not count: the lease that
+    /// holds it is the one asking.
     pub fn blocked(&self, credential: &Credential, model: &str) -> bool {
-        if self.tokens_refused(credential) {
+        if self.out_of_rotation(credential) {
             return true;
         }
         let scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
@@ -320,7 +321,7 @@ impl CredentialStore {
         let wait = inner
             .creds
             .iter()
-            .filter(|c| !c.disabled && !inner.refused(&c.id))
+            .filter(|c| !c.disabled && !inner.out_of_rotation(&c.id, std::time::SystemTime::now()))
             .filter(|c| {
                 let profile = inner.profile(c);
                 policy.retry_limit_of(&profile) > selection.retry_round && policy.admits_weight(profile.weight)

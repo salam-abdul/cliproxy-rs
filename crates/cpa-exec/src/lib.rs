@@ -292,6 +292,18 @@ impl Executors {
                 || filled(credential.attributes.get("dca_token").map(String::as_str)))
     }
 
+    /// Until when `credential`'s access token serves requests without a refresh, for
+    /// the providers whose refresh can report a [`cpa_core::exec::Refusal`]. `None` when
+    /// it has none, its expiry is unreadable, or the provider reports no refusals.
+    pub fn access_expiry(&self, credential: &Credential) -> Option<chrono::DateTime<chrono::Utc>> {
+        match credential.provider.as_str() {
+            "claude" => oauth::access_expiry(credential),
+            "codex" => codex_oauth::access_expiry(credential),
+            antigravity::PROVIDER => antigravity_auth::access_expiry(credential),
+            _ => None,
+        }
+    }
+
     /// Whether `credential` needs preparation, and whether requests must wait for it.
     /// Must be cheap and side-effect free. Providers without request-time preparation
     /// report `RefreshSoon` whenever `needs_prepare` holds.

@@ -949,7 +949,7 @@ async fn preparation_waiter_observes_deletion_and_refresh_loop_is_replaceable() 
     let guard = lock.lock().await;
     let worker = {
         let rt = rt.clone();
-        tokio::spawn(async move { rt.prepare_credential("a.json", &rt.config(), None).await })
+        tokio::spawn(async move { rt.prepare_credential("a.json", &rt.config(), Trigger::Due).await })
     };
     tokio::task::yield_now().await;
     assert!(!worker.is_finished());
@@ -1192,42 +1192,63 @@ async fn a_drain_ends_a_remote_stream_the_client_stopped_reading() {
     assert_eq!(observed.lock().unwrap().len(), 1);
 }
 
-/// Claude account files in a private auth-dir, each holding refresh token `fake-rt-<id>`
-/// and an access token that has expired, under a runtime whose token endpoint answers
-/// each refresh token with `answer`. Returns the refresh tokens sent, in order.
-async fn claude_accounts(
-    ids: &[&str],
-    answer: fn(&str) -> (u16, &'static str),
-) -> (Arc<Runtime>, std::path::PathBuf, Arc<Mutex<Vec<String>>>) {
+/// A token endpoint on loopback that answers each refresh grant's refresh token with
+/// `answer`, and the refresh tokens it was sent, in order.
+type Answer = Arc<dyn Fn(&str) -> (u16, String) + Send + Sync>;
+
+async fn token_endpoint(answer: Answer) -> (String, Arc<Mutex<Vec<String>>>) {
     let sent = Arc::new(Mutex::new(Vec::new()));
     let app = axum::Router::new().route(
         "/token",
         axum::routing::post({
             let sent = sent.clone();
             move |body: axum::body::Bytes| async move {
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                let token = body["refresh_token"].as_str().unwrap().to_owned();
-                let (status, answer) = answer(&token);
+                // Claude sends JSON, Codex a form.
+                let token = serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v["refresh_token"].as_str().map(str::to_owned))
+                    .or_else(|| {
+                        url::form_urlencoded::parse(&body)
+                            .find(|(k, _)| k == "refresh_token")
+                            .map(|(_, v)| v.into_owned())
+                    })
+                    .unwrap();
+                let (status, reply) = answer(&token);
                 sent.lock().unwrap().push(token);
-                (axum::http::StatusCode::from_u16(status).unwrap(), answer)
+                (axum::http::StatusCode::from_u16(status).unwrap(), reply)
             }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("http://{}/token", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, sent)
+}
+
+/// Account files of `provider` in a private auth-dir, each holding refresh token
+/// `fake-rt-<id>` and an access token that expires after its offset, under a runtime
+/// whose Claude and Codex token endpoints answer with `answer`.
+async fn oauth_accounts(
+    provider: &str,
+    accounts: &[(&str, chrono::Duration)],
+    answer: Answer,
+) -> (Arc<Runtime>, std::path::PathBuf, Arc<Mutex<Vec<String>>>) {
+    let (token, sent) = token_endpoint(answer).await;
     let cfg = crate::testing::config("");
     std::fs::create_dir_all(&cfg.auth_dir).unwrap();
-    for id in ids {
-        write_claude_account(
+    for (id, expires) in accounts {
+        write_account(
             &cfg.auth_dir,
+            provider,
             id,
             &format!("sk-ant-oat-{id}-fake"),
             &format!("fake-rt-{id}"),
+            *expires,
         );
     }
-    let (token, profile) = (format!("{base}/token"), format!("{base}/profile"));
-    let oauth = cpa_exec::oauth::OAuth::with_endpoints(wreq::Client::new(), &token, &profile, &profile);
+    let claude = cpa_exec::oauth::OAuth::with_endpoints(wreq::Client::new(), &token, &token, &token);
+    let codex = cpa_exec::codex_oauth::CodexOAuth::with_endpoints(wreq::Client::new(), &token, &token, &token)
+        .with_retry_delay(Duration::ZERO);
     let rt = Arc::new(crate::testing::runtime(
         cfg.clone(),
         cpa_core::config::credentials::from_auth_dir(&cfg)
@@ -1237,8 +1258,8 @@ async fn claude_accounts(
         Executors {
             claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1")
                 .unwrap()
-                .with_oauth(oauth),
-            codex: Default::default(),
+                .with_oauth(claude),
+            codex: cpa_exec::codex::CodexExecutor::with_client(wreq::Client::new(), codex),
             devices: Default::default(),
             openai: Default::default(),
             google: Default::default(),
@@ -1247,9 +1268,9 @@ async fn claude_accounts(
     (rt, cfg.auth_dir.clone(), sent)
 }
 
-fn write_claude_account(dir: &Path, id: &str, access: &str, refresh: &str) {
-    let file = serde_json::json!({"type": "claude", "access_token": access, "refresh_token": refresh,
-        "expired": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+fn write_account(dir: &Path, provider: &str, id: &str, access: &str, refresh: &str, expires: chrono::Duration) {
+    let file = serde_json::json!({"type": provider, "access_token": access, "refresh_token": refresh,
+        "expired": (chrono::Utc::now() + expires).to_rfc3339(),
         "account_uuid": format!("acct-{id}"), "claude_device_ids": ["b".repeat(64)]});
     std::fs::write(dir.join(format!("{id}.json")), file.to_string()).unwrap();
 }
@@ -1264,68 +1285,95 @@ fn reload_auth_dir(rt: &Runtime) {
     );
 }
 
-fn pinned(id: &str) -> Selection {
+fn pinned(provider: &str, id: &str) -> Selection {
     Selection {
         pinned: Some(id.into()),
-        ..sel("claude")
+        ..sel(provider)
     }
+}
+
+fn answer(f: fn(&str) -> (u16, &'static str)) -> Answer {
+    Arc::new(move |token| {
+        let (status, body) = f(token);
+        (status, body.to_owned())
+    })
+}
+
+fn sends(sent: &Mutex<Vec<String>>, token: &str) -> usize {
+    sent.lock().unwrap().iter().filter(|t| *t == token).count()
 }
 
 const REFRESHED: &str =
     r#"{"access_token":"sk-ant-oat-new-fake","expires_in":36000,"refresh_token":"fake-rt-rotated"}"#;
+const EXPIRED: &str = r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#;
 
-/// Anthropic's answer for an expired refresh token takes that account, and only that
-/// account, out of selection and refresh. A file edit that keeps its tokens does not
-/// bring it back; new tokens on disk do.
+/// A refusal the refresh loop receives stops refreshes of those tokens at once, for
+/// that account only. The account keeps serving while its access token works and
+/// leaves rotation when it expires. An edit that keeps the tokens does not bring it
+/// back; new tokens on disk do.
 #[tokio::test]
-async fn a_refresh_token_refused_for_good_leaves_rotation_until_its_tokens_change() {
-    let (rt, dir, sent) = claude_accounts(&["gone", "ok"], |token| match token {
-        "fake-rt-gone" => (
-            400,
-            r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#,
-        ),
-        _ => (200, REFRESHED),
-    })
+async fn a_refusal_in_the_refresh_loop_stops_refreshes_and_rotation_follows_the_access_token() {
+    let valid = chrono::Duration::seconds(3);
+    let (rt, dir, sent) = oauth_accounts(
+        "claude",
+        &[("gone", valid), ("ok", chrono::Duration::hours(-1))],
+        answer(|token| match token {
+            "fake-rt-gone" => (400, EXPIRED),
+            _ => (200, REFRESHED),
+        }),
+    )
     .await;
+    let expires_at = Instant::now() + Duration::from_secs(3);
     let cfg = rt.config();
-    let sends = |token: &str| sent.lock().unwrap().iter().filter(|t| *t == token).count();
+    rt.start_auto_refresh();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rt
+            .store
+            .get("gone.json")
+            .is_some_and(|c| rt.store.tokens_refused(&c).is_none())
+            || rt.store.get("ok.json").unwrap().str("access_token") != Some("sk-ant-oat-new-fake")
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the loop recorded the refusal and refreshed the other account");
     assert!(
-        rt.store.select(pinned("gone.json")).is_some(),
-        "selectable before the refusal"
+        Instant::now() < expires_at,
+        "the test ran too slowly to check a usable token"
     );
-    let error = rt.prepare_credential("gone.json", &cfg, None).await.unwrap_err();
-    assert_eq!(error.status, 400);
-    assert_eq!(sends("fake-rt-gone"), 1);
-    assert!(rt.store.select(pinned("gone.json")).is_none(), "still selected");
-    for _ in 0..4 {
-        assert_eq!(rt.store.select(sel("claude")).unwrap().credential.id, "ok.json");
-    }
     let gone = rt.store.get("gone.json").unwrap();
+    assert_eq!(rt.store.tokens_refused(&gone), Some(cpa_core::exec::Refusal::Expired));
+    assert!(
+        rt.store.select(pinned("claude", "gone.json")).is_some(),
+        "left rotation with a usable token"
+    );
+    assert!(!rt.store.blocked(&gone, ""));
+    assert!(rt.prepare_credential("gone.json", &cfg, Trigger::Due).await.is_err());
+    assert_eq!(
+        sends(&sent, "fake-rt-gone"),
+        1,
+        "a refused refresh token was sent again"
+    );
+    tokio::time::sleep_until((expires_at + Duration::from_millis(100)).into()).await;
+    assert!(
+        rt.store.select(pinned("claude", "gone.json")).is_none(),
+        "selected once expired"
+    );
     assert!(rt.store.blocked(&gone, ""));
-    assert!(!rt.store.blocked(&rt.store.get("ok.json").unwrap(), ""));
     assert!(
         rt.lease_credential("gone.json", sel("claude"), &cfg, |c| c.clone())
             .await
             .is_none()
     );
-    assert!(rt.prepare_credential("gone.json", &cfg, None).await.is_err());
-    assert!(rt.refresh_after_unauthorized(&gone, &cfg).await.is_none());
-    assert_eq!(sends("fake-rt-gone"), 1, "a refused refresh token was sent again");
-    // The refresh loop refreshes the other account and leaves this one alone.
-    rt.start_auto_refresh();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while rt.store.get("ok.json").unwrap().str("access_token") != Some("sk-ant-oat-new-fake") {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the other account was refreshed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..3 {
+        assert_eq!(rt.store.select(sel("claude")).unwrap().credential.id, "ok.json");
+    }
     rt.stop_auto_refresh();
-    assert_eq!(sends("fake-rt-gone"), 1, "the refresh loop retried a refused token");
-    assert!(
-        rt.refresh_state.lock().unwrap().retry_at(&gone).is_none(),
-        "the refresh loop scheduled a refused credential"
+    assert_eq!(
+        sends(&sent, "fake-rt-gone"),
+        1,
+        "the refresh loop retried a refused token"
     );
     // An edit that keeps the tokens keeps the account out.
     let mut file: Value = serde_json::from_slice(&std::fs::read(dir.join("gone.json")).unwrap()).unwrap();
@@ -1334,56 +1382,241 @@ async fn a_refresh_token_refused_for_good_leaves_rotation_until_its_tokens_chang
     reload_auth_dir(&rt);
     assert_eq!(rt.store.get("gone.json").unwrap().metadata["priority"], 5);
     assert!(
-        rt.store.select(pinned("gone.json")).is_none(),
-        "an edit without new tokens restored it"
+        rt.store.select(pinned("claude", "gone.json")).is_none(),
+        "an edit restored it"
     );
     // A new sign-in writes new tokens.
-    write_claude_account(&dir, "gone", "sk-ant-oat-signed-in-fake", "fake-rt-signed-in");
+    write_account(
+        &dir,
+        "claude",
+        "gone",
+        "sk-ant-oat-signed-in-fake",
+        "fake-rt-signed-in",
+        chrono::Duration::hours(8),
+    );
     reload_auth_dir(&rt);
     assert!(
-        rt.store.select(pinned("gone.json")).is_some(),
+        rt.store.select(pinned("claude", "gone.json")).is_some(),
         "new tokens did not restore it"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A transient refresh failure, and an `invalid_grant` while the access token was never
-/// refused, keep the account in rotation for the refresh loop's backoff to retry.
+/// refused, keep the account in rotation and refreshing.
 #[tokio::test]
-async fn transient_and_unconfirmed_refresh_failures_keep_the_account_in_rotation() {
-    let (rt, dir, sent) = claude_accounts(&["down", "grant"], |token| match token {
-        "fake-rt-down" => (503, "{}"),
-        _ => (400, r#"{"error":"invalid_grant"}"#),
-    })
+async fn transient_and_unconfirmed_refresh_failures_keep_refreshing() {
+    let past = chrono::Duration::hours(-1);
+    let (rt, dir, sent) = oauth_accounts(
+        "claude",
+        &[("busy", past), ("grant", past)],
+        answer(|token| match token {
+            "fake-rt-busy" => (429, "{}"),
+            _ => (400, r#"{"error":"invalid_grant"}"#),
+        }),
+    )
     .await;
     let cfg = rt.config();
-    for id in ["down.json", "grant.json"] {
-        assert!(rt.prepare_credential(id, &cfg, None).await.is_err(), "{id}");
-        assert!(rt.store.select(pinned(id)).is_some(), "{id} left rotation");
-        assert!(!rt.store.blocked(&rt.store.get(id).unwrap(), ""), "{id}");
+    for id in ["busy.json", "grant.json"] {
+        assert!(rt.prepare_credential(id, &cfg, Trigger::Due).await.is_err(), "{id}");
+        let c = rt.store.get(id).unwrap();
+        assert_eq!(rt.store.tokens_refused(&c), None, "{id}");
+        assert!(rt.store.select(pinned("claude", id)).is_some(), "{id} left rotation");
     }
-    assert!(rt.prepare_credential("grant.json", &cfg, None).await.is_err());
-    let sends = |token: &str| sent.lock().unwrap().iter().filter(|t| *t == token).count();
-    assert_eq!(sends("fake-rt-down"), 3, "server errors are retried");
-    assert_eq!(sends("fake-rt-grant"), 2, "the retry was not sent");
+    assert!(rt.prepare_credential("grant.json", &cfg, Trigger::Due).await.is_err());
+    assert_eq!(sends(&sent, "fake-rt-grant"), 2, "the retry was not sent");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 /// `invalid_grant` for the refresh after an upstream 401 means neither token works: the
-/// account leaves rotation and a second 401 sends nothing. A management refresh still
-/// tries once more.
+/// account leaves rotation at once, though its access token has not expired, and a
+/// second 401 sends nothing. A management refresh tries again, and its success brings
+/// the account back.
 #[tokio::test]
-async fn an_invalid_grant_after_an_upstream_401_leaves_rotation() {
-    let (rt, dir, sent) = claude_accounts(&["revoked", "ok"], |_| (400, r#"{"error":"invalid_grant"}"#)).await;
+async fn an_invalid_grant_after_an_upstream_401_leaves_rotation_until_a_refresh_succeeds() {
+    let accepting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (rt, dir, sent) = oauth_accounts("claude", &[("revoked", chrono::Duration::hours(1))], {
+        let accepting = accepting.clone();
+        Arc::new(move |_: &str| match accepting.load(Ordering::SeqCst) {
+            true => (200, REFRESHED.to_owned()),
+            false => (400, r#"{"error":"invalid_grant"}"#.to_owned()),
+        })
+    })
+    .await;
     let cfg = rt.config();
     let revoked = rt.store.get("revoked.json").unwrap();
     assert!(rt.refresh_after_unauthorized(&revoked, &cfg).await.is_none());
-    assert!(rt.store.select(pinned("revoked.json")).is_none(), "still selected");
-    assert!(rt.store.select(pinned("ok.json")).is_some());
+    assert!(
+        rt.store.select(pinned("claude", "revoked.json")).is_none(),
+        "still selected"
+    );
     assert!(rt.refresh_after_unauthorized(&revoked, &cfg).await.is_none());
     assert_eq!(sent.lock().unwrap().len(), 1, "a second 401 sent the refused token");
     assert!(rt.refresh_credential("revoked.json").await.is_err());
     assert_eq!(sent.lock().unwrap().len(), 2, "a management refresh was not sent");
-    assert!(rt.store.select(pinned("revoked.json")).is_none());
+    assert!(rt.store.select(pinned("claude", "revoked.json")).is_none());
+    accepting.store(true, Ordering::SeqCst);
+    let refreshed = rt.refresh_credential("revoked.json").await.unwrap();
+    assert_eq!(refreshed.str("access_token"), Some("sk-ant-oat-new-fake"));
+    assert!(
+        rt.store.select(pinned("claude", "revoked.json")).is_some(),
+        "a refresh did not restore it"
+    );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An account whose refresh token was refused while its access token still works
+/// leaves rotation on its next upstream 401, without another token request.
+#[tokio::test]
+async fn a_401_on_a_refused_account_takes_it_out_of_rotation() {
+    let (rt, dir, sent) = oauth_accounts(
+        "claude",
+        &[("late", chrono::Duration::hours(1))],
+        answer(|_| (400, EXPIRED)),
+    )
+    .await;
+    let cfg = rt.config();
+    assert!(rt.prepare_credential("late.json", &cfg, Trigger::Due).await.is_err());
+    assert!(rt.store.select(pinned("claude", "late.json")).is_some());
+    let late = rt.store.get("late.json").unwrap();
+    assert!(rt.refresh_after_unauthorized(&late, &cfg).await.is_none());
+    assert!(
+        rt.store.select(pinned("claude", "late.json")).is_none(),
+        "a 401 left it in rotation"
+    );
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A refusal recorded for tokens a sign-in has since replaced blocks nothing.
+#[tokio::test]
+async fn a_refusal_never_lands_on_tokens_that_replaced_the_refused_ones() {
+    let (rt, dir, _) = oauth_accounts(
+        "claude",
+        &[("rotated", chrono::Duration::hours(-1))],
+        answer(|_| (500, "{}")),
+    )
+    .await;
+    let (_, before) = rt.store.get_versioned("rotated.json").unwrap();
+    write_account(
+        &dir,
+        "claude",
+        "rotated",
+        "sk-ant-oat-b-fake",
+        "fake-rt-b",
+        chrono::Duration::hours(-1),
+    );
+    reload_auth_dir(&rt);
+    let refused = cpa_core::exec::Refusal::Expired;
+    assert!(!rt.store.refuse_tokens("rotated.json", before, refused, None));
+    let after = rt.store.get("rotated.json").unwrap();
+    assert_eq!(rt.store.tokens_refused(&after), None);
+    assert!(rt.store.select(pinned("claude", "rotated.json")).is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Codex reports a refused refresh token even while its access token works, which it
+/// otherwise keeps using after a failed refresh: refreshes stop at once, and the
+/// account serves until that token expires. An expired one leaves rotation at once.
+#[tokio::test]
+async fn codex_reports_a_refusal_while_its_access_token_still_works() {
+    let (rt, dir, sent) = oauth_accounts(
+        "codex",
+        &[
+            ("valid", chrono::Duration::seconds(3)),
+            ("stale", chrono::Duration::hours(-1)),
+        ],
+        answer(|_| (400, r#"{"error":"invalid_grant"}"#)),
+    )
+    .await;
+    let expires_at = Instant::now() + Duration::from_secs(3);
+    let cfg = rt.config();
+    let error = rt
+        .prepare_credential("valid.json", &cfg, Trigger::Due)
+        .await
+        .unwrap_err();
+    assert_eq!(error.refusal, Some(cpa_core::exec::Refusal::InvalidGrant));
+    assert_eq!(
+        sends(&sent, "fake-rt-valid"),
+        3,
+        "Go retries a Codex refresh three times"
+    );
+    let valid = rt.store.get("valid.json").unwrap();
+    assert!(rt.store.tokens_refused(&valid).is_some());
+    assert!(
+        rt.store.select(pinned("codex", "valid.json")).is_some(),
+        "left rotation with a usable token"
+    );
+    assert!(rt.prepare_credential("valid.json", &cfg, Trigger::Due).await.is_err());
+    assert_eq!(
+        sends(&sent, "fake-rt-valid"),
+        3,
+        "a refused refresh token was sent again"
+    );
+    assert!(rt.prepare_credential("stale.json", &cfg, Trigger::Due).await.is_err());
+    assert!(
+        rt.store.select(pinned("codex", "stale.json")).is_none(),
+        "an expired refused token was selected"
+    );
+    tokio::time::sleep_until((expires_at + Duration::from_millis(100)).into()).await;
+    assert!(
+        rt.store.select(pinned("codex", "valid.json")).is_none(),
+        "selected once expired"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A management `api-call` refreshes a due Antigravity token as a request would: a
+/// refused refresh token is not sent. Each account's proxy is a loopback listener that
+/// counts connections and answers none, so nothing leaves the machine.
+#[tokio::test]
+async fn an_api_call_does_not_send_a_refused_refresh_token() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tokio::spawn({
+        let connections = connections.clone();
+        async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                connections.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            }
+        }
+    });
+    let account = |id: &str| {
+        let mut c = cred(id, cpa_exec::antigravity::PROVIDER, false);
+        for (key, value) in [
+            ("access_token", "fake-ag-access"),
+            ("refresh_token", "fake-ag-refresh"),
+            ("project_id", "fake-project"),
+            ("expired", "2000-01-01T00:00:00Z"),
+        ] {
+            c.metadata.insert(key.into(), value.into());
+        }
+        c.metadata.insert("proxy_url".into(), format!("http://{addr}").into());
+        c
+    };
+    let rt = Arc::new(crate::testing::runtime(
+        crate::testing::config(""),
+        vec![account("refused.json"), account("control.json")],
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let (_, version) = rt.store.get_versioned("refused.json").unwrap();
+    assert!(
+        rt.store
+            .refuse_tokens("refused.json", version, cpa_core::exec::Refusal::Revoked, None)
+    );
+    let refused = rt.store.get("refused.json").unwrap();
+    assert!(Arc::ptr_eq(&rt.api_call_credential(refused.clone()).await, &refused));
+    assert_eq!(connections.load(Ordering::SeqCst), 0, "the refused token was sent");
+    // The same call for an account whose token was not refused does reach the listener.
+    let control = rt.store.get("control.json").unwrap();
+    rt.api_call_credential(control).await;
+    assert!(connections.load(Ordering::SeqCst) > 0, "the token host was not reached");
 }

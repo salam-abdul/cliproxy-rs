@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use cpa_core::credential::Credential;
-use cpa_core::exec::ExecError;
+use cpa_core::exec::{ExecError, Refusal};
 
 struct Entry {
     revision: u64,
@@ -72,34 +72,39 @@ impl RefreshState {
     }
 }
 
-/// A refresh token the provider no longer accepts, which backs off exponentially.
+/// A refresh token the provider no longer accepts, which backs off exponentially: a
+/// reported [`Refusal`] that was not definite, or an `invalid_grant` named in the error
+/// text of a provider that reports none.
 pub(crate) fn invalid_grant(error: &ExecError) -> bool {
-    String::from_utf8_lossy(&error.body)
-        .to_ascii_lowercase()
-        .contains("invalid_grant")
+    error.refusal.is_some()
+        || String::from_utf8_lossy(&error.body)
+            .to_ascii_lowercase()
+            .contains("invalid_grant")
 }
 
-/// Whether a failed refresh of `c` is a definite answer that its refresh token will never
-/// work again, so the credential leaves rotation until its tokens change. `confirmed`
-/// means an upstream just refused the access token this refresh started from, so
-/// neither token works. Go `isTerminalRefreshError` and `hasUnauthorizedAuthFailure`:
-/// an expired, reused, invalidated or revoked refresh token is terminal; `invalid_grant`
-/// is terminal for Codex, and for other providers only once `confirmed`, since Go keeps
-/// retrying a Claude `invalid_grant` while its access token may still work. Go's
-/// `invalid_client` is left out: Claude and Codex send one client ID for every account.
-pub(crate) fn refused_for_good(c: &Credential, error: &ExecError, confirmed: bool) -> bool {
-    const TERMINAL: &[&str] = &[
-        "refresh_token_expired",
-        "refresh_token_reused",
-        "refresh_token_invalidated",
-        "token_revoked",
-    ];
-    if !matches!(error.status, 400 | 401) {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&error.body).to_ascii_lowercase();
-    TERMINAL.iter().any(|code| text.contains(code))
-        || text.contains("invalid_grant") && (confirmed || c.provider.trim().eq_ignore_ascii_case("codex"))
+/// What started a credential preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trigger {
+    /// The credential was due: the refresh loop, a request, or a one-off account call.
+    Due,
+    /// An upstream refused the access token of this revision with a 401. Preparation
+    /// runs even when not due, unless another task already replaced that revision.
+    Unauthorized(u64),
+    /// An operator asked the management API to refresh this revision. Like
+    /// `Unauthorized`, and the only trigger that sends a refused refresh token again.
+    Management(u64),
+}
+
+/// The refusal in a failed refresh of `c` when it is definite: the refresh token will
+/// never work again. Go `isTerminalRefreshError` and `hasUnauthorizedAuthFailure`: an
+/// expired, reused, invalidated or revoked refresh token is definite; `invalid_grant` is
+/// definite for Codex, and for other providers only after an upstream 401 on the same
+/// access token, since Go keeps retrying a Claude `invalid_grant` while its access token
+/// may still work.
+pub(crate) fn definite(c: &Credential, error: &ExecError, trigger: Trigger) -> Option<Refusal> {
+    let refusal = error.refusal?;
+    let confirmed = matches!(trigger, Trigger::Unauthorized(_)) || c.provider.trim().eq_ignore_ascii_case("codex");
+    (refusal != Refusal::InvalidGrant || confirmed).then_some(refusal)
 }
 
 #[cfg(test)]
@@ -158,32 +163,23 @@ mod tests {
             .unwrap()
         };
         let (claude, codex) = (credential("claude"), credential("codex"));
-        let error = |status, text: &str| ExecError::local(status, FailureScope::Credential, text);
-        let expired = error(400, "Claude OAuth acquisition failed: refresh_token_expired");
-        let grant = error(400, "Claude OAuth acquisition failed: invalid_grant");
-        let codex_grant = error(
-            401,
-            "token refresh failed after 3 attempts: token refresh failed with status 400: invalid_grant",
-        );
-        let reused = error(401, "token refresh failed with status 400: refresh_token_reused");
-        assert!(refused_for_good(&claude, &expired, false));
-        assert!(
-            !refused_for_good(&claude, &grant, false),
-            "an unconfirmed Claude invalid_grant"
-        );
-        assert!(refused_for_good(&claude, &grant, true));
-        assert!(refused_for_good(&codex, &codex_grant, false));
-        assert!(refused_for_good(&codex, &reused, false));
-        for transient in [
-            error(502, "Claude OAuth acquisition failed"),
-            error(503, "home refresh temporarily unavailable"),
-            error(429, "Claude refresh temporarily blocked"),
-            error(400, "Claude OAuth acquisition failed"),
-            error(400, "Claude OAuth acquisition failed: invalid_client"),
-            error(502, "token refresh failed with status 503: invalid_grant"),
-        ] {
-            assert!(!refused_for_good(&claude, &transient, true), "{transient:?}");
-            assert!(!refused_for_good(&codex, &transient, true), "{transient:?}");
+        let refused = |refusal| {
+            let mut error = ExecError::local(401, FailureScope::Credential, "mock refusal");
+            error.refusal = Some(refusal);
+            error
+        };
+        let (grant, expired) = (refused(Refusal::InvalidGrant), refused(Refusal::Expired));
+        for trigger in [Trigger::Due, Trigger::Management(1), Trigger::Unauthorized(1)] {
+            assert_eq!(definite(&claude, &expired, trigger), Some(Refusal::Expired));
+            assert_eq!(definite(&codex, &grant, trigger), Some(Refusal::InvalidGrant));
+            let transient = ExecError::local(400, FailureScope::Credential, "invalid_grant");
+            assert_eq!(definite(&claude, &transient, trigger), None, "text is not a refusal");
         }
+        assert_eq!(definite(&claude, &grant, Trigger::Due), None);
+        assert_eq!(definite(&claude, &grant, Trigger::Management(1)), None);
+        assert_eq!(
+            definite(&claude, &grant, Trigger::Unauthorized(1)),
+            Some(Refusal::InvalidGrant)
+        );
     }
 }

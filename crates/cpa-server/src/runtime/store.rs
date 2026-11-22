@@ -38,10 +38,9 @@ pub(super) struct Inner {
     /// Last revision handed out. Revisions are never reused.
     pub(super) generation: u64,
     pub(super) versions: HashMap<String, Version>,
-    /// The version of each credential whose refresh token was refused for good when it
-    /// was refused ([`CredentialStore::refuse_tokens`]). Selection and refresh skip the
-    /// credential while that version is current.
-    pub(super) refused: HashMap<String, Version>,
+    /// Credentials whose refresh token was refused for good, with the version that held
+    /// it ([`CredentialStore::refuse_tokens`]). Only while that version is current.
+    pub(super) refused: HashMap<String, Refused>,
     /// What selection reads from each stored revision, parsed when it is stored.
     pub(super) profiles: HashMap<String, Profile>,
     /// Bumped on every reconcile and patch, including pure removals.
@@ -57,14 +56,31 @@ impl Inner {
         }
     }
 
-    /// Whether `id` still holds the tokens whose refresh was refused for good. A new
+    /// The refusal of `id`'s refresh token, while it still holds those tokens. A new
     /// sign-in, an upload or any edit of a token field advances the version's
     /// credentials, and deleting and re-adding the file its registration.
-    pub(super) fn refused(&self, id: &str) -> bool {
+    pub(super) fn refused(&self, id: &str) -> Option<&Refused> {
         self.refused
             .get(id)
-            .is_some_and(|refused| self.versions.get(id) == Some(refused))
+            .filter(|refused| self.versions.get(id) == Some(&refused.version))
     }
+
+    /// Whether `id`'s refresh token was refused for good and its access token no longer
+    /// serves requests at `now`. Fails closed: an unknown expiry is no longer serving.
+    pub(super) fn out_of_rotation(&self, id: &str, now: std::time::SystemTime) -> bool {
+        self.refused(id)
+            .is_some_and(|r| r.usable_until.is_none_or(|until| until <= now))
+    }
+}
+
+/// A refresh token refused for good ([`Inner::refused`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Refused {
+    pub(super) version: Version,
+    pub(super) refusal: cpa_core::exec::Refusal,
+    /// Until when its access token still serves requests; `None` once an upstream
+    /// refused it or when its expiry is unknown.
+    pub(super) usable_until: Option<std::time::SystemTime>,
 }
 
 pub struct CredentialStore {

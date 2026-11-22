@@ -104,23 +104,51 @@ impl CredentialStore {
         ))
     }
 
-    /// Records that the refresh token of `id` at `version` was refused for good, unless
-    /// the store has since replaced, removed or disabled it. Checked and recorded under
-    /// the write lock, so tokens that replaced the refused ones are never blocked.
-    pub(super) fn refuse_tokens(&self, id: &str, version: Version) -> bool {
+    /// Records that the refresh token of `id` at `version` was refused for good, and that
+    /// its access token serves requests until `usable_until` (`None`: no longer), unless
+    /// the store has since replaced, removed or disabled it. A later record for the same
+    /// tokens only shortens that time. Checked and recorded under the write lock, so
+    /// tokens that replaced the refused ones are never blocked. Returns whether anything
+    /// changed.
+    pub(super) fn refuse_tokens(
+        &self,
+        id: &str,
+        version: Version,
+        refusal: cpa_core::exec::Refusal,
+        usable_until: Option<std::time::SystemTime>,
+    ) -> bool {
         let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         let live = inner.creds.iter().any(|c| c.id == id && !c.disabled);
         if !live || inner.versions.get(id) != Some(&version) {
             return false;
         }
-        inner.refused.insert(id.to_owned(), version);
-        true
+        let next = match inner.refused(id) {
+            Some(known) => super::store::Refused {
+                usable_until: match (known.usable_until, usable_until) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    _ => None,
+                },
+                ..*known
+            },
+            None => super::store::Refused {
+                version,
+                refusal,
+                usable_until,
+            },
+        };
+        inner.refused.insert(id.to_owned(), next) != Some(next)
     }
 
-    /// Whether `c` still holds tokens whose refresh was refused for good. It is then
-    /// neither selected nor refreshed until a new sign-in or upload changes its tokens.
-    pub fn tokens_refused(&self, c: &Credential) -> bool {
-        self.read().refused(&c.id)
+    /// The refusal of `c`'s refresh token, while `c` still holds the refused tokens.
+    /// They are not refreshed again until a new sign-in or upload changes them.
+    pub fn tokens_refused(&self, c: &Credential) -> Option<cpa_core::exec::Refusal> {
+        self.read().refused(&c.id).map(|r| r.refusal)
+    }
+
+    /// Whether `c`'s refresh token was refused for good and its access token no longer
+    /// serves requests, which takes it out of rotation.
+    pub fn out_of_rotation(&self, c: &Credential) -> bool {
+        self.read().out_of_rotation(&c.id, std::time::SystemTime::now())
     }
 
     pub(crate) fn reload_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {

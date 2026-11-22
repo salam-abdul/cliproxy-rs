@@ -251,6 +251,7 @@ pub(crate) fn status_error_raw(code: u16, message: &str, headers: HeaderMap, mod
         addon: None,
         after_accept: None,
         held: None,
+        refusal: None,
     }
 }
 

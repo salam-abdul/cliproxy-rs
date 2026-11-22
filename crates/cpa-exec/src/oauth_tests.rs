@@ -254,6 +254,12 @@ async fn ambiguous_refresh_failures_are_not_retried() {
 }
 
 async fn refresh_against_raw(raw: Vec<u8>) -> (ExecError, usize) {
+    against_raw(raw, true).await
+}
+
+/// A refresh grant, or a code exchange unless `refresh`, against a token endpoint that
+/// answers every request with `raw`.
+async fn against_raw(raw: Vec<u8>, refresh: bool) -> (ExecError, usize) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/token", listener.local_addr().unwrap());
     let calls = Arc::new(AtomicUsize::new(0));
@@ -294,45 +300,81 @@ async fn refresh_against_raw(raw: Vec<u8>) -> (ExecError, usize) {
         &url,
         &url,
     );
-    let error = oauth.refresh("fake-refresh-raw").await.unwrap_err();
+    let error = if refresh {
+        oauth.refresh("fake-refresh-raw").await.unwrap_err()
+    } else {
+        oauth
+            .exchange("fake-code", "fake-state", "fake-verifier")
+            .await
+            .unwrap_err()
+    };
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
     (error, calls.load(Ordering::SeqCst))
 }
 
-/// A refused refresh keeps only an allowlisted OAuth error code, so the runtime can tell
-/// a refresh token the provider refuses for good from a transient failure. Anthropic's
-/// "Refresh token expired" description reads as `refresh_token_expired`.
+/// A refresh grant's 4xx answer reports which refusal its OAuth error states, and keeps
+/// nothing of the body. Anthropic's "Refresh token expired" description is `Expired`.
+/// A 5xx answer is retried and refuses nothing, and a code exchange never refuses.
 #[tokio::test]
-async fn a_refused_refresh_keeps_only_its_oauth_error_code() {
-    let response = |body: &str| {
+async fn a_refused_refresh_reports_its_refusal_and_nothing_else() {
+    use cpa_core::exec::Refusal;
+    let response = |status: &str, body: &str| {
         format!(
-            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .into_bytes()
     };
-    for (body, expected) in [
+    let cases = [
         (
+            "400 Bad Request",
             r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#,
-            "Claude OAuth acquisition failed: refresh_token_expired",
+            Some(Refusal::Expired),
+            1,
         ),
         (
+            "400 Bad Request",
             r#"{"error":"invalid_grant","error_description":"fake-refresh-raw is revoked"}"#,
-            "Claude OAuth acquisition failed: invalid_grant",
+            Some(Refusal::InvalidGrant),
+            1,
         ),
-        (r#"{"error":"fake-refresh-raw"}"#, HTTP_FAILURE),
         (
-            r#"{"type":"error","error":{"type":"invalid_request_error","message":"fake-refresh-raw"}}"#,
-            HTTP_FAILURE,
+            "401 Unauthorized",
+            r#"{"error":"invalid_grant"}"#,
+            Some(Refusal::InvalidGrant),
+            1,
         ),
-        ("fake-refresh-raw", HTTP_FAILURE),
-    ] {
-        let (error, calls) = refresh_against_raw(response(body)).await;
-        assert_eq!(calls, 1, "{body}");
-        assert_eq!(error.status, 400, "{body}");
-        assert_eq!(String::from_utf8_lossy(&error.body), expected, "{body}");
+        (
+            "400 Bad Request",
+            r#"{"error":"refresh_token_invalidated"}"#,
+            Some(Refusal::Invalidated),
+            1,
+        ),
+        (
+            "400 Bad Request",
+            r#"{"error":"token_revoked"}"#,
+            Some(Refusal::Revoked),
+            1,
+        ),
+        ("400 Bad Request", r#"{"error":"invalid_client"}"#, None, 1),
+        ("400 Bad Request", r#"{"error":"fake-refresh-raw"}"#, None, 1),
+        ("400 Bad Request", "fake-refresh-raw", None, 1),
+        ("503 Service Unavailable", r#"{"error":"invalid_grant"}"#, None, 3),
+    ];
+    let results = futures_util::future::join_all(
+        cases
+            .iter()
+            .map(|(status, body, _, _)| async move { refresh_against_raw(response(status, body)).await }),
+    )
+    .await;
+    for ((status, body, refusal, calls), (error, sent)) in cases.iter().zip(results) {
+        assert_eq!(error.refusal, *refusal, "{status} {body}");
+        assert_eq!(sent, *calls, "{status} {body}");
+        assert_eq!(error.body, HTTP_FAILURE, "{status} {body}");
     }
+    let (error, _) = against_raw(response("400 Bad Request", r#"{"error":"invalid_grant"}"#), false).await;
+    assert_eq!(error.refusal, None, "a code exchange refused a refresh token");
 }
 
 #[tokio::test]

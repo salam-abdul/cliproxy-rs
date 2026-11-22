@@ -169,6 +169,7 @@ fn upstream_error(status: u16, headers: http::HeaderMap, body: Bytes) -> ExecErr
         addon: None,
         after_accept: None,
         held: None,
+        refusal: None,
     }
 }
 
