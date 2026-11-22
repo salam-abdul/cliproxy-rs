@@ -316,12 +316,13 @@ impl CredentialStore {
         admit: &Admit<'_>,
         now: Instant,
     ) -> Option<Duration> {
+        let wall = std::time::SystemTime::now();
         let inner = self.read();
         let scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
         let wait = inner
             .creds
             .iter()
-            .filter(|c| !c.disabled && !inner.out_of_rotation(&c.id, std::time::SystemTime::now()))
+            .filter(|c| !c.disabled && !inner.out_of_rotation(&c.id, wall))
             .filter(|c| {
                 let profile = inner.profile(c);
                 policy.retry_limit_of(&profile) > selection.retry_round && policy.admits_weight(profile.weight)

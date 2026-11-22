@@ -283,6 +283,8 @@ async fn sideband(inbound: Inbound, realtime: bool, style: Sideband, call_id: St
                     &error,
                     (call.session_id.clone(), String::new()),
                 );
+            } else {
+                refresh_dial_unauthorized(&rt, &credential, &error);
             }
             return with_trace(
                 dial_failed(error, |status| fail(status, "Codex live sideband upstream unavailable")),
@@ -368,6 +370,13 @@ fn report_dial_unauthorized(
     super::report_unauthorized(rt, credential, model, body, session);
 }
 
+/// A local credential's handshake rejected with a 401: [`Runtime::refresh_unauthorized`].
+fn refresh_dial_unauthorized(rt: &Arc<Runtime>, credential: &Arc<cpa_core::credential::Credential>, error: &DialError) {
+    if error.response.as_ref().is_some_and(|h| h.status == 401) {
+        rt.refresh_unauthorized(credential.clone());
+    }
+}
+
 /// `HandleDirectWebsocket`.
 async fn direct(inbound: Inbound, model: String) -> Response {
     let Inbound {
@@ -444,6 +453,8 @@ async fn direct(inbound: Inbound, model: String) -> Response {
                     &error,
                     super::session_ids(&selection_headers, &[]),
                 );
+            } else {
+                refresh_dial_unauthorized(&rt, &credential, &error);
             }
             return traced(dial_failed(error, |status| {
                 let (status, message, kind, code) = match status {

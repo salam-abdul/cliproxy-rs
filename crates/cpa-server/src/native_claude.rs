@@ -477,14 +477,31 @@ impl State {
         } else {
             json!({})
         };
-        let pool = read_pool(
-            self.rt.store().snapshot(),
-            &self.config.auth_dir,
-            &settings,
-            &self.rt.config(),
-        )?;
+        let store = self.rt.store();
+        let snapshot = store.snapshot();
+        // An account out of rotation after its refresh token was refused for good needs a
+        // new sign-in, like an expired one.
+        let refused: std::collections::HashSet<String> = snapshot
+            .iter()
+            .filter(|c| store.out_of_rotation(c))
+            .map(|c| c.id.clone())
+            .collect();
+        let mut pool = read_pool(snapshot, &self.config.auth_dir, &settings, &self.rt.config())?;
+        for a in &mut pool.accounts {
+            a.enabled &= !refused.contains(&a.file_id);
+        }
         self.report_skipped(pool.skipped);
         Ok(pool.accounts)
+    }
+    /// Go's refresh after an upstream 401 ([`Runtime::refresh_unauthorized`]), unless the
+    /// store already holds other tokens than the rejected one. The request is not sent
+    /// to this account again.
+    fn refresh_unauthorized(&self, a: &Account) {
+        if let Some(c) = self.rt.store().get(&a.file_id)
+            && c.str("access_token") == Some(a.token.as_str())
+        {
+            self.rt.refresh_unauthorized(c);
+        }
     }
     /// Reports each skipped account file once, and again only when its reason changes.
     /// The event names the credential file and a reason, never its contents.
@@ -1031,6 +1048,9 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
             if !entitlement {
                 s.rt.claude_usage.invalidate(&a.token).await;
+            }
+            if status == StatusCode::UNAUTHORIZED {
+                s.refresh_unauthorized(&a);
             }
             s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
             continue;

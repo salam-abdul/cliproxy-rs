@@ -29,6 +29,8 @@ Restart the binary to apply native configuration changes.
 | `quotaFallback` | Default empty: no [quota fallback](#quota-fallback) |
 | Admission deadline | 60 seconds |
 | Cooldown on explicit 401, 403 or 429 | Whole account |
+| Token refresh after an explicit 401 | One, in the background; the request moves to another account |
+| Account whose refresh token was [refused for good](../docs/CONFIGURATION.md#oauth) | Skipped once its access token expires or gets a 401, until it has new tokens |
 | Quota reset used from the dashboard | Clears the account's cooldowns and stored limit readings |
 | Cooldown on 503 or 529 | Account and model pair; at 128 live model cooldowns on one account, further overloads cool the whole account |
 | Valid `Retry-After` | Bounded to 1 second to 15 minutes |
