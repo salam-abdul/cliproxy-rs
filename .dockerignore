@@ -1,4 +1,5 @@
 target
+vendor/*/target
 .git
 .amp
 harness
