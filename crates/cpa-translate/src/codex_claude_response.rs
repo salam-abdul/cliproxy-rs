@@ -141,7 +141,8 @@ fn stream_error(root: &Res<'_>) -> Vec<u8> {
     if message.is_empty() {
         message = kind.clone();
     }
-    if code == b"cyber_policy" || kind == b"invalid_request" {
+    let rejected = std::str::from_utf8(&code).is_ok_and(cpa_common::request_fault::is_prompt_rejection);
+    if rejected || kind == b"invalid_request" {
         kind = b"invalid_request_error".to_vec();
     }
     let mut payload = br#"{"type":"error","error":{"type":"api_error","message":""}}"#.to_vec();
@@ -994,4 +995,39 @@ fn web_search_blocks(blocks: &mut Vec<Vec<u8>>, item: &Res<'_>, seen: &mut HashS
     }
     blocks.push(result_block);
     seen.insert(id);
+}
+
+#[cfg(test)]
+mod tests {
+    /// A Codex error event with a policy code is a Claude `invalid_request_error`, typed
+    /// or not; the message passes through.
+    #[test]
+    fn policy_error_events_are_invalid_request_errors() {
+        for (event, kind, message) in [
+            (
+                r#"{"type":"error","error":{"code":"bio_policy","message":"flagged"}}"#,
+                "invalid_request_error",
+                "flagged",
+            ),
+            (
+                r#"{"type":"error","error":{"code":"Content_Policy_Violation","type":"server_error"}}"#,
+                "invalid_request_error",
+                "Content_Policy_Violation",
+            ),
+            (
+                r#"{"type":"error","error":{"type":"server_error","message":"echo: bio_policy"}}"#,
+                "server_error",
+                "echo: bio_policy",
+            ),
+        ] {
+            let out = super::stream_error(&cpa_common::json::parse(event.as_bytes()));
+            let data = out
+                .split(|b| *b == b'\n')
+                .find_map(|line| line.strip_prefix(b"data: "))
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(data).unwrap();
+            assert_eq!(parsed["error"]["type"], kind, "{event}");
+            assert_eq!(parsed["error"]["message"], message, "{event}");
+        }
+    }
 }

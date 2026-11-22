@@ -23,6 +23,8 @@
 //!   derived identity executors key provider sessions on; owner: server).
 //! - `cache`: internal/cache's Antigravity reasoning replay and thinking signature
 //!   caches, shared by the Antigravity translators and executor.
+//! - `request_fault`: internal/clienterror's request-fault codes and types, shared by
+//!   the server's classifier, the Codex executor and the Codex-to-Claude translator.
 //! - `gostr`: Go's `strings.ToLower`, `strings.EqualFold`, `strings.TrimSpace` and
 //!   `strconv.Quote` on Go's own Unicode tables (owner: Google).
 //!
@@ -40,6 +42,7 @@ pub mod headers;
 pub mod idle;
 pub mod json;
 pub mod payload;
+pub mod request_fault;
 pub mod session;
 pub mod signature;
 pub mod thinking;
