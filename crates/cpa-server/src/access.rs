@@ -5,12 +5,14 @@
 //! `X-Api-Key`, then the first `key` and `auth_token` query values. Comparison is on raw
 //! bytes, like Go strings, in constant time per key. With no keys configured the
 //! provider is unregistered and access is open, which [`refuse_open_access`] allows on
-//! an exposed listener only with `access.allow-unauthenticated`.
+//! an exposed listener only with `access.allow-unauthenticated`. On a loopback listener
+//! open access admits only requests that name this machine and come from no other origin.
 
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::HeaderMap;
+use axum::http::uri::Authority;
+use axum::http::{HeaderMap, Uri, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use cpa_core::config::Config;
@@ -25,10 +27,54 @@ use crate::runtime::Runtime;
 /// trusted proxies are set, since a tunnel or reverse proxy in front of a loopback
 /// listener is the documented way to expose it.
 pub fn listener_exposed(config: &Config) -> bool {
-    let host = config.host.as_str();
-    let loopback = host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("localhost")
-        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
-    !config.trusted_proxies.is_empty() || !loopback
+    !config.trusted_proxies.is_empty() || !loopback_host(&config.host)
+}
+
+/// `localhost` or a loopback IP, without brackets.
+fn loopback_host(host: &str) -> bool {
+    host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether `authority` (a `Host` value or a URI authority) names this machine.
+fn loopback_authority(authority: &[u8]) -> bool {
+    let Ok(authority) = Authority::try_from(authority) else {
+        return false;
+    };
+    let host = authority.host();
+    !authority.as_str().contains('@')
+        && loopback_host(host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host))
+}
+
+pub(crate) const FOREIGN_HOST: &str =
+    "Host is not this machine: add a client key to access.api-keys to use another name";
+pub(crate) const FOREIGN_ORIGIN: &str =
+    "Origin is not this machine: add a client key to access.api-keys to call from another site";
+
+/// Open access on a loopback listener is meant for programs on this machine. A browser
+/// here carries any page's requests to it, so a request that names another host (DNS
+/// rebinding) or comes from another origin is refused. An exposed listener is open only
+/// by `access.allow-unauthenticated`, which admits everyone already, and in Home mode
+/// (`home`) Home authenticates every client itself.
+fn open_access(config: &Config, home: bool, headers: &HeaderMap, uri: &Uri) -> Result<(), &'static str> {
+    if home || listener_exposed(config) {
+        return Ok(());
+    }
+    let hosts = headers.get_all(header::HOST).iter().map(|v| v.as_bytes());
+    let named = uri.authority().map(|a| a.as_str().as_bytes());
+    if !hosts.chain(named).all(loopback_authority) {
+        return Err(FOREIGN_HOST);
+    }
+    let local = |origin: &[u8]| {
+        origin
+            .strip_prefix(b"http://")
+            .or_else(|| origin.strip_prefix(b"https://"))
+            .is_some_and(loopback_authority)
+    };
+    if !headers.get_all(header::ORIGIN).iter().all(|v| local(v.as_bytes())) {
+        return Err(FOREIGN_ORIGIN);
+    }
+    Ok(())
 }
 
 /// Refuses `config` when it would let anyone who reaches an exposed listener use the
@@ -127,7 +173,9 @@ pub(crate) struct Denied {
 pub(crate) fn authenticate_request(rt: &Runtime, req: Request) -> (Request, Result<Access, Denied>) {
     let config = rt.config();
     let result = if config.api_keys.is_empty() {
-        Ok(Access::Open)
+        open_access(&config, rt.remote_dispatch().is_some(), req.headers(), req.uri())
+            .map(|()| Access::Open)
+            .map_err(|message| Denied { status: 403, message })
     } else {
         authenticate(&config.api_keys, req.headers(), req.uri().query().unwrap_or_default())
             .map(|caller| Access::Granted {
@@ -231,6 +279,76 @@ mod tests {
         ] {
             check(loopback).unwrap();
         }
+    }
+
+    #[test]
+    fn open_access_on_loopback_admits_only_this_machine() {
+        type Headers<'a> = &'a [(&'static str, &'a str)];
+        let check = |yaml: &str, headers: Headers, uri: &str| {
+            let mut map = HeaderMap::new();
+            for (k, v) in headers {
+                map.append(*k, v.parse().unwrap());
+            }
+            open_access(&Config::parse(yaml).unwrap(), false, &map, &uri.parse().unwrap())
+        };
+        const LOOPBACK: &str = "server: {host: 127.0.0.1}\n";
+        let local: [Headers; 8] = [
+            &[],
+            &[("host", "127.0.0.1:8317")],
+            &[("host", "localhost")],
+            &[("host", "LocalHost.:8317")],
+            &[("host", "[::1]:8317")],
+            &[("host", "127.0.0.1:8317"), ("origin", "http://127.0.0.1:8317")],
+            &[("host", "localhost:8317"), ("origin", "http://localhost:5173")],
+            &[("host", "[::1]:8317"), ("origin", "https://[::1]")],
+        ];
+        for headers in local {
+            assert_eq!(check(LOOPBACK, headers, "/v1/models"), Ok(()), "{headers:?}");
+        }
+        let foreign_hosts: [Headers; 5] = [
+            &[("host", "rebind.example:8317")],
+            &[("host", "localhost.example")],
+            &[("host", "192.0.2.10:8317")],
+            &[("host", "user@localhost")],
+            &[("host", "localhost"), ("host", "rebind.example")],
+        ];
+        for headers in foreign_hosts {
+            assert_eq!(check(LOOPBACK, headers, "/v1/models"), Err(FOREIGN_HOST), "{headers:?}");
+        }
+        assert_eq!(
+            check(LOOPBACK, &[], "http://rebind.example/v1/models"),
+            Err(FOREIGN_HOST),
+            "an HTTP/2 authority counts as the host"
+        );
+        for origin in [
+            "https://app.example",
+            "http://localhost.example",
+            "null",
+            "file://",
+            "chrome-extension://abcdefgh",
+            "localhost:8317",
+            "http://user@localhost",
+        ] {
+            let headers: Headers = &[("host", "127.0.0.1:8317"), ("origin", origin)];
+            assert_eq!(check(LOOPBACK, headers, "/v1/models"), Err(FOREIGN_ORIGIN), "{origin}");
+        }
+        let two: Headers = &[("origin", "http://localhost"), ("origin", "https://app.example")];
+        assert_eq!(check(LOOPBACK, two, "/v1/models"), Err(FOREIGN_ORIGIN));
+        // An exposed listener is open to everyone by its own opt-in.
+        let anyone: Headers = &[("host", "proxy.example"), ("origin", "https://app.example")];
+        for exposed in [
+            "server: {host: 0.0.0.0}\naccess: {allow-unauthenticated: true}\n",
+            "server: {host: 127.0.0.1, trusted-proxies: [127.0.0.1]}\naccess: {allow-unauthenticated: true}\n",
+        ] {
+            assert_eq!(check(exposed, anyone, "/v1/models"), Ok(()), "{exposed}");
+        }
+        // Home authenticates every client, whatever the request names.
+        let mut named = HeaderMap::new();
+        named.insert("host", "proxy.example".parse().unwrap());
+        named.insert("origin", "https://app.example".parse().unwrap());
+        let (config, uri) = (Config::parse(LOOPBACK).unwrap(), "/v1/models".parse().unwrap());
+        assert_eq!(open_access(&config, true, &named, &uri), Ok(()));
+        assert_eq!(open_access(&config, false, &named, &uri), Err(FOREIGN_HOST));
     }
 
     #[test]

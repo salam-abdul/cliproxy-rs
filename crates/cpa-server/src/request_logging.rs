@@ -1547,8 +1547,10 @@ fn unique_file(dir: &Path, filename: &str) -> io::Result<File> {
         };
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
+        // Deliberate difference: Go creates these 0644, but bodies can hold prompts and
+        // credentials, so only the owner may read them.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
         match options.open(dir.join(name)) {
             Ok(file) => return Ok(file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -2390,6 +2392,16 @@ mod tests {
                 unique_file(&dir, &name).unwrap();
             }
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_log_files_are_readable_by_the_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch();
+        let file = unique_file(&dir, "v1-messages-2026-10-03T040506-a1b2c3d4.log").unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
