@@ -59,7 +59,14 @@ mod tests {
 
     #[test]
     fn policy_codes_are_request_faults_in_any_case() {
-        for code in POLICY_CODES {
+        for code in [
+            "cyber_policy",
+            "cyber_policy_violation",
+            "bio_policy",
+            "misalignment_policy_violation",
+            "content_policy_violation",
+            "image_content_policy_violation",
+        ] {
             assert!(is_code(code) && is_prompt_rejection(code), "{code}");
             assert!(is_code(&format!(" {} ", code.to_uppercase())), "{code}");
         }

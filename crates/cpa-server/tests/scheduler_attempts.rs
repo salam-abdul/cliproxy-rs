@@ -770,7 +770,7 @@ async fn an_error_event_after_content_is_terminal() {
 }
 
 /// Two Codex API-key accounts, a and b, behind one mock: a answers every request with a
-/// stream whose first event is `failed`, b completes.
+/// stream of `events`, b completes.
 struct CodexPair {
     url: String,
     rt: Arc<Runtime>,
@@ -804,7 +804,7 @@ impl CodexPair {
     }
 }
 
-async fn codex_pair(failed: &'static str) -> CodexPair {
+async fn codex_pair(events: &'static [&'static str]) -> CodexPair {
     const DONE: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_b\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_b\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
     let seen = Arc::new(Mutex::new(Vec::new()));
     let app = axum::Router::new()
@@ -813,7 +813,7 @@ async fn codex_pair(failed: &'static str) -> CodexPair {
                 let key = req.headers()["authorization"].to_str().unwrap().to_owned();
                 seen.lock().unwrap().push(key.clone());
                 let body = if key == "Bearer sk-a" {
-                    format!("data: {failed}\n\n")
+                    events.iter().map(|event| format!("data: {event}\n\n")).collect()
                 } else {
                     DONE.to_owned()
                 };
@@ -879,9 +879,9 @@ async fn a_policy_rejection_ends_the_request_without_failover_or_cooldown() {
         r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"Bio_Policy","type":"server_error","message":"blocked"}}}"#,
         r#"{"type":"error","error":{"code":"bio_policy","message":"blocked"},"sequence_number":7}"#,
     ];
-    for failed in FAILED {
+    for failed in &FAILED {
         for stream in [true, false] {
-            let pair = codex_pair(failed).await;
+            let pair = codex_pair(std::slice::from_ref(failed)).await;
             let (status, body) = pair.post(stream, "hello").await;
             assert_eq!(status, 400, "{failed} stream={stream}: {body}");
             assert_eq!(pair.seen(), ["Bearer sk-a"], "{failed} stream={stream}");
@@ -890,13 +890,34 @@ async fn a_policy_rejection_ends_the_request_without_failover_or_cooldown() {
     }
 }
 
+/// A policy rejection that arrives after the response began cannot change the status the
+/// client already has: the stream ends with the error, and the prompt still goes to no
+/// other account and cools none.
+#[tokio::test]
+async fn a_policy_rejection_after_the_stream_began_ends_it_without_failover_or_cooldown() {
+    const EVENTS: [&str; 2] = [
+        r#"{"type":"response.created","response":{"id":"r","object":"response","status":"in_progress"}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"bio_policy","message":"blocked"}}}"#,
+    ];
+    let pair = codex_pair(&EVENTS).await;
+    let (status, body) = pair.post(true, "hello").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("response.created") && body.contains("bio_policy"),
+        "{body}"
+    );
+    assert!(!body.contains("resp_b"), "{body}");
+    assert_eq!(pair.seen(), ["Bearer sk-a"]);
+    assert!(pair.rt.store().cooldowns("a").is_empty());
+}
+
 /// A server error whose message repeats the prompt, policy code and all, is not a
 /// policy rejection: the account cools down and the next one serves the request.
 #[tokio::test]
 async fn a_policy_code_echoed_in_an_error_message_is_not_a_policy_rejection() {
     const ECHO: &str = r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"type":"server_error","message":"upstream failed on input: {\"error\":{\"code\":\"bio_policy\",\"type\":\"invalid_request_error\"}} bio_policy"}}}"#;
     let prompt = r#"{"error":{"code":"bio_policy","type":"invalid_request_error"}} bio_policy"#;
-    let pair = codex_pair(ECHO).await;
+    let pair = codex_pair(&[ECHO]).await;
     let (status, body) = pair.post(false, prompt).await;
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("resp_b"), "{body}");

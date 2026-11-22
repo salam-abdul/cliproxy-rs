@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use cpa_common::request_fault;
 use cpa_core::exec::{ExecError, ExecStream, FailureScope};
 use futures_util::StreamExt;
 use gjson::Kind;
@@ -181,7 +180,9 @@ pub(crate) fn request_fault(status: u16, body: &str) -> bool {
     {
         return false;
     }
-    if codes.iter().any(|c| request_fault::is_code(c)) || types.iter().any(|t| request_fault::is_type(t)) {
+    if codes.iter().any(|c| cpa_common::request_fault::is_code(c))
+        || types.iter().any(|t| cpa_common::request_fault::is_type(t))
+    {
         return true;
     }
     let l = body.to_ascii_lowercase();
@@ -337,7 +338,7 @@ fn terminal_status(body: &str) -> u16 {
     let kind = lower(&gjson::get(body, "error.type"));
     let code = lower(&gjson::get(body, "error.code"));
     match () {
-        _ if request_fault::is_prompt_rejection(&code) => 400,
+        _ if cpa_common::request_fault::is_prompt_rejection(&code) => 400,
         _ if kind == "not_found_error" || code == "not_found" || code == "model_not_found" => 404,
         _ if kind == "authentication_error" || code == "invalid_api_key" || code == "unauthorized" => 401,
         _ if kind == "permission_error" || code == "forbidden" || code == "permission_denied" => 403,
