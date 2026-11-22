@@ -43,6 +43,17 @@ pub fn sanitize_claude_tool_id(id: &[u8]) -> Vec<u8> {
     s
 }
 
+/// A sanitized tool-use ID, with 12 random hex characters appended when `portable`: an
+/// upstream that numbers its IDs per response, or per process, repeats them within one
+/// conversation.
+pub fn claude_tool_id(id: &[u8], portable: bool) -> Vec<u8> {
+    let mut id = sanitize_claude_tool_id(id);
+    if portable {
+        id.extend_from_slice(format!("-{:012x}", rand::rng().random_range(0..1u64 << 48)).as_bytes());
+    }
+    id
+}
+
 pub fn sanitize_claude_function_name(name: &[u8]) -> Vec<u8> {
     if name.is_empty() {
         return vec![];

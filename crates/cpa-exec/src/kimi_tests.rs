@@ -571,6 +571,7 @@ async fn claude_replay_sequence_matches_go() {
         let mut headers = http::HeaderMap::new();
         headers.insert("x-claude-code-session-id", "sess-1".parse().unwrap());
         let req = ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::Claude,
             response_format: Format::Claude,

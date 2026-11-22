@@ -10,6 +10,7 @@ fn schema_arguments_closed_empty_tools_drop_injected_values() {
             original_request:
                 br#"{"tools":[{"name":"t","input_schema":{"type":"object","additionalProperties":false}}]}"#,
             translated_request: b"{}",
+            portable: false,
         };
         let raw =
             br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"t","args":{"reason":"because"}}}]}}]}"#;
@@ -30,6 +31,7 @@ fn schema_arguments_implicitly_open_objects_keep_real_values() {
             model: "claude-test",
             original_request: br#"{"tools":[{"name":"t","input_schema":{"type":"object","properties":{}}}]}"#,
             translated_request: b"{}",
+            portable: false,
         };
         let raw = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"t","args":{"value":7}}}]}}]}"#;
         let raw = if upstream == Format::Antigravity {
@@ -49,6 +51,7 @@ fn schema_arguments_stream_defers_empty_input_until_continuation() {
             model: "claude-test",
             original_request: br#"{"tools":[{"name":"t","input_schema":{"type":"object","properties":{}}}]}"#,
             translated_request: b"{}",
+            portable: false,
         };
         let mut stream = cpa_translate::go_stream(Format::Claude, upstream).unwrap()(&ctx);
         let mut output = Vec::new();
@@ -74,6 +77,7 @@ fn schema_arguments_stream_flushes_deferred_empty_at_end() {
             model: "claude-test",
             original_request: br#"{"tools":[{"name":"t","input_schema":{"type":"object"}}]}"#,
             translated_request: b"{}",
+            portable: false,
         };
         let mut stream = cpa_translate::go_stream(Format::Claude, upstream).unwrap()(&ctx);
         let raw = br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"t","args":{}}}]}}]}"#;

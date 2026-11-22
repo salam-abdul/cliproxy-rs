@@ -1048,6 +1048,7 @@ impl Connection {
             home: Some(self.home.clone()),
         });
         let call = dispatch::Call {
+            portable_output: false,
             entry: Format::OpenAIResponse,
             response: Format::OpenAIResponse,
             operation: Operation::Generate,

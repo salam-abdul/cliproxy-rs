@@ -597,6 +597,7 @@ where
     let selected: Arc<Mutex<String>> = Arc::default();
     let sink = selected.clone();
     let call = Call {
+        portable_output: false,
         entry: Format::OpenAI,
         response: Format::OpenAI,
         operation: Operation::Generate,

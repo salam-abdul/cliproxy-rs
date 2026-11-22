@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store, every } from "./store.svelte";
   import { text } from "./api";
-  import { isFailure, outcomeLabel } from "./traffic";
+  import { fallbackNote, isFailure, outcomeLabel } from "./traffic";
   import { requestOutcomes, switchedAccounts } from "./accounts";
   import { type Data } from "./core";
   const native = $derived(!!store.native.data?.enabled);
@@ -110,6 +110,7 @@
               attempt.upstreamStatus ||
               "unknown"}
           </p>{/each}
+        {#if fallbackNote(e)}<p class="muted">{fallbackNote(e)}</p>{/if}
         <dl>
           {#if e.requestId}<dt>Request</dt>
             <dd><code>{e.requestId}</code></dd>{/if}

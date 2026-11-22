@@ -873,6 +873,7 @@ fn non_stream_output(
                 model: &req.model,
                 original_request: &req.original_body,
                 translated_request: translated.as_bytes(),
+                portable: false,
             };
             (pair.non_stream)(&ctx, completed.as_bytes()).unwrap_or_default()
         }
@@ -915,6 +916,7 @@ fn translate_stream(req: &ExecRequest, translated: &str, upstream: ExecStream) -
         model: &req.model,
         original_request: &req.original_body,
         translated_request: translated.as_bytes(),
+        portable: false,
     };
     let translator = (pair.stream)(&ctx);
     let original = if req.original_body.is_empty() {

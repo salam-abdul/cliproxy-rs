@@ -330,6 +330,7 @@ fn response_ctx<'a>(req: &'a ExecRequest, translated: &'a [u8]) -> ResponseCtx<'
         model: &req.model,
         original_request: original(req),
         translated_request: translated,
+        portable: false,
     }
 }
 

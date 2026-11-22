@@ -528,6 +528,7 @@ impl DevinExecutor {
             model: &req.model,
             original_request: &ctx_original,
             translated_request: &req.body,
+            portable: false,
         };
         if req.stream {
             let translator = pair.map(|pair| (pair.stream)(&ctx));

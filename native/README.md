@@ -26,6 +26,7 @@ Restart the binary to apply native configuration changes.
 | --- | --- |
 | `newSessionMinRemaining` | Default 5, range 0 to 50 percent |
 | `maxAttempts` (accounts tried per request) | Default 3, range 1 to 16 |
+| `quotaFallback` | Default empty: no [quota fallback](#quota-fallback) |
 | Admission deadline | 60 seconds |
 | Cooldown on explicit 401, 403 or 429 | Whole account |
 | Quota reset used from the dashboard | Clears the account's cooldowns and stored limit readings |
@@ -37,9 +38,49 @@ Restart the binary to apply native configuration changes.
 
 When possible, a local 429 carries Claude's unified reset and limit headers and a `Retry-After` for the earliest account's recovery, after all its blocking windows. Claude Code's [interactive automatic continuation](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) resumes the task. Remote Control needs that wait started by hand; background and print sessions do not offer it.
 
+## Quota fallback
+
+When no account has quota for a Claude model, the proxy can serve the request from another model the translating proxy already runs, and returns to Claude on the first request after quota is back. It is off until `quotaFallback` in the native configuration maps Claude model prefixes to models:
+
+```json
+"quotaFallback": {
+  "claude-opus-": "gemini-2.5-pro",
+  "claude-haiku-": "local-coder"
+}
+```
+
+The longest matching prefix wins, and a model without a match keeps the 429. Each key must start with `claude-`; an empty key or value is a configuration error. A target is a model name or alias served by a Gemini API key or an OpenAI-compatible entry under `api-keys` ([Configuration](../docs/CONFIGURATION.md#api-keys)); a target served by any other provider is not used. A local server that needs no key is an OpenAI-compatible entry with an empty key list:
+
+```yaml
+api-keys:
+  openai-compatibility:
+    - name: local
+      base-url: "http://127.0.0.1:11434/v1"
+      keys: []
+      models:
+        - name: "local-coder"
+```
+
+| Situation | Result |
+| --- | --- |
+| Every enabled account reads as out of included quota, or its quota is unknown, and paid overage is off or unavailable | The mapped model answers |
+| An account has quota but is resting after a sign-in, overload, entitlement or transport failure | Claude's response, no fallback |
+| Anthropic answers 429 without marking the account's window used up | Claude's 429, no fallback |
+| No account is enabled or signed in | Claude's response, no fallback |
+| A lost response (422), a 503 or an admission timeout | That response, no fallback |
+| The mapped model fails before any output | The original 429 with its reset headers |
+
+The order is included quota, then paid overage when it is allowed, then the fallback. A usage read that fails leaves quota unknown, so mapped models go to the fallback until it recovers.
+
+A fallback request leaves for the mapped provider: the conversation, system prompt and tool definitions are translated and sent there, without the `authorization`, `x-api-key`, `cookie` and `proxy-authorization` headers. Translation drops what the target cannot express: document blocks, images that are not base64, server tools such as web search and their results, cache markers and earlier thinking. Token counting stays on Anthropic. The fallback applies to Claude Code, Desktop and Zed alike, and Claude Code keeps showing the Claude model name while another model answers.
+
+Fallback replies carry no thinking blocks and get tool-use IDs that do not repeat within a conversation, because Claude Code sends earlier turns back and Anthropic rejects thinking it did not sign. Whether Anthropic accepts such a mixed history in every case, including the middle of a tool loop, is not covered by the wire tests; check it with one live session before relying on it.
+
+A fallback writes no routing state: session affinity and cooldowns are as the Claude attempts left them.
+
 ## Diagnostics and history
 
-**Activity** reads `GET /v8/management/observability/native/events`: recent selections, failover attempts and final outcomes. Stream errors, a missing `message_stop`, transport failures and client cancellations are reported separately, because an HTTP 200 alone does not establish that a stream succeeded. Observer failures show as incomplete observation. Provider errors keep only allowlisted types, and usage keeps only known numeric token counters.
+**Activity** reads `GET /v8/management/observability/native/events`: recent selections, failover attempts and final outcomes. A request served by the [quota fallback](#quota-fallback) ends in a `fallback` event with the mapped model, and shows as "Fell back to" that model; one whose fallback failed keeps its rejection and names the model that was tried. Stream errors, a missing `message_stop`, transport failures and client cancellations are reported separately, because an HTTP 200 alone does not establish that a stream succeeded. Observer failures show as incomplete observation. Provider errors keep only allowlisted types, and usage keeps only known numeric token counters.
 
 **Overview** reads `GET /v8/management/observability/native/history?range=24h|7d|30d` from a private SQLite file beside the event log. It keeps final request outcomes, token counters and account availability, and excludes sessions, request bodies and body fingerprints. Account status is sampled without inference calls. An unavailable history file does not stop routing. History starts when this version first runs; older event logs are not backfilled. The dashboard marks incomplete token totals, dropped records and possible gaps after an unclean shutdown.
 

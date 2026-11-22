@@ -11,24 +11,34 @@ use btls::{
 };
 use cpa_core::credential::Credential;
 
-const REQUEST: &[u8] =
+pub(super) const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
-const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
+pub(super) const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
 
 #[derive(Clone)]
-struct Reply {
-    status: u16,
-    body: Vec<u8>,
-    broken: bool,
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) body: Vec<u8>,
+    pub(super) broken: bool,
 }
 type Seen = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-struct Fixture {
-    state: Arc<State>,
-    url: String,
-    seen: Seen,
+pub(super) struct Fixture {
+    pub(super) state: Arc<State>,
+    pub(super) url: String,
+    pub(super) seen: Seen,
     tasks: Vec<JoinHandle<()>>,
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
+}
+/// What a test changes about the default fixture: two enabled accounts with quota.
+#[derive(Default)]
+pub(super) struct Setup {
+    /// `fixtureAccounts`, when not the default pair.
+    pub(super) accounts: Option<Value>,
+    /// Native configuration keys merged over the fixture's.
+    pub(super) native: Value,
+    /// Runtime YAML appended to the fixture's; its `api-keys` become credentials.
+    pub(super) yaml: String,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -88,6 +98,22 @@ impl Fixture {
         proxy: Option<&str>,
         accounts: bool,
     ) -> Self {
+        let setup = Setup {
+            accounts: (!accounts).then(|| json!([])),
+            ..Setup::default()
+        };
+        Self::build_from(reply, history, credential, proxy, setup).await
+    }
+    pub(super) async fn custom(reply: Reply, setup: Setup) -> Self {
+        Self::build_from(reply, None, None, None, setup).await
+    }
+    async fn build_from(
+        reply: Reply,
+        history: Option<&Path>,
+        credential: Option<Credential>,
+        proxy: Option<&str>,
+        setup: Setup,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -127,6 +153,7 @@ impl Fixture {
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
                                 let zstd = reply.body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
+                                let exhausted = cpa_common::gostr::contains(&body, b"MODE_EXHAUSTED");
                                 let body = if reply.broken {
                                     let stream = futures_util::stream::once(async move {
                                         Ok::<_, std::io::Error>(Bytes::from(reply.body))
@@ -146,6 +173,16 @@ impl Fixture {
                                 if zstd {
                                     response = response.header("content-encoding", "zstd");
                                 }
+                                // The rate-limit headers of an account whose five-hour
+                                // window is used up.
+                                if exhausted {
+                                    response = response
+                                        .header("anthropic-ratelimit-unified-5h-status", "rejected")
+                                        .header(
+                                            "anthropic-ratelimit-unified-5h-reset",
+                                            (now() / 1000 + 4 * 3600).to_string(),
+                                        );
+                                }
                                 response.body(body).unwrap()
                             } else {
                                 Response::builder()
@@ -163,17 +200,20 @@ impl Fixture {
             }
         });
         let quota = json!({"five_hour":{"utilization":1},"seven_day":{"utilization":1}});
-        let native: Config = serde_json::from_value(json!({
+        let mut native = json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":if accounts {json!([
+            "fixtureAccounts":setup.accounts.unwrap_or_else(|| json!([
                 {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default(),"proxyUrl":proxy},
                 {"id":"b","token":"token-b","quota":quota}
-            ])} else {json!([])},
+            ])),
             "upstream":{"hostname":"127.0.0.1","port":port}
-        }))
-        .unwrap();
-        let mut rt_yaml = format!("auth-dir: {}\n", dir.display());
+        });
+        for (key, value) in setup.native.as_object().into_iter().flatten() {
+            native[key] = value.clone();
+        }
+        let native: Config = serde_json::from_value(native).unwrap();
+        let mut rt_yaml = format!("auth-dir: {}\n{}", dir.display(), setup.yaml);
         if let Some(history) = history {
             rt_yaml.push_str(&format!(
                 "observability: {{history: {{enable: true, dir: '{}'}}}}\n",
@@ -181,9 +221,13 @@ impl Fixture {
             ));
         }
         let rt_config = cpa_core::config::Config::parse(&rt_yaml).unwrap();
+        let credentials = credential
+            .into_iter()
+            .chain(cpa_core::config::credentials::from_config(&rt_config))
+            .collect();
         let rt = Arc::new(crate::testing::runtime(
             rt_config,
-            credential.into_iter().collect(),
+            credentials,
             cpa_exec::Executors {
                 claude: cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap(),
                 codex: Default::default(),
@@ -226,10 +270,10 @@ impl Fixture {
             dir,
         }
     }
-    async fn request(&self) -> wreq::Response {
+    pub(super) async fn request(&self) -> wreq::Response {
         self.request_body(REQUEST).await
     }
-    async fn request_body(&self, body: &'static [u8]) -> wreq::Response {
+    pub(super) async fn request_body(&self, body: &'static [u8]) -> wreq::Response {
         wreq::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))

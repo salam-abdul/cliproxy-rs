@@ -9,7 +9,9 @@ const tokenRows = () =>
     reported: 0,
   }));
 export const isFailure = (e: Data) =>
-  !["success", "pending", "client_cancelled"].includes(e.outcome);
+  !["success", "pending", "client_cancelled", "fallback_served"].includes(
+    e.outcome,
+  );
 const outcomes: Record<string, string> = {
   success: "Succeeded",
   client_cancelled: "Cancelled by client",
@@ -24,12 +26,19 @@ const outcomes: Record<string, string> = {
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
 };
+/** A quota fallback that was tried and produced no output, on the rejected request. */
+export const fallbackNote = (e: Data) =>
+  e.fallbackOutcome === "failed" && e.fallbackModel
+    ? `Fallback to ${e.fallbackModel} failed`
+    : undefined;
 export const outcomeLabel = (e: Data) =>
   e.recovered
     ? "Recovered after account switch"
-    : Object.hasOwn(outcomes, e.outcome)
-      ? outcomes[e.outcome]
-      : String(e.outcome || "Unknown outcome").replaceAll("_", " ");
+    : e.outcome === "fallback_served"
+      ? `Fell back to ${e.fallbackModel || "another model"}`
+      : Object.hasOwn(outcomes, e.outcome)
+        ? outcomes[e.outcome]
+        : String(e.outcome || "Unknown outcome").replaceAll("_", " ");
 
 export function summarizeHistory(history: Data) {
   const buckets = Array.isArray(history.buckets)

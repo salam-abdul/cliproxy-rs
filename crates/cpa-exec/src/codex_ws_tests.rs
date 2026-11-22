@@ -191,6 +191,7 @@ fn credential(base_url: &str) -> Credential {
 fn request(body: &str) -> ExecRequest {
     let body = Bytes::from(body.to_owned());
     ExecRequest {
+        portable_output: false,
         operation: Operation::Generate,
         source_format: Format::OpenAIResponse,
         response_format: Format::OpenAIResponse,
