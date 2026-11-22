@@ -768,3 +768,141 @@ async fn an_error_event_after_content_is_terminal() {
     );
     assert_eq!(fixture.seen(), ["Bearer fake-a"]);
 }
+
+/// Two Codex API-key accounts, a and b, behind one mock: a answers every request with a
+/// stream whose first event is `failed`, b completes.
+struct CodexPair {
+    url: String,
+    rt: Arc<Runtime>,
+    seen: Arc<Mutex<Vec<String>>>,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for CodexPair {
+    fn drop(&mut self) {
+        for server in &self.servers {
+            server.abort();
+        }
+    }
+}
+
+impl CodexPair {
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    async fn post(&self, stream: bool, input: &str) -> (u16, String) {
+        let body = serde_json::json!({"model":"gpt-5.5","stream":stream,"input":input}).to_string();
+        let response = wreq::Client::new()
+            .post(format!("{}/v1/responses", self.url))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, response.text().await.unwrap())
+    }
+}
+
+async fn codex_pair(failed: &'static str) -> CodexPair {
+    const DONE: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_b\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_b\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .fallback(
+            move |State(seen): State<Arc<Mutex<Vec<String>>>>, req: Request| async move {
+                let key = req.headers()["authorization"].to_str().unwrap().to_owned();
+                seen.lock().unwrap().push(key.clone());
+                let body = if key == "Bearer sk-a" {
+                    format!("data: {failed}\n\n")
+                } else {
+                    DONE.to_owned()
+                };
+                ([("content-type", "text/event-stream")], body).into_response()
+            },
+        )
+        .with_state(seen.clone());
+    let (upstream_url, upstream) = serve(app).await;
+    let credentials = ["a", "b"]
+        .iter()
+        .map(|id| {
+            let metadata = serde_json::json!({"type":"codex"});
+            let mut credential = Credential::from_file(
+                Path::new("/mock"),
+                &Path::new("/mock").join(id),
+                metadata.as_object().unwrap().clone(),
+            )
+            .unwrap();
+            for (k, v) in [
+                ("api_key", format!("sk-{id}")),
+                ("base_url", upstream_url.clone()),
+                ("auth_kind", "apikey".to_owned()),
+            ] {
+                credential.attributes.insert(k.into(), v);
+            }
+            cpa_server::testing::local(credential)
+        })
+        .collect();
+    let mut config = Config::parse("routing:\n  retry:\n    request-retry: 2\n").unwrap();
+    config.auth_dir = std::env::temp_dir().join(format!("cpa-policy-{}", uuid::Uuid::new_v4()));
+    let rt = Arc::new(cpa_server::testing::runtime(
+        config,
+        credentials,
+        Executors {
+            claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let (url, proxy) = serve(router(rt.clone())).await;
+    CodexPair {
+        url,
+        rt,
+        seen,
+        servers: vec![upstream, proxy],
+    }
+}
+
+/// A safety-policy rejection is the prompt's fault whether or not the upstream types it:
+/// the client gets a 400, the prompt is not sent to another account and the account
+/// does not cool down. Codex reports these codes in a `response.failed` event, with or
+/// without an error type.
+#[tokio::test]
+async fn a_policy_rejection_ends_the_request_without_failover_or_cooldown() {
+    const FAILED: [&str; 7] = [
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"bio_policy","message":"This content was flagged for possible biological risk."}}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"cyber_policy_violation","message":"flagged"}}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"misalignment_policy_violation","message":"blocked"}}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"content_policy_violation","message":"blocked"}}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"image_content_policy_violation","message":"blocked"}}}"#,
+        r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"code":"Bio_Policy","type":"server_error","message":"blocked"}}}"#,
+        r#"{"type":"error","error":{"code":"bio_policy","message":"blocked"},"sequence_number":7}"#,
+    ];
+    for failed in FAILED {
+        for stream in [true, false] {
+            let pair = codex_pair(failed).await;
+            let (status, body) = pair.post(stream, "hello").await;
+            assert_eq!(status, 400, "{failed} stream={stream}: {body}");
+            assert_eq!(pair.seen(), ["Bearer sk-a"], "{failed} stream={stream}");
+            assert!(pair.rt.store().cooldowns("a").is_empty(), "{failed} stream={stream}");
+        }
+    }
+}
+
+/// A server error whose message repeats the prompt, policy code and all, is not a
+/// policy rejection: the account cools down and the next one serves the request.
+#[tokio::test]
+async fn a_policy_code_echoed_in_an_error_message_is_not_a_policy_rejection() {
+    const ECHO: &str = r#"{"type":"response.failed","response":{"id":"r","status":"failed","error":{"type":"server_error","message":"upstream failed on input: {\"error\":{\"code\":\"bio_policy\",\"type\":\"invalid_request_error\"}} bio_policy"}}}"#;
+    let prompt = r#"{"error":{"code":"bio_policy","type":"invalid_request_error"}} bio_policy"#;
+    let pair = codex_pair(ECHO).await;
+    let (status, body) = pair.post(false, prompt).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("resp_b"), "{body}");
+    assert_eq!(pair.seen(), ["Bearer sk-a", "Bearer sk-b"]);
+    assert!(
+        !pair.rt.store().cooldowns("a").is_empty(),
+        "the failing account cools down"
+    );
+}

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use cpa_common::request_fault;
 use cpa_core::exec::{ExecError, ExecStream, FailureScope};
 use futures_util::StreamExt;
 use gjson::Kind;
@@ -180,24 +181,7 @@ pub(crate) fn request_fault(status: u16, body: &str) -> bool {
     {
         return false;
     }
-    const CODES: [&str; 9] = [
-        "cyber_policy",
-        "context_length_exceeded",
-        "message_too_big",
-        "string_above_max_length",
-        "invalid_prompt",
-        "invalid_value",
-        "unsupported_value",
-        "invalid_request_error",
-        "previous_response_not_found",
-    ];
-    const TYPES: [&str; 4] = [
-        "invalid_request",
-        "invalid_request_error",
-        "bad_request_error",
-        "invalid_prompt",
-    ];
-    if codes.iter().any(|c| CODES.contains(&c.as_str())) || types.iter().any(|t| TYPES.contains(&t.as_str())) {
+    if codes.iter().any(|c| request_fault::is_code(c)) || types.iter().any(|t| request_fault::is_type(t)) {
         return true;
     }
     let l = body.to_ascii_lowercase();
@@ -353,7 +337,7 @@ fn terminal_status(body: &str) -> u16 {
     let kind = lower(&gjson::get(body, "error.type"));
     let code = lower(&gjson::get(body, "error.code"));
     match () {
-        _ if code == "cyber_policy" => 400,
+        _ if request_fault::is_prompt_rejection(&code) => 400,
         _ if kind == "not_found_error" || code == "not_found" || code == "model_not_found" => 404,
         _ if kind == "authentication_error" || code == "invalid_api_key" || code == "unauthorized" => 401,
         _ if kind == "permission_error" || code == "forbidden" || code == "permission_denied" => 403,
@@ -1135,5 +1119,26 @@ mod tests {
             done.as_ptr(),
             "unchanged chunks are not copied"
         );
+    }
+
+    /// A stream failure with a policy code is a request-scoped 400 with or without an
+    /// error type; the same code inside another error's message is not.
+    #[test]
+    fn policy_stream_failures_are_request_scoped_400s() {
+        use cpa_core::exec::FailureScope;
+        for event in [
+            r#"{"type":"response.failed","response":{"error":{"code":"bio_policy","message":"flagged"}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"image_content_policy_violation"}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"Misalignment_Policy_Violation","type":"server_error"}}}"#,
+            r#"{"type":"error","error":{"code":"content_policy_violation","message":"blocked"}}"#,
+            r#"{"type":"error","code":"cyber_policy_violation"}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"invalid_prompt"}}}"#,
+        ] {
+            let (error, _) = super::terminal_failure(event, false).unwrap();
+            assert_eq!((error.status, error.scope), (400, FailureScope::Request), "{event}");
+        }
+        let echo = r#"{"type":"response.failed","response":{"error":{"type":"server_error","message":"failed on {\"error\":{\"code\":\"bio_policy\"}} bio_policy"}}}"#;
+        let (error, _) = super::terminal_failure(echo, false).unwrap();
+        assert_eq!((error.status, error.scope), (502, FailureScope::Credential));
     }
 }
