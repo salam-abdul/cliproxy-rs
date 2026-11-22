@@ -74,24 +74,6 @@ pub fn response_status(e: &ExecError) -> u16 {
     }
 }
 
-const REQUEST_FAULT_CODES: [&str; 9] = [
-    "cyber_policy",
-    "context_length_exceeded",
-    "message_too_big",
-    "string_above_max_length",
-    "invalid_prompt",
-    "invalid_value",
-    "unsupported_value",
-    "invalid_request_error",
-    "previous_response_not_found",
-];
-const REQUEST_FAULT_TYPES: [&str; 4] = [
-    "invalid_request",
-    "invalid_request_error",
-    "bad_request_error",
-    "invalid_prompt",
-];
-
 fn json_body(text: &str) -> Option<Value> {
     serde_json::from_str(text.trim()).ok()
 }
@@ -161,8 +143,8 @@ pub fn is_request_fault(status: u16, text: &str) -> bool {
         }) {
             return false;
         }
-        if any_path(body, &CODE_PATHS, |c| REQUEST_FAULT_CODES.contains(&c))
-            || any_path(body, &TYPE_PATHS, |t| REQUEST_FAULT_TYPES.contains(&t))
+        if any_path(body, &CODE_PATHS, cpa_common::request_fault::is_code)
+            || any_path(body, &TYPE_PATHS, cpa_common::request_fault::is_type)
         {
             return true;
         }
@@ -653,6 +635,25 @@ mod tests {
             r#"{"error":{"code":"model_not_found"}}"#
         )));
         assert!(!is_request_invalid(&upstream(400, "invalid_grant")));
+        // A policy code is a request fault under any status and in any error layout,
+        // with or without a type; the same code in a message or in plain text is not.
+        for body in [
+            r#"{"error":{"code":"bio_policy","message":"flagged"}}"#,
+            r#"{"code":"cyber_policy_violation"}"#,
+            r#"{"response":{"error":{"code":"Misalignment_Policy_Violation","type":"server_error"}}}"#,
+            r#"{"body":{"error":{"code":"content_policy_violation"}}}"#,
+            r#"{"error":{"code":"image_content_policy_violation"}}"#,
+        ] {
+            for status in [403, 500, 502] {
+                assert!(is_request_invalid(&upstream(status, body)), "{status} {body}");
+            }
+        }
+        for body in [
+            r#"{"error":{"type":"server_error","message":"echo: {\"error\":{\"code\":\"bio_policy\"}}"}}"#,
+            r#"Backend failed on input: {"error":{"code":"bio_policy"}}"#,
+        ] {
+            assert!(!is_request_invalid(&upstream(500, body)), "{body}");
+        }
         // A local Request error (no upstream headers) is explicit.
         assert!(is_request_invalid(&ExecError::local(
             501,

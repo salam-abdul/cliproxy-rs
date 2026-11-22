@@ -1,6 +1,9 @@
 //! Anthropic-Beta assembly for the Claude Code profile (claude_executor_request.go).
 //! The list is per request: model capability, body features and caller requests
-//! decide which managed betas appear, in Claude Code 2.1.280's wire order.
+//! decide which managed betas appear, in the wire order Go v8.0.35 measured on Claude
+//! Code 2.1.280, which its recorded captures in `testdata` pin. Go b4e7dbd2 reorders
+//! and regates them for 2.1.321; that order is not ported. The model gates below
+//! follow the 2.1.321 catalog.
 
 use std::collections::HashSet;
 
@@ -105,14 +108,34 @@ fn sonnet5(m: &str) -> bool {
     let m = canonical_model(m);
     !sonnet55(&m) && (m == "claude-sonnet-5" || m.starts_with("claude-sonnet-5-") || m.starts_with("claude-sonnet-5["))
 }
+/// `m` is one of `families` itself, a dated or other `-` variant, or a `[...]` variant.
+fn model_family(m: &str, families: &[&str]) -> bool {
+    let m = canonical_model(m);
+    families.iter().any(|f| {
+        m.strip_prefix(f)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-') || rest.starts_with('['))
+    })
+}
+fn fable52(m: &str) -> bool {
+    model_family(m, &["claude-fable-5-2", "claude-fable-5.2"])
+}
+fn haiku55(m: &str) -> bool {
+    model_family(m, &["claude-haiku-5-5", "claude-haiku-5.5"])
+}
+/// Models Claude Code sends `thinking.display=updates` for; 2.1.321 added Fable 5.2
+/// and Haiku 5.5.
 pub(crate) fn progress_display(m: &str) -> bool {
-    is_opus55(m) || is_fable51(m) || sonnet5(m) || sonnet55(m)
+    is_opus55(m) || is_fable51(m) || fable52(m) || sonnet5(m) || sonnet55(m) || haiku55(m)
 }
+/// The 2.1.321 catalog's `per_turn_effort` models.
 fn per_turn_effort(m: &str) -> bool {
-    is_opus55(m) || canonical_model(m).starts_with("claude-fable-5-1")
+    is_opus55(m) || canonical_model(m).starts_with("claude-fable-5-1") || fable52(m) || sonnet55(m) || haiku55(m)
 }
+/// The 2.1.321 catalog's `per_turn_timing` models: the per-turn effort models but
+/// Haiku 5.5, and Mythos 5.1 and 5.2, which have timing without progress display.
 fn per_turn_timing_model(m: &str) -> bool {
-    per_turn_effort(m) || canonical_model(m).starts_with("claude-mythos-5-1")
+    !haiku55(m)
+        && (per_turn_effort(m) || model_family(m, &["claude-mythos-5-1", "claude-mythos-5-2", "claude-mythos-5.2"]))
 }
 
 fn include_per_turn_control(body: &str, r: &Requested) -> bool {
@@ -154,7 +177,9 @@ pub(crate) fn supports_effort(body: &str) -> bool {
     if signals::probe_or_helper(body) {
         return false;
     }
-    if model(body).trim().to_lowercase().contains("haiku") {
+    // Haiku 5.5 is the first Haiku Claude Code sends effort for (2.1.321).
+    let m = model(body);
+    if m.trim().to_lowercase().contains("haiku") && !haiku55(&m) {
         return false;
     }
     rawjson::string(body, "thinking.type").trim().to_lowercase() != "disabled"
@@ -410,5 +435,107 @@ mod tests {
             with_advisor("a,effort-2025-11-24,b"),
             "a,advisor-tool-2026-03-01,effort-2025-11-24,b"
         );
+    }
+
+    /// Claude Code 2.1.321 added Fable 5.2, Sonnet 5.5 and Haiku 5.5 to its per-turn
+    /// control and Fable 5.2 and Haiku 5.5 to its progress display; Mythos 5.2 gets
+    /// per-turn timing only, and Haiku 5.5 no timing.
+    #[test]
+    fn claude_code_2_1_321_catalog_models_get_their_gated_betas() {
+        let timed = |m: &str| {
+            include_per_turn_timing(
+                &format!(r#"{{"model":"{m}","output_config":{{"timing":{{"type":"enabled"}}}}}}"#),
+                &Requested::new(),
+            )
+        };
+        for (model, want) in [
+            ("claude-fable-5-2", true),
+            ("claude-fable-5-2[1m]", true),
+            ("claude-fable-5-1", true),
+            ("claude-opus-5-5", true),
+            ("claude-sonnet-5-5", true),
+            ("claude-mythos-5-2", true),
+            ("claude-mythos-5.2", true),
+            ("claude-mythos-5-2[1m]", true),
+            ("claude-mythos-5-20", false),
+            ("claude-haiku-5-5", false),
+            ("claude-fable-5", false),
+        ] {
+            assert_eq!(timed(model), want, "timing {model}");
+        }
+        let control = |m: &str| include_per_turn_control(&format!(r#"{{"model":"{m}"}}"#), &Requested::new());
+        for (model, want) in [
+            ("claude-fable-5-2", true),
+            ("claude-sonnet-5-5", true),
+            ("claude-haiku-5-5", true),
+            ("claude-fable-5", false),
+            ("claude-sonnet-4-6", false),
+        ] {
+            assert_eq!(control(model), want, "per-turn control {model}");
+        }
+        for (model, want) in [
+            ("claude-fable-5-2", true),
+            ("claude-fable-5.2", true),
+            ("claude-haiku-5-5", true),
+            ("claude-fable-5-20", false),
+            ("claude-haiku-4-5", false),
+            ("claude-mythos-5-2", false),
+        ] {
+            assert_eq!(progress_display(model), want, "progress display {model}");
+        }
+        assert!(supports_effort(r#"{"model":"claude-haiku-5-5"}"#));
+        assert!(!supports_effort(r#"{"model":"claude-haiku-4-5"}"#));
+    }
+
+    /// For the models 2.1.321 added to progress display, the cloak fills
+    /// `thinking.display: updates` and the assembled list carries per-turn control, the
+    /// clear-at beta, thinking binding, effort and display updates in place of
+    /// redact-thinking. Fable 5, outside those gates, gets none of them.
+    #[test]
+    fn claude_code_2_1_321_progress_display_models_shape_body_and_betas() {
+        let cloaked = |m: &str| {
+            let body = super::super::rules::cloak_thinking_display(format!(
+                r#"{{"model":"{m}","thinking":{{"type":"adaptive"}}}}"#
+            ));
+            (
+                rawjson::string(&body, "thinking.display"),
+                cli(&body, &Requested::new(), true),
+            )
+        };
+        let progress = [
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+            "interleaved-thinking-2025-05-14",
+            "thinking-token-count-2026-05-13",
+            "context-management-2025-06-27",
+            "prompt-caching-scope-2026-01-05",
+            "mid-conversation-system-2026-04-07",
+            "per-turn-control-2026-07-01",
+            "mid-conversation-tool-changes-2026-07-01",
+            "mid-conversation-system-clear-at-2026-08-21",
+            "effort-2025-11-24",
+            "thinking-binding-controls-2026-08-01",
+            "thinking-display-updates-2026-08-18",
+            "extended-cache-ttl-2025-04-11",
+        ]
+        .join(",");
+        for model in ["claude-fable-5-2", "claude-haiku-5-5", "claude-sonnet-5-5"] {
+            assert_eq!(cloaked(model), ("updates".to_owned(), progress.clone()), "{model}");
+        }
+        let plain = [
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+            "interleaved-thinking-2025-05-14",
+            "redact-thinking-2026-02-12",
+            "thinking-token-count-2026-05-13",
+            "context-management-2025-06-27",
+            "prompt-caching-scope-2026-01-05",
+            "mid-conversation-system-2026-04-07",
+            "mid-conversation-tool-changes-2026-07-01",
+            "effort-2025-11-24",
+            "extended-cache-ttl-2025-04-11",
+        ]
+        .join(",");
+        assert_eq!(cloaked("claude-fable-5"), (String::new(), plain));
     }
 }

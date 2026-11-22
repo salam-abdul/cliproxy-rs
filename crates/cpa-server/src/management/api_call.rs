@@ -265,21 +265,9 @@ pub(crate) async fn api_call(State(state): State<Arc<Management>>, body: Bytes) 
                 .find(|c| credentials::auth_index(c) == auth_index)
         })
         .flatten();
-    // Go refreshes antigravity, meta and xai tokens here when due. A failed refresh
-    // keeps the stored token.
     let credential = match credential {
-        Some(c)
-            if [
-                cpa_exec::antigravity::PROVIDER,
-                cpa_exec::meta::PROVIDER,
-                cpa_exec::xai::PROVIDER,
-            ]
-            .contains(&c.provider.as_str())
-                && state.rt.executors.needs_prepare(&c, &state.rt.config()) =>
-        {
-            Some(state.rt.refresh_credential(&c.id).await.unwrap_or(c))
-        }
-        other => other,
+        Some(c) => Some(state.rt.api_call_credential(c).await),
+        None => None,
     };
     let token = credential.as_deref().map(token_for).unwrap_or_default();
     let token_error = || {

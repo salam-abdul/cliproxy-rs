@@ -89,6 +89,7 @@ fn status_error_scoped(status: u16, scope: FailureScope, mut body: Bytes) -> Exe
         addon: None,
         after_accept: None,
         held: None,
+        refusal: None,
     }
 }
 
@@ -161,6 +162,7 @@ pub(crate) async fn into_response(res: wreq::Response) -> Result<ExecResponse, E
             addon: None,
             after_accept: None,
             held: None,
+            refusal: None,
         });
     }
     let is_sse = headers

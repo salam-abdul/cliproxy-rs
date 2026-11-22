@@ -451,7 +451,10 @@ pub(crate) fn build(p: &Plan<'_>) -> GoHeader {
         h.set("X-Stainless-Arch", &d.arch);
     };
     match device_profile {
-        Some(d) => set_profile(&mut h, &d),
+        Some(mut d) => {
+            d.user_agent = profile::with_request_fields(&d.user_agent, header(p.incoming, "user-agent"));
+            set_profile(&mut h, &d);
+        }
         None if stabilize => set_profile(&mut h, &Profile::default_for(p.settings)),
         None => legacy_device_headers(&mut h, p),
     }
@@ -494,7 +497,7 @@ fn legacy_device_headers(h: &mut GoHeader, p: &Plan<'_>) {
             .trim();
         // A newer native release keeps its own SDK and runtime versions, so they match
         // its User-Agent; otherwise Go's baseline values.
-        let newer = profile::newer_than_baseline(ua, p.settings);
+        let newer = profile::forwards_own_versions(ua, p.settings);
         ensure_valid("X-Stainless-Runtime-Version", &d.runtime_version, &|v| {
             v == d.runtime_version || (newer && profile::runtime_version_ok(v))
         });
@@ -624,7 +627,7 @@ mod tests {
 
     #[test]
     fn harness_unconfirmed_oauth_messages_headers_match_go_capture() {
-        let settings = Settings::default();
+        let settings = super::super::tests::go_settings();
         let incoming: HeaderMap = [
             ("authorization", "Bearer fixture-client-key"),
             ("content-type", "application/json"),
@@ -751,11 +754,11 @@ mod version_tests {
         );
         // The baseline release itself keeps Go's baseline SDK and runtime versions.
         assert_eq!(
-            sent("claude-cli/2.1.280 (external, cli)"),
+            sent("claude-cli/2.1.321 (external, cli)"),
             (
-                "claude-cli/2.1.280 (external, cli)".into(),
-                "0.112.1".into(),
-                "v26.3.0".into()
+                "claude-cli/2.1.321 (external, cli)".into(),
+                "0.128.0".into(),
+                "v26.12.1".into()
             )
         );
         // Another major, or an older release, gets the whole baseline identity.
@@ -763,12 +766,75 @@ mod version_tests {
             assert_eq!(
                 sent(refused),
                 (
-                    "claude-cli/2.1.280 (external, cli)".into(),
-                    "0.112.1".into(),
-                    "v26.3.0".into()
+                    "claude-cli/2.1.321 (external, cli)".into(),
+                    "0.128.0".into(),
+                    "v26.12.1".into()
                 ),
                 "{refused}"
             );
         }
+    }
+
+    /// A stabilized profile stores only the caller's stable identity; the request fields
+    /// of each request's own User-Agent (`workload/cron`) still go upstream with it, and
+    /// never with a later request.
+    #[test]
+    fn stabilized_profiles_keep_this_requests_user_agent_fields() {
+        let mut settings = Settings::default();
+        settings.header_defaults.stabilize_device_profile = true;
+        let base = format!(
+            "{} (external, cli, agent-sdk/0.2.133)",
+            profile::BASELINE.user_agent.split(' ').next().unwrap()
+        );
+        let cron = base.replace(
+            "cli, agent-sdk/0.2.133)",
+            "cli, workload/cron, agent-sdk/0.2.133, future-feature/value)",
+        );
+        let sent = |user_agent: &str| {
+            let incoming: HeaderMap = [
+                ("user-agent", user_agent),
+                ("x-stainless-package-version", profile::BASELINE.package_version),
+                ("x-stainless-runtime-version", profile::BASELINE.runtime_version),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap()))
+            .collect();
+            let device_profile = profile::resolve("request-fields", "", &incoming, &settings);
+            let attributes = Default::default();
+            let h = build(&Plan {
+                api_key: "sk-ant-oat01-FAKE",
+                bearer: true,
+                first_party: true,
+                count_tokens: false,
+                stream: false,
+                extra_betas: &[],
+                body: r#"{"model":"claude-sonnet-4-6"}"#,
+                incoming: &incoming,
+                confirmed: true,
+                helper: false,
+                cli_fingerprint: true,
+                use_oauth_betas: true,
+                session_id: "dd01238e-cdb5-5572-8f27-a28d98fe9075",
+                settings: &settings,
+                attributes: &attributes,
+                cpa_session: "",
+                device_profile: Some(device_profile.clone()),
+                cached_session_id: "",
+            });
+            let (pairs, _) = wire(h, true, false);
+            let ua = pairs.iter().find(|(k, _)| k == "User-Agent").unwrap().1.clone();
+            (device_profile.user_agent, ua)
+        };
+        assert_eq!(
+            sent(&cron),
+            (
+                base.clone(),
+                base.replace(
+                    "agent-sdk/0.2.133)",
+                    "agent-sdk/0.2.133, workload/cron, future-feature/value)"
+                )
+            )
+        );
+        assert_eq!(sent(&base), (base.clone(), base.clone()));
     }
 }

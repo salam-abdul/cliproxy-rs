@@ -62,6 +62,14 @@ The listener is exposed when `server.host` is neither a loopback IP nor `localho
 | `auth-dir` | The folder for account sign-in files, `~/.cli-proxy-api` by default. `~` is expanded. The server watches it, so a file added, edited or removed there takes effect without a restart. |
 | `providers.codex.chatgpt-keep-alive` | `false` by default. `true` keeps up to 2 idle connections to `chatgpt.com` per proxy for 90 seconds. Changes apply from the next request. |
 
+A failed token refresh is retried with backoff: from 1 minute doubling to 30 minutes after `invalid_grant`, and 5 minutes after any other failure.
+
+Claude, Codex and Antigravity accounts can have their refresh token refused for good. That happens when the token endpoint answers that the refresh token expired (Anthropic's "Refresh token expired"), was reused, invalidated or revoked, when a Codex refresh gets `invalid_grant`, and when any of the three answers `invalid_grant` to the refresh that follows an upstream 401 for the same access token. Other providers do not report the reason, so their failures keep the backoff above.
+
+From then on the server never refreshes those tokens again on its own. The account keeps serving requests while its access token is valid, and leaves rotation when that token expires or an upstream answers it with a 401. An account whose access token expiry cannot be read leaves rotation at once.
+
+New tokens bring the account back: a new sign-in, an upload, an edit of the file's token fields, or a successful refresh that an operator starts from the management API, which is the only refresh that sends a refused token again. Other edits leave it as it is. The refusal is kept in memory, so after a restart the server tries the refused token once more.
+
 A Codex account sign-in serves Responses WebSocket clients (`GET /v1/responses`, for example Codex CLI with `supports_websockets = true`) over its own upstream socket, so each continuation sends only the new input instead of the whole transcript. Set `"websockets": false` in the sign-in file to use HTTP instead. Codex API keys use HTTP unless their entry sets `websockets: true`.
 
 ## api-keys
@@ -98,6 +106,8 @@ These settings control translating-proxy account selection. Native CONNECT has [
 | `cooldown.max-trusted-cooldown` | Trust a provider reset for at most this duration (`"1h"` by default, at least 10 seconds), then let the next ordinary request check it. Repeated rejection doubles the rest up to the stated reset. `0` trusts the full reset; unreadable values use the default. |
 
 A Claude stream whose first event is an upstream error fails over before the client receives any of it, as the same status returned as an HTTP error would: the status is the one Anthropic answers with for the event's `error.type`, such as 529 for `overloaded_error`, 429 for `rate_limit_error` and 500 for `api_error`, and the account cools down as it would for that status. Such an account is tried once per request, by local and Home dispatch alike. When no other account remains, the client receives the last account's stream as it arrived: HTTP 200 with the error event. An `invalid_request_error`, an unknown error type, an error after the stream's first event, and any error on a fast request end the request on the account that sent it.
+
+An upstream error whose `code` is a safety-policy rejection (`bio_policy`, `cyber_policy`, `cyber_policy_violation`, `misalignment_policy_violation`, `content_policy_violation` or `image_content_policy_violation`) ends the request on the account that sent it, with or without an error `type`: no other account is tried and the account does not cool down. A 402 or 429 answer and a 401 authentication error keep their own handling. A Codex stream that fails with one of these codes or `invalid_prompt` before any of it reached the client answers 400, or the status the failure event states; once the client has part of the stream, the error arrives inside that HTTP 200 stream. The match reads the error's `code` field, never its message, which can repeat the prompt.
 
 When the proxy collects a streamed upstream answer for a non-stream request, it holds at most 256 MiB of it; a larger answer ends the request with a 500, without trying another account or cooling this one. Providers that read a non-stream answer whole themselves are not under this cap: Claude, Codex, xAI, Meta and Devin, and answers translated between formats.
 

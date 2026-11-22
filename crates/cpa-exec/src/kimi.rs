@@ -462,6 +462,7 @@ async fn execute_chat(
         model: &req.model,
         original_request: original(&req),
         translated_request: &translated,
+        portable: false,
     };
     let body = if req.stream {
         let (tapped, usage) = defer_usage(
@@ -776,6 +777,7 @@ async fn execute_responses(
         model: &req.model,
         original_request: original(&req),
         translated_request: &translated,
+        portable: false,
     };
     let original_request = original(&req);
     let mut bridge = apply_patch_responses::State::new(req.source_format, original_request, original_request);

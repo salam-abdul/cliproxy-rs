@@ -385,6 +385,7 @@ pub(crate) fn translate_non_stream(
                 model: &req.model,
                 original_request: original_request(req),
                 translated_request: translated,
+                portable: req.portable_output,
             },
             data,
         )
@@ -711,6 +712,7 @@ impl Output {
             model: &req.model,
             original_request: original_request(req),
             translated_request: translated,
+            portable: req.portable_output,
         };
         let translator = cpa_translate::stream_with(client, upstream, &ctx, options)
             .unwrap_or_else(|| Box::new(Unregistered(options)));

@@ -286,6 +286,7 @@ pub(crate) fn request(fixture: &Value, principal: &str) -> ExecRequest {
         }
     }
     ExecRequest {
+        portable_output: false,
         operation: if r["count"].as_bool() == Some(true) {
             Operation::CountTokens
         } else {

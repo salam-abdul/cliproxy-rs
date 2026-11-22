@@ -1,6 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { summarizeHistory } from "./traffic.ts";
+import {
+  fallbackNote,
+  isFailure,
+  outcomeLabel,
+  summarizeHistory,
+} from "./traffic.ts";
+
+test("a served fallback is labelled with its model and is not a failure", () => {
+  const served = { outcome: "fallback_served", fallbackModel: "local-test" };
+  assert.equal(outcomeLabel(served), "Fell back to local-test");
+  assert.equal(isFailure(served), false);
+  assert.equal(fallbackNote(served), undefined);
+});
+
+test("a failed fallback is noted on the rejected request", () => {
+  const rejected = {
+    outcome: "quota_unavailable",
+    fallbackModel: "local-test",
+    fallbackFailure: "unknown_model",
+  };
+  assert.equal(isFailure(rejected), true);
+  assert.equal(outcomeLabel(rejected), "No account has available quota");
+  assert.equal(
+    fallbackNote(rejected),
+    "Fallback to local-test failed: no provider serves it",
+  );
+  assert.equal(fallbackNote({ outcome: "quota_unavailable" }), undefined);
+});
 
 const model = (extra: Record<string, unknown> = {}) => ({
   model: "claude-sonnet-4-6",

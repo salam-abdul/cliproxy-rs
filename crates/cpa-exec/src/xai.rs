@@ -321,6 +321,7 @@ fn translate_non_stream(req: &ExecRequest, p: &Prepared, to: Format, data: &[u8]
                 model: &req.model,
                 original_request: &p.original_payload,
                 translated_request: &p.body,
+                portable: false,
             },
             data,
         )
@@ -836,6 +837,7 @@ impl Pipeline {
                 model: &req.model,
                 original_request: &p.original_payload,
                 translated_request: &p.body,
+                portable: false,
             }),
             None => Box::new(Identity),
         };

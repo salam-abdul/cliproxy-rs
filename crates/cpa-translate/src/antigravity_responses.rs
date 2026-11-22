@@ -323,6 +323,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
         model: ctx.model,
         original_request: &original,
         translated_request: &translated,
+        portable: false,
     };
     crate::gemini_responses_response::non_stream(&inner, &body)
 }

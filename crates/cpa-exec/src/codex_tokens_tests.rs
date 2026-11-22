@@ -20,6 +20,7 @@ fn request(v: &Value) -> ExecRequest {
     }
     let body = Bytes::from(v["in"].as_str().unwrap().to_owned());
     ExecRequest {
+        portable_output: false,
         operation: Operation::CountTokens,
         source_format: source,
         response_format: Format::parse(v["response"].as_str().unwrap()).unwrap(),

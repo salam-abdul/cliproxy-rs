@@ -53,6 +53,9 @@ pub struct Call {
     /// A media route (Go's `openai-image` / `openai-video` handler types), `None` for
     /// inference routes.
     pub media: Option<Arc<Media>>,
+    /// The client will replay the response to another provider
+    /// (`ExecRequest::portable_output`).
+    pub portable_output: bool,
 }
 
 /// How a media route runs through [`run`]: which executor operation serves it, and the
@@ -372,6 +375,13 @@ const IMAGE_ONLY: [&str; 8] = [
     "grok-imagine-image-quality",
     "grok-imagine-image-2.0",
 ];
+
+/// The providers `call`'s model resolves to, in the order [`run`] would try them.
+pub(crate) fn providers(rt: &Runtime, call: &Call) -> Result<Vec<String>, Failure> {
+    route(rt, &rt.registry(), call)
+        .map(|(providers, _)| providers)
+        .map_err(|e| e.failure)
+}
 
 /// Go `getRequestDetails`: resolve `auto`, find the providers, keep the suffix.
 fn route(rt: &Runtime, registry: &Registry, call: &Call) -> Result<(Vec<String>, String), RunError> {
@@ -967,6 +977,7 @@ async fn run_attempts(
         ..Selection::default()
     };
     let request = ExecRequest {
+        portable_output: call.portable_output,
         operation: call.operation,
         source_format: call.entry,
         response_format: call.response,
@@ -2740,6 +2751,7 @@ mod tests {
     #[test]
     fn nonstream_keepalive_only_for_nonstream_generate() {
         let call = |operation, stream| Call {
+            portable_output: false,
             entry: Format::Claude,
             response: Format::Claude,
             operation,
@@ -2798,6 +2810,7 @@ mod tests {
         .unwrap();
         let credential = cpa_core::config::credentials::from_config(&cfg).remove(0);
         let request = ExecRequest {
+            portable_output: false,
             operation: Operation::Generate,
             source_format: Format::OpenAI,
             response_format: Format::OpenAI,
@@ -3062,6 +3075,7 @@ mod tests {
     #[tokio::test]
     async fn a_buffered_stream_error_after_an_event_is_terminal() {
         let call = Call {
+            portable_output: false,
             entry: Format::Claude,
             response: Format::Claude,
             operation: Operation::Generate,
