@@ -38,6 +38,10 @@ pub(super) struct Inner {
     /// Last revision handed out. Revisions are never reused.
     pub(super) generation: u64,
     pub(super) versions: HashMap<String, Version>,
+    /// The version of each credential whose refresh token was refused for good when it
+    /// was refused ([`CredentialStore::refuse_tokens`]). Selection and refresh skip the
+    /// credential while that version is current.
+    pub(super) refused: HashMap<String, Version>,
     /// What selection reads from each stored revision, parsed when it is stored.
     pub(super) profiles: HashMap<String, Profile>,
     /// Bumped on every reconcile and patch, including pure removals.
@@ -51,6 +55,15 @@ impl Inner {
             Some(profile) if profile.revision == c.revision => std::borrow::Cow::Borrowed(profile),
             _ => std::borrow::Cow::Owned(Profile::of(c)),
         }
+    }
+
+    /// Whether `id` still holds the tokens whose refresh was refused for good. A new
+    /// sign-in, an upload or any edit of a token field advances the version's
+    /// credentials, and deleting and re-adding the file its registration.
+    pub(super) fn refused(&self, id: &str) -> bool {
+        self.refused
+            .get(id)
+            .is_some_and(|refused| self.versions.get(id) == Some(refused))
     }
 }
 
@@ -88,6 +101,7 @@ impl CredentialStore {
             creds: Vec::new(),
             generation: 0,
             versions: HashMap::new(),
+            refused: HashMap::new(),
             profiles: HashMap::new(),
             epoch: 0,
         };
@@ -433,6 +447,7 @@ impl CredentialStore {
             .collect();
         next.extend(runtime);
         inner.versions.retain(|id, _| next.iter().any(|c| &c.id == id));
+        inner.refused.retain(|id, _| next.iter().any(|c| &c.id == id));
         inner.profiles.retain(|id, _| next.iter().any(|c| &c.id == id));
         inner.creds = next;
         inner.epoch += 1;
@@ -479,6 +494,7 @@ impl CredentialStore {
             return;
         }
         inner.versions.remove(id);
+        inner.refused.remove(id);
         inner.profiles.remove(id);
         inner.epoch += 1;
         self.changed.send_replace(());

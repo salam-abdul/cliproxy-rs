@@ -1191,3 +1191,199 @@ async fn a_drain_ends_a_remote_stream_the_client_stopped_reading() {
     drop(stream);
     assert_eq!(observed.lock().unwrap().len(), 1);
 }
+
+/// Claude account files in a private auth-dir, each holding refresh token `fake-rt-<id>`
+/// and an access token that has expired, under a runtime whose token endpoint answers
+/// each refresh token with `answer`. Returns the refresh tokens sent, in order.
+async fn claude_accounts(
+    ids: &[&str],
+    answer: fn(&str) -> (u16, &'static str),
+) -> (Arc<Runtime>, std::path::PathBuf, Arc<Mutex<Vec<String>>>) {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post({
+            let sent = sent.clone();
+            move |body: axum::body::Bytes| async move {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let token = body["refresh_token"].as_str().unwrap().to_owned();
+                let (status, answer) = answer(&token);
+                sent.lock().unwrap().push(token);
+                (axum::http::StatusCode::from_u16(status).unwrap(), answer)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let cfg = crate::testing::config("");
+    std::fs::create_dir_all(&cfg.auth_dir).unwrap();
+    for id in ids {
+        write_claude_account(
+            &cfg.auth_dir,
+            id,
+            &format!("sk-ant-oat-{id}-fake"),
+            &format!("fake-rt-{id}"),
+        );
+    }
+    let (token, profile) = (format!("{base}/token"), format!("{base}/profile"));
+    let oauth = cpa_exec::oauth::OAuth::with_endpoints(wreq::Client::new(), &token, &profile, &profile);
+    let rt = Arc::new(crate::testing::runtime(
+        cfg.clone(),
+        cpa_core::config::credentials::from_auth_dir(&cfg)
+            .into_iter()
+            .map(crate::testing::local)
+            .collect(),
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1")
+                .unwrap()
+                .with_oauth(oauth),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    (rt, cfg.auth_dir.clone(), sent)
+}
+
+fn write_claude_account(dir: &Path, id: &str, access: &str, refresh: &str) {
+    let file = serde_json::json!({"type": "claude", "access_token": access, "refresh_token": refresh,
+        "expired": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+        "account_uuid": format!("acct-{id}"), "claude_device_ids": ["b".repeat(64)]});
+    std::fs::write(dir.join(format!("{id}.json")), file.to_string()).unwrap();
+}
+
+/// What the watcher does after a file change.
+fn reload_auth_dir(rt: &Runtime) {
+    rt.store.reconcile(
+        cpa_core::config::credentials::from_auth_dir(&rt.config())
+            .into_iter()
+            .map(crate::testing::local)
+            .collect(),
+    );
+}
+
+fn pinned(id: &str) -> Selection {
+    Selection {
+        pinned: Some(id.into()),
+        ..sel("claude")
+    }
+}
+
+const REFRESHED: &str =
+    r#"{"access_token":"sk-ant-oat-new-fake","expires_in":36000,"refresh_token":"fake-rt-rotated"}"#;
+
+/// Anthropic's answer for an expired refresh token takes that account, and only that
+/// account, out of selection and refresh. A file edit that keeps its tokens does not
+/// bring it back; new tokens on disk do.
+#[tokio::test]
+async fn a_refresh_token_refused_for_good_leaves_rotation_until_its_tokens_change() {
+    let (rt, dir, sent) = claude_accounts(&["gone", "ok"], |token| match token {
+        "fake-rt-gone" => (
+            400,
+            r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#,
+        ),
+        _ => (200, REFRESHED),
+    })
+    .await;
+    let cfg = rt.config();
+    let sends = |token: &str| sent.lock().unwrap().iter().filter(|t| *t == token).count();
+    assert!(
+        rt.store.select(pinned("gone.json")).is_some(),
+        "selectable before the refusal"
+    );
+    let error = rt.prepare_credential("gone.json", &cfg, None).await.unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(sends("fake-rt-gone"), 1);
+    assert!(rt.store.select(pinned("gone.json")).is_none(), "still selected");
+    for _ in 0..4 {
+        assert_eq!(rt.store.select(sel("claude")).unwrap().credential.id, "ok.json");
+    }
+    let gone = rt.store.get("gone.json").unwrap();
+    assert!(rt.store.blocked(&gone, ""));
+    assert!(!rt.store.blocked(&rt.store.get("ok.json").unwrap(), ""));
+    assert!(
+        rt.lease_credential("gone.json", sel("claude"), &cfg, |c| c.clone())
+            .await
+            .is_none()
+    );
+    assert!(rt.prepare_credential("gone.json", &cfg, None).await.is_err());
+    assert!(rt.refresh_after_unauthorized(&gone, &cfg).await.is_none());
+    assert_eq!(sends("fake-rt-gone"), 1, "a refused refresh token was sent again");
+    // The refresh loop refreshes the other account and leaves this one alone.
+    rt.start_auto_refresh();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while rt.store.get("ok.json").unwrap().str("access_token") != Some("sk-ant-oat-new-fake") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the other account was refreshed");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    rt.stop_auto_refresh();
+    assert_eq!(sends("fake-rt-gone"), 1, "the refresh loop retried a refused token");
+    assert!(
+        rt.refresh_state.lock().unwrap().retry_at(&gone).is_none(),
+        "the refresh loop scheduled a refused credential"
+    );
+    // An edit that keeps the tokens keeps the account out.
+    let mut file: Value = serde_json::from_slice(&std::fs::read(dir.join("gone.json")).unwrap()).unwrap();
+    file["priority"] = 5.into();
+    std::fs::write(dir.join("gone.json"), file.to_string()).unwrap();
+    reload_auth_dir(&rt);
+    assert_eq!(rt.store.get("gone.json").unwrap().metadata["priority"], 5);
+    assert!(
+        rt.store.select(pinned("gone.json")).is_none(),
+        "an edit without new tokens restored it"
+    );
+    // A new sign-in writes new tokens.
+    write_claude_account(&dir, "gone", "sk-ant-oat-signed-in-fake", "fake-rt-signed-in");
+    reload_auth_dir(&rt);
+    assert!(
+        rt.store.select(pinned("gone.json")).is_some(),
+        "new tokens did not restore it"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A transient refresh failure, and an `invalid_grant` while the access token was never
+/// refused, keep the account in rotation for the refresh loop's backoff to retry.
+#[tokio::test]
+async fn transient_and_unconfirmed_refresh_failures_keep_the_account_in_rotation() {
+    let (rt, dir, sent) = claude_accounts(&["down", "grant"], |token| match token {
+        "fake-rt-down" => (503, "{}"),
+        _ => (400, r#"{"error":"invalid_grant"}"#),
+    })
+    .await;
+    let cfg = rt.config();
+    for id in ["down.json", "grant.json"] {
+        assert!(rt.prepare_credential(id, &cfg, None).await.is_err(), "{id}");
+        assert!(rt.store.select(pinned(id)).is_some(), "{id} left rotation");
+        assert!(!rt.store.blocked(&rt.store.get(id).unwrap(), ""), "{id}");
+    }
+    assert!(rt.prepare_credential("grant.json", &cfg, None).await.is_err());
+    let sends = |token: &str| sent.lock().unwrap().iter().filter(|t| *t == token).count();
+    assert_eq!(sends("fake-rt-down"), 3, "server errors are retried");
+    assert_eq!(sends("fake-rt-grant"), 2, "the retry was not sent");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `invalid_grant` for the refresh after an upstream 401 means neither token works: the
+/// account leaves rotation and a second 401 sends nothing. A management refresh still
+/// tries once more.
+#[tokio::test]
+async fn an_invalid_grant_after_an_upstream_401_leaves_rotation() {
+    let (rt, dir, sent) = claude_accounts(&["revoked", "ok"], |_| (400, r#"{"error":"invalid_grant"}"#)).await;
+    let cfg = rt.config();
+    let revoked = rt.store.get("revoked.json").unwrap();
+    assert!(rt.refresh_after_unauthorized(&revoked, &cfg).await.is_none());
+    assert!(rt.store.select(pinned("revoked.json")).is_none(), "still selected");
+    assert!(rt.store.select(pinned("ok.json")).is_some());
+    assert!(rt.refresh_after_unauthorized(&revoked, &cfg).await.is_none());
+    assert_eq!(sent.lock().unwrap().len(), 1, "a second 401 sent the refused token");
+    assert!(rt.refresh_credential("revoked.json").await.is_err());
+    assert_eq!(sent.lock().unwrap().len(), 2, "a management refresh was not sent");
+    assert!(rt.store.select(pinned("revoked.json")).is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}

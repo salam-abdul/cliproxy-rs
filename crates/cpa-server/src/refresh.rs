@@ -79,6 +79,29 @@ pub(crate) fn invalid_grant(error: &ExecError) -> bool {
         .contains("invalid_grant")
 }
 
+/// Whether a failed refresh of `c` is a definite answer that its refresh token will never
+/// work again, so the credential leaves rotation until its tokens change. `confirmed`
+/// means an upstream just refused the access token this refresh started from, so
+/// neither token works. Go `isTerminalRefreshError` and `hasUnauthorizedAuthFailure`:
+/// an expired, reused, invalidated or revoked refresh token is terminal; `invalid_grant`
+/// is terminal for Codex, and for other providers only once `confirmed`, since Go keeps
+/// retrying a Claude `invalid_grant` while its access token may still work. Go's
+/// `invalid_client` is left out: Claude and Codex send one client ID for every account.
+pub(crate) fn refused_for_good(c: &Credential, error: &ExecError, confirmed: bool) -> bool {
+    const TERMINAL: &[&str] = &[
+        "refresh_token_expired",
+        "refresh_token_reused",
+        "refresh_token_invalidated",
+        "token_revoked",
+    ];
+    if !matches!(error.status, 400 | 401) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&error.body).to_ascii_lowercase();
+    TERMINAL.iter().any(|code| text.contains(code))
+        || text.contains("invalid_grant") && (confirmed || c.provider.trim().eq_ignore_ascii_case("codex"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +145,45 @@ mod tests {
         assert!(!s.reserve(&c, t), "disabled credentials never refresh");
         s.reconcile(&[]);
         assert!(s.entries.is_empty(), "deletion drops refresh state");
+    }
+
+    #[test]
+    fn only_a_definite_refusal_ends_refreshes() {
+        let credential = |provider: &str| {
+            Credential::from_file(
+                Path::new("/mock"),
+                Path::new("/mock/a"),
+                serde_json::from_str(&format!(r#"{{"type":"{provider}"}}"#)).unwrap(),
+            )
+            .unwrap()
+        };
+        let (claude, codex) = (credential("claude"), credential("codex"));
+        let error = |status, text: &str| ExecError::local(status, FailureScope::Credential, text);
+        let expired = error(400, "Claude OAuth acquisition failed: refresh_token_expired");
+        let grant = error(400, "Claude OAuth acquisition failed: invalid_grant");
+        let codex_grant = error(
+            401,
+            "token refresh failed after 3 attempts: token refresh failed with status 400: invalid_grant",
+        );
+        let reused = error(401, "token refresh failed with status 400: refresh_token_reused");
+        assert!(refused_for_good(&claude, &expired, false));
+        assert!(
+            !refused_for_good(&claude, &grant, false),
+            "an unconfirmed Claude invalid_grant"
+        );
+        assert!(refused_for_good(&claude, &grant, true));
+        assert!(refused_for_good(&codex, &codex_grant, false));
+        assert!(refused_for_good(&codex, &reused, false));
+        for transient in [
+            error(502, "Claude OAuth acquisition failed"),
+            error(503, "home refresh temporarily unavailable"),
+            error(429, "Claude refresh temporarily blocked"),
+            error(400, "Claude OAuth acquisition failed"),
+            error(400, "Claude OAuth acquisition failed: invalid_client"),
+            error(502, "token refresh failed with status 503: invalid_grant"),
+        ] {
+            assert!(!refused_for_good(&claude, &transient, true), "{transient:?}");
+            assert!(!refused_for_good(&codex, &transient, true), "{transient:?}");
+        }
     }
 }

@@ -104,6 +104,25 @@ impl CredentialStore {
         ))
     }
 
+    /// Records that the refresh token of `id` at `version` was refused for good, unless
+    /// the store has since replaced, removed or disabled it. Checked and recorded under
+    /// the write lock, so tokens that replaced the refused ones are never blocked.
+    pub(super) fn refuse_tokens(&self, id: &str, version: Version) -> bool {
+        let mut inner = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        let live = inner.creds.iter().any(|c| c.id == id && !c.disabled);
+        if !live || inner.versions.get(id) != Some(&version) {
+            return false;
+        }
+        inner.refused.insert(id.to_owned(), version);
+        true
+    }
+
+    /// Whether `c` still holds tokens whose refresh was refused for good. It is then
+    /// neither selected nor refreshed until a new sign-in or upload changes its tokens.
+    pub fn tokens_refused(&self, c: &Credential) -> bool {
+        self.read().refused(&c.id)
+    }
+
     pub(crate) fn reload_guard(&self) -> std::sync::RwLockWriteGuard<'_, ()> {
         self.reload.write().unwrap_or_else(PoisonError::into_inner)
     }

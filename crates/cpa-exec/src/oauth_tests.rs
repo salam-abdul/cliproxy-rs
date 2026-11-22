@@ -300,6 +300,41 @@ async fn refresh_against_raw(raw: Vec<u8>) -> (ExecError, usize) {
     (error, calls.load(Ordering::SeqCst))
 }
 
+/// A refused refresh keeps only an allowlisted OAuth error code, so the runtime can tell
+/// a refresh token the provider refuses for good from a transient failure. Anthropic's
+/// "Refresh token expired" description reads as `refresh_token_expired`.
+#[tokio::test]
+async fn a_refused_refresh_keeps_only_its_oauth_error_code() {
+    let response = |body: &str| {
+        format!(
+            "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+    for (body, expected) in [
+        (
+            r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#,
+            "Claude OAuth acquisition failed: refresh_token_expired",
+        ),
+        (
+            r#"{"error":"invalid_grant","error_description":"fake-refresh-raw is revoked"}"#,
+            "Claude OAuth acquisition failed: invalid_grant",
+        ),
+        (r#"{"error":"fake-refresh-raw"}"#, HTTP_FAILURE),
+        (
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"fake-refresh-raw"}}"#,
+            HTTP_FAILURE,
+        ),
+        ("fake-refresh-raw", HTTP_FAILURE),
+    ] {
+        let (error, calls) = refresh_against_raw(response(body)).await;
+        assert_eq!(calls, 1, "{body}");
+        assert_eq!(error.status, 400, "{body}");
+        assert_eq!(String::from_utf8_lossy(&error.body), expected, "{body}");
+    }
+}
+
 #[tokio::test]
 async fn explicit_server_refresh_errors_remain_retryable() {
     for status in [500, 503, 599] {

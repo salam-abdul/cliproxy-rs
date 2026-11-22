@@ -179,6 +179,7 @@ impl CredentialStore {
                 .iter()
                 .filter(|c| {
                     !c.disabled
+                        && !inner.refused(&c.id)
                         && selection.pinned.as_ref().is_none_or(|id| *id == c.id)
                         && selection.accept.is_none_or(|accept| accept(c))
                         && !excluded.contains(c.id.as_str())
@@ -269,9 +270,13 @@ impl CredentialStore {
         Suspension::None
     }
 
-    /// Whether `model` is cooling for this credential right now. A probe reservation does
-    /// not count: the lease that holds it is the one asking.
+    /// Whether `model` is cooling for this credential right now, or its refresh token was
+    /// refused for good. A probe reservation does not count: the lease that holds it is
+    /// the one asking.
     pub fn blocked(&self, credential: &Credential, model: &str) -> bool {
+        if self.tokens_refused(credential) {
+            return true;
+        }
         let scheduler = self.scheduler.lock().unwrap_or_else(PoisonError::into_inner);
         scheduler.cooling(credential, model, Instant::now())
     }
@@ -315,7 +320,7 @@ impl CredentialStore {
         let wait = inner
             .creds
             .iter()
-            .filter(|c| !c.disabled)
+            .filter(|c| !c.disabled && !inner.refused(&c.id))
             .filter(|c| {
                 let profile = inner.profile(c);
                 policy.retry_limit_of(&profile) > selection.retry_round && policy.admits_weight(profile.weight)

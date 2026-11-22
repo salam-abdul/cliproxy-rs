@@ -116,7 +116,10 @@ impl OAuth {
         };
         // Never expose a control-plane body: providers may echo tokens in errors.
         let response = into_response(response).await.map_err(|error| {
-            let mut safe = ExecError::local(error.status, error.scope, HTTP_FAILURE);
+            let mut safe = match refusal_code(error.status, &error.body) {
+                Some(code) => ExecError::local(error.status, error.scope, format!("{HTTP_FAILURE}: {code}")),
+                None => ExecError::local(error.status, error.scope, HTTP_FAILURE),
+            };
             safe.retry_after = backoff.or(error.retry_after);
             safe
         })?;
@@ -620,6 +623,34 @@ pub(crate) fn random_hex(n: usize) -> Result<String, ExecError> {
     let mut bytes = vec![0; n];
     getrandom::fill(&mut bytes).map_err(|_| acquisition_error("secure random source unavailable"))?;
     Ok(cpa_core::hex::encode(&bytes))
+}
+
+/// The OAuth error code of a 4xx token endpoint answer, when it is one of RFC 6749's.
+/// Nothing else of the body is kept, since the request carried the refresh token.
+/// Anthropic answers an expired refresh token with `invalid_grant` and the description
+/// "Refresh token expired", read here as `refresh_token_expired`.
+fn refusal_code(status: u16, body: &[u8]) -> Option<&'static str> {
+    const CODES: &[&str] = &[
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+    ];
+    if !(400..500).contains(&status) {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let code = CODES.iter().copied().find(|c| value["error"].as_str() == Some(*c))?;
+    let expired = value["error_description"]
+        .as_str()
+        .is_some_and(|d| d.to_ascii_lowercase().contains("refresh token expired"));
+    Some(if code == "invalid_grant" && expired {
+        "refresh_token_expired"
+    } else {
+        code
+    })
 }
 
 fn acquisition_error(message: &str) -> ExecError {
