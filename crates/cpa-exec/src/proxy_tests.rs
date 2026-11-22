@@ -298,6 +298,44 @@ async fn environment_proxy_bypasses_loopback_and_proxies_the_rest() {
     assert_eq!(proxied.await.unwrap(), "POST http://upstream.invalid/v1 HTTP/1.1");
 }
 
+/// A resolve hook pins a host to a local mock, and an environment proxy would resolve
+/// that host itself. The environment here is passed in, not set, so no other test sees
+/// it: its proxy is a loopback port where nothing listens.
+#[tokio::test]
+async fn a_pinned_host_is_reached_whatever_the_environment_proxies_are() {
+    use std::sync::atomic::Ordering::SeqCst;
+    const DEAD: &str = "http://127.0.0.1:9";
+    let host = "pinned.test";
+    let (ca, addr, accepted) = crate::test_tls::counting_upstream(host, b"\x08http/1.1").await;
+    let env = EnvProxy::from_lookup(|name| (name == "HTTPS_PROXY").then(|| DEAD.to_owned()));
+    let url = format!("https://{host}:{}/v1/messages", addr.port());
+    let clients = |resolve| {
+        GoClients::new(Hooks {
+            trust: Some(CertStore::from_pem_stack(ca.clone()).unwrap()),
+            resolve,
+        })
+    };
+    let refused = |error: wreq::Error| {
+        assert!(format!("{error:?}").contains("Connection refused"), "{error:?}");
+    };
+
+    let pinned = clients(vec![(host.to_owned(), addr)]);
+    let inherit = pinned.build(&Proxy::Inherit, &env).unwrap();
+    let response = inherit.post(&url).body("{}").send().await.unwrap();
+    assert_eq!(response.text().await.unwrap(), "ok");
+    assert_eq!(accepted.load(SeqCst), 1);
+
+    // A configured proxy still applies to a pinned host: the test runtime's deny proxy
+    // keeps refusing.
+    let configured = pinned.build(&Proxy::Url(DEAD.into()), &env).unwrap();
+    refused(configured.post(&url).body("{}").send().await.unwrap_err());
+
+    // Without a pin the same environment proxies the request, as in production.
+    let unpinned = clients(Vec::new()).build(&Proxy::Inherit, &env).unwrap();
+    refused(unpinned.post(&url).body("{}").send().await.unwrap_err());
+    assert_eq!(accepted.load(SeqCst), 1);
+}
+
 #[test]
 fn canonical_header_matches_go() {
     assert_eq!(canonical_header("x-msh-device-id"), "X-Msh-Device-Id");

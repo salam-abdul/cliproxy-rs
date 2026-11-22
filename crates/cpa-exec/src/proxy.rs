@@ -45,7 +45,8 @@ pub(crate) const CACHE_CAPACITY: usize = 64;
 
 /// Test-only routing: extra trust roots replace the default store, and resolve
 /// overrides pin logical hosts to local addresses while URL, Host and SNI stay
-/// unchanged. Production uses [`Hooks::default`].
+/// unchanged. A Go-standard client with resolve overrides ignores environment proxies
+/// ([`GoClients`]). Production uses [`Hooks::default`].
 #[derive(Clone, Default)]
 pub struct Hooks {
     pub trust: Option<CertStore>,
@@ -128,9 +129,14 @@ impl Proxy {
     /// which honours environment proxies when nothing is configured; the Claude uTLS
     /// transports dial directly instead.
     pub fn apply(&self, builder: wreq::ClientBuilder, inherit_env: bool) -> wreq::Result<wreq::ClientBuilder> {
-        match self {
-            Proxy::Url(url) => Ok(builder.proxy(wreq::Proxy::all(wreq_proxy_url(url).as_str())?)),
-            Proxy::Inherit | Proxy::Invalid if inherit_env => EnvProxy::current().apply(builder),
+        self.apply_env(builder, inherit_env.then(EnvProxy::current))
+    }
+
+    /// [`Proxy::apply`] with the environment proxies to inherit, if any.
+    fn apply_env(&self, builder: wreq::ClientBuilder, env: Option<&EnvProxy>) -> wreq::Result<wreq::ClientBuilder> {
+        match (self, env) {
+            (Proxy::Url(url), _) => Ok(builder.proxy(wreq::Proxy::all(wreq_proxy_url(url).as_str())?)),
+            (Proxy::Inherit | Proxy::Invalid, Some(env)) => env.apply(builder),
             _ => Ok(builder.no_proxy()),
         }
     }
@@ -234,6 +240,17 @@ impl GoClients {
             cache.insert(0, entry);
             return Some(client);
         }
+        let client = self.build(proxy, EnvProxy::current()).ok()?;
+        cache.insert(0, (proxy.clone(), client.clone()));
+        cache.truncate(CACHE_CAPACITY);
+        Some(client)
+    }
+
+    /// A new client for `proxy`, with `env` as the environment proxies. A proxy resolves
+    /// the target host itself, so an environment proxy would carry a request for a host
+    /// that a resolve hook pins to a local address out to the real host. Clients with
+    /// resolve hooks therefore never inherit `env`; a configured proxy still applies.
+    fn build(&self, proxy: &Proxy, env: &EnvProxy) -> wreq::Result<wreq::Client> {
         let mut builder = wreq::Client::builder()
             .redirect(wreq::redirect::Policy::none())
             .retry(wreq::retry::Policy::never());
@@ -247,11 +264,9 @@ impl GoClients {
         if let Some((max_idle, idle_timeout)) = self.pool {
             builder = builder.pool_max_idle_per_host(max_idle).pool_idle_timeout(idle_timeout);
         }
-        let built = proxy.apply(builder, true).and_then(wreq::ClientBuilder::build);
-        let client = built.ok()?;
-        cache.insert(0, (proxy.clone(), client.clone()));
-        cache.truncate(CACHE_CAPACITY);
-        Some(client)
+        proxy
+            .apply_env(builder, self.hooks.resolve.is_empty().then_some(env))?
+            .build()
     }
 }
 
