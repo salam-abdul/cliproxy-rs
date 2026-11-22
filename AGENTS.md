@@ -64,5 +64,6 @@ Operation docs live only in these files. When a behavior changes, update the pag
 - [Installation](docs/INSTALL.md): prerequisites, builds, manual updates and the container image.
 - [Native Claude](native/README.md): routing behavior, install, state and qualification.
 - [Upstream review](docs/UPSTREAM-REVIEW.md): reviewed upstream hashes and pending ports.
+- [Usage insights](docs/USAGE-INSIGHTS.md): the proposed design for provider, speed and tool panels. A design, not an operation doc.
 - [Dashboard](ui/README.md): build, budgets and page layout.
 - [Patched crates](vendor/README.md): what each vendored crate changes.
