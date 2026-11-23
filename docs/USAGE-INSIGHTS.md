@@ -100,7 +100,7 @@ Built. [Configuration](CONFIGURATION.md#activity-store) and [Native Claude](../n
 
 - The store's file stays beside the native routing event log, and the store runs only while native routing runs. The server has no state folder of its own.
 - The translating proxy writes no request row, and `requests` gained no columns. Each send stores `start_ms`, the time from its request's arrival to the send's start, so a request's total and its time in the server follow from its sends.
-- On the translating proxy `send` is the attempt number. It equals body history's send number unless one attempt resent its request.
+- On the translating proxy `send` numbers the request's attempts, counting on across bootstrap retry rounds. Body history numbers each request it sends on a counter of its own, so the two differ once an attempt resends its request or fails before sending.
 - Quota readings come from response headers for Claude and Codex alike, on both paths, from the snapshots the executors keep. The native status loop and `account_status` are unchanged.
 - With the store on, a 306 KB proxy request allocates 4.75 percent more (2,082 to 2,181 allocations) and a 1.9 MB one 1.67 percent more, with peak heap up under 0.2 percent.
 

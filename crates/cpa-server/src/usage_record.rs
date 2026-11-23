@@ -1606,6 +1606,9 @@ pub struct Facts {
     pub(crate) turn: Option<(String, i32)>,
     /// The request this one's sends serve, from its trace.
     pub(crate) parent_request: Option<String>,
+    /// Numbers the request's attempts in the activity store, from its trace, so a
+    /// bootstrap retry round continues where the last one stopped.
+    pub(crate) sends: std::sync::Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl Facts {
@@ -1638,6 +1641,7 @@ impl Facts {
             history: None,
             turn: trace.turn(),
             parent_request: trace.parent().map(str::to_owned),
+            sends: trace.sends(),
         }
     }
 
@@ -2014,6 +2018,8 @@ pub struct Tracker {
     /// Attempt start time for queue telemetry.
     requested_at: chrono::DateTime<chrono::FixedOffset>,
     attempt: usize,
+    /// This attempt's number in the activity store.
+    send: i32,
     /// This attempt's sends, while history is on.
     history: Option<std::sync::Arc<crate::request_logging::history::capture::Sends>>,
 }
@@ -2091,6 +2097,7 @@ impl Tracker {
             client: home_client,
             requested_at: now.fixed_offset(),
             attempt: facts.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            send: facts.sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             history: None,
         }
     }
@@ -2365,7 +2372,7 @@ impl Tracker {
         crate::activity::sends::SendRow {
             request_id,
             turn,
-            send: i32::try_from(self.attempt).unwrap_or(i32::MAX),
+            send: self.send,
             parent_request: self.facts.parent_request.clone(),
             at_ms: self.requested_at.timestamp_millis(),
             source: crate::request_logging::history::row::Source::Proxy,
@@ -3329,6 +3336,7 @@ mod tests {
                 history: Default::default(),
                 turn: None,
                 parent_request: None,
+                sends: Default::default(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

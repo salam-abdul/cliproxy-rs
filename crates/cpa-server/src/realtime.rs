@@ -402,6 +402,7 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         history: Default::default(),
         turn: None,
         parent_request: None,
+        sends: Default::default(),
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

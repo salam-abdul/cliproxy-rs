@@ -679,6 +679,9 @@ pub struct Trace(
     crate::request_logging::history::capture::TraceExchange,
     /// The request this trace's sends serve in place of its own.
     Option<String>,
+    /// Numbers the request's attempts in the activity store across its bootstrap retry
+    /// rounds, made on first use.
+    std::sync::OnceLock<Arc<std::sync::atomic::AtomicI32>>,
 );
 
 impl Trace {
@@ -695,6 +698,7 @@ impl Trace {
             Default::default(),
             Default::default(),
             None,
+            Default::default(),
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
@@ -734,6 +738,13 @@ impl Trace {
 
     pub(crate) fn history(&self) -> crate::request_logging::history::capture::HistoryExchange {
         self.5.exchange()
+    }
+
+    /// The counter that numbers the request's attempts in the activity store. Body
+    /// history numbers wire sends on its own counter: an attempt can resend its request,
+    /// or fail before sending, so the two counts differ.
+    pub(crate) fn sends(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.7.get_or_init(Arc::default).clone()
     }
 
     /// The WebSocket connection ID and turn index, without creating the history's send

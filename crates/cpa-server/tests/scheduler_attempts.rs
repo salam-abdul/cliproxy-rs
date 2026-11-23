@@ -538,6 +538,81 @@ async fn stopped_bootstrap_failure_skips_bootstrap_retries() {
     upstream.abort();
 }
 
+/// A bootstrap retry round runs the request again on the same trace: its sends follow
+/// the earlier round's in the activity store instead of replacing them.
+#[tokio::test]
+async fn a_bootstrap_retry_round_keeps_the_earlier_rounds_sends() {
+    let calls = Arc::new(Mutex::new(0));
+    let failed = r#"data: {"type":"response.failed","response":{"error":{"type":"server_error","status":503,"message":"boom"}}}"#;
+    let completed = r#"data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let app = axum::Router::new()
+        .fallback(move |State(calls): State<Arc<Mutex<usize>>>| async move {
+            let call = {
+                let mut calls = calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            let event = if call == 1 { failed } else { completed };
+            ([("content-type", "text/event-stream")], format!("{event}\n\n")).into_response()
+        })
+        .with_state(calls.clone());
+    let (upstream_url, upstream) = serve(app).await;
+    let mut credential = Credential::from_file(
+        Path::new("/mock"),
+        &Path::new("/mock").join("codex.json"),
+        serde_json::json!({"type":"codex","disable_cooling":true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    for (k, v) in [
+        ("api_key", "sk-fake"),
+        ("base_url", upstream_url.as_str()),
+        ("auth_kind", "apikey"),
+    ] {
+        credential.attributes.insert(k.into(), v.into());
+    }
+    let config = "routing:\n  retry:\n    request-retry: 0\nrequests:\n  streaming:\n    bootstrap-retries: 1\n";
+    let mut config = Config::parse(config).unwrap();
+    let dir = std::env::temp_dir().join(format!("cpa-bootstrap-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    config.auth_dir = dir.join("auth");
+    let rt = Arc::new(cpa_server::testing::runtime(
+        config,
+        vec![cpa_server::testing::local(credential)],
+        Executors {
+            claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    cpa_server::testing::start_activity(&rt, dir.join("activity.sqlite")).unwrap();
+    let (url, proxy) = serve(router(rt.clone())).await;
+    let response = wreq::Client::new()
+        .post(format!("{url}/v1/responses"))
+        .body(r#"{"model":"gpt-5.5","stream":true,"input":"hi"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(*calls.lock().unwrap(), 2, "the retry round sent again");
+    let sends = cpa_server::testing::activity_sends(&rt);
+    rt.stop_activity();
+    proxy.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+    let column = |name: &str| sends.iter().map(|send| send[name].clone()).collect::<Vec<_>>();
+    assert_eq!(column("send"), [0, 1], "{sends:?}");
+    assert_eq!(column("outcome"), ["failed", "complete"]);
+    let ids = column("request_id");
+    assert_eq!(ids[0], ids[1]);
+}
+
 /// A stream that broke off before its first payload fails over to the next account
 /// once, even with retries, bootstrap reruns and continue rules configured: no account
 /// is tried twice. Two empty streams answer the last failure; a reset on the first
