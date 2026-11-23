@@ -1234,7 +1234,7 @@ async fn serve(
     // Translators and thinking validation read model capabilities through the global
     // overlay; without it they see only the static catalog.
     cpa_server::install_registry(&rt);
-    let _native_router = cpa_server::native_claude::start(rt.clone()).await?;
+    let native_router = cpa_server::native_claude::start(rt.clone()).await?;
     rt.start_auto_refresh();
     let options = cpa_server::management::Options {
         local_password: password,
@@ -1321,6 +1321,12 @@ async fn serve(
     // dropping the server future afterwards does the same.
     advertiser.shutdown().await;
     drop(server);
+    // Native routing stops accepting with the server, so the sends it still settles land
+    // during the drains below, before the activity store marks its file clean. Its
+    // credential owner lock is held until exit.
+    if let Some(native_router) = &native_router {
+        native_router.stop_accepting();
+    }
     // Go drains the Home registry and flushes releases before exiting.
     if let Some((shutdown, task)) = home
         && !home_failed

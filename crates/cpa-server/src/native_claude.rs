@@ -146,11 +146,18 @@ pub(crate) struct State {
     skipped: Mutex<HashMap<String, Skip>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
-impl Drop for Running {
-    fn drop(&mut self) {
+impl Running {
+    /// Stops accepting native connections and the background tasks; connections already
+    /// accepted run on. The credential owner lock is held until drop.
+    pub fn stop_accepting(&self) {
         for task in &self.0 {
             task.abort();
         }
+    }
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop_accepting();
         let _ = self.1.take();
     }
 }
@@ -1303,9 +1310,6 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             None => builder,
         }
     })?;
-    if let Err(error) = rt.start_activity(c.events.with_extension("sqlite")) {
-        tracing::warn!(%error, "Native history is unavailable");
-    }
     let s = Arc::new(State {
         events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
         config: c.clone(),
@@ -1323,6 +1327,11 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
+    // After the last step that can fail, so a native start that fails leaves no store
+    // running and no file marked in use.
+    if let Err(error) = s.rt.start_activity(c.events.with_extension("sqlite")) {
+        tracing::warn!(%error, "Native history is unavailable");
+    }
     *s.rt.native_state.write().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&s);
     let cert_state = s.clone();
     let certificate = tokio::spawn(async move {

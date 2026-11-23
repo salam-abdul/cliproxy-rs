@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
         mpsc::{SyncSender, sync_channel},
     },
@@ -120,6 +120,21 @@ pub(crate) struct Activity {
     path: PathBuf,
     tx: SyncSender<Command>,
     lost: Arc<AtomicU64>,
+    /// False once `finish` ran. A record holds it shared while it queues, so none is
+    /// queued behind the finish, where the writer would never see it.
+    open: RwLock<bool>,
+    /// What decides whether the file may be marked clean, shared with the writer.
+    ending: Arc<Mutex<Ending>>,
+}
+
+/// Whether the store may claim that it holds every record. A record that arrives after
+/// `finish` is lost: it leaves the file unclean, so the next start reports the gap.
+#[derive(Default)]
+struct Ending {
+    /// A record arrived after `finish`.
+    late: bool,
+    /// The writer marked the file clean and stopped.
+    clean: bool,
 }
 
 impl Activity {
@@ -178,6 +193,8 @@ impl Activity {
         startup.commit()?;
         let (tx, rx) = sync_channel(QUEUE);
         let writer_lost = lost.clone();
+        let ending = Arc::new(Mutex::new(Ending::default()));
+        let writer_ending = ending.clone();
         std::thread::Builder::new().name("activity".into()).spawn(move || {
             let mut last_prune = std::time::Instant::now();
             while let Ok(first) = rx.recv() {
@@ -197,6 +214,9 @@ impl Activity {
                         let _ = release.recv();
                     }
                 }
+                // Held through the commit, so a late record either keeps the file from
+                // being marked clean or comes after the mark and undoes it.
+                let mut ending = finish.then(|| writer_ending.lock().unwrap_or_else(PoisonError::into_inner));
                 let result = (|| -> rusqlite::Result<()> {
                     let transaction = conn.transaction()?;
                     for command in &commands {
@@ -223,11 +243,17 @@ impl Activity {
                         "lost_events",
                         writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
                     )?;
-                    if finish {
+                    let clean = ending.as_ref().is_some_and(|ending| !ending.late);
+                    if clean {
                         set_meta(&transaction, "dirty", 0)?;
                     }
-                    transaction.commit()
+                    transaction.commit()?;
+                    if let Some(ending) = ending.as_mut() {
+                        ending.clean = clean;
+                    }
+                    Ok(())
                 })();
+                drop(ending);
                 if result.is_err() {
                     writer_lost.fetch_add(count, Ordering::Relaxed);
                 }
@@ -248,7 +274,13 @@ impl Activity {
                 }
             }
         })?;
-        Ok(Self { path, tx, lost })
+        Ok(Self {
+            path,
+            tx,
+            lost,
+            open: RwLock::new(true),
+            ending,
+        })
     }
 
     pub(crate) fn record_event(&self, event: &Value) {
@@ -288,8 +320,40 @@ impl Activity {
 
     fn send(&self, command: Command) {
         let count = command.records();
+        let open = self.open.read().unwrap_or_else(PoisonError::into_inner);
+        if !*open {
+            drop(open);
+            self.lost.fetch_add(count, Ordering::Relaxed);
+            if count > 0 {
+                self.late();
+            }
+            return;
+        }
         if self.tx.try_send(command).is_err() {
             self.lost.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    /// A record arrived after `finish`: keeps the file from being marked clean, or marks it
+    /// unclean again with the lost count when it already was. Writes at most once, on the
+    /// caller's thread, which only shutdown reaches.
+    fn late(&self) {
+        let mut ending = self.ending.lock().unwrap_or_else(PoisonError::into_inner);
+        if std::mem::replace(&mut ending.late, true) || !ending.clean {
+            return;
+        }
+        let lost = self.lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64;
+        let marked = (|| -> rusqlite::Result<()> {
+            // Never creates the file: one that was removed has nothing to mark.
+            let mut conn = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            conn.busy_timeout(Duration::from_secs(2))?;
+            let transaction = conn.transaction()?;
+            set_meta(&transaction, "dirty", 1)?;
+            set_meta(&transaction, "lost_events", lost)?;
+            transaction.commit()
+        })();
+        if marked.is_err() {
+            tracing::warn!("Activity store could not record a loss after shutdown");
         }
     }
 
@@ -309,10 +373,15 @@ impl Activity {
     }
 
     /// Writes what is queued, marks the file clean and stops the writer, waiting at most two
-    /// seconds. Later records are counted as lost; a second call does nothing.
+    /// seconds. Later records are counted as lost and leave the file unclean; a second call
+    /// does nothing.
     pub(crate) fn finish(&self) {
         let (done, ack) = std::sync::mpsc::channel();
-        if self.tx.try_send(Command::Finish(done)).is_ok() {
+        let queued = {
+            let mut open = self.open.write().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *open, false) && self.tx.try_send(Command::Finish(done)).is_ok()
+        };
+        if queued {
             let _ = ack.recv_timeout(Duration::from_secs(2));
         }
     }
@@ -661,6 +730,57 @@ mod tests {
         assert_eq!(data["lostEvents"], 2);
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn inference(id: &str) -> Value {
+        json!({"type":"inference","requestId":id,"at":chrono::Utc::now().to_rfc3339(),"outcome":"success"})
+    }
+
+    fn dirty(path: &Path) -> Option<i64> {
+        meta(&Connection::open(path).unwrap(), "dirty").unwrap()
+    }
+
+    #[test]
+    fn a_record_after_finish_leaves_the_file_unclean() {
+        let dir = std::env::temp_dir().join(format!("activity-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("activity.sqlite");
+        let activity = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        activity.record_event(&inference("before"));
+        activity.finish();
+        assert_eq!(dirty(&path), Some(0), "nothing was lost yet");
+        activity.record_event(&inference("after"));
+        assert_eq!(dirty(&path), Some(1));
+        drop(activity);
+        let restarted = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        assert_eq!(data["buckets"][0]["requests"], 1, "{data}");
+        assert_eq!(data["lostEvents"], 1);
+        assert_eq!(data["coverageUncertain"], true);
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_while_finish_waits_keeps_the_file_unclean() {
+        let dir = std::env::temp_dir().join(format!("activity-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("activity.sqlite");
+        let activity = Arc::new(Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap());
+        let release = activity.hold();
+        let finishing = {
+            let activity = activity.clone();
+            std::thread::spawn(move || activity.finish())
+        };
+        while *activity.open.read().unwrap() {
+            std::thread::yield_now();
+        }
+        activity.record_event(&inference("late"));
+        drop(release);
+        finishing.join().unwrap();
+        assert_eq!(dirty(&path), Some(1));
+        drop(activity);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1060,3 +1060,65 @@ async fn an_account_without_a_credential_file_is_recorded_with_no_credential() {
     assert_eq!(sends[0]["outcome"], "complete");
     assert_eq!(sends[0]["model"], "claude-opus-test");
 }
+
+#[tokio::test]
+async fn a_native_start_that_fails_leaves_no_activity_store() {
+    let dir = std::env::temp_dir().join(format!("native-start-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let key =
+        PKey::from_ec_key(EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap()).unwrap();
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+    let name = name.build();
+    let mut cert = X509::builder().unwrap();
+    cert.set_version(2).unwrap();
+    cert.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    cert.set_subject_name(&name).unwrap();
+    cert.set_issuer_name(&name).unwrap();
+    cert.set_pubkey(&key).unwrap();
+    cert.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    cert.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    cert.sign(&key, MessageDigest::sha256()).unwrap();
+    let private = |file: &str, bytes: &[u8]| {
+        std::fs::write(dir.join(file), bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    };
+    private("key", &key.private_key_to_pem_pkcs8().unwrap());
+    private("cert", &cert.build().to_pem().unwrap());
+    private("secret", b"synthetic-secret-synthetic-secret-0123");
+    // The diagnostics port is taken, so the start fails at its last listener.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = json!({
+        "port":taken.local_addr().unwrap().port(),"httpProxyPort":0,"database":dir.join("routing.json"),
+        "events":dir.join("events.jsonl"),"proxySecret":dir.join("secret"),"key":dir.join("key"),
+        "cert":dir.join("cert"),"fixtureAccounts":[],"upstream":{"hostname":"127.0.0.1","port":1}
+    });
+    std::fs::write(dir.join("native.json"), config.to_string()).unwrap();
+    let rt = Arc::new(crate::testing::runtime(
+        cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.join("auth").display())).unwrap(),
+        Vec::new(),
+        cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("https://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let Err(error) = start_config(rt.clone(), &dir.join("native.json")).await else {
+        panic!("the native start succeeded on a taken port")
+    };
+    assert!(
+        format!("{error:#}").contains("native diagnostics listener"),
+        "{error:#}"
+    );
+    assert!(rt.activity().is_none());
+    assert!(!dir.join("events.sqlite").exists());
+    drop(taken);
+    let _ = std::fs::remove_dir_all(&dir);
+}
