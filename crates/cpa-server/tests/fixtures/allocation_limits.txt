@@ -18,3 +18,7 @@ alloc.cloak.306k.allocations          4_443  3
 alloc.cloak.1900k.peak_bytes      9_322_748  2
 alloc.cloak.1900k.allocations        10_388  3
 alloc.cloak.1900k.c8.held_bytes  15_662_380  2
+alloc.activity.306k.peak_bytes       1_288_041  2
+alloc.activity.306k.allocations          2_181  3
+alloc.activity.1900k.peak_bytes      7_422_153  2
+alloc.activity.1900k.allocations         6_024  3

@@ -677,6 +677,11 @@ pub struct Trace(
     /// The client's prompt prefix (`crate::usage_record::prompt_prefix`).
     std::sync::OnceLock<String>,
     crate::request_logging::history::capture::TraceExchange,
+    /// The request this trace's sends serve in place of its own.
+    Option<String>,
+    /// Numbers the request's attempts in the activity store across its bootstrap retry
+    /// rounds, made on first use.
+    std::sync::OnceLock<Arc<std::sync::atomic::AtomicI32>>,
 );
 
 impl Trace {
@@ -692,11 +697,27 @@ impl Trace {
             crate::observability::current_clock(),
             Default::default(),
             Default::default(),
+            None,
+            Default::default(),
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
         }
         trace
+    }
+
+    /// A trace with its own request ID whose sends serve `parent_request`, which arrived
+    /// at `arrived`: its sends' times count from there.
+    pub(crate) fn serving(parent_request: String, arrived: std::time::Instant) -> Self {
+        let mut trace = Self::with_request_id(None);
+        trace.3 = Arc::new(crate::observability::Clock::accepted_at(arrived));
+        trace.6 = Some(parent_request);
+        trace
+    }
+
+    /// The request this trace's sends serve, when they serve another.
+    pub(crate) fn parent(&self) -> Option<&str> {
+        self.6.as_deref()
     }
 
     /// The request ID (Go `logging.GetRequestID`), created on first use.
@@ -719,6 +740,19 @@ impl Trace {
 
     pub(crate) fn history(&self) -> crate::request_logging::history::capture::HistoryExchange {
         self.5.exchange()
+    }
+
+    /// The counter that numbers the request's attempts in the activity store. Body
+    /// history numbers wire sends on its own counter: an attempt can resend its request,
+    /// or fail before sending, so the two counts differ.
+    pub(crate) fn sends(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.7.get_or_init(Arc::default).clone()
+    }
+
+    /// The WebSocket connection ID and turn index, without creating the history's send
+    /// counter.
+    pub(crate) fn turn(&self) -> Option<(String, i32)> {
+        self.5.turn.clone()
     }
 
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
@@ -925,24 +959,25 @@ async fn run_attempts(
         call.execution_session.as_deref(),
         &call.caller.principal,
     );
-    // Go's usage reporter: one record per Generate attempt while the queue accepts.
+    // Go's usage reporter: one record per Generate attempt while the queue accepts. The
+    // activity store takes one send per Generate attempt while it runs.
     // Home count-tokens attempts record only their upstream 401s (`reportHomeUnauthorized`).
     let home_count = call.operation == Operation::CountTokens && rt.remote_dispatch().is_some();
     let history = call.operation == Operation::Generate && crate::request_logging::history::on(&cfg);
-    let facts = ((call.operation == Operation::Generate && (rt.usage_queue().accepts() || history))
-        || (home_count && rt.usage_queue().accepts()))
-    .then(|| {
-        let facts = crate::usage_record::Facts::new(
-            usage_client(&cfg, &call, trace, &session),
-            call.entry,
-            call.response,
-            &call.model,
-            &call.body,
-            call.stream,
-            trace,
-        );
-        Arc::new(if history { facts.recording(trace) } else { facts })
-    });
+    let recorded = rt.usage_queue().accepts() || history || rt.activity().is_some();
+    let facts = ((call.operation == Operation::Generate && recorded) || (home_count && rt.usage_queue().accepts()))
+        .then(|| {
+            let facts = crate::usage_record::Facts::new(
+                usage_client(&cfg, &call, trace, &session),
+                call.entry,
+                call.response,
+                &call.model,
+                &call.body,
+                call.stream,
+                trace,
+            );
+            Arc::new(if history { facts.recording(trace) } else { facts })
+        });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
     // A remote dispatcher receives the pinned ID itself.

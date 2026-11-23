@@ -53,6 +53,15 @@ impl Default for Clock {
 }
 
 impl Clock {
+    /// A clock for a request that arrived at `accepted` outside the HTTP middleware, such
+    /// as a native request's quota fallback.
+    pub(crate) fn accepted_at(accepted: Instant) -> Self {
+        Self {
+            accepted,
+            ..Self::default()
+        }
+    }
+
     /// The server accepted the request: its head was read and routing began.
     pub fn accepted(&self) -> Instant {
         self.accepted

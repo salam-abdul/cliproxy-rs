@@ -19,7 +19,9 @@
 //! own thread and runtime, which the allocator does not count: hyper sizes its read buffers
 //! from how much the previous read returned, so the upstream's allocations depend on
 //! scheduling, not on the proxy. Each size is sent three times and gated on the smallest
-//! peak and call count. The ceilings are the `alloc.*` lines of `fixtures/allocation_limits.txt` (a
+//! peak and call count. Last, the two Claude requests are measured again with the
+//! activity store recording their sends, after every other case so none of them pays for
+//! it. The ceilings are the `alloc.*` lines of `fixtures/allocation_limits.txt` (a
 //! value without a line is reported, not gated); the measured values are printed so a
 //! change can update them with a dated note. Every route runs in one test, one after the
 //! other, because the counters are process-wide.
@@ -279,6 +281,26 @@ fn gated(key: &str) -> usize {
     budget(key).unwrap_or_else(|| panic!("fixtures/allocation_limits.txt has no {key}"))
 }
 
+/// Prints case `name`'s smallest peak and call count and adds each one over its ceiling to
+/// `over`.
+fn gate(name: &str, body: &Bytes, (peak, calls): (usize, usize), over: &mut Vec<String>) {
+    let (peak_max, calls_max) = (
+        gated(&format!("alloc.{name}.peak_bytes")),
+        gated(&format!("alloc.{name}.allocations")),
+    );
+    println!(
+        "{name}: body {} B, peak live {peak} B ({:.1}x body, ceiling {peak_max}), {calls} allocations (ceiling {calls_max})",
+        body.len(),
+        peak as f64 / body.len() as f64,
+    );
+    if peak > peak_max {
+        over.push(format!("alloc.{name}.peak_bytes {peak} > {peak_max}"));
+    }
+    if calls > calls_max {
+        over.push(format!("alloc.{name}.allocations {calls} > {calls_max}"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_requests_stay_within_their_heap_budget() {
     // The fake upstream: its own thread and single-threaded runtime, not counted.
@@ -352,7 +374,7 @@ async fn large_requests_stay_within_their_heap_budget() {
         &management,
         axum::Router::new().fallback_service(Captures(cpa_server::router(rt.clone()), captures.clone())),
     );
-    let app = cpa_server::router(rt);
+    let app = cpa_server::router(rt.clone());
 
     // `route` is "claude" or "cloak" (`/v1/messages`), "count" (`/v1/messages/count_tokens`)
     // or "codex" (`/v1/responses`). The request, and what its response must contain.
@@ -385,6 +407,26 @@ async fn large_requests_stay_within_their_heap_budget() {
         }
     };
 
+    // A warm-up, then three counted sends: the smallest peak and call count.
+    let measure = async |route: &'static str, body: &Bytes| {
+        // Warm-up: connection pool, registries and lazy statics.
+        send(route, body.clone()).await;
+        settle(&captures).await;
+        let (mut peak, mut calls) = (usize::MAX, usize::MAX);
+        for _ in 0..3 {
+            let base = LIVE.load(Ordering::Relaxed);
+            PEAK.store(base, Ordering::Relaxed);
+            CALLS.store(0, Ordering::Relaxed);
+            COUNTING.store(true, Ordering::Relaxed);
+            send(route, body.clone()).await;
+            COUNTING.store(false, Ordering::Relaxed);
+            peak = peak.min(PEAK.load(Ordering::Relaxed).saturating_sub(base));
+            calls = calls.min(CALLS.load(Ordering::Relaxed));
+            settle(&captures).await;
+        }
+        (peak, calls)
+    };
+
     let mut over = Vec::new();
     for (route, name, target) in [
         ("claude", "306k", 306_000),
@@ -401,36 +443,7 @@ async fn large_requests_stay_within_their_heap_budget() {
             "cloak" => cloak_conversation(target),
             _ => conversation(target),
         };
-        // Warm-up: connection pool, registries and lazy statics.
-        send(route, body.clone()).await;
-        settle(&captures).await;
-        let (mut peak, mut calls) = (usize::MAX, usize::MAX);
-        for _ in 0..3 {
-            let base = LIVE.load(Ordering::Relaxed);
-            PEAK.store(base, Ordering::Relaxed);
-            CALLS.store(0, Ordering::Relaxed);
-            COUNTING.store(true, Ordering::Relaxed);
-            send(route, body.clone()).await;
-            COUNTING.store(false, Ordering::Relaxed);
-            peak = peak.min(PEAK.load(Ordering::Relaxed).saturating_sub(base));
-            calls = calls.min(CALLS.load(Ordering::Relaxed));
-            settle(&captures).await;
-        }
-        let (peak_max, calls_max) = (
-            gated(&format!("alloc.{name}.peak_bytes")),
-            gated(&format!("alloc.{name}.allocations")),
-        );
-        println!(
-            "{name}: body {} B, peak live {peak} B ({:.1}x body, ceiling {peak_max}), {calls} allocations (ceiling {calls_max})",
-            body.len(),
-            peak as f64 / body.len() as f64,
-        );
-        if peak > peak_max {
-            over.push(format!("alloc.{name}.peak_bytes {peak} > {peak_max}"));
-        }
-        if calls > calls_max {
-            over.push(format!("alloc.{name}.allocations {calls} > {calls_max}"));
-        }
+        gate(name, &body, measure(route, &body).await, &mut over);
     }
 
     // CONCURRENT cloaked 1.9 MB requests at once, each waiting for the fake upstream's
@@ -502,6 +515,29 @@ async fn large_requests_stay_within_their_heap_budget() {
             over.push(format!("{} {value} > {max}", key(name)));
         }
     }
+
+    // The Claude requests again with every send recorded in the activity store, as native
+    // Claude routing runs it.
+    cpa_server::testing::start_activity(&rt, dir.join("activity.sqlite")).unwrap();
+    for (name, target) in [("activity.306k", 306_000), ("activity.1900k", 1_900_000)] {
+        let body = conversation(target);
+        gate(name, &body, measure("claude", &body).await, &mut over);
+    }
+    // Outside the counted sends: each case's warm-up and three counted sends were recorded.
+    let recorded = rt.clone();
+    let sends = tokio::task::spawn_blocking(move || cpa_server::testing::activity_sends(&recorded))
+        .await
+        .unwrap();
+    rt.stop_activity();
+    assert_eq!(sends.len(), 8, "{sends:?}");
+    for send in &sends {
+        assert!(
+            send["source"] == "proxy" && send["provider"] == "claude" && send["outcome"] == "complete",
+            "{send}"
+        );
+    }
+    let requests: std::collections::HashSet<_> = sends.iter().map(|send| send["request_id"].clone()).collect();
+    assert_eq!(requests.len(), 8, "{sends:?}");
     let _ = std::fs::remove_dir_all(dir);
     assert!(
         over.is_empty(),

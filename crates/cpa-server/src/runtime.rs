@@ -71,7 +71,13 @@ pub struct Runtime {
     config_changed: tokio::sync::watch::Sender<()>,
     /// Quota windows by credential, parsed once per observation for selection.
     quota_windows: Mutex<HashMap<String, crate::scheduler::Observation>>,
+    /// The observation time of the quota snapshot last recorded in the activity store, by
+    /// credential.
+    quota_recorded: Mutex<HashMap<String, std::time::SystemTime>>,
     history: crate::request_logging::history::writer::Writer,
+    activity: std::sync::OnceLock<Arc<crate::activity::Activity>>,
+    /// Held while the store starts, so concurrent first starts open the file once.
+    activity_start: Mutex<()>,
 }
 
 /// One config publication: requests read the config and its policy from the same one.
@@ -127,7 +133,10 @@ impl Runtime {
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
             quota_windows: Mutex::default(),
+            quota_recorded: Mutex::default(),
             history: Default::default(),
+            activity: std::sync::OnceLock::new(),
+            activity_start: Mutex::default(),
         };
         rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
@@ -145,6 +154,84 @@ impl Runtime {
     /// The model-traffic history writer (`observability.history`).
     pub fn history(&self) -> &crate::request_logging::history::writer::Writer {
         &self.history
+    }
+
+    /// Starts the activity store at `path` unless one already runs; a later call opens nothing.
+    pub(crate) fn start_activity(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+        let _starting = self.activity_start.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.activity.get().is_some() {
+            return Ok(());
+        }
+        let activity = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0)))?;
+        let _ = self.activity.set(Arc::new(activity));
+        Ok(())
+    }
+
+    /// Writes what the activity store has queued and marks its file clean; call before exit.
+    /// Blocks for at most two seconds.
+    pub fn stop_activity(&self) {
+        if let Some(activity) = self.activity() {
+            activity.finish();
+        }
+    }
+
+    pub(crate) fn activity(&self) -> Option<&Arc<crate::activity::Activity>> {
+        self.activity.get()
+    }
+
+    /// Records one upstream send when the activity store runs, with its credential's quota
+    /// readings when the executor observed a newer snapshot; never waits on the store.
+    pub(crate) fn record_send(&self, row: crate::activity::sends::SendRow) {
+        let Some(activity) = self.activity() else {
+            return;
+        };
+        if let Some(credential) = row.credential.as_deref() {
+            self.record_quota(activity, &row.provider, credential);
+        }
+        activity.record_send(row);
+    }
+
+    /// Records the readings of `credential`'s quota snapshot once per snapshot. Only a
+    /// snapshot newer than the last recorded one is parsed, in place under the executor's
+    /// lock, so a request pays for a copy only when there is something new to record.
+    fn record_quota(&self, activity: &crate::activity::Activity, provider: &str, credential: &str) {
+        let provider = match provider.trim() {
+            p if p.eq_ignore_ascii_case("claude") => "claude",
+            p if p.eq_ignore_ascii_case("codex") => "codex",
+            _ => return,
+        };
+        let fresh = {
+            // Held across the snapshot read so concurrent sends record a snapshot once.
+            let mut recorded = self.quota_recorded.lock().unwrap_or_else(PoisonError::into_inner);
+            let last = recorded.get(credential).copied();
+            let read = |s: &cpa_exec::codex_quota::Snapshot| {
+                last.is_none_or(|last| s.observed_at > last).then(|| {
+                    (
+                        s.observed_at,
+                        crate::scheduler::readings(provider, &s.signals, s.observed_at),
+                    )
+                })
+            };
+            let fresh = match provider {
+                "claude" => self.executors.claude.quota().with_snapshot(credential, read),
+                _ => self.executors.codex.quota().with_snapshot(credential, read),
+            }
+            .flatten();
+            if let Some((observed_at, _)) = &fresh {
+                if recorded.len() >= 4096 {
+                    recorded.clear();
+                }
+                recorded.insert(credential.to_owned(), *observed_at);
+            }
+            fresh
+        };
+        let Some((observed_at, readings)) = fresh else {
+            return;
+        };
+        let at_ms = crate::quota_time::epoch_millis(observed_at).and_then(|ms| i64::try_from(ms).ok());
+        if let Some(at_ms) = at_ms {
+            activity.record_readings(provider, credential, at_ms, &readings);
+        }
     }
 
     /// Records `--local-model` (Go `modelCatalogUpdaterPlan`'s `localModel`): remote

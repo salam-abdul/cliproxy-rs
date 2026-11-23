@@ -158,6 +158,10 @@ Claude accounts ignore `HTTPS_PROXY` and `HTTP_PROXY`. Without an explicit proxy
 | `history.dir` | The history folder, an absolute path outside any repository or synced folder; `~` is the home directory. Required: with `enable: true` and no `dir` or a relative one, history stays off and the log says so. |
 | `history.max-total-size-mb` | `10240` by default. When the files exceed it, the oldest are deleted. `0` keeps everything. There is no age limit. |
 
+### Activity store
+
+The activity store is the SQLite file beside native routing's event log ([Native Claude](../native/README.md#diagnostics-and-history)), and runs only while native routing runs. It has no setting. It records one row per upstream send, from native routing and from the translating proxy, and Claude and Codex quota readings from response headers. It keeps no bodies, session IDs or tool names. While it runs, every translating-proxy request is tracked for usage, as when the usage queue or history is on. `GET /v8/management/observability/activity?range=24h|7d|30d` reads it per provider and per account, narrowed by the optional `provider` and `credential` parameters; it answers `409` while the store is not running.
+
 ### History
 
 History keeps one row per upstream send, except in commercial mode, which turns it off: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.

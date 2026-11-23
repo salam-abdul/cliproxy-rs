@@ -1765,3 +1765,37 @@ async fn an_api_call_does_not_send_a_refused_refresh_token() {
     rt.api_call_credential(control).await;
     assert!(connections.load(Ordering::SeqCst) > 0, "the token host was not reached");
 }
+
+/// The store is started once and every path shares it; a second start opens no file.
+#[tokio::test]
+async fn the_activity_store_starts_once_and_is_shared() {
+    let (rt, dir, _) = oauth_accounts("claude", &[], answer(|_| (500, "{}"))).await;
+    assert!(rt.activity().is_none());
+    rt.start_activity(dir.join("activity.sqlite")).unwrap();
+    let first = Arc::as_ptr(rt.activity().unwrap());
+    rt.start_activity(dir.join("other.sqlite")).unwrap();
+    assert_eq!(Arc::as_ptr(rt.activity().unwrap()), first);
+    assert!(!dir.join("other.sqlite").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Stopping the store marks its file clean even though the runtime still holds the store,
+/// so the next start does not report uncertain coverage.
+#[tokio::test]
+async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
+    let (rt, dir, _) = oauth_accounts("claude", &[], answer(|_| (500, "{}"))).await;
+    let path = dir.join("activity.sqlite");
+    rt.start_activity(path.clone()).unwrap();
+    rt.activity()
+        .unwrap()
+        .record_event(&serde_json::json!({"type":"inference","requestId":"one",
+        "at":chrono::Utc::now().to_rfc3339(),"outcome":"success"}));
+    rt.stop_activity();
+    assert!(rt.activity().is_some());
+    let next = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0))).unwrap();
+    let data = next.query(crate::activity::Range::Day, None).await.unwrap();
+    assert_eq!(data["buckets"][0]["requests"], 1);
+    assert_eq!(data["coverageUncertain"], false);
+    drop(next);
+    let _ = std::fs::remove_dir_all(dir);
+}

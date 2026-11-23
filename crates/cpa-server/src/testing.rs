@@ -127,6 +127,26 @@ fn is_loopback(raw: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// Starts the runtime's activity store at `path`.
+pub fn start_activity(rt: &Runtime, path: std::path::PathBuf) -> anyhow::Result<()> {
+    rt.start_activity(path)
+}
+
+/// Whether the runtime's activity store runs.
+pub fn activity_running(rt: &Runtime) -> bool {
+    rt.activity().is_some()
+}
+
+/// Every row of the runtime's `sends` table after a flush, ordered by `at_ms, request_id,
+/// turn, send`, as objects keyed by column name. Empty when the store is not running.
+pub fn activity_sends(rt: &Runtime) -> Vec<serde_json::Value> {
+    let Some(activity) = rt.activity() else {
+        return Vec::new();
+    };
+    activity.flush();
+    activity.sends().expect("activity sends are readable")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,10 +1,14 @@
+mod panels;
+mod quota;
+pub(crate) mod sends;
+
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
         mpsc::{SyncSender, sync_channel},
     },
@@ -16,6 +20,8 @@ const DAY_MS: i64 = 86_400_000;
 const RETAIN_MS: i64 = 31 * DAY_MS;
 const MAX_REQUESTS: i64 = 250_000;
 const MAX_STATUSES: i64 = 50_000;
+const MAX_SENDS: i64 = 1_000_000;
+const MAX_READINGS: i64 = 200_000;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Range {
@@ -87,9 +93,13 @@ struct StatusRow {
 enum Command {
     Request(Box<RequestRow>),
     Status(Vec<StatusRow>),
+    Send(Box<sends::SendRow>),
+    Readings(Vec<quota::ReadingRow>),
     Finish(std::sync::mpsc::Sender<()>),
-    #[cfg(test)]
     Flush(std::sync::mpsc::Sender<()>),
+    /// Stops the writer until the receiver's sender is dropped, after telling the first sender.
+    #[cfg(test)]
+    Hold(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
 }
 
 impl Command {
@@ -97,21 +107,38 @@ impl Command {
         match self {
             Self::Request(_) => 1,
             Self::Status(rows) => rows.len() as u64,
-            Self::Finish(_) => 0,
+            Self::Send(_) => 1,
+            Self::Readings(rows) => rows.len() as u64,
+            Self::Finish(_) | Self::Flush(_) => 0,
             #[cfg(test)]
-            Self::Flush(_) => 0,
+            Self::Hold(..) => 0,
         }
     }
 }
 
-pub(super) struct History {
+pub(crate) struct Activity {
     path: PathBuf,
     tx: SyncSender<Command>,
     lost: Arc<AtomicU64>,
+    /// False once `finish` ran. A record holds it shared while it queues, so none is
+    /// queued behind the finish, where the writer would never see it.
+    open: RwLock<bool>,
+    /// What decides whether the file may be marked clean, shared with the writer.
+    ending: Arc<Mutex<Ending>>,
 }
 
-impl History {
-    pub(super) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
+/// Whether the store may claim that it holds every record. A record that arrives after
+/// `finish` is lost: it leaves the file unclean, so the next start reports the gap.
+#[derive(Default)]
+struct Ending {
+    /// A record arrived after `finish`.
+    late: bool,
+    /// The writer marked the file clean and stopped.
+    clean: bool,
+}
+
+impl Activity {
+    pub(crate) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
         secure_file(&path)?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -134,7 +161,25 @@ impl History {
             CREATE INDEX IF NOT EXISTS account_status_by_time ON account_status(at_ms);
             CREATE TABLE IF NOT EXISTS history_meta (
                 key TEXT PRIMARY KEY, value INTEGER NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS sends (
+                request_id TEXT NOT NULL, turn INTEGER NOT NULL, send INTEGER NOT NULL,
+                parent_request TEXT, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                provider TEXT NOT NULL, credential TEXT, model TEXT,
+                outcome TEXT NOT NULL, status INTEGER, stream INTEGER NOT NULL,
+                start_ms INTEGER NOT NULL, latency_ms INTEGER, ttft_ms INTEGER, ttft_kind TEXT,
+                uncached_input_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                output_tokens INTEGER, reasoning_tokens INTEGER, tokens_exact INTEGER,
+                PRIMARY KEY (request_id, turn, send)
+            );
+            CREATE INDEX IF NOT EXISTS sends_by_time ON sends(at_ms);
+            CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);
+            CREATE TABLE IF NOT EXISTS quota_readings (
+                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
+                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
+                PRIMARY KEY (credential, long, bucket_ms)
+            );
+            CREATE INDEX IF NOT EXISTS quota_readings_by_time ON quota_readings(at_ms);",
         )?;
         prune(&conn, epoch_ms())?;
         let previous_lost = meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64;
@@ -148,81 +193,103 @@ impl History {
         startup.commit()?;
         let (tx, rx) = sync_channel(QUEUE);
         let writer_lost = lost.clone();
-        std::thread::Builder::new()
-            .name("native-history".into())
-            .spawn(move || {
-                let mut last_prune = std::time::Instant::now();
-                while let Ok(first) = rx.recv() {
-                    let mut commands = vec![first];
-                    while commands.len() < 64 {
-                        match rx.try_recv() {
-                            Ok(next) => commands.push(next),
-                            Err(_) => break,
-                        }
-                    }
-                    let count = commands.iter().map(Command::records).sum::<u64>();
-                    let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
-                    let result = (|| -> rusqlite::Result<()> {
-                        let transaction = conn.transaction()?;
-                        for command in &commands {
-                            match command {
-                                Command::Request(row) => write_request(&transaction, row)?,
-                                Command::Status(rows) => {
-                                    for row in rows {
-                                        write_status(&transaction, row)?;
-                                    }
-                                }
-                                Command::Finish(_) => {}
-                                #[cfg(test)]
-                                Command::Flush(_) => {}
-                            }
-                        }
-                        set_meta(
-                            &transaction,
-                            "lost_events",
-                            writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
-                        )?;
-                        if finish {
-                            set_meta(&transaction, "dirty", 0)?;
-                        }
-                        transaction.commit()
-                    })();
-                    if result.is_err() {
-                        writer_lost.fetch_add(count, Ordering::Relaxed);
-                    }
-                    // ponytail: Hourly trimming keeps writes cheap; track live row counts for hard caps.
-                    if !finish && last_prune.elapsed() >= Duration::from_secs(3600) {
-                        if prune(&conn, epoch_ms()).is_err() {
-                            writer_lost.fetch_add(1, Ordering::Relaxed);
-                        }
-                        last_prune = std::time::Instant::now();
-                    }
-                    #[cfg(test)]
-                    for command in &commands {
-                        if let Command::Flush(done) = command {
-                            let _ = done.send(());
-                        }
-                    }
-                    for command in commands {
-                        if let Command::Finish(done) = command {
-                            let _ = done.send(());
-                        }
-                    }
-                    if finish {
-                        break;
+        let ending = Arc::new(Mutex::new(Ending::default()));
+        let writer_ending = ending.clone();
+        std::thread::Builder::new().name("activity".into()).spawn(move || {
+            let mut last_prune = std::time::Instant::now();
+            while let Ok(first) = rx.recv() {
+                let mut commands = vec![first];
+                while commands.len() < 64 {
+                    match rx.try_recv() {
+                        Ok(next) => commands.push(next),
+                        Err(_) => break,
                     }
                 }
-            })?;
-        Ok(Self { path, tx, lost })
+                let count = commands.iter().map(Command::records).sum::<u64>();
+                let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
+                #[cfg(test)]
+                for command in &commands {
+                    if let Command::Hold(held, release) = command {
+                        let _ = held.send(());
+                        let _ = release.recv();
+                    }
+                }
+                // Held through the commit, so a late record either keeps the file from
+                // being marked clean or comes after the mark and undoes it.
+                let mut ending = finish.then(|| writer_ending.lock().unwrap_or_else(PoisonError::into_inner));
+                let result = (|| -> rusqlite::Result<()> {
+                    let transaction = conn.transaction()?;
+                    for command in &commands {
+                        match command {
+                            Command::Request(row) => write_request(&transaction, row)?,
+                            Command::Status(rows) => {
+                                for row in rows {
+                                    write_status(&transaction, row)?;
+                                }
+                            }
+                            Command::Send(row) => sends::write_send(&transaction, row)?,
+                            Command::Readings(rows) => {
+                                for row in rows {
+                                    quota::write_reading(&transaction, row)?;
+                                }
+                            }
+                            Command::Finish(_) | Command::Flush(_) => {}
+                            #[cfg(test)]
+                            Command::Hold(..) => {}
+                        }
+                    }
+                    set_meta(
+                        &transaction,
+                        "lost_events",
+                        writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
+                    )?;
+                    let clean = ending.as_ref().is_some_and(|ending| !ending.late);
+                    if clean {
+                        set_meta(&transaction, "dirty", 0)?;
+                    }
+                    transaction.commit()?;
+                    if let Some(ending) = ending.as_mut() {
+                        ending.clean = clean;
+                    }
+                    Ok(())
+                })();
+                drop(ending);
+                if result.is_err() {
+                    writer_lost.fetch_add(count, Ordering::Relaxed);
+                }
+                // ponytail: Hourly trimming keeps writes cheap; track live row counts for hard caps.
+                if !finish && last_prune.elapsed() >= Duration::from_secs(3600) {
+                    if prune(&conn, epoch_ms()).is_err() {
+                        writer_lost.fetch_add(1, Ordering::Relaxed);
+                    }
+                    last_prune = std::time::Instant::now();
+                }
+                for command in commands {
+                    if let Command::Finish(done) | Command::Flush(done) = command {
+                        let _ = done.send(());
+                    }
+                }
+                if finish {
+                    break;
+                }
+            }
+        })?;
+        Ok(Self {
+            path,
+            tx,
+            lost,
+            open: RwLock::new(true),
+            ending,
+        })
     }
 
-    pub(super) fn record_event(&self, event: &Value) {
+    pub(crate) fn record_event(&self, event: &Value) {
         if let Some(row) = RequestRow::from_event(event) {
             self.send(Command::Request(Box::new(row)));
         }
     }
 
-    pub(super) fn record_status(&self, status: &Value) {
+    pub(crate) fn record_status(&self, status: &Value) {
         let Some(at) = status["observedAt"].as_i64() else {
             return;
         };
@@ -253,31 +320,86 @@ impl History {
 
     fn send(&self, command: Command) {
         let count = command.records();
+        let open = self.open.read().unwrap_or_else(PoisonError::into_inner);
+        if !*open {
+            drop(open);
+            self.lost.fetch_add(count, Ordering::Relaxed);
+            if count > 0 {
+                self.late();
+            }
+            return;
+        }
         if self.tx.try_send(command).is_err() {
             self.lost.fetch_add(count, Ordering::Relaxed);
         }
     }
 
-    pub(super) async fn query(&self, range: Range, account: Option<String>) -> anyhow::Result<Value> {
+    /// A record arrived after `finish`: keeps the file from being marked clean, or marks it
+    /// unclean again with the lost count when it already was. Writes at most once, on the
+    /// caller's thread, which only shutdown reaches.
+    fn late(&self) {
+        let mut ending = self.ending.lock().unwrap_or_else(PoisonError::into_inner);
+        if std::mem::replace(&mut ending.late, true) || !ending.clean {
+            return;
+        }
+        let lost = self.lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64;
+        let marked = (|| -> rusqlite::Result<()> {
+            // Never creates the file: one that was removed has nothing to mark.
+            let mut conn = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            conn.busy_timeout(Duration::from_secs(2))?;
+            let transaction = conn.transaction()?;
+            set_meta(&transaction, "dirty", 1)?;
+            set_meta(&transaction, "lost_events", lost)?;
+            transaction.commit()
+        })();
+        if marked.is_err() {
+            tracing::warn!("Activity store could not record a loss after shutdown");
+        }
+    }
+
+    pub(crate) async fn query(&self, range: Range, account: Option<String>) -> anyhow::Result<Value> {
         let path = self.path.clone();
         let lost = self.lost.load(Ordering::Relaxed);
         tokio::task::spawn_blocking(move || query(&path, range, account.as_deref(), epoch_ms(), lost)).await?
     }
 
+    /// Blocks until every record queued before it is written, or for at most two seconds
+    /// once it is queued.
+    pub(crate) fn flush(&self) {
+        let (done, ack) = std::sync::mpsc::channel();
+        if self.tx.send(Command::Flush(done)).is_ok() {
+            let _ = ack.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    /// Writes what is queued, marks the file clean and stops the writer, waiting at most two
+    /// seconds. Later records are counted as lost and leave the file unclean; a second call
+    /// does nothing.
+    pub(crate) fn finish(&self) {
+        let (done, ack) = std::sync::mpsc::channel();
+        let queued = {
+            let mut open = self.open.write().unwrap_or_else(PoisonError::into_inner);
+            std::mem::replace(&mut *open, false) && self.tx.try_send(Command::Finish(done)).is_ok()
+        };
+        if queued {
+            let _ = ack.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    /// Stops the writer until the returned sender is dropped, so the queue fills.
     #[cfg(test)]
-    fn flush(&self) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.tx.send(Command::Flush(tx)).unwrap();
-        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    fn hold(&self) -> std::sync::mpsc::Sender<()> {
+        let (held, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        self.tx.send(Command::Hold(held, released)).unwrap();
+        waiting.recv().unwrap();
+        release
     }
 }
 
-impl Drop for History {
+impl Drop for Activity {
     fn drop(&mut self) {
-        let (done, ack) = std::sync::mpsc::channel();
-        if self.tx.try_send(Command::Finish(done)).is_ok() {
-            let _ = ack.recv_timeout(Duration::from_secs(2));
-        }
+        self.finish();
     }
 }
 
@@ -412,11 +534,19 @@ fn write_status(conn: &Connection, row: &StatusRow) -> rusqlite::Result<()> {
 fn prune(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM requests WHERE at_ms < ?1", [now - RETAIN_MS])?;
     conn.execute("DELETE FROM account_status WHERE at_ms < ?1", [now - RETAIN_MS])?;
-    trim(conn, MAX_REQUESTS, MAX_STATUSES)?;
+    conn.execute("DELETE FROM sends WHERE at_ms < ?1", [now - RETAIN_MS])?;
+    conn.execute("DELETE FROM quota_readings WHERE at_ms < ?1", [now - RETAIN_MS])?;
+    trim(conn, MAX_REQUESTS, MAX_STATUSES, MAX_SENDS, MAX_READINGS)?;
     Ok(())
 }
 
-fn trim(conn: &Connection, request_limit: i64, status_limit: i64) -> rusqlite::Result<()> {
+fn trim(
+    conn: &Connection,
+    request_limit: i64,
+    status_limit: i64,
+    send_limit: i64,
+    reading_limit: i64,
+) -> rusqlite::Result<()> {
     let requests: i64 = conn.query_row("SELECT MAX(0, COUNT(*) - ?1) FROM requests", [request_limit], |row| {
         row.get(0)
     })?;
@@ -437,6 +567,28 @@ fn trim(conn: &Connection, request_limit: i64, status_limit: i64) -> rusqlite::R
             "DELETE FROM account_status WHERE rowid IN
             (SELECT rowid FROM account_status ORDER BY at_ms, rowid LIMIT ?1)",
             [statuses],
+        )?;
+    }
+    let sends: i64 = conn.query_row("SELECT MAX(0, COUNT(*) - ?1) FROM sends", [send_limit], |row| {
+        row.get(0)
+    })?;
+    if sends > 0 {
+        conn.execute(
+            "DELETE FROM sends WHERE rowid IN
+            (SELECT rowid FROM sends ORDER BY at_ms, rowid LIMIT ?1)",
+            [sends],
+        )?;
+    }
+    let readings: i64 = conn.query_row(
+        "SELECT MAX(0, COUNT(*) - ?1) FROM quota_readings",
+        [reading_limit],
+        |row| row.get(0),
+    )?;
+    if readings > 0 {
+        conn.execute(
+            "DELETE FROM quota_readings WHERE rowid IN
+            (SELECT rowid FROM quota_readings ORDER BY at_ms, rowid LIMIT ?1)",
+            [readings],
         )?;
     }
     Ok(())
@@ -555,7 +707,7 @@ mod tests {
         let path = dir.join("history.sqlite");
         let lost = Arc::new(AtomicU64::new(0));
         {
-            let history = History::start(path.clone(), lost.clone()).unwrap();
+            let history = Activity::start(path.clone(), lost.clone()).unwrap();
             history.record_event(&json!({"type":"inference","requestId":"one",
                 "at":chrono::Utc::now().to_rfc3339(),"outcome":"success"}));
             history.flush();
@@ -563,7 +715,7 @@ mod tests {
         }
         let restarted = Arc::new(AtomicU64::new(0));
         {
-            let history = History::start(path.clone(), restarted.clone()).unwrap();
+            let history = Activity::start(path.clone(), restarted.clone()).unwrap();
             assert_eq!(restarted.load(Ordering::Relaxed), 2);
             let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
             assert_eq!(data["lostEvents"], 2);
@@ -573,11 +725,62 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         set_meta(&conn, "dirty", 1).unwrap();
         drop(conn);
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
         assert_eq!(data["lostEvents"], 2);
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn inference(id: &str) -> Value {
+        json!({"type":"inference","requestId":id,"at":chrono::Utc::now().to_rfc3339(),"outcome":"success"})
+    }
+
+    fn dirty(path: &Path) -> Option<i64> {
+        meta(&Connection::open(path).unwrap(), "dirty").unwrap()
+    }
+
+    #[test]
+    fn a_record_after_finish_leaves_the_file_unclean() {
+        let dir = std::env::temp_dir().join(format!("activity-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("activity.sqlite");
+        let activity = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        activity.record_event(&inference("before"));
+        activity.finish();
+        assert_eq!(dirty(&path), Some(0), "nothing was lost yet");
+        activity.record_event(&inference("after"));
+        assert_eq!(dirty(&path), Some(1));
+        drop(activity);
+        let restarted = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        assert_eq!(data["buckets"][0]["requests"], 1, "{data}");
+        assert_eq!(data["lostEvents"], 1);
+        assert_eq!(data["coverageUncertain"], true);
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_while_finish_waits_keeps_the_file_unclean() {
+        let dir = std::env::temp_dir().join(format!("activity-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("activity.sqlite");
+        let activity = Arc::new(Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap());
+        let release = activity.hold();
+        let finishing = {
+            let activity = activity.clone();
+            std::thread::spawn(move || activity.finish())
+        };
+        while *activity.open.read().unwrap() {
+            std::thread::yield_now();
+        }
+        activity.record_event(&inference("late"));
+        drop(release);
+        finishing.join().unwrap();
+        assert_eq!(dirty(&path), Some(1));
+        drop(activity);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -590,7 +793,7 @@ mod tests {
         let at = epoch_ms() - 60_000;
         let stamp = chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339();
         {
-            let history = History::start(path.clone(), lost.clone()).unwrap();
+            let history = Activity::start(path.clone(), lost.clone()).unwrap();
             history.record_event(&json!({"type":"inference","requestId":"synthetic-1","at":stamp,
                 "session":"private-session","bodySha256":"private-digest","account":"account-a",
                 "model":"claude-sonnet-4-6","outcome":"success","status":200,
@@ -632,7 +835,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         history.record_event(
             &json!({"type":"fallback","requestId":"one","at":stamp,"model":"claude-opus-test",
@@ -657,7 +860,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         for (id, account, outcome) in [("one", "a", "success"), ("two", "b", "quota_unavailable")] {
             history.record_event(&json!({"type":"inference","requestId":id,"at":stamp,
@@ -680,7 +883,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         for (id, usage) in [
             ("one", json!({"input_tokens":10,"cache_creation_input_tokens":5})),
@@ -704,7 +907,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let now = epoch_ms();
         for i in 0..3 {
             let at = now - (3 - i) * 1_000_000;
@@ -717,7 +920,7 @@ mod tests {
         history.flush();
         drop(history);
         let conn = Connection::open(&path).unwrap();
-        trim(&conn, 2, 2).unwrap();
+        trim(&conn, 2, 2, MAX_SENDS, MAX_READINGS).unwrap();
         let requests: Vec<String> = conn
             .prepare("SELECT request_id FROM requests ORDER BY at_ms")
             .unwrap()

@@ -271,6 +271,59 @@ async fn same_round_failover_preserves_lease_counts_and_last_error() {
 }
 
 #[tokio::test]
+async fn a_failover_is_two_sends_of_one_request_on_two_credentials() {
+    let fixture = Fixture::new(
+        Mode::FirstFails,
+        &[serde_json::json!({}), serde_json::json!({})],
+        Policy::default(),
+    )
+    .await;
+    let dir = std::env::temp_dir().join(format!("cpa-scheduler-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    cpa_server::testing::start_activity(&fixture.rt, dir.join("activity.sqlite")).unwrap();
+    let response = fixture.request(false).await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
+    let sends = cpa_server::testing::activity_sends(&fixture.rt);
+    fixture.rt.stop_activity();
+    let _ = std::fs::remove_dir_all(&dir);
+    let column = |name: &str| sends.iter().map(|send| send[name].clone()).collect::<Vec<_>>();
+    assert_eq!(column("send"), [0, 1], "{sends:?}");
+    assert_eq!(column("outcome"), ["failed", "complete"]);
+    assert_eq!(column("status"), [Value::from(503), Value::Null]);
+    let ids = column("request_id");
+    assert!(ids[0].as_str().is_some_and(|id| !id.is_empty()), "{ids:?}");
+    assert_eq!(ids[0], ids[1]);
+    let credentials = column("credential");
+    assert!(credentials.iter().all(Value::is_string), "{credentials:?}");
+    assert_ne!(credentials[0], credentials[1]);
+}
+
+#[tokio::test]
+async fn without_the_store_a_request_is_served_and_nothing_is_recorded() {
+    let fixture = Fixture::new(
+        Mode::FirstFails,
+        &[serde_json::json!({}), serde_json::json!({})],
+        Policy::default(),
+    )
+    .await;
+    assert!(!fixture.rt.usage_queue().accepts());
+    assert!(!cpa_server::testing::activity_running(&fixture.rt));
+    let response = fixture.request(false).await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
+    assert!(!cpa_server::testing::activity_running(&fixture.rt));
+    // A store started afterwards holds nothing of the request served without one.
+    let dir = std::env::temp_dir().join(format!("cpa-scheduler-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    cpa_server::testing::start_activity(&fixture.rt, dir.join("activity.sqlite")).unwrap();
+    let sends = cpa_server::testing::activity_sends(&fixture.rt);
+    fixture.rt.stop_activity();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(sends.is_empty(), "{sends:?}");
+}
+
+#[tokio::test]
 async fn cap_is_per_round_and_skipped_credentials_age_by_round() {
     let policy = Policy {
         max_retry_credentials: 1,
@@ -492,6 +545,81 @@ async fn stopped_bootstrap_failure_skips_bootstrap_retries() {
         proxy.abort();
     }
     upstream.abort();
+}
+
+/// A bootstrap retry round runs the request again on the same trace: its sends follow
+/// the earlier round's in the activity store instead of replacing them.
+#[tokio::test]
+async fn a_bootstrap_retry_round_keeps_the_earlier_rounds_sends() {
+    let calls = Arc::new(Mutex::new(0));
+    let failed = r#"data: {"type":"response.failed","response":{"error":{"type":"server_error","status":503,"message":"boom"}}}"#;
+    let completed = r#"data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+    let app = axum::Router::new()
+        .fallback(move |State(calls): State<Arc<Mutex<usize>>>| async move {
+            let call = {
+                let mut calls = calls.lock().unwrap();
+                *calls += 1;
+                *calls
+            };
+            let event = if call == 1 { failed } else { completed };
+            ([("content-type", "text/event-stream")], format!("{event}\n\n")).into_response()
+        })
+        .with_state(calls.clone());
+    let (upstream_url, upstream) = serve(app).await;
+    let mut credential = Credential::from_file(
+        Path::new("/mock"),
+        &Path::new("/mock").join("codex.json"),
+        serde_json::json!({"type":"codex","disable_cooling":true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    for (k, v) in [
+        ("api_key", "sk-fake"),
+        ("base_url", upstream_url.as_str()),
+        ("auth_kind", "apikey"),
+    ] {
+        credential.attributes.insert(k.into(), v.into());
+    }
+    let config = "routing:\n  retry:\n    request-retry: 0\nrequests:\n  streaming:\n    bootstrap-retries: 1\n";
+    let mut config = Config::parse(config).unwrap();
+    let dir = std::env::temp_dir().join(format!("cpa-bootstrap-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    config.auth_dir = dir.join("auth");
+    let rt = Arc::new(cpa_server::testing::runtime(
+        config,
+        vec![cpa_server::testing::local(credential)],
+        Executors {
+            claude: ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    cpa_server::testing::start_activity(&rt, dir.join("activity.sqlite")).unwrap();
+    let (url, proxy) = serve(router(rt.clone())).await;
+    let response = wreq::Client::new()
+        .post(format!("{url}/v1/responses"))
+        .body(r#"{"model":"gpt-5.5","stream":true,"input":"hi"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(*calls.lock().unwrap(), 2, "the retry round sent again");
+    let sends = cpa_server::testing::activity_sends(&rt);
+    rt.stop_activity();
+    proxy.abort();
+    upstream.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+    let column = |name: &str| sends.iter().map(|send| send[name].clone()).collect::<Vec<_>>();
+    assert_eq!(column("send"), [0, 1], "{sends:?}");
+    assert_eq!(column("outcome"), ["failed", "complete"]);
+    let ids = column("request_id");
+    assert_eq!(ids[0], ids[1]);
 }
 
 /// A stream that broke off before its first payload fails over to the next account

@@ -34,6 +34,16 @@ pub struct Breakdown {
     unclassified: i64,
 }
 
+impl Breakdown {
+    /// Uncached input, cache read, cache write, total output and reasoning, for a
+    /// complete breakdown only.
+    pub(crate) fn parts(&self) -> Option<[i64; 5]> {
+        let [_, uncached, cache_read, cache_write] = self.input;
+        let [output, _, reasoning] = self.output;
+        (self.quality == Quality::Complete).then_some([uncached, cache_read, cache_write, output, reasoning])
+    }
+}
+
 /// Go `usage.Detail`. `breakdown: None` is Go's zero (invalid) breakdown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Detail {
@@ -353,7 +363,7 @@ pub fn ensure_breakdown(mut d: Detail, provider: &str, executor_type: &str) -> D
 }
 
 /// Go `hasNonZeroTokenUsage`.
-fn has_tokens(d: &Detail) -> bool {
+pub(crate) fn has_tokens(d: &Detail) -> bool {
     d.input != 0
         || d.output != 0
         || d.reasoning != 0
@@ -1592,6 +1602,13 @@ pub struct Facts {
     /// The exchange history files this request's sends under, from its trace, while
     /// history records it.
     pub(crate) history: Option<crate::request_logging::history::capture::HistoryExchange>,
+    /// The WebSocket connection ID and turn index, from its trace.
+    pub(crate) turn: Option<(String, i32)>,
+    /// The request this one's sends serve, from its trace.
+    pub(crate) parent_request: Option<String>,
+    /// Numbers the request's attempts in the activity store, from its trace, so a
+    /// bootstrap retry round continues where the last one stopped.
+    pub(crate) sends: std::sync::Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl Facts {
@@ -1622,6 +1639,9 @@ impl Facts {
             prompt_prefix_hash: trace.prompt_prefix(entry, body),
             attempts: Default::default(),
             history: None,
+            turn: trace.turn(),
+            parent_request: trace.parent().map(str::to_owned),
+            sends: trace.sends(),
         }
     }
 
@@ -1710,6 +1730,8 @@ struct Ttft {
     start: Option<std::time::Instant>,
     ttft: Option<std::time::Duration>,
     first_packet: Option<std::time::Duration>,
+    /// `ttft` is a token event's time, not the first body byte's.
+    token: bool,
 }
 
 impl Ttft {
@@ -1741,7 +1763,20 @@ impl Ttft {
         self.first_packet.get_or_insert(elapsed);
         if is_token {
             self.ttft = Some(elapsed);
+            self.token = true;
             self.start = None;
+        }
+    }
+
+    /// What `get` measures; none without marks. `first_packet` is set only by `token`, so
+    /// without `ttft` it is the first event that carried no token.
+    fn kind(&self) -> Option<crate::activity::sends::TtftKind> {
+        use crate::activity::sends::TtftKind;
+        match (self.tracked, self.ttft, self.first_packet) {
+            (false, ..) | (true, None, None) => None,
+            (true, Some(_), _) if self.token => Some(TtftKind::Token),
+            (true, Some(_), _) => Some(TtftKind::Byte),
+            (true, None, Some(_)) => Some(TtftKind::Event),
         }
     }
 
@@ -1761,6 +1796,7 @@ struct Outcome {
     model: String,
     latency: std::time::Duration,
     ttft: std::time::Duration,
+    ttft_kind: Option<crate::activity::sends::TtftKind>,
 }
 
 /// The upstream exchange's stages as the shared HTTP client reported them. Apart from
@@ -1870,6 +1906,7 @@ impl Observer {
             model: r.model.get().to_owned(),
             latency: self.started.elapsed(),
             ttft: r.ttft.get(),
+            ttft_kind: r.ttft.kind(),
         });
     }
 }
@@ -1983,6 +2020,8 @@ pub struct Tracker {
     /// Attempt start time for queue telemetry.
     requested_at: chrono::DateTime<chrono::FixedOffset>,
     attempt: usize,
+    /// This attempt's number in the activity store.
+    send: i32,
     /// This attempt's sends, while history is on.
     history: Option<std::sync::Arc<crate::request_logging::history::capture::Sends>>,
 }
@@ -2060,6 +2099,7 @@ impl Tracker {
             client: home_client,
             requested_at: now.fixed_offset(),
             attempt: facts.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            send: facts.sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             history: None,
         }
     }
@@ -2149,12 +2189,16 @@ impl Tracker {
         let history = self.history.take();
         let rt = self.queue.clone();
         let queue = rt.usage_queue();
-        if !queue.accepts() && history.is_none() {
+        let activity = rt.activity().is_some();
+        if !queue.accepts() && history.is_none() && !activity {
             return;
         }
         let settled = self.settle(ending, queue.accepts());
         if let Some(sends) = history {
             sends.finish(&self.queue, settled.history_end());
+        }
+        if activity {
+            rt.record_send(self.send_row(&settled));
         }
         if settled.enqueue {
             if queue.accepts() {
@@ -2177,14 +2221,14 @@ impl Tracker {
         // Keep the returned TTL buckets as observations, not inferred accounting.
         let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
         let mut record = std::mem::take(&mut self.record);
-        let (latency, ttft);
+        let (latency, ttft, ttft_kind);
         if let Some(outcome) = reported.outcome {
             record.failed = outcome.failed;
             record.fail_status = outcome.status;
             record.fail_body = outcome.body;
             record.detail = outcome.detail;
             record.response_model = outcome.model;
-            (latency, ttft) = (outcome.latency, outcome.ttft);
+            (latency, ttft, ttft_kind) = (outcome.latency, outcome.ttft, outcome.ttft_kind);
         } else {
             let usage = if reported.seen {
                 reported.usage()
@@ -2223,10 +2267,11 @@ impl Tracker {
                 self.model.get().to_owned()
             };
             latency = self.started.elapsed();
-            ttft = if reported.ttft.tracked {
-                reported.ttft.get()
+            (ttft, ttft_kind) = if reported.ttft.tracked {
+                (reported.ttft.get(), reported.ttft.kind())
             } else {
-                self.first.unwrap_or_default()
+                let event = self.first.map(|_| crate::activity::sends::TtftKind::Event);
+                (self.first.unwrap_or_default(), event)
             };
         }
         record.latency_ms = latency.as_millis() as i64;
@@ -2268,6 +2313,8 @@ impl Tracker {
             enqueue,
             cancelled,
             upstream_model: reported.upstream_model,
+            // A zero time is no time: nothing was measured.
+            ttft_kind: ttft_kind.filter(|_| !ttft.is_zero()),
         }
     }
 }
@@ -2280,11 +2327,23 @@ struct Settled {
     /// The client went away before the attempt ended.
     cancelled: bool,
     upstream_model: String,
+    /// What `record.ttft_ms` measures; none when nothing was measured.
+    ttft_kind: Option<crate::activity::sends::TtftKind>,
 }
 
 impl Settled {
-    fn history_end(&self) -> crate::request_logging::history::capture::AttemptEnd {
+    fn outcome(&self) -> crate::request_logging::history::row::Outcome {
         use crate::request_logging::history::row::Outcome;
+        if self.cancelled {
+            Outcome::Cancelled
+        } else if self.record.failed {
+            Outcome::Failed
+        } else {
+            Outcome::Complete
+        }
+    }
+
+    fn history_end(&self) -> crate::request_logging::history::capture::AttemptEnd {
         let record = &self.record;
         crate::request_logging::history::capture::AttemptEnd {
             response_model: record.response_model.clone(),
@@ -2292,13 +2351,7 @@ impl Settled {
             latency_ms: record.latency_ms,
             // 0: no first byte was seen.
             ttft_ms: (record.ttft_ms > 0).then_some(record.ttft_ms),
-            outcome: if self.cancelled {
-                Outcome::Cancelled
-            } else if record.failed {
-                Outcome::Failed
-            } else {
-                Outcome::Complete
-            },
+            outcome: self.outcome(),
             status: record
                 .failed
                 .then(|| i32::try_from(record.fail_status).unwrap_or_default()),
@@ -2308,6 +2361,37 @@ impl Settled {
 }
 
 impl Tracker {
+    /// This attempt's activity row: identifiers, timings, counts and a status, nothing
+    /// read from a body.
+    fn send_row(&self, settled: &Settled) -> crate::activity::sends::SendRow {
+        let record = &settled.record;
+        let (request_id, turn) = self
+            .facts
+            .turn
+            .clone()
+            .unwrap_or_else(|| (self.facts.client.request_id.clone(), 0));
+        let start = self.started.saturating_duration_since(self.facts.clock.accepted());
+        crate::activity::sends::SendRow {
+            request_id,
+            turn,
+            send: self.send,
+            parent_request: self.facts.parent_request.clone(),
+            at_ms: self.requested_at.timestamp_millis(),
+            source: crate::request_logging::history::row::Source::Proxy,
+            provider: record.provider.clone(),
+            credential: Some(self.auth_id.clone()).filter(|id| !id.is_empty()),
+            model: Some(record.model.clone()).filter(|model| !model.is_empty()),
+            outcome: settled.outcome(),
+            // A transport failure has no HTTP answer: Go's status for it is 0.
+            status: Some(record.fail_status).filter(|status| record.failed && *status > 0),
+            stream: record.stream,
+            start_ms: i64::try_from(start.as_millis()).unwrap_or(i64::MAX),
+            latency_ms: Some(record.latency_ms),
+            ttft: settled.ttft_kind.map(|kind| (record.ttft_ms, kind)),
+            tokens: crate::activity::sends::Tokens::of(&record.detail, &record.provider, &record.executor_type),
+        }
+    }
+
     /// The record's [`Timings`]: each mark as an offset from the request's arrival.
     fn timings(&self, exchange: &Exchange) -> Timings {
         let clock = &self.facts.clock;
@@ -2787,6 +2871,240 @@ mod tests {
         c
     }
 
+    /// A runtime with the usage queue and body history off and the activity store on,
+    /// in a private directory removed on drop.
+    struct ActivityRuntime {
+        rt: std::sync::Arc<crate::Runtime>,
+        dir: std::path::PathBuf,
+    }
+
+    impl ActivityRuntime {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("usage-record-activity-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let executors = cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            };
+            let rt = std::sync::Arc::new(crate::testing::runtime(
+                crate::testing::config(""),
+                Vec::new(),
+                executors,
+            ));
+            assert!(!rt.usage_queue().accepts());
+            assert!(!crate::request_logging::history::on(&rt.request_snapshot().0));
+            rt.start_activity(dir.join("activity.sqlite")).unwrap();
+            Self { rt, dir }
+        }
+
+        fn sends(&self) -> Vec<Value> {
+            crate::testing::activity_sends(&self.rt)
+        }
+    }
+
+    impl Drop for ActivityRuntime {
+        fn drop(&mut self) {
+            self.rt.stop_activity();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn activity_facts(request_id: &str) -> std::sync::Arc<Facts> {
+        let mut facts = Facts::new(
+            Client::default(),
+            Format::Claude,
+            Format::Claude,
+            "claude-sonnet-4-6",
+            b"{}",
+            true,
+            &crate::dispatch::Trace::default(),
+        );
+        facts.client.request_id = request_id.into();
+        std::sync::Arc::new(facts)
+    }
+
+    fn column(sends: &[Value], name: &str) -> Vec<Value> {
+        sends.iter().map(|send| send[name].clone()).collect()
+    }
+
+    #[test]
+    fn an_attempt_is_recorded_with_the_queue_and_body_history_off() {
+        let store = ActivityRuntime::new();
+        let facts = activity_facts("r1");
+        let tracker = Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        tracker.sink().response_line(
+            Format::Claude,
+            br#"data: {"type":"message_start","message":{"model":"claude-upstream","usage":{"input_tokens":9,"output_tokens":3}}}"#,
+        );
+        tracker.succeed();
+        let sends = store.sends();
+        assert_eq!(sends.len(), 1, "{sends:?}");
+        let send = &sends[0];
+        assert_eq!(send["request_id"], "r1");
+        assert_eq!(send["source"], "proxy");
+        assert_eq!(send["provider"], "claude");
+        assert_eq!(send["send"], 0);
+        assert_eq!(send["outcome"], "complete");
+        assert!(send["latency_ms"].is_i64(), "{send}");
+        assert!(send["output_tokens"].as_i64().is_some_and(|n| n > 0), "{send}");
+    }
+
+    #[test]
+    fn a_second_attempt_is_send_one_and_starts_later() {
+        use cpa_core::exec::{ExecError, FailureScope};
+        let store = ActivityRuntime::new();
+        let facts = activity_facts("r1");
+        let first = Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        first.fail(&ExecError::local(500, FailureScope::Credential, "upstream failed"));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6");
+        second.succeed();
+        let sends = store.sends();
+        assert_eq!(column(&sends, "send"), [0, 1]);
+        assert_eq!(column(&sends, "outcome"), ["failed", "complete"]);
+        assert_eq!(column(&sends, "status"), [Value::from(500), Value::Null]);
+        let start = column(&sends, "start_ms");
+        assert!(start[1].as_i64().unwrap() >= start[0].as_i64().unwrap(), "{start:?}");
+    }
+
+    #[test]
+    fn a_transport_failure_is_stored_without_a_status() {
+        use cpa_core::exec::{ExecError, FailureScope};
+        let store = ActivityRuntime::new();
+        let facts = activity_facts("r1");
+        let error = ExecError::local(502, FailureScope::Transport, "connection reset");
+        assert_eq!(error.go_status(), 0);
+        Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6").fail(&error);
+        let sends = store.sends();
+        assert_eq!(column(&sends, "outcome"), ["failed"]);
+        assert_eq!(column(&sends, "status"), [Value::Null]);
+    }
+
+    #[test]
+    fn a_recorded_send_brings_its_accounts_quota_reading() {
+        let store = ActivityRuntime::new();
+        let credential = credential_for("codex");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "40".parse().unwrap());
+        store
+            .rt
+            .executors
+            .codex
+            .quota()
+            .observe(&credential.id, "gpt-test", &headers);
+        let facts = activity_facts("r1");
+        Tracker::start(&store.rt, &facts, &credential, "gpt-test").succeed();
+        store.sends();
+        let db = rusqlite::Connection::open(store.dir.join("activity.sqlite")).unwrap();
+        let readings = |db: &rusqlite::Connection| -> Vec<(String, String, f64)> {
+            db.prepare("SELECT credential, provider, used FROM quota_readings")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(readings(&db), [(credential.id.clone(), "codex".to_owned(), 40.0)]);
+        // A second write of the same snapshot would restore the reading changed here.
+        db.execute("UPDATE quota_readings SET used = -1", []).unwrap();
+        let facts = activity_facts("r2");
+        Tracker::start(&store.rt, &facts, &credential, "gpt-test").succeed();
+        assert_eq!(store.sends().len(), 2);
+        assert_eq!(readings(&db), [(credential.id.clone(), "codex".to_owned(), -1.0)]);
+    }
+
+    #[test]
+    fn a_dropped_attempt_is_one_cancelled_send() {
+        let store = ActivityRuntime::new();
+        let facts = activity_facts("r1");
+        drop(Tracker::start(
+            &store.rt,
+            &facts,
+            &credential_for("claude"),
+            "claude-sonnet-4-6",
+        ));
+        let sends = store.sends();
+        assert_eq!(column(&sends, "outcome"), ["cancelled"]);
+    }
+
+    #[test]
+    fn two_turns_of_one_connection_keep_both_sends() {
+        let store = ActivityRuntime::new();
+        for turn in [0, 1] {
+            let mut facts = Facts::new(
+                Client::default(),
+                Format::Claude,
+                Format::Claude,
+                "claude-sonnet-4-6",
+                b"{}",
+                true,
+                &crate::dispatch::Trace::default(),
+            );
+            facts.client.request_id = "http-request".into();
+            facts.turn = Some(("conn-1".into(), turn));
+            let facts = std::sync::Arc::new(facts);
+            Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6").succeed();
+        }
+        let sends = store.sends();
+        assert_eq!(column(&sends, "request_id"), ["conn-1", "conn-1"]);
+        let mut turns = column(&sends, "turn");
+        turns.sort_by_key(|turn| turn.as_i64());
+        assert_eq!(turns, [0, 1]);
+    }
+
+    #[test]
+    fn an_executor_that_reports_no_marks_gets_an_event_time() {
+        let store = ActivityRuntime::new();
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut unmarked = Tracker::start(&store.rt, &activity_facts("event"), &credential_for("claude"), "m");
+        pause();
+        unmarked.arrived(&axum::http::HeaderMap::new());
+        unmarked.succeed();
+        let token = Tracker::start(&store.rt, &activity_facts("token"), &credential_for("claude"), "m");
+        token.sink().round_trip_started();
+        pause();
+        token.sink().token_event(true);
+        token.succeed();
+        // Claude's executor marks the first body byte; the token event after it does not
+        // change what the time measures.
+        let byte = Tracker::start(&store.rt, &activity_facts("byte"), &credential_for("claude"), "m");
+        byte.sink().round_trip_started();
+        pause();
+        byte.sink().first_byte();
+        byte.sink().token_event(true);
+        byte.succeed();
+        // Only an event without a token came before the end: the time is that event's.
+        let packet = Tracker::start(&store.rt, &activity_facts("packet"), &credential_for("claude"), "m");
+        packet.sink().round_trip_started();
+        pause();
+        packet.sink().token_event(false);
+        packet.succeed();
+        let none = Tracker::start(&store.rt, &activity_facts("none"), &credential_for("claude"), "m");
+        none.succeed();
+        let mut sends = store.sends();
+        sends.sort_by_key(|send| send["request_id"].as_str().unwrap().to_owned());
+        let kinds: Vec<(Value, Value)> = sends
+            .iter()
+            .map(|send| (send["request_id"].clone(), send["ttft_kind"].clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("byte".into(), "byte".into()),
+                ("event".into(), "event".into()),
+                ("none".into(), Value::Null),
+                ("packet".into(), "event".into()),
+                ("token".into(), "token".into()),
+            ]
+        );
+        for send in sends.iter().filter(|send| !send["ttft_kind"].is_null()) {
+            assert!(send["ttft_ms"].as_i64().is_some_and(|ms| ms >= 2), "{send}");
+        }
+    }
+
     /// The fields Go's reporter goldens compare, from one queued record.
     fn summary(queued: &[u8]) -> Value {
         let v: Value = serde_json::from_slice(queued).unwrap();
@@ -3039,6 +3357,9 @@ mod tests {
                 prompt_prefix_hash: String::new(),
                 attempts: Default::default(),
                 history: Default::default(),
+                turn: None,
+                parent_request: None,
+                sends: Default::default(),
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

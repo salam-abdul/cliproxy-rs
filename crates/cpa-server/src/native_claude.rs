@@ -6,7 +6,6 @@ mod entitlement_tests;
 mod fallback;
 #[cfg(test)]
 mod fallback_tests;
-pub(crate) mod history;
 mod observation;
 mod policy;
 mod quota;
@@ -137,7 +136,6 @@ fn yes() -> bool {
 pub(crate) struct State {
     config: Config,
     events: diagnostics::Writer,
-    history: Option<history::History>,
     rt: Arc<Runtime>,
     clients: Clients,
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
@@ -148,11 +146,18 @@ pub(crate) struct State {
     skipped: Mutex<HashMap<String, Skip>>,
 }
 pub struct Running(Vec<JoinHandle<()>>, Option<std::fs::File>);
-impl Drop for Running {
-    fn drop(&mut self) {
+impl Running {
+    /// Stops accepting native connections and the background tasks; connections already
+    /// accepted run on. The credential owner lock is held until drop.
+    pub fn stop_accepting(&self) {
         for task in &self.0 {
             task.abort();
         }
+    }
+}
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.stop_accepting();
         let _ = self.1.take();
     }
 }
@@ -448,15 +453,19 @@ impl State {
     fn event(&self, mut v: Value) {
         v["at"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         self.events.send(&v, &self.rt.native_events.lost);
-        if let Some(history) = &self.history {
-            history.record_event(&v);
+        if let Some(activity) = self.rt.activity() {
+            activity.record_event(&v);
         }
         self.rt.native_events.record(v);
     }
 
-    pub(crate) async fn history(&self, range: history::Range, account: Option<String>) -> anyhow::Result<Value> {
-        self.history
-            .as_ref()
+    pub(crate) async fn history(
+        &self,
+        range: crate::activity::Range,
+        account: Option<String>,
+    ) -> anyhow::Result<Value> {
+        self.rt
+            .activity()
             .context("Native history is unavailable")?
             .query(range, account)
             .await
@@ -833,6 +842,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                             raw: &raw,
                             headers: &parts.headers,
                             attempts: tried.len(),
+                            started: request_started,
                         },
                         rejected,
                     )
@@ -876,6 +886,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                                 raw: &raw,
                                 headers: &parts.headers,
                                 attempts: tried.len(),
+                                started: request_started,
                             },
                             rejected,
                         )
@@ -927,6 +938,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                                 raw: &raw,
                                 headers: &parts.headers,
                                 attempts: tried.len(),
+                                started: request_started,
                             },
                             rejected,
                         )
@@ -951,6 +963,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             return Ok(error(502, "Native routing state unavailable; no request sent"));
         };
         let started = Instant::now();
+        let send = i32::try_from(tried.len().saturating_sub(1)).unwrap_or(i32::MAX);
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
             &s.rt,
             crate::request_logging::history::native::NativeSend {
@@ -996,6 +1009,15 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         error: Some(failure_kind.to_owned()),
                     });
                 }
+                s.rt.record_send(observation::send_row(
+                    &request_id,
+                    send,
+                    &a,
+                    &model,
+                    request_started,
+                    started,
+                    crate::request_logging::history::row::Outcome::TransportLost,
+                ));
                 s.cool(&a, &model, 0, None, false).await?;
                 s.rt.store().note_activity(&a.file_id, false);
                 s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
@@ -1045,6 +1067,18 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     error: Some(outcome.to_owned()),
                 });
             }
+            s.rt.record_send(crate::activity::sends::SendRow {
+                status: Some(i64::from(status.as_u16())),
+                ..observation::send_row(
+                    &request_id,
+                    send,
+                    &a,
+                    &model,
+                    request_started,
+                    started,
+                    crate::request_logging::history::row::Outcome::Failover,
+                )
+            });
             s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
             if !entitlement {
                 s.rt.claude_usage.invalidate(&a.token).await;
@@ -1072,6 +1106,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             digest: hash(&raw),
             body_bytes: raw.len(),
             started: request_started,
+            sent_at: started,
+            send,
         };
         let mut record = Some(Observation::new(s.clone(), facts, &encoding, capture));
         // The server stops polling a body once it has sent the declared content-length, so the
@@ -1276,16 +1312,6 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     })?;
     let s = Arc::new(State {
         events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
-        history: match history::History::start(
-            c.events.with_extension("sqlite"),
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        ) {
-            Ok(history) => Some(history),
-            Err(error) => {
-                tracing::warn!(%error, "Native history is unavailable");
-                None
-            }
-        },
         config: c.clone(),
         rt,
         clients,
@@ -1301,6 +1327,11 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
+    // After the last step that can fail, so a native start that fails leaves no store
+    // running and no file marked in use.
+    if let Err(error) = s.rt.start_activity(c.events.with_extension("sqlite")) {
+        tracing::warn!(%error, "Native history is unavailable");
+    }
     *s.rt.native_state.write().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&s);
     let cert_state = s.clone();
     let certificate = tokio::spawn(async move {
@@ -1327,8 +1358,8 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             interval.tick().await;
             match health_state.status().await {
                 Ok(status) => {
-                    if let Some(history) = &health_state.history {
-                        history.record_status(&status);
+                    if let Some(activity) = health_state.rt.activity() {
+                        activity.record_status(&status);
                     }
                 }
                 Err(_) => tracing::warn!("Native Claude health observation failed"),

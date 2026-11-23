@@ -144,6 +144,9 @@ impl Fixture {
                             if cpa_common::gostr::contains(&body, b"MODE_STALL") {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
+                            if cpa_common::gostr::contains(&body, b"MODE_SLOW") {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                            }
                             let response = if cpa_common::gostr::contains(&body, b"MODE_OPEN_STREAM") {
                                 let stream = futures_util::stream::once(async {
                                     Ok::<_, std::io::Error>(Bytes::from_static(b"event: ping\n\n"))
@@ -251,15 +254,9 @@ impl Fixture {
                 google: Default::default(),
             },
         ));
+        rt.start_activity(native.events.with_extension("sqlite")).unwrap();
         let state = Arc::new(State {
             events: diagnostics::Writer::start(native.events.clone(), rt.native_events.lost.clone()).unwrap(),
-            history: Some(
-                history::History::start(
-                    native.events.with_extension("sqlite"),
-                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                )
-                .unwrap(),
-            ),
             config: native,
             rt,
             clients: Clients::new(|| native_client().tls_cert_verification(false)).unwrap(),
@@ -585,6 +582,8 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
             digest: String::new(),
             body_bytes: 0,
             started: std::time::Instant::now(),
+            sent_at: std::time::Instant::now(),
+            send: 0,
         };
         let observation = Observation::new(fixture.state.clone(), facts, "identity", None);
         tokio::spawn(async move {
@@ -999,4 +998,145 @@ async fn a_pool_of_only_skipped_files_is_a_routing_error() {
     let response = fixture.request().await;
     assert_eq!(response.status(), 502);
     assert!(fixture.seen.lock().unwrap().is_empty());
+}
+
+/// The fixture's `sends` rows once every queued record is written.
+pub(super) async fn activity_sends(fixture: &Fixture) -> Vec<Value> {
+    let rt = fixture.state.rt.clone();
+    tokio::task::spawn_blocking(move || crate::testing::activity_sends(&rt))
+        .await
+        .unwrap()
+}
+
+fn send_column(sends: &[Value], name: &str) -> Vec<Value> {
+    sends.iter().map(|send| send[name].clone()).collect()
+}
+
+#[tokio::test]
+async fn a_failover_then_a_success_is_two_native_sends_each_timed_from_its_own_start() {
+    let fixture = Fixture::new(Reply {
+        status: 403,
+        body: br#"{"error":{"code":"model_access_denied"}}"#.to_vec(),
+        broken: false,
+    })
+    .await;
+    let began = std::time::Instant::now();
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let elapsed = i64::try_from(began.elapsed().as_millis()).unwrap();
+    let sends = activity_sends(&fixture).await;
+    assert_eq!(sends.len(), 2, "{sends:?}");
+    assert_eq!(sends[0]["request_id"], sends[1]["request_id"]);
+    assert_eq!(send_column(&sends, "send"), [0, 1]);
+    assert_eq!(send_column(&sends, "outcome"), ["failover", "complete"]);
+    assert_eq!(sends[0]["status"], 403);
+    assert_eq!(send_column(&sends, "source"), ["native", "native"]);
+    assert_eq!(send_column(&sends, "provider"), ["claude", "claude"]);
+    assert_eq!(send_column(&sends, "turn"), [0, 0]);
+    let start = |i: usize| sends[i]["start_ms"].as_i64().unwrap();
+    let latency = sends[0]["latency_ms"].as_i64().unwrap();
+    assert!(start(1) >= start(0) + latency, "{sends:?}");
+    // A send's latency counts from its own start, so it ends inside the client's wait.
+    for send in &sends {
+        let end = send["start_ms"].as_i64().unwrap() + send["latency_ms"].as_i64().unwrap();
+        assert!(end <= elapsed, "{send} ended after the {elapsed} ms the client waited");
+    }
+}
+
+#[tokio::test]
+async fn an_account_without_a_credential_file_is_recorded_under_its_account_id() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-ratelimit-unified-5h-utilization", "0.3".parse().unwrap());
+    fixture
+        .state
+        .rt
+        .executors
+        .claude
+        .quota()
+        .observe_model("a", "claude-opus-test", &headers);
+    assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
+    let sends = activity_sends(&fixture).await;
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert_eq!(sends[0]["credential"], "a");
+    let db = rusqlite::Connection::open(fixture.dir.join("events.sqlite")).unwrap();
+    let readings: Vec<(String, f64)> = db
+        .prepare("SELECT credential, used FROM quota_readings")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(readings, [("a".to_owned(), 30.0)]);
+    assert_eq!(sends[0]["ttft_kind"], "byte");
+    assert_eq!(sends[0]["outcome"], "complete");
+    assert_eq!(sends[0]["model"], "claude-opus-test");
+}
+
+#[tokio::test]
+async fn a_native_start_that_fails_leaves_no_activity_store() {
+    let dir = std::env::temp_dir().join(format!("native-start-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let key =
+        PKey::from_ec_key(EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap()).unwrap();
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "localhost").unwrap();
+    let name = name.build();
+    let mut cert = X509::builder().unwrap();
+    cert.set_version(2).unwrap();
+    cert.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    cert.set_subject_name(&name).unwrap();
+    cert.set_issuer_name(&name).unwrap();
+    cert.set_pubkey(&key).unwrap();
+    cert.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    cert.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    cert.sign(&key, MessageDigest::sha256()).unwrap();
+    let private = |file: &str, bytes: &[u8]| {
+        std::fs::write(dir.join(file), bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    };
+    private("key", &key.private_key_to_pem_pkcs8().unwrap());
+    private("cert", &cert.build().to_pem().unwrap());
+    private("secret", b"synthetic-secret-synthetic-secret-0123");
+    // The diagnostics port is taken, so the start fails at its last listener.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = json!({
+        "port":taken.local_addr().unwrap().port(),"httpProxyPort":0,"database":dir.join("routing.json"),
+        "events":dir.join("events.jsonl"),"proxySecret":dir.join("secret"),"key":dir.join("key"),
+        "cert":dir.join("cert"),"fixtureAccounts":[],"upstream":{"hostname":"127.0.0.1","port":1}
+    });
+    std::fs::write(dir.join("native.json"), config.to_string()).unwrap();
+    let rt = Arc::new(crate::testing::runtime(
+        cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.join("auth").display())).unwrap(),
+        Vec::new(),
+        cpa_exec::Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("https://127.0.0.1:1").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let Err(error) = start_config(rt.clone(), &dir.join("native.json")).await else {
+        panic!("the native start succeeded on a taken port")
+    };
+    assert!(
+        format!("{error:#}").contains("native diagnostics listener"),
+        "{error:#}"
+    );
+    assert!(rt.activity().is_none());
+    assert!(!dir.join("events.sqlite").exists());
+    drop(taken);
+    let _ = std::fs::remove_dir_all(&dir);
 }

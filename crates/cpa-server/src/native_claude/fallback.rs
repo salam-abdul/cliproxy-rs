@@ -56,6 +56,8 @@ pub(super) struct Refused<'a> {
     pub(super) headers: &'a HeaderMap,
     /// Claude accounts tried before the refusal.
     pub(super) attempts: usize,
+    /// When the native request arrived.
+    pub(super) started: Instant,
 }
 
 /// Why a mapped model did not answer. The 429 stands in every case.
@@ -149,7 +151,7 @@ impl State {
             return Err(Failure::ProviderNotAllowed);
         }
         // Its own trace ID: the Claude attempts are already recorded under the request's.
-        let trace = dispatch::Trace::with_request_id(None);
+        let trace = dispatch::Trace::serving(refused.request_id.to_owned(), refused.started);
         // Not `dispatch::serve`: its keep-alive commits a 200 before the result exists and
         // its header passthrough would replace the 429's reset headers.
         match dispatch::run_with_bootstrap_retries(&self.rt, call, &trace).await {
