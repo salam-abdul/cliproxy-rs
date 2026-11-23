@@ -478,6 +478,8 @@ struct State {
     model: Vec<u8>,
     created_at: i64,
     response_id: Vec<u8>,
+    /// `message_start`'s input tokens, for a `message_delta` that reports only output.
+    input_tokens: i64,
     tool_names: HashMap<i64, Vec<u8>>,
     tool_args: HashMap<i64, Vec<u8>>,
     tool_ids: HashMap<i64, Vec<u8>>,
@@ -519,9 +521,12 @@ fn delta_part(delta: &Res<'_>) -> Option<Vec<u8>> {
     Some(part)
 }
 
-/// Gemini usage metadata (without the traffic type) from Claude usage.
-fn usage_fields(target: &mut Vec<u8>, prefix: &str, usage: &Res<'_>) {
-    let input = usage.get("input_tokens").int();
+/// Gemini usage metadata (without the traffic type) from Claude usage. Claude reports input
+/// tokens in `message_start` and may leave them out of `message_delta`; `start_input` is
+/// the former.
+fn usage_fields(target: &mut Vec<u8>, prefix: &str, usage: &Res<'_>, start_input: i64) {
+    let reported = usage.get("input_tokens");
+    let input = if reported.exists() { reported.int() } else { start_input };
     let output = usage.get("output_tokens").int();
     let set = |target: &mut Vec<u8>, key: &str, value: i64| gj::set_int(target, &format!("{prefix}{key}"), value);
     set(target, "promptTokenCount", input);
@@ -626,6 +631,7 @@ impl GoStream for State {
                 if message.exists() {
                     self.response_id = string(&message.get("id"));
                     self.model = string(&message.get("model"));
+                    self.input_tokens = message.get("usage.input_tokens").int();
                 }
                 vec![]
             }
@@ -679,7 +685,7 @@ impl GoStream for State {
                 }
                 let usage = root.get("usage");
                 if usage.exists() {
-                    usage_fields(&mut template, "usageMetadata.", &usage);
+                    usage_fields(&mut template, "usageMetadata.", &usage, self.input_tokens);
                 }
                 gj::set_str(&mut template, "candidates.0.finishReason", "STOP");
                 vec![template]
@@ -767,6 +773,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     let mut st = State::default();
     let mut parts = vec![];
     let mut usage_json: Option<Vec<u8>> = None;
+    let mut start_input = 0;
     let (mut response_id, mut created_at) = (vec![], 0);
     for line in body.split(|&c| c == b'\n') {
         let end = line.iter().rposition(|&c| c != b'\r').map_or(0, |i| i + 1);
@@ -786,6 +793,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
                 if message.exists() {
                     response_id = string(&message.get("id"));
                     created_at = now_unix();
+                    start_input = message.get("usage.input_tokens").int();
                 }
             }
             b"content_block_start" => {
@@ -814,7 +822,7 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
                 let usage = root.get("usage");
                 if usage.exists() {
                     let mut json = b"{}".to_vec();
-                    usage_fields(&mut json, "", &usage);
+                    usage_fields(&mut json, "", &usage, start_input);
                     usage_json = Some(json);
                 }
             }
