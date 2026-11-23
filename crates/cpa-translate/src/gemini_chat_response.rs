@@ -227,7 +227,7 @@ impl State {
             let reason = if self.saw_tool_call.get(&index).copied().unwrap_or(false) {
                 "tool_calls"
             } else if upstream == b"MAX_TOKENS" {
-                "max_tokens"
+                "length"
             } else {
                 "stop"
             };
@@ -258,7 +258,10 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, raw: &[u8]) -> Result<Vec<u8>, Error> {
         let finish = candidate.get("finishReason");
         if finish.exists() {
             let reason = go_lower(&finish.bytes());
-            gj::set_str(&mut choice, "finish_reason", &reason);
+            // OpenAI reports an output token limit as `length`; the native reason keeps
+            // Gemini's.
+            let mapped: &[u8] = if go_trim_space(&reason) == b"max_tokens" { b"length" } else { &reason };
+            gj::set_str(&mut choice, "finish_reason", mapped);
             gj::set_str(&mut choice, "native_finish_reason", &reason);
         }
         let parts = candidate.get("content.parts");

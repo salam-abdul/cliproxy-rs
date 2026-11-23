@@ -611,7 +611,7 @@ impl Stream {
         let reason = if self.saw_tool_call {
             "tool_calls"
         } else if self.upstream_finish == b"MAX_TOKENS" {
-            "max_tokens"
+            "length"
         } else {
             "stop"
         };
