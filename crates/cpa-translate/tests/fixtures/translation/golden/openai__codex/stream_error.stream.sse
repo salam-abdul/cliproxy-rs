@@ -1,0 +1,2 @@
+data: {"id":"resp_fixture_1","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null,"native_finish_reason":null}]}
+

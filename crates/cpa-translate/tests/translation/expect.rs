@@ -90,6 +90,18 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             ..Expected::default()
         },
         ("max_tokens", _) => reply(vec!["Once upon a"], Stop::Length),
+        // A failed reply's text so far, then the error. Buffered replies of a stream that
+        // failed have no defined shape, so only the stream is checked.
+        ("stream_error", Kind::Request) => Expected {
+            text: vec!["Say hello."],
+            ..Expected::default()
+        },
+        ("stream_error", Kind::Stream) => Expected {
+            text: vec!["Hello"],
+            stop: Some(Stop::Error),
+            ..Expected::default()
+        },
+        ("stream_error", Kind::Response) => Expected::default(),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
@@ -101,7 +113,57 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
 /// accept it (`docs/UPSTREAM-REVIEW.md`, Codex output budgets).
 const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pending decision";
 
+/// executor: the Codex executor ends a stream at `response.failed` or `error` with an
+/// error of its own (`cpa-exec/src/codex_response.rs`), so the translator never sees it.
+const CODEX_EXECUTOR_FAILURE: &str = "executor";
+/// No translator to Interactions writes a failure event, so its shape waits for a
+/// decision; until then the Claude translator reports a failed stream as completed and the
+/// Responses one stops without a terminal event.
+const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event shape yet: a decision";
+
 pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
+    (
+        "claude__codex",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        CODEX_EXECUTOR_FAILURE,
+    ),
+    (
+        "gemini__codex",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        CODEX_EXECUTOR_FAILURE,
+    ),
+    (
+        "openai__codex",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        CODEX_EXECUTOR_FAILURE,
+    ),
+    (
+        "interactions__codex",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        CODEX_EXECUTOR_FAILURE,
+    ),
+    (
+        "interactions__claude",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        NO_INTERACTIONS_FAILURE,
+    ),
+    (
+        "interactions__openai-response",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        NO_INTERACTIONS_FAILURE,
+    ),
     (
         "claude__gemini",
         "max_tokens",

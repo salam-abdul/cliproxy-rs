@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"error":{"code":503,"message":"Overloaded","status":"UNAVAILABLE"}}
+

@@ -1,0 +1,12 @@
+event: interaction.created
+data: {"event_type":"interaction.created","interaction":{"id":"interaction_fixture_1","object":"interaction","status":"in_progress","model":"gemini-2.5-pro"}}
+
+event: step.start
+data: {"event_type":"step.start","index":0,"step":{"type":"model_output"}}
+
+event: step.delta
+data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"Hello"}}
+
+event: interaction.failed
+data: {"event_type":"interaction.failed","interaction":{"id":"interaction_fixture_1","status":"failed","error":{"code":"unavailable","message":"Overloaded"}}}
+

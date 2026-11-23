@@ -1,0 +1,6 @@
+data: {"id":"msg_fixture_1","object":"chat.completion.chunk","created":"<time>","model":"claude-sonnet-4-6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"msg_fixture_1","object":"chat.completion.chunk","created":"<time>","model":"claude-sonnet-4-6","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"error":{"message":"Overloaded","type":"overloaded_error"}}
+

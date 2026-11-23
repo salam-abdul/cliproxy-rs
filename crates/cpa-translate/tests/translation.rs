@@ -37,11 +37,25 @@ const SCENARIOS: &[&str] = &[
     "image",
     "multi_turn",
     "max_tokens",
+    "stream_error",
 ];
 
 /// Inputs a format cannot express: (format, scenario, file kind, why). Any other missing
 /// input fails, so a scenario cannot quietly skip a format.
-const NOT_EXPRESSIBLE: &[(Format, &str, &str, &str)] = &[];
+const NO_ERROR_EVENT: &str =
+    "its streams carry no error event: a failed reply arrives as an HTTP error, which the executor handles";
+const FAILED_BODY: &str = "a failed reply arrives as an HTTP error, which the executor handles before translation";
+
+const NOT_EXPRESSIBLE: &[(Format, &str, &str, &str)] = &[
+    (Format::OpenAI, "stream_error", "stream.sse", NO_ERROR_EVENT),
+    (Format::Gemini, "stream_error", "stream.sse", NO_ERROR_EVENT),
+    (Format::Antigravity, "stream_error", "stream.sse", NO_ERROR_EVENT),
+    (Format::OpenAI, "stream_error", "response.json", FAILED_BODY),
+    (Format::Gemini, "stream_error", "response.json", FAILED_BODY),
+    (Format::Antigravity, "stream_error", "response.json", FAILED_BODY),
+    (Format::OpenAIResponse, "stream_error", "response.json", FAILED_BODY),
+    (Format::Interactions, "stream_error", "response.json", FAILED_BODY),
+];
 
 /// Every input a pair would read exists, or is listed in [`NOT_EXPRESSIBLE`].
 fn missing_inputs() -> Vec<String> {

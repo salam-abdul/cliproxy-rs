@@ -1,0 +1,15 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"interaction_fixture_1","object":"response","status":"in_progress","model":"client-model","output":[]},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"item_0","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":2}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"item_0","part":{"type":"output_text","text":""},"sequence_number":3}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"item_0","delta":"Hello","sequence_number":4}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"interaction_fixture_1","object":"response","status":"failed","model":"gemini-2.5-pro","output":[],"error":{"message":"Overloaded","code":"unavailable","type":"server_error"}},"sequence_number":5}
+

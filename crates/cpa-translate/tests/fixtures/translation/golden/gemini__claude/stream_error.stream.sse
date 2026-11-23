@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+
+data: {"error":{"code":400,"message":"Overloaded","status":"INVALID_ARGUMENT"}}
+

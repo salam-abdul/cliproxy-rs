@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-6","max_tokens":32000,"messages":[{"role":"user","content":[{"type":"text","text":"You are terse."}]},{"role":"user","content":[{"type":"text","text":"Say hello."}]}],"metadata":{"user_id":"ae9d421addcf74b3a555d81670a59b92f72e8cd42e7eef6defb080fc25944e6a"},"stream":true}
