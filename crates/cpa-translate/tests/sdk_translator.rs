@@ -2,8 +2,9 @@
 //! registry_bytes_test.go) against Go-generated vectors in tests/fixtures/sdk_registry.json
 //! (tests/reference/sdk.go).
 //!
-//! Each registered pair's request, reply and token-count output is covered by
-//! tests/translation.rs.
+//! Each registered pair's request, reply and token-count output over synthetic scenarios is
+//! covered by tests/translation.rs; envelope dispatch, summary intent and apply_patch nil
+//! results are not.
 //! Go's plugin-hook tests are not ported: the fork has no plugin host.
 use cpa_core::format::Format;
 use cpa_translate::{RequestCtx, pair, token_count, translate_request, translate_token_count};

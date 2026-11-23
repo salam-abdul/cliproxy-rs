@@ -1,1 +1,0 @@
-{"id":"msg_fixture_1","object":"interaction","status":"completed","model":"claude-sonnet-4-6","steps":[],"usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":1,"total_output_tokens":1,"total_tokens":13}}

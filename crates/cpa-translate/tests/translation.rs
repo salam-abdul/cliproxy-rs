@@ -46,7 +46,18 @@ const NO_ERROR_EVENT: &str =
     "its streams carry no error event: a failed reply arrives as an HTTP error, which the executor handles";
 const FAILED_BODY: &str = "a failed reply arrives as an HTTP error, which the executor handles before translation";
 
+/// Scenarios with no buffered reply: a buffered stream that fails is rejected before
+/// translation (`validate_buffered` in `cpa-exec/src/claude/stream.rs`).
+const STREAM_ONLY: &[&str] = &["stream_error"];
+
 const NOT_EXPRESSIBLE: &[(Format, &str, &str, &str)] = &[
+    (
+        Format::Codex,
+        "stream_error",
+        "stream.sse",
+        "the Codex executor ends the stream at response.failed or error before translation \
+         (cpa-exec/src/codex_response.rs)",
+    ),
     (Format::OpenAI, "stream_error", "stream.sse", NO_ERROR_EVENT),
     (Format::Gemini, "stream_error", "stream.sse", NO_ERROR_EVENT),
     (Format::Antigravity, "stream_error", "stream.sse", NO_ERROR_EVENT),
@@ -152,7 +163,9 @@ fn run_stream(client: Format, upstream: Format, ctx: &ResponseCtx<'_>, sse: &[u8
     for event in &delivery.events {
         push(t.event(event), &mut out);
     }
-    push(Ok(t.finalize_tool_input()), &mut out);
+    if delivery.finalize {
+        push(Ok(t.finalize_tool_input()), &mut out);
+    }
     if delivery.done {
         push(t.event(b"[DONE]"), &mut out);
     }
@@ -203,11 +216,12 @@ fn translations_match_their_goldens() {
                     let json = input(upstream, &format!("{scenario}.response.json"));
                     let raw_buffered = translate(false);
                     let raw_streamed = translate(true);
-                    if let Some(body) = sse
+                    let buffered_body = sse
                         .as_deref()
                         .and_then(|sse| deliver::non_stream(upstream, sse, json.as_deref()))
                         .or_else(|| json.clone())
-                    {
+                        .filter(|_| !STREAM_ONLY.contains(scenario));
+                    if let Some(body) = buffered_body {
                         let ctx = ResponseCtx {
                             model,
                             original_request: &request,

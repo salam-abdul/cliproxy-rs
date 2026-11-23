@@ -70,6 +70,9 @@ pub struct StreamDelivery {
     pub options: StreamOptions,
     pub events: Vec<Vec<u8>>,
     pub done: bool,
+    /// Whether the executor finalizes tool input when the upstream ends; the Codex
+    /// executor's `translate_stream` does not.
+    pub finalize: bool,
 }
 
 /// The events an executor passes to the stream translator for `sse`.
@@ -80,7 +83,8 @@ pub struct StreamDelivery {
 ///   line appended.
 /// - Interactions (`gemini.rs` `InteractionsLines`): each scanned line, blank ones
 ///   included, as a `\r\n`-terminated event.
-/// - Gemini (`gemini.rs` `GeminiLines`): each line's bare JSON payload, then `[DONE]`.
+/// - Gemini (`gemini.rs` `GeminiLines`): each line's bare JSON payload, then `[DONE]`. The
+///   executor also drops usage from chunks before the last; fixtures carry usage only there.
 /// - Antigravity (`antigravity.rs`, through `gemini_lines`): each whole payload with
 ///   `whole_events`, then `[DONE]`.
 pub fn stream(upstream: Format, sse: &[u8]) -> StreamDelivery {
@@ -125,7 +129,12 @@ pub fn stream(upstream: Format, sse: &[u8]) -> StreamDelivery {
             )
         }
     };
-    StreamDelivery { options, events, done }
+    StreamDelivery {
+        options,
+        events,
+        done,
+        finalize: upstream != Format::Codex,
+    }
 }
 
 /// The body an executor passes to the non-stream translator.

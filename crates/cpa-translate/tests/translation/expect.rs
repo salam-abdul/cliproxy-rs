@@ -101,26 +101,23 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             stop: Some(Stop::Error),
             ..Expected::default()
         },
-        ("stream_error", Kind::Response) => Expected::default(),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
 
-/// A fact a pair's output does not carry, and why: (pair directory, scenario, output
-/// kind, fact, reason). `executor` means the executor adds the fact after translation.
-/// An entry whose fact the output does carry fails, so this list cannot go stale.
 /// Codex requests drop the output limit until subscription accounts are confirmed to
 /// accept it (`docs/UPSTREAM-REVIEW.md`, Codex output budgets).
 const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pending decision";
 
-/// executor: the Codex executor ends a stream at `response.failed` or `error` with an
-/// error of its own (`cpa-exec/src/codex_response.rs`), so the translator never sees it.
-const CODEX_EXECUTOR_FAILURE: &str = "executor";
 /// No translator to Interactions writes a failure event, so its shape waits for a
 /// decision; until then the Claude translator reports a failed stream as completed and the
 /// Responses one stops without a terminal event.
 const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event shape yet: a decision";
 
+/// A fact a pair's output does not carry, and why: (pair directory, scenario, output
+/// kind, fact, reason). A reason starting `executor` means the executor, not the
+/// translator, supplies the fact or ends the stream. An entry whose fact the output does
+/// carry fails, so this list cannot go stale.
 pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
     (
         "openai-response__claude",
@@ -128,34 +125,6 @@ pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
         Kind::Stream,
         Fact::Stop,
         "executor: the Claude executor ends the stream with an error and the server writes the terminal frame",
-    ),
-    (
-        "claude__codex",
-        "stream_error",
-        Kind::Stream,
-        Fact::Stop,
-        CODEX_EXECUTOR_FAILURE,
-    ),
-    (
-        "gemini__codex",
-        "stream_error",
-        Kind::Stream,
-        Fact::Stop,
-        CODEX_EXECUTOR_FAILURE,
-    ),
-    (
-        "openai__codex",
-        "stream_error",
-        Kind::Stream,
-        Fact::Stop,
-        CODEX_EXECUTOR_FAILURE,
-    ),
-    (
-        "interactions__codex",
-        "stream_error",
-        Kind::Stream,
-        Fact::Stop,
-        CODEX_EXECUTOR_FAILURE,
     ),
     (
         "interactions__claude",
