@@ -1,3 +1,4 @@
+mod panels;
 mod quota;
 pub(crate) mod sends;
 

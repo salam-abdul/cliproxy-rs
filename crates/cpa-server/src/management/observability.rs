@@ -199,9 +199,53 @@ pub(crate) async fn native_history(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct ActivityParams {
+    #[serde(default = "default_history_range")]
+    range: String,
+    provider: Option<String>,
+    credential: Option<String>,
+}
+
+/// A filter is absent, or a non-empty value the store could hold.
+fn check(filter: Option<&str>) -> Result<(), &'static str> {
+    match filter {
+        Some(value) if value.is_empty() || value.len() > 256 => Err("Invalid provider or credential filter"),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) async fn activity(
+    State(state): State<Arc<Management>>,
+    AxumQuery(params): AxumQuery<ActivityParams>,
+) -> Response {
+    let Some(range) = crate::activity::Range::parse(&params.range) else {
+        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
+    };
+    if let Err(message) = check(params.provider.as_deref()).and(check(params.credential.as_deref())) {
+        return fail(StatusCode::BAD_REQUEST, message);
+    }
+    let Some(activity) = state.rt.activity() else {
+        return fail(StatusCode::CONFLICT, "Activity store is not running on this server");
+    };
+    match activity.panels(range, params.provider, params.credential).await {
+        Ok(result) => super::json_ordered(StatusCode::OK, &result),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Activity could not be read"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_filters_must_be_non_empty_and_bounded() {
+        assert!(check(Some("")).is_err());
+        assert!(check(Some(&"a".repeat(257))).is_err());
+        assert!(check(None).is_ok());
+        assert!(check(Some("codex")).is_ok());
+        assert!(check(Some(&"a".repeat(256))).is_ok());
+    }
 
     #[test]
     fn same_base_and_key_sum_bucket_by_bucket() {
