@@ -123,6 +123,13 @@ const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event shape yet: 
 
 pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
     (
+        "openai-response__claude",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        "executor: the Claude executor ends the stream with an error and the server writes the terminal frame",
+    ),
+    (
         "claude__codex",
         "stream_error",
         Kind::Stream,
