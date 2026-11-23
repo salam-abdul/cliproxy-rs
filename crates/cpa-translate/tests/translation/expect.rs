@@ -71,6 +71,12 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             thinking: vec!["Check divisors up to 4."],
             ..reply(vec!["Yes, 17 is prime."], Stop::End)
         },
+        ("image", Kind::Request) => Expected {
+            text: vec!["What is in this image?"],
+            images: 1,
+            ..Expected::default()
+        },
+        ("image", _) => reply(vec!["A red dot."], Stop::End),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }

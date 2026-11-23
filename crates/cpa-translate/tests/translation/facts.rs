@@ -442,7 +442,11 @@ fn gemini_parts(f: &mut Facts, parts: &Value) {
         if let Some(result) = part.get("functionResponse") {
             f.tool_results.push(result_text(&result["response"]));
         }
-        if part.get("inlineData").is_some() || part.get("fileData").is_some() {
+        // The Gemini API takes either spelling.
+        if ["inlineData", "inline_data", "fileData", "file_data"]
+            .iter()
+            .any(|k| part.get(*k).is_some())
+        {
             f.images += 1;
         }
     }

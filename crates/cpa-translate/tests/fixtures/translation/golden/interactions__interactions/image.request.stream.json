@@ -1,0 +1,1 @@
+{"model":"client-model","input":[{"type":"user_input","content":[{"type":"text","text":"What is in this image?"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}]}],"stream":true}
