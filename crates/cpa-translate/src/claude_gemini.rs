@@ -521,10 +521,10 @@ fn delta_part(delta: &Res<'_>) -> Option<Vec<u8>> {
     Some(part)
 }
 
-/// Gemini's finish reason for a Claude stop reason: a reply cut off at the output limit is
+/// Gemini's finish reason for a Claude stop reason: a reply cut off at a token limit is
 /// `MAX_TOKENS`, anything else `STOP`.
 fn finish_reason(stop_reason: &Res<'_>) -> &'static str {
-    if stop_reason.bytes().as_ref() == b"max_tokens" {
+    if crate::claude_responses_response::incomplete(&stop_reason.bytes()) {
         "MAX_TOKENS"
     } else {
         "STOP"

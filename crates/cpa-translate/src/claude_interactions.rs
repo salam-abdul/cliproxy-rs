@@ -886,10 +886,10 @@ impl GoStream for State {
     }
 }
 
-/// Whether a Claude stop reason says the reply hit its output limit, which Interactions
-/// reports as an incomplete interaction, as the Codex and Responses translators do.
+/// Whether a Claude stop reason says the reply hit a token limit, which Interactions
+/// reports as an incomplete interaction, as the Codex translator to Interactions does.
 fn cut_off(stop_reason: &Res<'_>) -> bool {
-    stop_reason.bytes().as_ref() == b"max_tokens"
+    crate::claude_responses_response::incomplete(&stop_reason.bytes())
 }
 
 /// ConvertClaudeResponseToInteractionsNonStream: a Claude message, or a buffered stream.

@@ -648,9 +648,9 @@ struct State {
     model: Vec<u8>,
     created_at: i64,
     has_output_text: bool,
-    /// The open function call's arguments already arrived as deltas, so its
-    /// `output_item.done` must not send them again.
-    streamed_arguments: bool,
+    /// Items whose arguments already arrived as deltas, so their `output_item.done` must not
+    /// send them again.
+    streamed_arguments: std::collections::HashSet<Vec<u8>>,
     call_name: Vec<u8>,
     call_id: Vec<u8>,
 }
@@ -931,7 +931,7 @@ impl State {
             }
             b"function_call" | b"tool_call" => {
                 self.ensure_step("function_call", item, out);
-                if !std::mem::take(&mut self.streamed_arguments) {
+                if !self.streamed_arguments.remove(item.get("id").bytes().as_ref()) {
                     out.push(delta_event(
                         ARGUMENTS_DELTA,
                         self.step_index,
@@ -1021,7 +1021,7 @@ impl GoStream for State {
             b"response.function_call_arguments.delta" => {
                 self.created(&response, &mut out);
                 self.ensure_step("function_call", &root.get("item"), &mut out);
-                self.streamed_arguments = true;
+                self.streamed_arguments.insert(root.get("item_id").bytes().into_owned());
                 out.push(delta_event(
                     ARGUMENTS_DELTA,
                     self.step_index,

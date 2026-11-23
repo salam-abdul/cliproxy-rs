@@ -20,6 +20,7 @@ use crate::common::{
     go_runes, now_nanos, now_unix, parse_rfc3339_unix, request_model_name, restore_sanitized_tool_name,
     sanitized_tool_name_map, sse_event,
 };
+use crate::gemini_interactions_response::hit_output_limit;
 use crate::gemini_responses::{
     ANY, BYPASS_SIGNATURE, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, cache_text_signatures, encode_carrier,
 };
@@ -1557,11 +1558,6 @@ enum Output {
     Message(usize),
     Function(usize),
     Detached(usize),
-}
-
-/// Whether a Gemini response stopped at its output limit.
-fn hit_output_limit(root: &Res<'_>) -> bool {
-    root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
 }
 
 // The flush macros mirror Go's closures, which reset state their last call never reads.

@@ -277,3 +277,66 @@ fn every_registered_pair_has_goldens_and_no_other_pair_does() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+fn ctx<'a>(original: &'a [u8]) -> ResponseCtx<'a> {
+    ResponseCtx {
+        model: "m",
+        original_request: original,
+        translated_request: b"{}",
+        portable: false,
+    }
+}
+
+/// Claude's other token-limit stop reason reads as a limit for every client, as the
+/// Responses translator already treats it.
+#[test]
+fn a_claude_context_window_stop_is_a_limit_for_gemini_and_interactions_clients() {
+    let body = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"c\",\"usage\":{\"input_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"model_context_window_exceeded\"},\"usage\":{\"output_tokens\":1}}\n\n";
+    let gemini = (pair(Format::Gemini, Format::Claude).unwrap().non_stream)(&ctx(b"{}"), body).unwrap();
+    let gemini: serde_json::Value = serde_json::from_slice(&gemini).unwrap();
+    assert_eq!(gemini["candidates"][0]["finishReason"], "MAX_TOKENS");
+    let interactions = (pair(Format::Interactions, Format::Claude).unwrap().non_stream)(&ctx(b"{}"), body).unwrap();
+    let interactions: serde_json::Value = serde_json::from_slice(&interactions).unwrap();
+    assert_eq!(interactions["status"], "incomplete");
+}
+
+/// Arguments streamed for two calls are not sent again when their items finish, whatever
+/// order the items finish in.
+#[test]
+fn codex_arguments_streamed_for_two_calls_reach_interactions_clients_once() {
+    let events: Vec<&[u8]> = vec![
+        b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"m\"}}\n\n",
+        b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"f\"}}\n\n",
+        b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_a\",\"delta\":\"{\\\"n\\\":1}\"}\n\n",
+        b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"b\",\"name\":\"g\"}}\n\n",
+        b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_b\",\"delta\":\"{\\\"n\\\":2}\"}\n\n",
+        b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"f\",\"arguments\":\"{\\\"n\\\":1}\"}}\n\n",
+        b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"b\",\"name\":\"g\",\"arguments\":\"{\\\"n\\\":2}\"}}\n\n",
+    ];
+    let request = br#"{"stream":true}"#;
+    let mut t = stream_with(Format::Interactions, Format::Codex, &ctx(request), Default::default()).unwrap();
+    let mut out = Vec::new();
+    for event in events {
+        t.event(event).unwrap().iter().for_each(|f| out.extend_from_slice(f));
+    }
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(out.matches(r#"\"n\":1"#).count(), 1, "{out}");
+    assert_eq!(out.matches(r#"\"n\":2"#).count(), 1, "{out}");
+}
+
+#[test]
+fn an_interactions_output_limit_in_camel_case_reaches_responses() {
+    let body = br#"{"input":"hi","generation_config":{"maxOutputTokens":7}}"#;
+    let out = translate_request(
+        Format::Interactions,
+        Format::OpenAIResponse,
+        &RequestCtx {
+            model: "m",
+            stream: false,
+        },
+        body,
+    )
+    .unwrap();
+    let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["max_output_tokens"], 7);
+}
