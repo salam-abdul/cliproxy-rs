@@ -239,6 +239,8 @@ struct ToInteractions {
     step_type: &'static str,
     step_index: i64,
     next_step: i64,
+    /// The response stopped at its output limit.
+    limited: bool,
 }
 
 pub(crate) fn gemini_to_interactions_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
@@ -253,6 +255,7 @@ pub(crate) fn gemini_to_interactions_stream(ctx: &ResponseCtx<'_>) -> Box<dyn Go
         step_type: "",
         step_index: 0,
         next_step: 0,
+        limited: false,
     })
 }
 
@@ -277,6 +280,9 @@ impl ToInteractions {
         gj::set_str(&mut completed, "interaction.model", &self.model);
         if let Some(root) = root.filter(|r| r.exists()) {
             set_stream_usage(&mut completed, "interaction.usage", root);
+        }
+        if self.limited {
+            gj::set_str(&mut completed, "interaction.status", "incomplete");
         }
         out.push(sse_event("interaction.completed", &completed));
         self.completed = true;
@@ -407,6 +413,7 @@ impl GoStream for ToInteractions {
             true
         });
         if root.get("candidates.0.finishReason").exists() && !self.finished {
+            self.limited = hit_output_limit(&root);
             self.stop_step(&mut out);
             self.finished = true;
         }
@@ -415,6 +422,12 @@ impl GoStream for ToInteractions {
         }
         Ok(out)
     }
+}
+
+/// Whether a Gemini response stopped at its output limit, which Interactions reports as an
+/// incomplete interaction, as the Codex and Responses translators do.
+pub(crate) fn hit_output_limit(root: &Res<'_>) -> bool {
+    root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
 }
 
 /// ConvertGeminiResponseToInteractionsNonStream.
@@ -434,6 +447,9 @@ pub(crate) fn gemini_to_interactions_non_stream(ctx: &ResponseCtx<'_>, body: &[u
     });
     gj::set_items(&mut out, "steps", &steps);
     set_usage(&mut out, "usage", &root);
+    if hit_output_limit(&root) {
+        gj::set_str(&mut out, "status", "incomplete");
+    }
     Ok(out)
 }
 
