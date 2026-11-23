@@ -9,15 +9,15 @@
 ## Isolation
 
 - Every server test builds its runtime with `cpa_server::testing::runtime` and a private `auth-dir` in a temp directory. That runtime sends every non-local credential to a dead loopback proxy. Never let a test resolve the default auth directory or read real credentials.
-- Upstreams are local mocks on loopback. CI runs the tests in a network namespace with only loopback up, so a test that reaches a real host fails there.
+- Upstreams are local mocks on loopback. CI's Linux jobs run the tests in a network namespace with only loopback up, so a test that reaches a real host fails there.
 - A test that requests a hostname pins it to its mock with a resolve hook (`cpa_exec::proxy::Hooks`). A client built with one ignores proxy environment variables, so the shell's `HTTPS_PROXY` cannot carry the request to the real host.
-- PostgreSQL store tests start a throwaway cluster from local server binaries; set `CPA_TEST_PG_BIN` to their directory. Without binaries they skip and pass. `CPA_TEST_NO_SKIP=1` turns that skip into a failure, as CI does.
+- PostgreSQL store tests start a throwaway cluster from local server binaries; set `CPA_TEST_PG_BIN` to their directory. Without binaries they skip and pass. `CPA_TEST_NO_SKIP=1` turns that skip into a failure, as CI's Linux jobs do.
 
 ## Traps
 
 - Nextest skips doc tests. CI runs `cargo test --workspace --doc` after it.
 - The heap gate (`crates/cpa-server/tests/alloc_budget.rs`, budgets in `tests/fixtures/allocation_limits.txt`) and the tests that bound wall-clock time run alone only when `.config/nextest.toml` lists them. Add a new timing test there.
-- The heap budgets are measured on the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes.
+- The heap budgets are measured on Linux with the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes. macOS counts fewer allocations, so its CI job skips the heap gate; never set budgets from a macOS run.
 - The Codex Live media relay tests run only with the feature on: `cargo nextest run -p cpa-server --features media-relay --lib`.
 - Code behind `cfg(windows)` is checked only by the Windows clippy job.
 - `vendor/gjson` is outside the workspace, so `--workspace` commands skip it.

@@ -106,8 +106,10 @@ jobs:
         # All of cpa-server's unit tests run with the feature on, the ones behind it included.
         run: .github/scripts/offline.sh 'cargo nextest run -p cpa-server --features media-relay --lib --locked --profile ci'
 
-  # The workspace tests on macOS, where the native Claude clients run. The network cannot be
-  # denied here as it is on Linux, and the PostgreSQL store tests skip; the Linux job runs both.
+  # The workspace and patched gjson tests on macOS, where the native Claude clients run. The
+  # network cannot be denied here as it is on Linux, and the PostgreSQL store tests skip; the
+  # Linux job runs both. The heap gate is left out: its budgets are Linux measurements, and
+  # macOS counts fewer allocations, so it would pass a regression Linux catches.
   macos:
     name: tests (macOS)
     runs-on: macos-15
@@ -121,7 +123,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.148
       - name: Test
-        run: cargo nextest run --workspace --locked --profile ci
+        run: |
+          cargo nextest run --workspace --locked --profile ci -E 'not binary_id(cpa-server::alloc_budget)'
+          cargo test --locked --manifest-path vendor/gjson/Cargo.toml --target-dir target
 
   # Clippy over every target with warnings as errors, so code that only builds on Windows,
   # test-only code included, is held to the Linux rules. Checking only, no codegen or link.

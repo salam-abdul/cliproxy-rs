@@ -31,7 +31,7 @@ Keep the listener on loopback, configure separate client and management keys, an
 
 ## Development
 
-Tests use private auth directories and local mock upstreams; CI runs them with external networking denied. These are the checks CI runs, scoped down for local use:
+Tests use private auth directories and local mock upstreams; CI's Linux jobs run them with external networking denied. These are the checks CI runs, scoped down for local use:
 
 ```sh
 cargo fmt --all --check
