@@ -521,6 +521,16 @@ fn delta_part(delta: &Res<'_>) -> Option<Vec<u8>> {
     Some(part)
 }
 
+/// Gemini's finish reason for a Claude stop reason: a reply cut off at the output limit is
+/// `MAX_TOKENS`, anything else `STOP`.
+fn finish_reason(stop_reason: &Res<'_>) -> &'static str {
+    if stop_reason.bytes().as_ref() == b"max_tokens" {
+        "MAX_TOKENS"
+    } else {
+        "STOP"
+    }
+}
+
 /// Gemini usage metadata (without the traffic type) from Claude usage. Claude reports input
 /// tokens in `message_start` and may leave them out of `message_delta`; `start_input` is
 /// the former.
@@ -674,20 +684,15 @@ impl GoStream for State {
                 None => vec![],
             },
             b"message_delta" => {
-                let reason = root.get("delta.stop_reason");
-                if reason.exists() {
-                    let mapped = if reason.bytes().as_ref() == b"max_tokens" {
-                        "MAX_TOKENS"
-                    } else {
-                        "STOP"
-                    };
-                    gj::set_str(&mut template, "candidates.0.finishReason", mapped);
-                }
+                gj::set_str(
+                    &mut template,
+                    "candidates.0.finishReason",
+                    finish_reason(&root.get("delta.stop_reason")),
+                );
                 let usage = root.get("usage");
                 if usage.exists() {
                     usage_fields(&mut template, "usageMetadata.", &usage, self.input_tokens);
                 }
-                gj::set_str(&mut template, "candidates.0.finishReason", "STOP");
                 vec![template]
             }
             b"error" => {
@@ -819,6 +824,11 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
             }
             b"content_block_stop" => parts.extend(st.finish_tool(index)),
             b"message_delta" => {
+                gj::set_str(
+                    &mut template,
+                    "candidates.0.finishReason",
+                    finish_reason(&root.get("delta.stop_reason")),
+                );
                 let usage = root.get("usage");
                 if usage.exists() {
                     let mut json = b"{}".to_vec();
