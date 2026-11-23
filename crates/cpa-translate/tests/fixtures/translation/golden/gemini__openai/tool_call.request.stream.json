@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","messages":[{"role":"user","content":"Weather in Paris?"}],"stream":true,"tools":[{"type":"function","function":{"name":"get_weather","description":"Current weather for a city.","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}

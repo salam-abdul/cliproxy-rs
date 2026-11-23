@@ -11,6 +11,7 @@ pub enum Fact {
     Thinking,
     ToolCall,
     ToolResult,
+    ToolDef,
     Image,
     Usage,
     Stop,
@@ -22,6 +23,7 @@ pub struct Expected {
     pub thinking: Vec<&'static str>,
     pub tool_calls: Vec<(&'static str, Value)>,
     pub tool_results: Vec<&'static str>,
+    pub tool_defs: Vec<&'static str>,
     pub images: usize,
     pub usage: Option<(i64, i64)>,
     pub stop: Option<Stop>,
@@ -41,6 +43,15 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             ..Expected::default()
         },
         ("text", _) => reply(vec!["Hello there."], Stop::End),
+        ("tool_call", Kind::Request) => Expected {
+            text: vec!["Weather in Paris?"],
+            tool_defs: vec!["get_weather"],
+            ..Expected::default()
+        },
+        ("tool_call", _) => Expected {
+            tool_calls: vec![("get_weather", serde_json::json!({"city": "Paris"}))],
+            ..reply(vec![], Stop::ToolUse)
+        },
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
@@ -76,6 +87,14 @@ pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
             out.push((
                 Fact::ToolResult,
                 format!("tool result {t:?} not in {:?}", actual.tool_results),
+            ));
+        }
+    }
+    for t in &expected.tool_defs {
+        if !actual.tool_defs.iter().any(|d| d == t) {
+            out.push((
+                Fact::ToolDef,
+                format!("tool {t:?} not declared in {:?}", actual.tool_defs),
             ));
         }
     }

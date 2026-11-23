@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-6","max_tokens":32000,"messages":[{"role":"user","content":[{"type":"text","text":"Weather in Paris?"}]}],"stream":true,"tools":[{"name":"get_weather","input_schema":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"description":"Current weather for a city."}]}

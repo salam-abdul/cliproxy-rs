@@ -1,0 +1,21 @@
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_resp-fixture-1","object":"response","created_at":"<time>","status":"in_progress","background":false,"error":null,"output":[],"model":"client-model"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":2,"response":{"id":"resp_resp-fixture-1","object":"response","created_at":"<time>","status":"in_progress","output":[],"model":"client-model"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"id":"<id:1>","type":"function_call","status":"in_progress","arguments":"","call_id":"<id:2>","name":"get_weather"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"<id:1>","output_index":0,"delta":"{\"city\":\"Paris\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"<id:1>","output_index":0,"arguments":"{\"city\":\"Paris\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"<id:1>","type":"function_call","status":"completed","arguments":"{\"city\":\"Paris\"}","call_id":"<id:2>","name":"get_weather"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_resp-fixture-1","object":"response","created_at":"<time>","status":"completed","background":false,"error":null,"model":"client-model","tools":[{"description":"Current weather for a city.","name":"get_weather","parameters":{"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"type":"function"}],"output":[{"id":"<id:1>","type":"function_call","status":"completed","arguments":"{\"city\":\"Paris\"}","call_id":"<id:2>","name":"get_weather"}],"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":15}}}
+

@@ -29,7 +29,7 @@ use golden::Goldens;
 use normalize::normalize;
 
 /// Scenario names, in the order they run.
-const SCENARIOS: &[&str] = &["text"];
+const SCENARIOS: &[&str] = &["text", "tool_call"];
 
 /// Inputs a format cannot express: (format, scenario, file kind, why). Any other missing
 /// input fails, so a scenario cannot quietly skip a format.

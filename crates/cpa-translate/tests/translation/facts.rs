@@ -31,6 +31,8 @@ pub struct Facts {
     pub tool_calls: Vec<(String, Value)>,
     /// Result content as text.
     pub tool_results: Vec<String>,
+    /// Names of the tools a request declares.
+    pub tool_defs: Vec<String>,
     pub images: usize,
     /// Input and output tokens, the largest seen.
     pub usage: Option<(i64, i64)>,
@@ -163,7 +165,18 @@ fn claude_usage(f: &mut Facts, u: &Value) {
     f.usage(int(&u["input_tokens"]), int(&u["output_tokens"]));
 }
 
+/// Each declared tool's name, at `path` under every item of `tools`.
+fn tool_defs(f: &mut Facts, tools: &Value, path: &[&str]) {
+    for tool in tools.as_array().into_iter().flatten() {
+        let name = path.iter().fold(tool, |v, key| &v[*key]);
+        if let Some(name) = name.as_str() {
+            f.tool_defs.push(name.to_string());
+        }
+    }
+}
+
 fn claude_request(f: &mut Facts, p: &Value) {
+    tool_defs(f, &p["tools"], &["name"]);
     claude_blocks(f, &p["system"]);
     for m in p["messages"].as_array().into_iter().flatten() {
         claude_blocks(f, &m["content"]);
@@ -246,6 +259,7 @@ fn chat_usage(f: &mut Facts, u: &Value) {
 }
 
 fn chat_request(f: &mut Facts, p: &Value) {
+    tool_defs(f, &p["tools"], &["function", "name"]);
     for m in p["messages"].as_array().into_iter().flatten() {
         if s(&m["role"]) == "tool" {
             f.tool_results.push(result_text(&m["content"]));
@@ -353,6 +367,7 @@ fn responses_status(f: &mut Facts, r: &Value) {
 }
 
 fn responses_request(f: &mut Facts, p: &Value) {
+    tool_defs(f, &p["tools"], &["name"]);
     f.text.push_str(s(&p["instructions"]));
     if let Some(text) = p["input"].as_str() {
         f.text.push_str(text);
@@ -419,6 +434,11 @@ fn gemini_parts(f: &mut Facts, parts: &Value) {
 }
 
 fn gemini_request(f: &mut Facts, p: &Value) {
+    for tool in p["tools"].as_array().into_iter().flatten() {
+        for key in ["functionDeclarations", "function_declarations"] {
+            tool_defs(f, &tool[key], &["name"]);
+        }
+    }
     for key in ["systemInstruction", "system_instruction"] {
         gemini_parts(f, &p[key]["parts"]);
     }
@@ -503,6 +523,7 @@ fn interactions_status(f: &mut Facts, i: &Value, saw_call: bool) {
 }
 
 fn interactions_request(f: &mut Facts, p: &Value) {
+    tool_defs(f, &p["tools"], &["name"]);
     interactions_content(f, &p["system_instruction"], false);
     if let Some(text) = p["input"].as_str() {
         f.text.push_str(text);

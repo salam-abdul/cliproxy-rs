@@ -1,0 +1,1 @@
+{"model":"client-model","max_tokens":1024,"messages":[{"role":"user","content":"Weather in Paris?"}],"tools":[{"name":"get_weather","description":"Current weather for a city.","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}

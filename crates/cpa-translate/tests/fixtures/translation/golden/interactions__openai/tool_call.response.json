@@ -1,0 +1,1 @@
+{"id":"chatcmpl-fixture","status":"completed","object":"interaction","model":"kimi-k2.5","steps":[{"type":"function_call","name":"get_weather","arguments":{"city":"Paris"},"id":"call_fixture_1"}],"finish_reason":"tool_calls","usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":3,"total_output_tokens":3,"total_tokens":15}}

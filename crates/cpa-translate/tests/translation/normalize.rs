@@ -3,7 +3,7 @@
 //! value gets a numbered placeholder by first appearance, so a value used twice stays
 //! recognizably the same.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,13 @@ const CLOCK_WINDOW_SECS: u128 = 24 * 3600;
 /// A JSON string body: what an ID or timestamp in the output lives in.
 static JSON_STRING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""((?:[^"\\]|\\.)*)""#).unwrap());
 static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]{10,}").unwrap());
+/// Hexadecimal clock readings, as in `call_<hex nanos>_<n>`.
+static HEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9a-f]{12,}").unwrap());
+/// An ID field holding `<tool name>-<counter>`, from a process-wide counter
+/// (`gemini_claude_response.rs`, `antigravity_claude_response.rs`).
+static COUNTER_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(?:id|call_id|tool_use_id|tool_call_id)":"([A-Za-z_][A-Za-z0-9_.]*-[0-9]+)""#).unwrap()
+});
 static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$").unwrap()
 });
@@ -70,7 +77,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 /// Whether a JSON string's content is a generated value.
 fn is_generated(content: &str) -> bool {
-    RANDOM_TOOLU.is_match(content) || DIGITS.find_iter(content).any(|m| is_clock(m.as_str()))
+    RANDOM_TOOLU.is_match(content)
+        || DIGITS.find_iter(content).any(|m| is_clock(m.as_str()))
+        || HEX
+            .find_iter(content)
+            .any(|m| u128::from_str_radix(m.as_str(), 16).is_ok_and(|v| is_clock(&v.to_string())))
 }
 
 /// `out` with every generated value replaced. Clock-reading numbers become `<time>`; a
@@ -85,13 +96,14 @@ pub fn normalize(out: &[u8]) -> Vec<u8> {
             c[0].to_string()
         }
     });
+    let counters: HashSet<String> = COUNTER_ID.captures_iter(&text).map(|c| c[1].to_string()).collect();
     let mut ids: HashMap<String, usize> = HashMap::new();
     let text = JSON_STRING.replace_all(&text, |c: &regex::Captures<'_>| {
         let content = &c[1];
         if is_rfc3339_now(content) {
             return r#""<time>""#.to_string();
         }
-        if !is_generated(content) {
+        if !is_generated(content) && !counters.contains(content) {
             return c[0].to_string();
         }
         let next = ids.len() + 1;
@@ -129,6 +141,17 @@ mod tests {
         let n = now_nanos();
         let s = format!(r#"["call_{n}_1","Bash-{n}-2","call_{n}_1","step_{n}"]"#);
         assert_eq!(norm(&s), r#"["<id:1>","<id:2>","<id:1>","<id:3>"]"#);
+    }
+
+    #[test]
+    fn hex_clock_and_counter_ids_get_placeholders() {
+        let hex = format!("{:x}", now_nanos());
+        let s =
+            format!(r#"{{"call_id":"call_{hex}_9","id":"get_weather-2","text":"get_weather-2","name":"get_weather"}}"#);
+        assert_eq!(
+            norm(&s),
+            r#"{"call_id":"<id:1>","id":"<id:2>","text":"<id:2>","name":"get_weather"}"#
+        );
     }
 
     #[test]
