@@ -1,0 +1,1 @@
+{"model":"gpt-5.5","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Write a long story."}]}],"max_output_tokens":5}

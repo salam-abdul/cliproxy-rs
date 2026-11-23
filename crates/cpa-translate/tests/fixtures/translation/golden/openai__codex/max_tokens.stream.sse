@@ -1,0 +1,6 @@
+data: {"id":"resp_fixture_1","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"Once upon"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"resp_fixture_1","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":" a"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"resp_fixture_1","object":"chat.completion.chunk","created":1700000000,"model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"length","native_finish_reason":"max_output_tokens"}],"usage":{"completion_tokens":3,"total_tokens":15,"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}
+

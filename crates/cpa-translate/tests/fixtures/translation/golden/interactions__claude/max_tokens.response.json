@@ -1,0 +1,1 @@
+{"id":"msg_fixture_1","object":"interaction","status":"completed","model":"claude-sonnet-4-6","steps":[{"type":"model_output","content":[{"type":"text","text":"Once upon a"}]}],"usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":3,"total_output_tokens":3,"total_tokens":15}}

@@ -35,6 +35,8 @@ pub struct Facts {
     pub tool_defs: Vec<String>,
     /// Whether a request asks for reasoning.
     pub reasoning: bool,
+    /// A request's output token limit.
+    pub max_output: Option<i64>,
     pub images: usize,
     /// Input and output tokens, the largest seen.
     pub usage: Option<(i64, i64)>,
@@ -190,6 +192,7 @@ fn on(v: &Value) -> bool {
 fn claude_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
     f.reasoning |= on(&p["thinking"]["type"]) || on(&p["output_config"]["effort"]);
+    f.max_output = f.max_output.or(int(&p["max_tokens"]));
     claude_blocks(f, &p["system"]);
     for m in p["messages"].as_array().into_iter().flatten() {
         claude_blocks(f, &m["content"]);
@@ -274,6 +277,10 @@ fn chat_usage(f: &mut Facts, u: &Value) {
 fn chat_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["function", "name"]);
     f.reasoning |= on(&p["reasoning_effort"]);
+    f.max_output = f
+        .max_output
+        .or(int(&p["max_completion_tokens"]))
+        .or(int(&p["max_tokens"]));
     for m in p["messages"].as_array().into_iter().flatten() {
         if s(&m["role"]) == "tool" {
             f.tool_results.push(result_text(&m["content"]));
@@ -383,6 +390,7 @@ fn responses_status(f: &mut Facts, r: &Value) {
 fn responses_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
     f.reasoning |= on(&p["reasoning"]["effort"]);
+    f.max_output = f.max_output.or(int(&p["max_output_tokens"]));
     f.text.push_str(s(&p["instructions"]));
     if let Some(text) = p["input"].as_str() {
         f.text.push_str(text);
@@ -454,6 +462,7 @@ fn gemini_parts(f: &mut Facts, parts: &Value) {
 
 fn gemini_request(f: &mut Facts, p: &Value) {
     let thinking = &p["generationConfig"]["thinkingConfig"];
+    f.max_output = f.max_output.or(int(&p["generationConfig"]["maxOutputTokens"]));
     f.reasoning |=
         on(&thinking["includeThoughts"]) || on(&thinking["thinkingBudget"]) || on(&thinking["thinkingLevel"]);
     for tool in p["tools"].as_array().into_iter().flatten() {
@@ -547,6 +556,7 @@ fn interactions_status(f: &mut Facts, i: &Value, saw_call: bool) {
 fn interactions_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
     let config = &p["generation_config"];
+    f.max_output = f.max_output.or(int(&config["max_output_tokens"]));
     f.reasoning |= on(&config["thinking_level"]) || on(&config["thinking_config"]["thinking_budget"]);
     interactions_content(f, &p["system_instruction"], false);
     if let Some(text) = p["input"].as_str() {

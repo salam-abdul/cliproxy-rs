@@ -13,6 +13,7 @@ pub enum Fact {
     ToolResult,
     ToolDef,
     Reasoning,
+    MaxOutput,
     Image,
     Usage,
     Stop,
@@ -26,6 +27,7 @@ pub struct Expected {
     pub tool_results: Vec<&'static str>,
     pub tool_defs: Vec<&'static str>,
     pub reasoning: bool,
+    pub max_output: Option<i64>,
     pub images: usize,
     pub usage: Option<(i64, i64)>,
     pub stop: Option<Stop>,
@@ -82,6 +84,12 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             ..Expected::default()
         },
         ("multi_turn", _) => reply(vec!["Your name is Ada."], Stop::End),
+        ("max_tokens", Kind::Request) => Expected {
+            text: vec!["Write a long story."],
+            max_output: Some(5),
+            ..Expected::default()
+        },
+        ("max_tokens", _) => reply(vec!["Once upon a"], Stop::Length),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
@@ -89,7 +97,39 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
 /// A fact a pair's output does not carry, and why: (pair directory, scenario, output
 /// kind, fact, reason). `executor` means the executor adds the fact after translation.
 /// An entry whose fact the output does carry fails, so this list cannot go stale.
+/// Codex requests drop the output limit until subscription accounts are confirmed to
+/// accept it (`docs/UPSTREAM-REVIEW.md`, Codex output budgets).
+const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pending decision";
+
 pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
+    (
+        "claude__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "gemini__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "openai__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "openai-response__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
     (
         "gemini__interactions",
         "tool_call",
@@ -158,6 +198,12 @@ pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
     }
     if expected.reasoning && !actual.reasoning {
         out.push((Fact::Reasoning, "no reasoning setting".to_string()));
+    }
+    if expected.max_output.is_some() && actual.max_output != expected.max_output {
+        out.push((
+            Fact::MaxOutput,
+            format!("output limit {:?}, want {:?}", actual.max_output, expected.max_output),
+        ));
     }
     if actual.images < expected.images {
         out.push((
