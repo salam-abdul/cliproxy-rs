@@ -1,0 +1,1 @@
+{"model":"client-model","input":[{"type":"user_input","content":[{"type":"text","text":"My name is Ada."}]},{"type":"model_output","content":[{"type":"text","text":"Hello Ada."}]},{"type":"user_input","content":[{"type":"text","text":"What is my name?"}]}]}

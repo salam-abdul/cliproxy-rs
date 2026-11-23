@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Your name"}]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" is Ada."}]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT","promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+

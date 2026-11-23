@@ -77,6 +77,11 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             ..Expected::default()
         },
         ("image", _) => reply(vec!["A red dot."], Stop::End),
+        ("multi_turn", Kind::Request) => Expected {
+            text: vec!["My name is Ada.", "Hello Ada.", "What is my name?"],
+            ..Expected::default()
+        },
+        ("multi_turn", _) => reply(vec!["Your name is Ada."], Stop::End),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
@@ -114,9 +119,12 @@ pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
 /// Each fact `expected` names that `actual` lacks, with a description.
 pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
     let mut out = vec![];
+    // Texts appear in the order the conversation had them.
+    let mut from = 0;
     for t in &expected.text {
-        if !actual.text.contains(t) {
-            out.push((Fact::Text, format!("text {t:?} not in {:?}", actual.text)));
+        match actual.text[from..].find(t) {
+            Some(at) => from += at + t.len(),
+            None => out.push((Fact::Text, format!("text {t:?} not in order in {:?}", actual.text))),
         }
     }
     for t in &expected.thinking {

@@ -1,0 +1,1 @@
+{"model":"gemini-2.5-pro","contents":[{"role":"user","parts":[{"text":"My name is Ada."}]},{"role":"model","parts":[{"text":"Hello Ada."}]},{"role":"user","parts":[{"text":"What is my name?"}]}]}

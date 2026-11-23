@@ -1,0 +1,1 @@
+{"id":"resp-fixture-1","type":"message","role":"assistant","model":"gemini-3-flash","content":[{"type":"text","text":"Your name is Ada."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":3}}
