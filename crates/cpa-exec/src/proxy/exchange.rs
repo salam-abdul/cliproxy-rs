@@ -449,6 +449,8 @@ async fn exchange(
         }
         hop_headers = headers.clone();
         if strip_sensitive {
+            // Deliberate difference: Go keeps `X-Api-Key` and `X-Goog-Api-Key`, which
+            // carry provider keys here, so another host would receive them.
             for name in [
                 "Authorization",
                 "Www-Authenticate",
@@ -456,6 +458,8 @@ async fn exchange(
                 "Cookie2",
                 "Proxy-Authorization",
                 "Proxy-Authenticate",
+                "X-Api-Key",
+                "X-Goog-Api-Key",
             ] {
                 hop_headers.take(name);
             }

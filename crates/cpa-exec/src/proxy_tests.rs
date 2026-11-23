@@ -767,6 +767,66 @@ async fn redirects_follow_go_http_client() {
     }
 }
 
+/// A redirect to another host drops the provider key headers along with
+/// `Authorization`; a redirect on the same host keeps all three.
+#[tokio::test]
+async fn cross_host_redirect_drops_provider_key_headers() {
+    use axum::response::IntoResponse;
+    const KEYS: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+    let main = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (main_addr, other_port) = (main.local_addr().unwrap(), second.local_addr().unwrap().port());
+    type Hops = Arc<Mutex<Vec<(String, Vec<&'static str>)>>>;
+    let seen: Hops = Arc::default();
+    for listener in [main, second] {
+        let seen = seen.clone();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let seen = seen.clone();
+            async move {
+                let path = req.uri().path().to_owned();
+                let sent = KEYS.into_iter().filter(|k| req.headers().contains_key(*k)).collect();
+                seen.lock().unwrap().push((path.clone(), sent));
+                let to = |location: String| {
+                    (
+                        http::StatusCode::TEMPORARY_REDIRECT,
+                        [(http::header::LOCATION, location)],
+                    )
+                        .into_response()
+                };
+                match path.as_str() {
+                    "/start" => to("/same-host".to_owned()),
+                    "/same-host" => to(format!("http://localhost:{other_port}/other-host")),
+                    _ => "done".into_response(),
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    }
+    let mut headers = GoHeaders::new();
+    for name in ["Authorization", "X-Api-Key", "X-Goog-Api-Key"] {
+        headers.set(name, "synthetic");
+    }
+    let upstream = request(
+        &default_client(),
+        wreq::Method::GET,
+        &format!("http://{main_addr}/start"),
+        headers,
+        None,
+        Some(std::time::Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("/start".to_owned(), KEYS.to_vec()),
+            ("/same-host".to_owned(), KEYS.to_vec()),
+            ("/other-host".to_owned(), Vec::new()),
+        ]
+    );
+}
+
 /// Go's `Client.Timeout` bounds the whole exchange: redirect hops share one deadline
 /// instead of each getting the full timeout.
 #[tokio::test]
