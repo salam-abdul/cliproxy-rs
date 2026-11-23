@@ -44,7 +44,7 @@ fn thought_step(signature: &[u8], text: &[u8]) -> Vec<u8> {
         gj::set_str(&mut step, "signature", signature);
     }
     if !text.is_empty() {
-        let mut item = br#"{"text":""}"#.to_vec();
+        let mut item = br#"{"type":"text","text":""}"#.to_vec();
         gj::set_str(&mut item, "text", text);
         gj::set_items(&mut step, "content", &[item]);
     }
