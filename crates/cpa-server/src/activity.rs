@@ -176,6 +176,7 @@ impl Activity {
             );
             CREATE INDEX IF NOT EXISTS sends_by_time ON sends(at_ms);
             CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);
+            CREATE INDEX IF NOT EXISTS sends_by_credential_time ON sends(credential, at_ms);
             {}
             CREATE INDEX IF NOT EXISTS quota_readings_by_time ON quota_readings(at_ms);",
             quota::READINGS_TABLE

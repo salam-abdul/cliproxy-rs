@@ -10,15 +10,17 @@ use super::{Activity, DAY_MS, Range, epoch_ms, meta};
 /// The sends in range with their request (a fallback send counts under the request it
 /// serves), whether they failed, and their place from the last send of that request,
 /// then the filtered ones. A send's place is judged among every send in range, so a
-/// filter never turns a failed-over send into its request's last.
+/// filter never turns a failed-over send into its request's last. `picked` is materialized
+/// so the provider, credential and bucket groups share one pass over `sends`.
 const SENDS: &str = "WITH ranged AS (
-        SELECT *, COALESCE(parent_request, request_id) AS request,
+        SELECT at_ms, provider, credential, outcome, status, turn, tokens_exact, uncached_input_tokens,
+            cache_read_tokens, cache_write_tokens, output_tokens, COALESCE(parent_request, request_id) AS request,
             (outcome NOT IN ('complete', 'cancelled') AND status IS NOT 429) AS failed,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(parent_request, request_id), turn ORDER BY at_ms DESC, send DESC
             ) AS from_last
         FROM sends WHERE at_ms >= ?1 AND at_ms <= ?2
-    ), picked AS (
+    ), picked AS MATERIALIZED (
         SELECT * FROM ranged WHERE (?3 IS NULL OR provider = ?3) AND (?4 IS NULL OR credential = ?4)
     )";
 
@@ -89,42 +91,36 @@ fn read(
     let conn = db.transaction()?;
     let from = now - range.duration();
     let bucket_ms = range.bucket();
-    let filter = params![from, now, provider, credential];
-    let providers = conn
-        .prepare(&format!(
-            "{SENDS} SELECT provider, {TOTALS} FROM picked GROUP BY provider ORDER BY provider"
-        ))?
-        .query_map(filter, |row| {
-            let mut object = serde_json::Map::new();
-            object.insert("provider".into(), row.get::<_, String>(0)?.into());
-            totals(row, 1, object)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let credentials = conn
-        .prepare(&format!(
-            "{SENDS} SELECT provider, credential, {TOTALS} FROM picked WHERE credential IS NOT NULL
-            GROUP BY provider, credential ORDER BY provider, credential"
-        ))?
-        .query_map(filter, |row| {
-            let mut object = serde_json::Map::new();
-            object.insert("provider".into(), row.get::<_, String>(0)?.into());
-            object.insert("credential".into(), row.get::<_, String>(1)?.into());
-            totals(row, 2, object)
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let buckets = conn
-        .prepare(&format!(
-            "{SENDS} SELECT (at_ms / ?5) * ?5, provider, COUNT(*), SUM(failed), SUM(status IS 429),
-            SUM(outcome = 'cancelled') FROM picked GROUP BY 1, provider ORDER BY 1, provider"
-        ))?
-        .query_map(params![from, now, provider, credential, bucket_ms], |row| {
-            Ok(json!({
-                "at": row.get::<_, i64>(0)?, "provider": row.get::<_, String>(1)?,
-                "sends": row.get::<_, i64>(2)?, "failed": row.get::<_, i64>(3)?,
-                "rateLimited": row.get::<_, i64>(4)?, "cancelled": row.get::<_, i64>(5)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut providers = Vec::new();
+    let mut credentials = Vec::new();
+    let mut buckets = Vec::new();
+    let mut statement = conn.prepare(&format!(
+        "{SENDS} SELECT 0, NULL, provider, NULL, {TOTALS} FROM picked GROUP BY provider
+        UNION ALL SELECT 1, NULL, provider, credential, {TOTALS} FROM picked WHERE credential IS NOT NULL
+            GROUP BY provider, credential
+        UNION ALL SELECT 2, (at_ms / ?5) * ?5, provider, NULL, 0, COUNT(*), SUM(failed), SUM(status IS 429),
+            0, 0, 0, 0, 0, SUM(outcome = 'cancelled'), 0 FROM picked GROUP BY 2, provider
+        ORDER BY 1, 2, 3, 4"
+    ))?;
+    let mut rows = statement.query(params![from, now, provider, credential, bucket_ms])?;
+    while let Some(row) = rows.next()? {
+        let mut object = serde_json::Map::new();
+        object.insert("provider".into(), row.get::<_, String>(2)?.into());
+        match row.get::<_, i64>(0)? {
+            0 => providers.push(totals(row, 4, object)?),
+            1 => {
+                object.insert("credential".into(), row.get::<_, String>(3)?.into());
+                credentials.push(totals(row, 4, object)?);
+            }
+            _ => buckets.push(json!({
+                "at": row.get::<_, i64>(1)?, "provider": object["provider"],
+                "sends": row.get::<_, i64>(5)?, "failed": row.get::<_, i64>(6)?,
+                "rateLimited": row.get::<_, i64>(7)?, "cancelled": row.get::<_, i64>(13)?
+            })),
+        }
+    }
+    drop(rows);
+    drop(statement);
     let cycles = weekly_cycles(&conn, from, now, provider, credential)?;
     let oldest: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM sends", [], |row| row.get(0))?;
     let lost = lost.max(meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64);
