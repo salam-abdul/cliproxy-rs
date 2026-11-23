@@ -664,7 +664,10 @@ impl GoStream for ToInteractions {
                     true
                 });
             }
-            if choice.get("finish_reason").exists() {
+            // Chunks before the last carry `"finish_reason":null`; only a reason ends the step,
+            // as in the Gemini-client translator of the same stream.
+            let finish = choice.get("finish_reason");
+            if finish.kind == Kind::String && !finish.s.is_empty() {
                 self.stop_step(&mut out);
             }
             true
