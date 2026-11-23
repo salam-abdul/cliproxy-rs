@@ -669,10 +669,26 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
             match item.get("type").bytes().as_ref() {
                 b"reasoning" => {
                     parts.append(&mut calls);
-                    let content = item.get("content");
-                    if content.exists() {
+                    // The summary's text, as the streamed translation sends it; else the
+                    // reasoning content's text.
+                    let mut text = Vec::new();
+                    for key in ["summary", "content"] {
+                        let field = item.get(key);
+                        if field.is_array() {
+                            field.each(|_, piece| {
+                                text.extend_from_slice(&piece.get("text").bytes());
+                                true
+                            });
+                        } else if field.kind == Kind::String {
+                            text.extend_from_slice(&field.bytes());
+                        }
+                        if !text.is_empty() {
+                            break;
+                        }
+                    }
+                    if !text.is_empty() {
                         let mut part = br#"{"text":"","thought":true}"#.to_vec();
-                        gj::set_str(&mut part, "text", content.bytes());
+                        gj::set_str(&mut part, "text", &text);
                         parts.push(part);
                     }
                 }
