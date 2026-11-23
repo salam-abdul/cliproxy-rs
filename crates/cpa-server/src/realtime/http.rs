@@ -363,6 +363,8 @@ pub(super) async fn call(
             &data,
             super::session_ids(&selection_headers, &body),
         );
+    } else if status == 401 {
+        rt.refresh_unauthorized(credential.clone());
     }
     if let Some(error) = read_error {
         let message = match error {
@@ -689,6 +691,8 @@ pub(super) async fn hangup(
             &data,
             (stored.session_id.clone(), String::new()),
         );
+    } else if status == 401 {
+        rt.refresh_unauthorized(credential.clone());
     }
     if read_error.is_some() {
         return traced(realtime_error(

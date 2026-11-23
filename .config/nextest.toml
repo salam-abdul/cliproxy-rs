@@ -25,7 +25,9 @@ filter = '''
         | test(=antigravity_request::tests::tool_schemas_are_cleaned_in_one_pass)))
     | (binary_id(cpa-server) & (test(/^websocket::tests::/)
         | test(=request_logging::history::writer::tests::a_full_channel_drops_rows_and_counts_them)
-        | test(=native_claude::entitlement_tests::a_streaming_turn_does_not_hold_back_its_session)))
+        | test(=native_claude::entitlement_tests::a_streaming_turn_does_not_hold_back_its_session)
+        | test(=runtime::tests::a_refusal_in_the_refresh_loop_stops_refreshes_and_rotation_follows_the_access_token)
+        | test(=runtime::tests::codex_reports_a_refusal_while_its_access_token_still_works)))
     | (binary_id(cpa-home) & test(=inflight::tests::a_new_interval_applies_at_the_next_timer_cycle))
     | (binary_id(cliproxy::bin/cliproxy) & (
         test(=home::tests::usage_and_in_flight_reach_home_and_drains_cancel_running_work)

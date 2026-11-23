@@ -128,3 +128,64 @@ async fn alpha_search_uses_policy_eligible_credential_and_passes_upstream_throug
     assert_eq!(headers["version"], "0.150.0");
     assert_eq!(headers["session_id"], "s-1");
 }
+
+/// An upstream 401 passes through to the client and refreshes the account off the
+/// request. When the token endpoint refuses its refresh token, the next search finds no
+/// account.
+#[tokio::test]
+async fn a_401_refreshes_the_account_and_a_refused_refresh_token_takes_it_out_of_rotation() {
+    let upstream_url =
+        serve(axum::Router::new().fallback(|| async { (StatusCode::UNAUTHORIZED, "token rejected") })).await;
+    let token = axum::Router::new().route(
+        "/token",
+        axum::routing::post(|| async { (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#) }),
+    );
+    let token_url = format!("{}/token", serve(token).await);
+    let oauth = CodexOAuth::with_endpoints(wreq::Client::new(), &token_url, &token_url, &token_url)
+        .with_retry_delay(std::time::Duration::ZERO);
+    let executor = CodexExecutor::with_client(wreq::Client::new(), oauth)
+        .with_alpha_base_url(format!("{upstream_url}/backend-api/codex"));
+    let account = credential(
+        "oauth.json",
+        serde_json::json!({"type":"codex","access_token":"at-FAKE","refresh_token":"fake-rt",
+            "account_id":"acct-FAKE","expired":(chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()}),
+        &[("auth_kind", "oauth")],
+    );
+    let rt = Arc::new(cpa_server::testing::runtime(
+        cpa_server::testing::config("{}"),
+        vec![cpa_server::testing::local(account)],
+        Executors {
+            claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+            codex: executor,
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        },
+    ));
+    let proxy = serve(router(rt)).await;
+    let search = || async {
+        let response = wreq::Client::new()
+            .post(format!("{proxy}/backend-api/codex/alpha/search"))
+            .body(r#"{"id":"s-1","model":"gpt-5.5","query":"q"}"#)
+            .send()
+            .await
+            .unwrap();
+        (response.status().as_u16(), response.text().await.unwrap())
+    };
+    assert_eq!(search().await, (401, "token rejected".to_owned()));
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let answer = search().await;
+            if answer.0 != 401 {
+                return answer;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the account left rotation");
+    assert_eq!(
+        refused,
+        (503, r#"{"error":"auth_not_found: no auth available"}"#.to_owned())
+    );
+}
