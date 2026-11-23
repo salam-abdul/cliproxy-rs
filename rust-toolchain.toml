@@ -1,0 +1,5 @@
+[toolchain]
+# CI, local and container builds use this exact compiler. The heap budgets in
+# crates/cpa-server/tests/fixtures/allocation_limits.txt are measured on it, so re-measure
+# them when it changes, and move the Dockerfile's rust image with it.
+channel = "1.99.0"

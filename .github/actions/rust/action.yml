@@ -1,10 +1,7 @@
 name: Rust
-description: Install BoringSSL's build tools, the pinned Rust toolchain and the cargo cache.
+description: Install BoringSSL's build tools, the Rust toolchain pinned in rust-toolchain.toml and the cargo cache.
 
 inputs:
-  toolchain:
-    description: Toolchain to install and make the default.
-    required: true
   components:
     description: Comma-separated rustup components.
     default: ""
@@ -32,10 +29,11 @@ runs:
     - name: Toolchain
       shell: bash
       env:
-        TOOLCHAIN: ${{ inputs.toolchain }}
         COMPONENTS: ${{ inputs.components }}
         TARGET: ${{ inputs.target }}
       run: |
+        TOOLCHAIN=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+        if [ -z "$TOOLCHAIN" ]; then echo "no channel in rust-toolchain.toml" >&2; exit 1; fi
         args=(--profile minimal)
         if [ -n "$COMPONENTS" ]; then args+=(--component "$COMPONENTS"); fi
         if [ -n "$TARGET" ]; then args+=(--target "$TARGET"); fi

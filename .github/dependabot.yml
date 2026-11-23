@@ -1,0 +1,36 @@
+# Weekly version updates, one grouped pull request per ecosystem. A release must be a week
+# old before it is proposed. The vendored crates in vendor/ are patched copies and are
+# updated by hand: a requirement past the patched version would make cargo drop the patch.
+# A dashboard update that changes the built assets fails CI until ui/dist is rebuilt and
+# committed on its branch.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: gjson
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /ui
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directories: [/, /.github/actions/rust]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
