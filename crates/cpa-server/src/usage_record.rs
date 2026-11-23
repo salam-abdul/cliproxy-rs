@@ -34,6 +34,16 @@ pub struct Breakdown {
     unclassified: i64,
 }
 
+impl Breakdown {
+    /// Uncached input, cache read, cache write, total output and reasoning, for a
+    /// complete breakdown only.
+    pub(crate) fn parts(&self) -> Option<[i64; 5]> {
+        let [_, uncached, cache_read, cache_write] = self.input;
+        let [output, _, reasoning] = self.output;
+        (self.quality == Quality::Complete).then_some([uncached, cache_read, cache_write, output, reasoning])
+    }
+}
+
 /// Go `usage.Detail`. `breakdown: None` is Go's zero (invalid) breakdown.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Detail {
@@ -353,7 +363,7 @@ pub fn ensure_breakdown(mut d: Detail, provider: &str, executor_type: &str) -> D
 }
 
 /// Go `hasNonZeroTokenUsage`.
-fn has_tokens(d: &Detail) -> bool {
+pub(crate) fn has_tokens(d: &Detail) -> bool {
     d.input != 0
         || d.output != 0
         || d.reasoning != 0

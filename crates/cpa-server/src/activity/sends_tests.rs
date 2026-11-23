@@ -1,5 +1,6 @@
 use super::*;
 use crate::activity::{Activity, DAY_MS, MAX_REQUESTS, MAX_STATUSES, QUEUE, epoch_ms, prune, trim};
+use crate::usage_record::Detail;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -198,4 +199,56 @@ fn a_full_queue_counts_the_send_as_lost_and_returns() {
     drop(release);
     activity.flush();
     assert_eq!(activity.sends().unwrap().len(), QUEUE);
+}
+
+#[test]
+fn claude_input_is_already_uncached() {
+    let d = Detail {
+        input: 100,
+        cache_read: 10,
+        cache_creation: 5,
+        output: 20,
+        ..Detail::default()
+    };
+    assert_eq!(
+        Tokens::of(&d, "claude", "claude"),
+        Some(Tokens {
+            uncached_input: 100,
+            cache_read: 10,
+            cache_write: 5,
+            output: 20,
+            reasoning: 0,
+            exact: true
+        })
+    );
+}
+
+#[test]
+fn gemini_output_gains_the_thinking_it_reports_apart() {
+    let d = Detail {
+        input: 100,
+        output: 20,
+        reasoning: 7,
+        ..Detail::default()
+    };
+    let tokens = Tokens::of(&d, "gemini", "gemini").unwrap();
+    assert_eq!((tokens.output, tokens.reasoning, tokens.exact), (27, 7, true));
+}
+
+#[test]
+fn counts_that_do_not_add_up_are_kept_and_marked_inexact() {
+    // cache larger than the input it is part of
+    let d = Detail {
+        input: 5,
+        cache_read: 10,
+        output: 1,
+        ..Detail::default()
+    };
+    let tokens = Tokens::of(&d, "openai-compatibility", "openaicompatexecutor").unwrap();
+    assert_eq!((tokens.uncached_input, tokens.cache_read, tokens.exact), (5, 10, false));
+}
+
+#[test]
+fn a_send_with_no_usage_has_no_tokens() {
+    assert_eq!(Tokens::of(&Detail::default(), "claude", "claude"), None);
 }
