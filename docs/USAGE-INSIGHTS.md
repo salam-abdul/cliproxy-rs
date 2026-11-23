@@ -224,7 +224,7 @@ Each is its own change. Tests worth naming now: a WebSocket turn's frames are in
 | Decision | Proposal |
 | --- | --- |
 | When the native history route goes | In the change that moves the dashboard to the activity route. |
-| Dashboard elements | Providers table, health strip, Speed section, Tools tab. Each must fit the bundle budgets. |
+| Dashboard elements | Speed section, Tools tab. Each must fit the bundle budgets. |
 | First-byte marks in the Codex and Gemini executors | Add them, so their time to first response is comparable. Until then part 3 labels it. |
 | The tool index file in the history folder, and the delete command updating it | As described in part 4. No new setting: the indexer runs whenever body history is on. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
