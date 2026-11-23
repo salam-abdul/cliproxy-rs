@@ -112,7 +112,7 @@ pub(crate) fn part_to_steps(part: &Res<'_>) -> Vec<Vec<u8>> {
                 vec![thought_step(&signature, b"")]
             };
         }
-        let mut item = br#"{"text":""}"#.to_vec();
+        let mut item = br#"{"type":"text","text":""}"#.to_vec();
         gj::set_str(&mut item, "text", text.bytes());
         return output_steps(item, &signature);
     }
