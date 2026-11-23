@@ -13,6 +13,7 @@ page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
+let activityChecks = 0, activityConflict = false;
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
@@ -59,6 +60,25 @@ await page.route("**/*", async route => {
       }],
       statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}],
       errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
+  }
+  if (path === "/v8/management/observability/activity") {
+    activityChecks++;
+    if (activityConflict) return route.fulfill({status:409,json:{error:"activity store is not running"}});
+    const range = new URL(request.url()).searchParams.get("range") || "24h";
+    const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
+    const width = {"24h":3600000,"7d":21600000,"30d":86400000}[range], last = Math.floor(now/width)*width;
+    const totals = (sends, failed, rateLimited, outputTokens) => ({requests:sends,sends,failed,rateLimited,failedOver:0,
+      uncachedInputTokens:100,cacheReadTokens:300,cacheWriteTokens:100,outputTokens,cancelled:0,exactSends:sends});
+    const cycle = (credential, over) => ({provider:"claude",credential,start:now-duration/2,end:now-3600000,reset:null,first:0,peak:30,last:30,
+      ended:false,unused:null,partial:false,inRange:true,tokens:60000,tokensPerPercent:2000,...over});
+    return send({range,from:now-duration,to:now,bucketMs:width,
+      providers:[{provider:"claude",...totals(8,1,2,800)},{provider:"codex",...totals(4,0,0,200)}],
+      credentials:[{provider:"claude",credential:"account-a.json",...totals(5,1,0,600)},{provider:"claude",credential:"disabled.json",...totals(3,0,2,200)},
+        {provider:"codex",credential:"codex-synthetic.json",...totals(4,0,0,200)}],
+      buckets:[{at:last-width,provider:"claude",sends:2,failed:0,rateLimited:2,cancelled:0},{at:last,provider:"claude",sends:6,failed:1,rateLimited:0,cancelled:0},
+        {at:last,provider:"codex",sends:4,failed:0,rateLimited:0,cancelled:0}],
+      cycles:[cycle("account-a.json",{ended:true,last:60,peak:60,unused:40}),cycle("disabled.json",{})],
+      oldestSend:now-duration/2,lostEvents:0,coverageUncertain:false});
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send(config);
   if (path === "/v8/management/config/api-keys/openai-compatibility") {
@@ -346,11 +366,23 @@ try {
   await page.getByRole("heading", {name:"Top models",exact:true}).waitFor();
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
   assert.ok(historyChecks > 0,"history loads with Overview");
-  const historyBefore = historyChecks;
+  const activity = page.getByRole("region",{name:"Provider activity"});
+  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  assert.deepEqual(await activity.locator("button[aria-expanded]").allInnerTexts(),["Claude","Codex"],"providers sort by unused weekly quota");
+  const claudeToggle = activity.getByRole("button",{name:"Claude",exact:true});
+  assert.equal(await claudeToggle.getAttribute("aria-expanded"),"false");
+  assert.equal(await activity.getByText("disabled.json",{exact:true}).count(),0,"account rows start closed");
+  await claudeToggle.click();
+  assert.equal(await claudeToggle.getAttribute("aria-expanded"),"true");
+  await activity.getByText("account-a.json",{exact:true}).waitFor();
+  await activity.getByText("disabled.json",{exact:true}).waitFor();
+  assert.ok(await activity.getByText(/all rate-limited or cancelled/).count() > 0,"a bucket of only 429s is not drawn as idle");
+  const historyBefore = historyChecks, activityBefore = activityChecks;
   for (let i = 0; i < 6; i++) { await page.clock.fastForward(10_000); await settle(); }
   assert.equal(historyChecks - historyBefore, 2, "history reloads every 30 seconds despite 10-second status polls");
+  assert.equal(activityChecks - activityBefore, 1, "provider activity reloads every 60 seconds");
   historyHold = new Promise(r => historyRelease = r);
-  const rangeBefore = historyChecks;
+  const rangeBefore = historyChecks, activityRange = activityChecks;
   await page.getByRole("button",{name:"7 days"}).click();
   await page.getByText("Loading history…").first().waitFor();
   await page.getByRole("button",{name:"account-a.json"}).first().click();
@@ -366,6 +398,8 @@ try {
   historyRelease(); historyHold = null;
   await page.getByText("By requests · selected period",{exact:true}).waitFor();
   assert.equal(historyChecks - rangeBefore, 1, "range selection loads durable history once");
+  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  assert.equal(activityChecks - activityRange, 1, "range selection loads provider activity once");
   historyFailure = true;
   await page.getByRole("button",{name:"30 days"}).click();
   await page.getByText("History could not be loaded. Current account readings remain available.").waitFor();
@@ -376,6 +410,19 @@ try {
   historyFailure = false;
   await page.getByRole("button",{name:"24 hours"}).click();
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
+  activityConflict = true;
+  const conflictBefore = activityChecks;
+  await page.getByRole("button",{name:"7 days"}).click();
+  await activity.getByText("The activity store is not running.",{exact:true}).waitFor();
+  await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
+  assert.equal(activityChecks - conflictBefore, 1, "a refused activity read is not retried before the next poll");
+  activityConflict = false;
+  await page.getByRole("button",{name:"24 hours"}).click();
+  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the provider table does not widen the page");
+  assert.ok(await activity.locator(".provider-scroll").evaluate(e => e.scrollWidth > e.clientWidth),"the provider table scrolls inside its card");
+  await page.setViewportSize({width:1280,height:900});
   await page.getByRole("button",{name:"account-a.json"}).first().click();
   await page.getByRole("dialog",{name:/account-a.json details/}).waitFor();
   await page.getByText("Availability history",{exact:true}).waitFor();

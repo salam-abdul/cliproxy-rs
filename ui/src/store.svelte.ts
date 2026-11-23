@@ -96,6 +96,9 @@ class Store {
   history = new Res<Data>(() =>
     api(`/observability/native/history?range=${this.historyRange}`),
   );
+  providerActivity = new Res<Data>(() =>
+    api(`/observability/activity?range=${this.historyRange}`),
+  );
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> => {
     const list = await api("/credentials");
@@ -162,6 +165,7 @@ class Store {
       this.native,
       this.activity,
       this.history,
+      this.providerActivity,
     ]) {
       resource.data = undefined;
       resource.error = null;
