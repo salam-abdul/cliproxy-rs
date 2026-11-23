@@ -17,7 +17,7 @@
 
 - Nextest skips doc tests. CI runs `cargo test --workspace --doc` after it.
 - The heap gate (`crates/cpa-server/tests/alloc_budget.rs`, budgets in `tests/fixtures/allocation_limits.txt`) and the tests that bound wall-clock time run alone only when `.config/nextest.toml` lists them. Add a new timing test there.
-- The heap budgets are measured on the toolchain pinned in `.github/workflows/ci.yml` (`RUST_TOOLCHAIN`). Re-measure them when it changes.
+- The heap budgets are measured on the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes.
 - The Codex Live media relay tests run only with the feature on: `cargo nextest run -p cpa-server --features media-relay --lib`.
 - Code behind `cfg(windows)` is checked only by the Windows clippy job.
 - `vendor/gjson` is outside the workspace, so `--workspace` commands skip it.

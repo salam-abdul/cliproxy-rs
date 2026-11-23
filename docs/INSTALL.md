@@ -6,7 +6,7 @@ Build this checkout. Upstream releases do not contain this fork's native routing
 
 | Need | For |
 | --- | --- |
-| Rust with edition 2024, at least the `rust-version` in `Cargo.toml` | Every build. CI pins the exact toolchain in `.github/workflows/ci.yml`. |
+| Rust with edition 2024, at least the `rust-version` in `Cargo.toml` | Every build. `rust-toolchain.toml` pins the exact toolchain that CI and rustup use. |
 | CMake, Clang, libclang and Perl | BoringSSL, through `btls-sys` |
 | NASM | Native Windows builds only |
 | Node.js and npm | Dashboard development only |
