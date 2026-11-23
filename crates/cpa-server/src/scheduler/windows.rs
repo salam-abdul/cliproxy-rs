@@ -52,6 +52,8 @@ pub(super) struct Window {
     stated_reset: Option<SystemTime>,
     /// The window length, when one was reported and can be represented.
     length: Option<Duration>,
+    /// The percent of the window used, as stated.
+    used: Option<f64>,
 }
 
 impl Window {
@@ -81,6 +83,124 @@ pub(super) fn window_length(minutes: f64, observed_at: SystemTime) -> Option<Dur
 
 use crate::quota_time::reset_time;
 
+/// A signal's value by case-insensitive header name.
+fn signal<'a>(signals: &'a std::collections::BTreeMap<String, String>, name: &str) -> Option<&'a str> {
+    signals
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+}
+
+/// Codex's (long, short) windows: the longer window is the weekly one, whichever header
+/// carries it; without lengths, secondary is weekly. A lone window is weekly only when it
+/// lasts at least a day, or, for secondary, when its length is unknown.
+fn codex_long_short(primary: Option<Window>, secondary: Option<Window>) -> (Option<Window>, Option<Window>) {
+    let day = Duration::from_secs(24 * 3600);
+    match (primary, secondary) {
+        (Some(p), Some(s)) if p.length.unwrap_or(Duration::ZERO) > s.length.unwrap_or(Duration::MAX) => {
+            (Some(p), Some(s))
+        }
+        (Some(p), Some(s)) => (Some(s), Some(p)),
+        (Some(p), None) if p.length.is_some_and(|l| l >= day) => (Some(p), None),
+        (None, Some(s)) if s.length.is_none_or(|l| l >= day) => (Some(s), None),
+        (only, None) | (None, only) => (None, only),
+    }
+}
+
+/// A snapshot's (long, short) windows for `provider` (`claude` or `codex`; anything else
+/// has none).
+fn parse_windows(
+    provider: &str,
+    signals: &std::collections::BTreeMap<String, String>,
+    observed_at: SystemTime,
+) -> (Option<Window>, Option<Window>) {
+    let get = |name: &str| signal(signals, name);
+    let number = |name: &str| get(name).and_then(|v| v.parse::<f64>().ok()).filter(|n| n.is_finite());
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" => {
+            let window = |id: WindowId, label: &str, minutes: f64| {
+                let reset = get(&format!("anthropic-ratelimit-unified-{label}-reset")).and_then(reset_time);
+                let utilization = number(&format!("anthropic-ratelimit-unified-{label}-utilization"));
+                Window {
+                    id,
+                    used_up: get(&format!("anthropic-ratelimit-unified-{label}-status"))
+                        .is_some_and(|s| s.eq_ignore_ascii_case("rejected"))
+                        || utilization.is_some_and(|u| u >= 1.0),
+                    reset,
+                    stated_reset: reset,
+                    length: window_length(minutes, observed_at),
+                    // Claude states utilization as a fraction.
+                    used: utilization.map(|u| u * 100.0),
+                }
+            };
+            (
+                Some(window(WindowId::Claude7d, "7d", 7.0 * 24.0 * 60.0)),
+                Some(window(WindowId::Claude5h, "5h", 300.0)),
+            )
+        }
+        "codex" => {
+            // Usage, reset and length are read independently; a window exists when
+            // any of them was reported.
+            let window = |id: WindowId, label: &str| {
+                let p = format!("x-codex-{label}-");
+                let used = number(&format!("{p}used-percent"));
+                let absolute = get(&format!("{p}reset-at")).and_then(reset_time);
+                let after = number(&format!("{p}reset-after-seconds")).filter(|s| *s >= 0.0);
+                let relative = after.and_then(|a| observed_at.checked_add(Duration::try_from_secs_f64(a).ok()?));
+                let reset = absolute.or(relative);
+                // A zero delay still ends an exhausted window now, but its time is
+                // just the observation's, so it names no rollover.
+                let stated_reset = absolute.or(relative.filter(|_| after.is_some_and(|a| a > 0.0)));
+                let length = number(&format!("{p}window-minutes")).and_then(|m| window_length(m, observed_at));
+                (used.is_some() || reset.is_some() || length.is_some()).then_some(Window {
+                    id,
+                    used_up: used.is_some_and(|u| u >= 100.0),
+                    reset,
+                    stated_reset,
+                    length,
+                    used,
+                })
+            };
+            codex_long_short(
+                window(WindowId::CodexPrimary, "primary"),
+                window(WindowId::CodexSecondary, "secondary"),
+            )
+        }
+        _ => (None, None),
+    }
+}
+
+/// One quota window's use, as a snapshot states it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reading {
+    /// The weekly window, or the shorter one.
+    pub long: bool,
+    pub used_percent: f64,
+    pub reset: Option<SystemTime>,
+}
+
+/// Each quota window's use in a snapshot's `signals`, for `claude` or `codex`.
+/// A window that states no use gives no reading.
+pub fn readings(
+    provider: &str,
+    signals: &std::collections::BTreeMap<String, String>,
+    observed_at: SystemTime,
+) -> Vec<Reading> {
+    let (long, short) = parse_windows(provider, signals, observed_at);
+    [(true, long), (false, short)]
+        .into_iter()
+        .filter_map(|(long, window)| {
+            let window = window?;
+            let used_percent = window.used.filter(|u| (0.0..=100.0).contains(u))?;
+            Some(Reading {
+                long,
+                used_percent,
+                reset: window.reset,
+            })
+        })
+        .collect()
+}
+
 /// One quota observation's windows, parsed once: what [`Windows`] reads, before it is
 /// judged at a point in time.
 #[derive(Debug, Clone, Copy)]
@@ -100,74 +220,8 @@ impl Observation {
         signals: &std::collections::BTreeMap<String, String>,
         observed_at: SystemTime,
     ) -> Self {
-        let get = |name: &str| {
-            signals
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v.trim())
-        };
-        let number = |name: &str| get(name).and_then(|v| v.parse::<f64>().ok()).filter(|n| n.is_finite());
         let codex = provider.trim().eq_ignore_ascii_case("codex");
-        let (long, short) = match provider.trim().to_ascii_lowercase().as_str() {
-            "claude" => {
-                let window = |id: WindowId, label: &str, minutes: f64| {
-                    let reset = get(&format!("anthropic-ratelimit-unified-{label}-reset")).and_then(reset_time);
-                    Window {
-                        id,
-                        used_up: get(&format!("anthropic-ratelimit-unified-{label}-status"))
-                            .is_some_and(|s| s.eq_ignore_ascii_case("rejected"))
-                            || number(&format!("anthropic-ratelimit-unified-{label}-utilization"))
-                                .is_some_and(|u| u >= 1.0),
-                        reset,
-                        stated_reset: reset,
-                        length: window_length(minutes, observed_at),
-                    }
-                };
-                (
-                    Some(window(WindowId::Claude7d, "7d", 7.0 * 24.0 * 60.0)),
-                    Some(window(WindowId::Claude5h, "5h", 300.0)),
-                )
-            }
-            "codex" => {
-                // Usage, reset and length are read independently; a window exists when
-                // any of them was reported.
-                let window = |id: WindowId, label: &str| {
-                    let p = format!("x-codex-{label}-");
-                    let used = number(&format!("{p}used-percent"));
-                    let absolute = get(&format!("{p}reset-at")).and_then(reset_time);
-                    let after = number(&format!("{p}reset-after-seconds")).filter(|s| *s >= 0.0);
-                    let relative = after.and_then(|a| observed_at.checked_add(Duration::try_from_secs_f64(a).ok()?));
-                    let reset = absolute.or(relative);
-                    // A zero delay still ends an exhausted window now, but its time is
-                    // just the observation's, so it names no rollover.
-                    let stated_reset = absolute.or(relative.filter(|_| after.is_some_and(|a| a > 0.0)));
-                    let length = number(&format!("{p}window-minutes")).and_then(|m| window_length(m, observed_at));
-                    (used.is_some() || reset.is_some() || length.is_some()).then_some(Window {
-                        id,
-                        used_up: used.is_some_and(|u| u >= 100.0),
-                        reset,
-                        stated_reset,
-                        length,
-                    })
-                };
-                let day = Duration::from_secs(24 * 3600);
-                match (
-                    window(WindowId::CodexPrimary, "primary"),
-                    window(WindowId::CodexSecondary, "secondary"),
-                ) {
-                    // The longer window is the weekly one, whichever header carries it;
-                    // without lengths, secondary is weekly.
-                    (Some(p), Some(s)) if p.length.unwrap_or(Duration::ZERO) > s.length.unwrap_or(Duration::MAX) => {
-                        (Some(p), Some(s))
-                    }
-                    (Some(p), Some(s)) => (Some(s), Some(p)),
-                    (Some(p), None) if p.length.is_some_and(|l| l >= day) => (Some(p), None),
-                    (None, Some(s)) if s.length.is_none_or(|l| l >= day) => (Some(s), None),
-                    (only, None) | (None, only) => (None, only),
-                }
-            }
-            _ => (None, None),
-        };
+        let (long, short) = parse_windows(provider, signals, observed_at);
         let windows = [long, short];
         let until = windows
             .iter()
@@ -177,13 +231,14 @@ impl Observation {
         // `X-Codex-Limit-Reached` lasts as long as the used-up windows do; when none is
         // used up, until the soonest reset any window reports; with no reset at all,
         // five hours from the observation.
-        let flag_until = (codex && get("x-codex-limit-reached").is_some_and(|v| v.eq_ignore_ascii_case("true")))
-            .then(|| {
-                until
-                    .or_else(|| windows.iter().flatten().filter_map(|w| w.reset).min())
-                    .or_else(|| observed_at.checked_add(FALLBACK_WINDOW))
-            })
-            .flatten();
+        let flag_until = (codex
+            && signal(signals, "x-codex-limit-reached").is_some_and(|v| v.eq_ignore_ascii_case("true")))
+        .then(|| {
+            until
+                .or_else(|| windows.iter().flatten().filter_map(|w| w.reset).min())
+                .or_else(|| observed_at.checked_add(FALLBACK_WINDOW))
+        })
+        .flatten();
         Self {
             observed_at,
             long,

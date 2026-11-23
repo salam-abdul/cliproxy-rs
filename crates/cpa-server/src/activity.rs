@@ -1,3 +1,4 @@
+mod quota;
 pub(crate) mod sends;
 
 use anyhow::Context;
@@ -19,6 +20,7 @@ const RETAIN_MS: i64 = 31 * DAY_MS;
 const MAX_REQUESTS: i64 = 250_000;
 const MAX_STATUSES: i64 = 50_000;
 const MAX_SENDS: i64 = 1_000_000;
+const MAX_READINGS: i64 = 200_000;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Range {
@@ -91,6 +93,7 @@ enum Command {
     Request(Box<RequestRow>),
     Status(Vec<StatusRow>),
     Send(Box<sends::SendRow>),
+    Readings(Vec<quota::ReadingRow>),
     Finish(std::sync::mpsc::Sender<()>),
     Flush(std::sync::mpsc::Sender<()>),
     /// Stops the writer until the receiver's sender is dropped, after telling the first sender.
@@ -104,6 +107,7 @@ impl Command {
             Self::Request(_) => 1,
             Self::Status(rows) => rows.len() as u64,
             Self::Send(_) => 1,
+            Self::Readings(rows) => rows.len() as u64,
             Self::Finish(_) | Self::Flush(_) => 0,
             #[cfg(test)]
             Self::Hold(..) => 0,
@@ -153,7 +157,13 @@ impl Activity {
                 PRIMARY KEY (request_id, turn, send)
             );
             CREATE INDEX IF NOT EXISTS sends_by_time ON sends(at_ms);
-            CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);",
+            CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);
+            CREATE TABLE IF NOT EXISTS quota_readings (
+                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
+                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
+                PRIMARY KEY (credential, long, bucket_ms)
+            );
+            CREATE INDEX IF NOT EXISTS quota_readings_by_time ON quota_readings(at_ms);",
         )?;
         prune(&conn, epoch_ms())?;
         let previous_lost = meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64;
@@ -197,6 +207,11 @@ impl Activity {
                                 }
                             }
                             Command::Send(row) => sends::write_send(&transaction, row)?,
+                            Command::Readings(rows) => {
+                                for row in rows {
+                                    quota::write_reading(&transaction, row)?;
+                                }
+                            }
                             Command::Finish(_) | Command::Flush(_) => {}
                             #[cfg(test)]
                             Command::Hold(..) => {}
@@ -450,11 +465,18 @@ fn prune(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM requests WHERE at_ms < ?1", [now - RETAIN_MS])?;
     conn.execute("DELETE FROM account_status WHERE at_ms < ?1", [now - RETAIN_MS])?;
     conn.execute("DELETE FROM sends WHERE at_ms < ?1", [now - RETAIN_MS])?;
-    trim(conn, MAX_REQUESTS, MAX_STATUSES, MAX_SENDS)?;
+    conn.execute("DELETE FROM quota_readings WHERE at_ms < ?1", [now - RETAIN_MS])?;
+    trim(conn, MAX_REQUESTS, MAX_STATUSES, MAX_SENDS, MAX_READINGS)?;
     Ok(())
 }
 
-fn trim(conn: &Connection, request_limit: i64, status_limit: i64, send_limit: i64) -> rusqlite::Result<()> {
+fn trim(
+    conn: &Connection,
+    request_limit: i64,
+    status_limit: i64,
+    send_limit: i64,
+    reading_limit: i64,
+) -> rusqlite::Result<()> {
     let requests: i64 = conn.query_row("SELECT MAX(0, COUNT(*) - ?1) FROM requests", [request_limit], |row| {
         row.get(0)
     })?;
@@ -485,6 +507,18 @@ fn trim(conn: &Connection, request_limit: i64, status_limit: i64, send_limit: i6
             "DELETE FROM sends WHERE rowid IN
             (SELECT rowid FROM sends ORDER BY at_ms, rowid LIMIT ?1)",
             [sends],
+        )?;
+    }
+    let readings: i64 = conn.query_row(
+        "SELECT MAX(0, COUNT(*) - ?1) FROM quota_readings",
+        [reading_limit],
+        |row| row.get(0),
+    )?;
+    if readings > 0 {
+        conn.execute(
+            "DELETE FROM quota_readings WHERE rowid IN
+            (SELECT rowid FROM quota_readings ORDER BY at_ms, rowid LIMIT ?1)",
+            [readings],
         )?;
     }
     Ok(())
@@ -765,7 +799,7 @@ mod tests {
         history.flush();
         drop(history);
         let conn = Connection::open(&path).unwrap();
-        trim(&conn, 2, 2, MAX_SENDS).unwrap();
+        trim(&conn, 2, 2, MAX_SENDS, MAX_READINGS).unwrap();
         let requests: Vec<String> = conn
             .prepare("SELECT request_id FROM requests ORDER BY at_ms")
             .unwrap()

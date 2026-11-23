@@ -25,7 +25,7 @@ use pick::Rotation;
 pub(crate) use policy::Profile;
 pub use policy::{ErrorAction, ErrorRule, Policy, RuleAction, Strategy, retry_status};
 use windows::Probes;
-pub use windows::{Observation, Ranks, Rollover, WindowId, Windows};
+pub use windows::{Observation, Ranks, Reading, Rollover, WindowId, Windows, readings};
 
 pub use cpa_core::registry::dynamic::canonical_model;
 

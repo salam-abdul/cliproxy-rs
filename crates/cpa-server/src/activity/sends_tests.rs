@@ -1,5 +1,5 @@
 use super::*;
-use crate::activity::{Activity, DAY_MS, MAX_REQUESTS, MAX_STATUSES, QUEUE, epoch_ms, prune, trim};
+use crate::activity::{Activity, DAY_MS, MAX_READINGS, MAX_REQUESTS, MAX_STATUSES, QUEUE, epoch_ms, prune, trim};
 use crate::usage_record::Detail;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -183,7 +183,7 @@ fn sends_past_31_days_or_the_cap_are_removed_oldest_first() {
     activity.record_send(earlier);
     activity.flush();
     assert_eq!(ids(activity.sends().unwrap()), ["earlier", "recent"]);
-    trim(&conn, MAX_REQUESTS, MAX_STATUSES, 1).unwrap();
+    trim(&conn, MAX_REQUESTS, MAX_STATUSES, 1, MAX_READINGS).unwrap();
     assert_eq!(ids(activity.sends().unwrap()), ["recent"]);
 }
 

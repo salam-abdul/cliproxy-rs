@@ -2961,6 +2961,39 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_send_brings_its_accounts_quota_reading() {
+        let store = ActivityRuntime::new();
+        let credential = credential_for("codex");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "40".parse().unwrap());
+        store
+            .rt
+            .executors
+            .codex
+            .quota()
+            .observe(&credential.id, "gpt-test", &headers);
+        let facts = activity_facts("r1");
+        Tracker::start(&store.rt, &facts, &credential, "gpt-test").succeed();
+        store.sends();
+        let db = rusqlite::Connection::open(store.dir.join("activity.sqlite")).unwrap();
+        let readings = |db: &rusqlite::Connection| -> Vec<(String, String, f64)> {
+            db.prepare("SELECT credential, provider, used FROM quota_readings")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(readings(&db), [(credential.id.clone(), "codex".to_owned(), 40.0)]);
+        // A second write of the same snapshot would restore the reading changed here.
+        db.execute("UPDATE quota_readings SET used = -1", []).unwrap();
+        let facts = activity_facts("r2");
+        Tracker::start(&store.rt, &facts, &credential, "gpt-test").succeed();
+        assert_eq!(store.sends().len(), 2);
+        assert_eq!(readings(&db), [(credential.id.clone(), "codex".to_owned(), -1.0)]);
+    }
+
+    #[test]
     fn a_dropped_attempt_is_one_cancelled_send() {
         let store = ActivityRuntime::new();
         let facts = activity_facts("r1");
