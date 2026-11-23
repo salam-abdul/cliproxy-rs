@@ -103,6 +103,14 @@ const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pend
 
 pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
     (
+        "claude__gemini",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        "Claude max_tokens is not sent as maxOutputTokens, while OpenAI requests to Gemini send it; \
+         Claude Code's large default could exceed a smaller Gemini model's limit, so it waits for a decision",
+    ),
+    (
         "claude__codex",
         "max_tokens",
         Kind::Request,
