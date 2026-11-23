@@ -1,6 +1,7 @@
 //! HTTP surface: routes and client-key auth over an axum-independent [`runtime`].
 
 mod access;
+pub(crate) mod activity;
 mod affinity;
 pub mod capabilities;
 mod classify;

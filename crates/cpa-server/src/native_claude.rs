@@ -6,7 +6,6 @@ mod entitlement_tests;
 mod fallback;
 #[cfg(test)]
 mod fallback_tests;
-pub(crate) mod history;
 mod observation;
 mod policy;
 mod quota;
@@ -137,7 +136,6 @@ fn yes() -> bool {
 pub(crate) struct State {
     config: Config,
     events: diagnostics::Writer,
-    history: Option<history::History>,
     rt: Arc<Runtime>,
     clients: Clients,
     tls: std::sync::RwLock<Arc<SslAcceptor>>,
@@ -448,15 +446,19 @@ impl State {
     fn event(&self, mut v: Value) {
         v["at"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         self.events.send(&v, &self.rt.native_events.lost);
-        if let Some(history) = &self.history {
-            history.record_event(&v);
+        if let Some(activity) = self.rt.activity() {
+            activity.record_event(&v);
         }
         self.rt.native_events.record(v);
     }
 
-    pub(crate) async fn history(&self, range: history::Range, account: Option<String>) -> anyhow::Result<Value> {
-        self.history
-            .as_ref()
+    pub(crate) async fn history(
+        &self,
+        range: crate::activity::Range,
+        account: Option<String>,
+    ) -> anyhow::Result<Value> {
+        self.rt
+            .activity()
             .context("Native history is unavailable")?
             .query(range, account)
             .await
@@ -1274,18 +1276,11 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             None => builder,
         }
     })?;
+    if let Err(error) = rt.start_activity(c.events.with_extension("sqlite")) {
+        tracing::warn!(%error, "Native history is unavailable");
+    }
     let s = Arc::new(State {
         events: diagnostics::Writer::start(c.events.clone(), rt.native_events.lost.clone())?,
-        history: match history::History::start(
-            c.events.with_extension("sqlite"),
-            Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        ) {
-            Ok(history) => Some(history),
-            Err(error) => {
-                tracing::warn!(%error, "Native history is unavailable");
-                None
-            }
-        },
         config: c.clone(),
         rt,
         clients,
@@ -1327,8 +1322,8 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             interval.tick().await;
             match health_state.status().await {
                 Ok(status) => {
-                    if let Some(history) = &health_state.history {
-                        history.record_status(&status);
+                    if let Some(activity) = health_state.rt.activity() {
+                        activity.record_status(&status);
                     }
                 }
                 Err(_) => tracing::warn!("Native Claude health observation failed"),

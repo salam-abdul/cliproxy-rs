@@ -178,7 +178,7 @@ pub(crate) async fn native_history(
     State(state): State<Arc<Management>>,
     AxumQuery(params): AxumQuery<NativeHistoryParams>,
 ) -> Response {
-    let Some(range) = crate::native_claude::history::Range::parse(&params.range) else {
+    let Some(range) = crate::activity::Range::parse(&params.range) else {
         return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
     };
     if params.account.as_ref().is_some_and(|a| a.is_empty() || a.len() > 256) {

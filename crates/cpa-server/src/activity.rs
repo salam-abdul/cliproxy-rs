@@ -104,14 +104,14 @@ impl Command {
     }
 }
 
-pub(super) struct History {
+pub(crate) struct Activity {
     path: PathBuf,
     tx: SyncSender<Command>,
     lost: Arc<AtomicU64>,
 }
 
-impl History {
-    pub(super) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
+impl Activity {
+    pub(crate) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
         secure_file(&path)?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
@@ -148,81 +148,79 @@ impl History {
         startup.commit()?;
         let (tx, rx) = sync_channel(QUEUE);
         let writer_lost = lost.clone();
-        std::thread::Builder::new()
-            .name("native-history".into())
-            .spawn(move || {
-                let mut last_prune = std::time::Instant::now();
-                while let Ok(first) = rx.recv() {
-                    let mut commands = vec![first];
-                    while commands.len() < 64 {
-                        match rx.try_recv() {
-                            Ok(next) => commands.push(next),
-                            Err(_) => break,
-                        }
-                    }
-                    let count = commands.iter().map(Command::records).sum::<u64>();
-                    let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
-                    let result = (|| -> rusqlite::Result<()> {
-                        let transaction = conn.transaction()?;
-                        for command in &commands {
-                            match command {
-                                Command::Request(row) => write_request(&transaction, row)?,
-                                Command::Status(rows) => {
-                                    for row in rows {
-                                        write_status(&transaction, row)?;
-                                    }
-                                }
-                                Command::Finish(_) => {}
-                                #[cfg(test)]
-                                Command::Flush(_) => {}
-                            }
-                        }
-                        set_meta(
-                            &transaction,
-                            "lost_events",
-                            writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
-                        )?;
-                        if finish {
-                            set_meta(&transaction, "dirty", 0)?;
-                        }
-                        transaction.commit()
-                    })();
-                    if result.is_err() {
-                        writer_lost.fetch_add(count, Ordering::Relaxed);
-                    }
-                    // ponytail: Hourly trimming keeps writes cheap; track live row counts for hard caps.
-                    if !finish && last_prune.elapsed() >= Duration::from_secs(3600) {
-                        if prune(&conn, epoch_ms()).is_err() {
-                            writer_lost.fetch_add(1, Ordering::Relaxed);
-                        }
-                        last_prune = std::time::Instant::now();
-                    }
-                    #[cfg(test)]
-                    for command in &commands {
-                        if let Command::Flush(done) = command {
-                            let _ = done.send(());
-                        }
-                    }
-                    for command in commands {
-                        if let Command::Finish(done) = command {
-                            let _ = done.send(());
-                        }
-                    }
-                    if finish {
-                        break;
+        std::thread::Builder::new().name("activity".into()).spawn(move || {
+            let mut last_prune = std::time::Instant::now();
+            while let Ok(first) = rx.recv() {
+                let mut commands = vec![first];
+                while commands.len() < 64 {
+                    match rx.try_recv() {
+                        Ok(next) => commands.push(next),
+                        Err(_) => break,
                     }
                 }
-            })?;
+                let count = commands.iter().map(Command::records).sum::<u64>();
+                let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
+                let result = (|| -> rusqlite::Result<()> {
+                    let transaction = conn.transaction()?;
+                    for command in &commands {
+                        match command {
+                            Command::Request(row) => write_request(&transaction, row)?,
+                            Command::Status(rows) => {
+                                for row in rows {
+                                    write_status(&transaction, row)?;
+                                }
+                            }
+                            Command::Finish(_) => {}
+                            #[cfg(test)]
+                            Command::Flush(_) => {}
+                        }
+                    }
+                    set_meta(
+                        &transaction,
+                        "lost_events",
+                        writer_lost.load(Ordering::Relaxed).min(i64::MAX as u64) as i64,
+                    )?;
+                    if finish {
+                        set_meta(&transaction, "dirty", 0)?;
+                    }
+                    transaction.commit()
+                })();
+                if result.is_err() {
+                    writer_lost.fetch_add(count, Ordering::Relaxed);
+                }
+                // ponytail: Hourly trimming keeps writes cheap; track live row counts for hard caps.
+                if !finish && last_prune.elapsed() >= Duration::from_secs(3600) {
+                    if prune(&conn, epoch_ms()).is_err() {
+                        writer_lost.fetch_add(1, Ordering::Relaxed);
+                    }
+                    last_prune = std::time::Instant::now();
+                }
+                #[cfg(test)]
+                for command in &commands {
+                    if let Command::Flush(done) = command {
+                        let _ = done.send(());
+                    }
+                }
+                for command in commands {
+                    if let Command::Finish(done) = command {
+                        let _ = done.send(());
+                    }
+                }
+                if finish {
+                    break;
+                }
+            }
+        })?;
         Ok(Self { path, tx, lost })
     }
 
-    pub(super) fn record_event(&self, event: &Value) {
+    pub(crate) fn record_event(&self, event: &Value) {
         if let Some(row) = RequestRow::from_event(event) {
             self.send(Command::Request(Box::new(row)));
         }
     }
 
-    pub(super) fn record_status(&self, status: &Value) {
+    pub(crate) fn record_status(&self, status: &Value) {
         let Some(at) = status["observedAt"].as_i64() else {
             return;
         };
@@ -258,7 +256,7 @@ impl History {
         }
     }
 
-    pub(super) async fn query(&self, range: Range, account: Option<String>) -> anyhow::Result<Value> {
+    pub(crate) async fn query(&self, range: Range, account: Option<String>) -> anyhow::Result<Value> {
         let path = self.path.clone();
         let lost = self.lost.load(Ordering::Relaxed);
         tokio::task::spawn_blocking(move || query(&path, range, account.as_deref(), epoch_ms(), lost)).await?
@@ -272,7 +270,7 @@ impl History {
     }
 }
 
-impl Drop for History {
+impl Drop for Activity {
     fn drop(&mut self) {
         let (done, ack) = std::sync::mpsc::channel();
         if self.tx.try_send(Command::Finish(done)).is_ok() {
@@ -555,7 +553,7 @@ mod tests {
         let path = dir.join("history.sqlite");
         let lost = Arc::new(AtomicU64::new(0));
         {
-            let history = History::start(path.clone(), lost.clone()).unwrap();
+            let history = Activity::start(path.clone(), lost.clone()).unwrap();
             history.record_event(&json!({"type":"inference","requestId":"one",
                 "at":chrono::Utc::now().to_rfc3339(),"outcome":"success"}));
             history.flush();
@@ -563,7 +561,7 @@ mod tests {
         }
         let restarted = Arc::new(AtomicU64::new(0));
         {
-            let history = History::start(path.clone(), restarted.clone()).unwrap();
+            let history = Activity::start(path.clone(), restarted.clone()).unwrap();
             assert_eq!(restarted.load(Ordering::Relaxed), 2);
             let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
             assert_eq!(data["lostEvents"], 2);
@@ -573,7 +571,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         set_meta(&conn, "dirty", 1).unwrap();
         drop(conn);
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
         assert_eq!(data["lostEvents"], 2);
         assert_eq!(data["coverageUncertain"], true);
@@ -590,7 +588,7 @@ mod tests {
         let at = epoch_ms() - 60_000;
         let stamp = chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339();
         {
-            let history = History::start(path.clone(), lost.clone()).unwrap();
+            let history = Activity::start(path.clone(), lost.clone()).unwrap();
             history.record_event(&json!({"type":"inference","requestId":"synthetic-1","at":stamp,
                 "session":"private-session","bodySha256":"private-digest","account":"account-a",
                 "model":"claude-sonnet-4-6","outcome":"success","status":200,
@@ -632,7 +630,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         history.record_event(
             &json!({"type":"fallback","requestId":"one","at":stamp,"model":"claude-opus-test",
@@ -657,7 +655,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         for (id, account, outcome) in [("one", "a", "success"), ("two", "b", "quota_unavailable")] {
             history.record_event(&json!({"type":"inference","requestId":id,"at":stamp,
@@ -680,7 +678,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let stamp = chrono::Utc::now().to_rfc3339();
         for (id, usage) in [
             ("one", json!({"input_tokens":10,"cache_creation_input_tokens":5})),
@@ -704,7 +702,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("history.sqlite");
-        let history = History::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
         let now = epoch_ms();
         for i in 0..3 {
             let at = now - (3 - i) * 1_000_000;

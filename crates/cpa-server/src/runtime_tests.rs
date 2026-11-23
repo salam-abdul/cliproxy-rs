@@ -1765,3 +1765,16 @@ async fn an_api_call_does_not_send_a_refused_refresh_token() {
     rt.api_call_credential(control).await;
     assert!(connections.load(Ordering::SeqCst) > 0, "the token host was not reached");
 }
+
+/// The store is started once and every path shares it; a second start opens no file.
+#[tokio::test]
+async fn the_activity_store_starts_once_and_is_shared() {
+    let (rt, dir, _) = oauth_accounts("claude", &[], answer(|_| (500, "{}"))).await;
+    assert!(rt.activity().is_none());
+    rt.start_activity(dir.join("activity.sqlite")).unwrap();
+    let first = Arc::as_ptr(rt.activity().unwrap());
+    rt.start_activity(dir.join("other.sqlite")).unwrap();
+    assert_eq!(Arc::as_ptr(rt.activity().unwrap()), first);
+    assert!(!dir.join("other.sqlite").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

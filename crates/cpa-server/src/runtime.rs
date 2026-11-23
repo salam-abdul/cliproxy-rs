@@ -72,6 +72,7 @@ pub struct Runtime {
     /// Quota windows by credential, parsed once per observation for selection.
     quota_windows: Mutex<HashMap<String, crate::scheduler::Observation>>,
     history: crate::request_logging::history::writer::Writer,
+    activity: std::sync::OnceLock<Arc<crate::activity::Activity>>,
 }
 
 /// One config publication: requests read the config and its policy from the same one.
@@ -128,6 +129,7 @@ impl Runtime {
             config_changed: tokio::sync::watch::Sender::new(()),
             quota_windows: Mutex::default(),
             history: Default::default(),
+            activity: std::sync::OnceLock::new(),
         };
         rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
@@ -145,6 +147,20 @@ impl Runtime {
     /// The model-traffic history writer (`observability.history`).
     pub fn history(&self) -> &crate::request_logging::history::writer::Writer {
         &self.history
+    }
+
+    /// Starts the activity store at `path` unless one already runs; a later call opens nothing.
+    pub(crate) fn start_activity(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+        if self.activity.get().is_some() {
+            return Ok(());
+        }
+        let activity = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0)))?;
+        let _ = self.activity.set(Arc::new(activity));
+        Ok(())
+    }
+
+    pub(crate) fn activity(&self) -> Option<&Arc<crate::activity::Activity>> {
+        self.activity.get()
     }
 
     /// Records `--local-model` (Go `modelCatalogUpdaterPlan`'s `localModel`): remote

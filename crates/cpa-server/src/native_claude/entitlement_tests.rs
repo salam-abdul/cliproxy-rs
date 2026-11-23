@@ -251,15 +251,9 @@ impl Fixture {
                 google: Default::default(),
             },
         ));
+        rt.start_activity(native.events.with_extension("sqlite")).unwrap();
         let state = Arc::new(State {
             events: diagnostics::Writer::start(native.events.clone(), rt.native_events.lost.clone()).unwrap(),
-            history: Some(
-                history::History::start(
-                    native.events.with_extension("sqlite"),
-                    Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                )
-                .unwrap(),
-            ),
             config: native,
             rt,
             clients: Clients::new(|| native_client().tls_cert_verification(false)).unwrap(),
