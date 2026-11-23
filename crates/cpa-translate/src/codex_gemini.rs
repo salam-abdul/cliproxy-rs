@@ -601,13 +601,14 @@ impl State {
                 gj::set_int(&mut out, "usageMetadata.promptTokenCount", input);
                 gj::set_int(&mut out, "usageMetadata.candidatesTokenCount", output);
                 gj::set_int(&mut out, "usageMetadata.totalTokenCount", input.wrapping_add(output));
-                if kind == b"response.incomplete" {
-                    gj::set_str(
-                        &mut out,
-                        "candidates.0.finishReason",
-                        incomplete_reason(&root.get("response.incomplete_details.reason").bytes()),
-                    );
-                }
+                // The last chunk carries the finish reason, as a Gemini stream's does and as
+                // the buffered translation sets it.
+                let reason = if kind == b"response.incomplete" {
+                    incomplete_reason(&root.get("response.incomplete_details.reason").bytes())
+                } else {
+                    "STOP"
+                };
+                gj::set_str(&mut out, "candidates.0.finishReason", reason);
             }
             _ => return vec![],
         }
