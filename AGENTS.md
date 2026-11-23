@@ -53,6 +53,7 @@ Read these when the task calls for them:
 | `npm ci && npm run check && npm test && npm run build` (in `ui/`) | Dashboard type check, unit tests, bundle and size budgets. |
 | `node scripts/dashboard-check.mjs` (in `ui/`) | Dashboard browser checks with every request mocked. |
 | `python3 native/test.py` | Native routing wire tests. Build the binaries first (`native/README.md`). |
+| `python3 tools/live-check.py [--provider NAME]` | Builds the working tree and sends six short requests per provider (Claude, Codex, xAI, Kimi) through its translating proxy, with copies of the signed-in accounts that have their refresh tokens removed. It reads accounts from `~/.cli-proxy-api`; set `CLIPROXY_LIVE_AUTH_DIR` to the installed config's `oauth.auth-dir` when it differs. Checks the translating proxy only, not native routing or refresh. A pass is per provider, not per account. The installed config's `proxy-url` is not carried over; proxy environment variables (which Claude accounts ignore) and a per-account `proxy_url` in the auth file are. Spends real quota: six short requests per provider. `python3 tools/live_check_test.py` runs its offline tests. |
 | `tools/claude-cache-live.sh` | Live prompt-cache qualification. Spends real tokens; run it only by hand. |
 
 ## Docs
