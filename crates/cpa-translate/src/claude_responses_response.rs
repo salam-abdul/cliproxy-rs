@@ -382,6 +382,8 @@ struct State {
     completed: bool,
     /// ApplyPatchErrorState: an invalid apply_patch call failed the response.
     tool_error: bool,
+    /// The upstream sent an error event and the response has ended with `response.failed`.
+    failed: bool,
     patch_calls: HashMap<i64, CallState>,
     func_input_snapshot: HashMap<i64, Vec<u8>>,
     func_snapshot_errors: HashSet<i64>,
@@ -435,6 +437,7 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
         echo: RequestEcho::from_root(&root, !request.is_empty()),
         completed: false,
         tool_error: false,
+        failed: false,
         patch_calls: HashMap::new(),
         func_input_snapshot: HashMap::new(),
         func_snapshot_errors: HashSet::new(),
@@ -1007,6 +1010,18 @@ impl State {
                 return Ok(vec![]);
             }
             b"message_stop" => self.message_stop(&mut out)?,
+            // A stream that fails part way ends with `response.failed`, so the client does
+            // not wait for a completion that will not come.
+            b"error" if !self.failed => {
+                self.failed = true;
+                let mut failed = br#"{"type":"response.failed","sequence_number":0,"response":{"id":"","object":"response","status":"failed","error":{"type":"server_error","code":"","message":""}}}"#.to_vec();
+                gj::set_str(&mut failed, "response.id", &self.response_id);
+                let seq = self.next_seq();
+                gj::set_int(&mut failed, "sequence_number", seq);
+                gj::set_str(&mut failed, "response.error.code", root.get("error.type").bytes());
+                gj::set_str(&mut failed, "response.error.message", root.get("error.message").bytes());
+                out.push(event("response.failed", &failed));
+            }
             _ => {}
         }
         Ok(out)
