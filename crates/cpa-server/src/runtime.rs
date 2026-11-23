@@ -163,6 +163,14 @@ impl Runtime {
         self.activity.get()
     }
 
+    /// Records one upstream send when the activity store runs; never waits on the store.
+    #[expect(dead_code, reason = "no request path records sends yet")]
+    pub(crate) fn record_send(&self, row: crate::activity::sends::SendRow) {
+        if let Some(activity) = self.activity() {
+            activity.record_send(row);
+        }
+    }
+
     /// Records `--local-model` (Go `modelCatalogUpdaterPlan`'s `localModel`): remote
     /// model catalog updaters must not start when set (additive API).
     pub fn set_local_model(&self, on: bool) {

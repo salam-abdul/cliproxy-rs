@@ -1,3 +1,5 @@
+pub(crate) mod sends;
+
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -16,6 +18,7 @@ const DAY_MS: i64 = 86_400_000;
 const RETAIN_MS: i64 = 31 * DAY_MS;
 const MAX_REQUESTS: i64 = 250_000;
 const MAX_STATUSES: i64 = 50_000;
+const MAX_SENDS: i64 = 1_000_000;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Range {
@@ -87,9 +90,12 @@ struct StatusRow {
 enum Command {
     Request(Box<RequestRow>),
     Status(Vec<StatusRow>),
+    Send(Box<sends::SendRow>),
     Finish(std::sync::mpsc::Sender<()>),
-    #[cfg(test)]
     Flush(std::sync::mpsc::Sender<()>),
+    /// Stops the writer until the receiver's sender is dropped, after telling the first sender.
+    #[cfg(test)]
+    Hold(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
 }
 
 impl Command {
@@ -97,9 +103,10 @@ impl Command {
         match self {
             Self::Request(_) => 1,
             Self::Status(rows) => rows.len() as u64,
-            Self::Finish(_) => 0,
+            Self::Send(_) => 1,
+            Self::Finish(_) | Self::Flush(_) => 0,
             #[cfg(test)]
-            Self::Flush(_) => 0,
+            Self::Hold(..) => 0,
         }
     }
 }
@@ -134,7 +141,19 @@ impl Activity {
             CREATE INDEX IF NOT EXISTS account_status_by_time ON account_status(at_ms);
             CREATE TABLE IF NOT EXISTS history_meta (
                 key TEXT PRIMARY KEY, value INTEGER NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS sends (
+                request_id TEXT NOT NULL, turn INTEGER NOT NULL, send INTEGER NOT NULL,
+                parent_request TEXT, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                provider TEXT NOT NULL, credential TEXT, model TEXT,
+                outcome TEXT NOT NULL, status INTEGER, stream INTEGER NOT NULL,
+                start_ms INTEGER NOT NULL, latency_ms INTEGER, ttft_ms INTEGER, ttft_kind TEXT,
+                uncached_input_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                output_tokens INTEGER, reasoning_tokens INTEGER, tokens_exact INTEGER,
+                PRIMARY KEY (request_id, turn, send)
+            );
+            CREATE INDEX IF NOT EXISTS sends_by_time ON sends(at_ms);
+            CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);",
         )?;
         prune(&conn, epoch_ms())?;
         let previous_lost = meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64;
@@ -160,6 +179,13 @@ impl Activity {
                 }
                 let count = commands.iter().map(Command::records).sum::<u64>();
                 let finish = commands.iter().any(|command| matches!(command, Command::Finish(_)));
+                #[cfg(test)]
+                for command in &commands {
+                    if let Command::Hold(held, release) = command {
+                        let _ = held.send(());
+                        let _ = release.recv();
+                    }
+                }
                 let result = (|| -> rusqlite::Result<()> {
                     let transaction = conn.transaction()?;
                     for command in &commands {
@@ -170,9 +196,10 @@ impl Activity {
                                     write_status(&transaction, row)?;
                                 }
                             }
-                            Command::Finish(_) => {}
+                            Command::Send(row) => sends::write_send(&transaction, row)?,
+                            Command::Finish(_) | Command::Flush(_) => {}
                             #[cfg(test)]
-                            Command::Flush(_) => {}
+                            Command::Hold(..) => {}
                         }
                     }
                     set_meta(
@@ -195,14 +222,8 @@ impl Activity {
                     }
                     last_prune = std::time::Instant::now();
                 }
-                #[cfg(test)]
-                for command in &commands {
-                    if let Command::Flush(done) = command {
-                        let _ = done.send(());
-                    }
-                }
                 for command in commands {
-                    if let Command::Finish(done) = command {
+                    if let Command::Finish(done) | Command::Flush(done) = command {
                         let _ = done.send(());
                     }
                 }
@@ -262,11 +283,23 @@ impl Activity {
         tokio::task::spawn_blocking(move || query(&path, range, account.as_deref(), epoch_ms(), lost)).await?
     }
 
+    /// Blocks until every record queued before it is written, or for at most two seconds
+    /// once it is queued.
+    pub(crate) fn flush(&self) {
+        let (done, ack) = std::sync::mpsc::channel();
+        if self.tx.send(Command::Flush(done)).is_ok() {
+            let _ = ack.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    /// Stops the writer until the returned sender is dropped, so the queue fills.
     #[cfg(test)]
-    fn flush(&self) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.tx.send(Command::Flush(tx)).unwrap();
-        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    fn hold(&self) -> std::sync::mpsc::Sender<()> {
+        let (held, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        self.tx.send(Command::Hold(held, released)).unwrap();
+        waiting.recv().unwrap();
+        release
     }
 }
 
@@ -410,11 +443,12 @@ fn write_status(conn: &Connection, row: &StatusRow) -> rusqlite::Result<()> {
 fn prune(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM requests WHERE at_ms < ?1", [now - RETAIN_MS])?;
     conn.execute("DELETE FROM account_status WHERE at_ms < ?1", [now - RETAIN_MS])?;
-    trim(conn, MAX_REQUESTS, MAX_STATUSES)?;
+    conn.execute("DELETE FROM sends WHERE at_ms < ?1", [now - RETAIN_MS])?;
+    trim(conn, MAX_REQUESTS, MAX_STATUSES, MAX_SENDS)?;
     Ok(())
 }
 
-fn trim(conn: &Connection, request_limit: i64, status_limit: i64) -> rusqlite::Result<()> {
+fn trim(conn: &Connection, request_limit: i64, status_limit: i64, send_limit: i64) -> rusqlite::Result<()> {
     let requests: i64 = conn.query_row("SELECT MAX(0, COUNT(*) - ?1) FROM requests", [request_limit], |row| {
         row.get(0)
     })?;
@@ -435,6 +469,16 @@ fn trim(conn: &Connection, request_limit: i64, status_limit: i64) -> rusqlite::R
             "DELETE FROM account_status WHERE rowid IN
             (SELECT rowid FROM account_status ORDER BY at_ms, rowid LIMIT ?1)",
             [statuses],
+        )?;
+    }
+    let sends: i64 = conn.query_row("SELECT MAX(0, COUNT(*) - ?1) FROM sends", [send_limit], |row| {
+        row.get(0)
+    })?;
+    if sends > 0 {
+        conn.execute(
+            "DELETE FROM sends WHERE rowid IN
+            (SELECT rowid FROM sends ORDER BY at_ms, rowid LIMIT ?1)",
+            [sends],
         )?;
     }
     Ok(())
@@ -715,7 +759,7 @@ mod tests {
         history.flush();
         drop(history);
         let conn = Connection::open(&path).unwrap();
-        trim(&conn, 2, 2).unwrap();
+        trim(&conn, 2, 2, MAX_SENDS).unwrap();
         let requests: Vec<String> = conn
             .prepare("SELECT request_id FROM requests ORDER BY at_ms")
             .unwrap()
