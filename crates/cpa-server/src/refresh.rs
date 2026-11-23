@@ -72,9 +72,9 @@ impl RefreshState {
     }
 }
 
-/// A refresh token the provider no longer accepts, which backs off exponentially: a
-/// reported [`Refusal`] that was not definite, or an `invalid_grant` named in the error
-/// text of a provider that reports none.
+/// A refresh token the provider no longer accepts, which backs off exponentially: any
+/// reported [`Refusal`], or an `invalid_grant` named in the error text of a provider that
+/// reports none. A [`definite`] one is not retried, so its backoff is never used.
 pub(crate) fn invalid_grant(error: &ExecError) -> bool {
     error.refusal.is_some()
         || String::from_utf8_lossy(&error.body)
@@ -90,20 +90,20 @@ pub(crate) enum Trigger {
     /// An upstream refused the access token of this revision with a 401. Preparation
     /// runs even when not due, unless another task already replaced that revision.
     Unauthorized(u64),
-    /// An operator asked the management API to refresh this revision. Like
-    /// `Unauthorized`, and the only trigger that sends a refused refresh token again.
+    /// An operator asked the management API to refresh this revision. It runs even when
+    /// not due, and is the only trigger that sends a refused refresh token again.
     Management(u64),
 }
 
 /// The refusal in a failed refresh of `c` when it is definite: the refresh token will
 /// never work again. Go `isTerminalRefreshError` and `hasUnauthorizedAuthFailure`: an
-/// expired, reused, invalidated or revoked refresh token is definite; `invalid_grant` is
-/// definite for Codex, and for other providers only after an upstream 401 on the same
-/// access token, since Go keeps retrying a Claude `invalid_grant` while its access token
-/// may still work.
-pub(crate) fn definite(c: &Credential, error: &ExecError, trigger: Trigger) -> Option<Refusal> {
+/// expired, reused, invalidated or revoked refresh token is definite, and so is a Codex
+/// `invalid_grant`. Any other `invalid_grant` is definite once the access token no
+/// longer serves requests (`access_serves`): Go keeps retrying it only because that
+/// token may still work.
+pub(crate) fn definite(c: &Credential, error: &ExecError, access_serves: bool) -> Option<Refusal> {
     let refusal = error.refusal?;
-    let confirmed = matches!(trigger, Trigger::Unauthorized(_)) || c.provider.trim().eq_ignore_ascii_case("codex");
+    let confirmed = !access_serves || c.provider == "codex";
     (refusal != Refusal::InvalidGrant || confirmed).then_some(refusal)
 }
 
@@ -169,17 +169,13 @@ mod tests {
             error
         };
         let (grant, expired) = (refused(Refusal::InvalidGrant), refused(Refusal::Expired));
-        for trigger in [Trigger::Due, Trigger::Management(1), Trigger::Unauthorized(1)] {
-            assert_eq!(definite(&claude, &expired, trigger), Some(Refusal::Expired));
-            assert_eq!(definite(&codex, &grant, trigger), Some(Refusal::InvalidGrant));
+        for serves in [true, false] {
+            assert_eq!(definite(&claude, &expired, serves), Some(Refusal::Expired));
+            assert_eq!(definite(&codex, &grant, serves), Some(Refusal::InvalidGrant));
             let transient = ExecError::local(400, FailureScope::Credential, "invalid_grant");
-            assert_eq!(definite(&claude, &transient, trigger), None, "text is not a refusal");
+            assert_eq!(definite(&claude, &transient, serves), None, "text is not a refusal");
         }
-        assert_eq!(definite(&claude, &grant, Trigger::Due), None);
-        assert_eq!(definite(&claude, &grant, Trigger::Management(1)), None);
-        assert_eq!(
-            definite(&claude, &grant, Trigger::Unauthorized(1)),
-            Some(Refusal::InvalidGrant)
-        );
+        assert_eq!(definite(&claude, &grant, true), None);
+        assert_eq!(definite(&claude, &grant, false), Some(Refusal::InvalidGrant));
     }
 }

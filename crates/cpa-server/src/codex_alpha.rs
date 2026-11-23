@@ -297,6 +297,9 @@ async fn search(
         };
         crate::usage_record::publish_home_unauthorized(rt, facts, &lease.credential, "codex", &model, &body);
     }
+    if !lease.is_remote() && result.as_ref().is_ok_and(|response| response.status == 401) {
+        rt.refresh_unauthorized(lease.credential.clone());
+    }
     // Dropping the lease reports `Cancelled`: Go's Alpha Search never marks a result.
     drop(lease);
     match result {

@@ -105,7 +105,7 @@ impl Transport {
         };
         // uTLS dialers never inherit environment proxies; an unusable proxy is logged
         // by Go and dialled as if none were configured.
-        proxy.apply(self.hooks.apply(builder), false)?.build()
+        proxy.apply(self.hooks.apply(builder))?.build()
     }
 }
 

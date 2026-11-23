@@ -139,14 +139,14 @@ impl CredentialStore {
         inner.refused.insert(id.to_owned(), next) != Some(next)
     }
 
-    /// The refusal of `c`'s refresh token, while `c` still holds the refused tokens.
-    /// They are not refreshed again until a new sign-in or upload changes them.
+    /// The refusal of the refresh token the store now holds for `c.id`, if any. Those
+    /// tokens are not refreshed again until a new sign-in or upload changes them.
     pub fn tokens_refused(&self, c: &Credential) -> Option<cpa_core::exec::Refusal> {
         self.read().refused(&c.id).map(|r| r.refusal)
     }
 
-    /// Whether `c`'s refresh token was refused for good and its access token no longer
-    /// serves requests, which takes it out of rotation.
+    /// Whether the refresh token the store now holds for `c.id` was refused for good and
+    /// its access token no longer serves requests, which takes it out of rotation.
     pub fn out_of_rotation(&self, c: &Credential) -> bool {
         self.read().out_of_rotation(&c.id, std::time::SystemTime::now())
     }

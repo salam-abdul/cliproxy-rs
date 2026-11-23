@@ -39,6 +39,9 @@ pub(super) struct Setup {
     pub(super) native: Value,
     /// Runtime YAML appended to the fixture's; its `api-keys` become credentials.
     pub(super) yaml: String,
+    /// A Claude token endpoint. Account `a` is then the signed-in file `a.json` in the
+    /// auth-dir, holding `token-a` and a refresh token.
+    pub(super) token_url: Option<String>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -116,6 +119,7 @@ impl Fixture {
     ) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
+        let credential = credential.or_else(|| setup.token_url.as_ref().map(|_| signed_in(&dir)));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -229,7 +233,18 @@ impl Fixture {
             rt_config,
             credentials,
             cpa_exec::Executors {
-                claude: cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap(),
+                claude: {
+                    let claude = cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap();
+                    match setup.token_url.as_deref() {
+                        Some(url) => claude.with_oauth(cpa_exec::oauth::OAuth::with_endpoints(
+                            wreq::Client::builder().no_proxy().build().unwrap(),
+                            url,
+                            url,
+                            url,
+                        )),
+                        None => claude,
+                    }
+                },
                 codex: Default::default(),
                 devices: Default::default(),
                 openai: Default::default(),
@@ -287,6 +302,73 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+/// A private Claude sign-in file `a.json` in `dir` with an access token that has not
+/// expired, and its credential.
+fn signed_in(dir: &Path) -> Credential {
+    let file = json!({"type":"claude","access_token":"token-a","refresh_token":"fake-rt-a",
+        "expired":"2099-01-01T00:00:00Z","account_uuid":"acct-a","claude_device_ids":["b".repeat(64)]});
+    let path = dir.join("a.json");
+    std::fs::write(&path, file.to_string()).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    crate::testing::local(Credential::from_file(dir, &path, file.as_object().unwrap().clone()).unwrap())
+}
+
+/// An upstream 401 on native routing refreshes that account once, off the request. When
+/// the token endpoint refuses the refresh token, native routing stops offering the
+/// account, as it does an expired one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_native_401_takes_an_account_with_a_refused_refresh_token_out_of_rotation() {
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let token = axum::Router::new().route(
+        "/token",
+        axum::routing::post({
+            let refreshes = refreshes.clone();
+            move || async move {
+                refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+    let token = tokio::spawn(async move { axum::serve(listener, token).await.unwrap() });
+    let mut fixture = Fixture::custom(
+        Reply {
+            status: 401,
+            body: br#"{"error":{"type":"authentication_error","message":"Invalid bearer token"}}"#.to_vec(),
+            broken: false,
+        },
+        Setup {
+            token_url: Some(token_url),
+            ..Setup::default()
+        },
+    )
+    .await;
+    fixture.tasks.push(token);
+    let offered = |fixture: &Fixture| {
+        let accounts = fixture.state.read_accounts().unwrap();
+        accounts.iter().find(|a| a.file_id == "a.json").unwrap().enabled
+    };
+    assert!(offered(&fixture));
+
+    assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
+    let tokens: Vec<_> = fixture.seen.lock().unwrap().iter().map(|(t, _)| t.clone()).collect();
+    assert_eq!(tokens, ["Bearer token-a", "Bearer token-b"]);
+    let store = fixture.state.rt.store();
+    let a = store.get("a.json").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !store.out_of_rotation(&a) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the 401 recorded the refused refresh token");
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!offered(&fixture), "native routing still offers the refused account");
 }
 
 #[tokio::test]
