@@ -59,7 +59,14 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
 /// A fact a pair's output does not carry, and why: (pair directory, scenario, output
 /// kind, fact, reason). `executor` means the executor adds the fact after translation.
 /// An entry whose fact the output does carry fails, so this list cannot go stale.
-pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[];
+pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[(
+    "gemini__interactions",
+    "tool_call",
+    Kind::Stream,
+    Fact::ToolCall,
+    "each arguments_delta becomes its own functionCall, and a piece that is not whole JSON is dropped; \
+     the fix also changes a recorded Devin executor fixture in cpa-exec, so it waits for a decision",
+)];
 
 /// Each fact `expected` names that `actual` lacks, with a description.
 pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
