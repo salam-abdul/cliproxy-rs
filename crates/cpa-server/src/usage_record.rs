@@ -1768,13 +1768,15 @@ impl Ttft {
         }
     }
 
-    /// What `get` measures; none without marks.
+    /// What `get` measures; none without marks. `first_packet` is set only by `token`, so
+    /// without `ttft` it is the first event that carried no token.
     fn kind(&self) -> Option<crate::activity::sends::TtftKind> {
         use crate::activity::sends::TtftKind;
         match (self.tracked, self.ttft, self.first_packet) {
             (false, ..) | (true, None, None) => None,
             (true, Some(_), _) if self.token => Some(TtftKind::Token),
-            (true, ..) => Some(TtftKind::Byte),
+            (true, Some(_), _) => Some(TtftKind::Byte),
+            (true, None, Some(_)) => Some(TtftKind::Event),
         }
     }
 
@@ -2380,7 +2382,8 @@ impl Tracker {
             credential: Some(self.auth_id.clone()).filter(|id| !id.is_empty()),
             model: Some(record.model.clone()).filter(|model| !model.is_empty()),
             outcome: settled.outcome(),
-            status: record.failed.then_some(record.fail_status),
+            // A transport failure has no HTTP answer: Go's status for it is 0.
+            status: Some(record.fail_status).filter(|status| record.failed && *status > 0),
             stream: record.stream,
             start_ms: i64::try_from(start.as_millis()).unwrap_or(i64::MAX),
             latency_ms: Some(record.latency_ms),
@@ -2968,6 +2971,19 @@ mod tests {
     }
 
     #[test]
+    fn a_transport_failure_is_stored_without_a_status() {
+        use cpa_core::exec::{ExecError, FailureScope};
+        let store = ActivityRuntime::new();
+        let facts = activity_facts("r1");
+        let error = ExecError::local(502, FailureScope::Transport, "connection reset");
+        assert_eq!(error.go_status(), 0);
+        Tracker::start(&store.rt, &facts, &credential_for("claude"), "claude-sonnet-4-6").fail(&error);
+        let sends = store.sends();
+        assert_eq!(column(&sends, "outcome"), ["failed"]);
+        assert_eq!(column(&sends, "status"), [Value::Null]);
+    }
+
+    #[test]
     fn a_recorded_send_brings_its_accounts_quota_reading() {
         let store = ActivityRuntime::new();
         let credential = credential_for("codex");
@@ -3060,6 +3076,12 @@ mod tests {
         byte.sink().first_byte();
         byte.sink().token_event(true);
         byte.succeed();
+        // Only an event without a token came before the end: the time is that event's.
+        let packet = Tracker::start(&store.rt, &activity_facts("packet"), &credential_for("claude"), "m");
+        packet.sink().round_trip_started();
+        pause();
+        packet.sink().token_event(false);
+        packet.succeed();
         let none = Tracker::start(&store.rt, &activity_facts("none"), &credential_for("claude"), "m");
         none.succeed();
         let mut sends = store.sends();
@@ -3074,6 +3096,7 @@ mod tests {
                 ("byte".into(), "byte".into()),
                 ("event".into(), "event".into()),
                 ("none".into(), Value::Null),
+                ("packet".into(), "event".into()),
                 ("token".into(), "token".into()),
             ]
         );
