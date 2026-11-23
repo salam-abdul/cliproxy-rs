@@ -1559,13 +1559,13 @@ enum Output {
     Detached(usize),
 }
 
-// The flush macros mirror Go's closures, which reset state their last call never reads.
-#[allow(unused_assignments)]
 /// Whether a Gemini response stopped at its output limit.
 fn hit_output_limit(root: &Res<'_>) -> bool {
     root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
 }
 
+// The flush macros mirror Go's closures, which reset state their last call never reads.
+#[allow(unused_assignments)]
 pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     let root = unwrap_response_root(gj::parse(body));
     let request = pick_request(ctx.original_request, ctx.translated_request);
