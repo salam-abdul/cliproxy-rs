@@ -1,0 +1,1 @@
+{"id":"resp-fixture-1","object":"chat.completion","created":0,"model":"gemini-2.5-pro","choices":[{"index":0,"message":{"role":"assistant","content":"Yes, 17 is prime.","reasoning_content":"Check divisors up to 4.","tool_calls":null},"finish_reason":"stop","native_finish_reason":"stop"}],"usage":{"completion_tokens":3,"total_tokens":15,"prompt_tokens":12}}

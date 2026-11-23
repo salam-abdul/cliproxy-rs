@@ -33,6 +33,8 @@ pub struct Facts {
     pub tool_results: Vec<String>,
     /// Names of the tools a request declares.
     pub tool_defs: Vec<String>,
+    /// Whether a request asks for reasoning.
+    pub reasoning: bool,
     pub images: usize,
     /// Input and output tokens, the largest seen.
     pub usage: Option<(i64, i64)>,
@@ -175,8 +177,19 @@ fn tool_defs(f: &mut Facts, tools: &Value, path: &[&str]) {
     }
 }
 
+/// A reasoning setting that asks for reasoning: present and not off.
+fn on(v: &Value) -> bool {
+    match v {
+        Value::String(s) => !s.is_empty() && !matches!(s.as_str(), "none" | "disabled" | "off"),
+        Value::Number(n) => n.as_i64() != Some(0),
+        Value::Bool(b) => *b,
+        _ => false,
+    }
+}
+
 fn claude_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
+    f.reasoning |= on(&p["thinking"]["type"]) || on(&p["output_config"]["effort"]);
     claude_blocks(f, &p["system"]);
     for m in p["messages"].as_array().into_iter().flatten() {
         claude_blocks(f, &m["content"]);
@@ -260,6 +273,7 @@ fn chat_usage(f: &mut Facts, u: &Value) {
 
 fn chat_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["function", "name"]);
+    f.reasoning |= on(&p["reasoning_effort"]);
     for m in p["messages"].as_array().into_iter().flatten() {
         if s(&m["role"]) == "tool" {
             f.tool_results.push(result_text(&m["content"]));
@@ -368,6 +382,7 @@ fn responses_status(f: &mut Facts, r: &Value) {
 
 fn responses_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
+    f.reasoning |= on(&p["reasoning"]["effort"]);
     f.text.push_str(s(&p["instructions"]));
     if let Some(text) = p["input"].as_str() {
         f.text.push_str(text);
@@ -434,6 +449,9 @@ fn gemini_parts(f: &mut Facts, parts: &Value) {
 }
 
 fn gemini_request(f: &mut Facts, p: &Value) {
+    let thinking = &p["generationConfig"]["thinkingConfig"];
+    f.reasoning |=
+        on(&thinking["includeThoughts"]) || on(&thinking["thinkingBudget"]) || on(&thinking["thinkingLevel"]);
     for tool in p["tools"].as_array().into_iter().flatten() {
         for key in ["functionDeclarations", "function_declarations"] {
             tool_defs(f, &tool[key], &["name"]);
@@ -524,6 +542,8 @@ fn interactions_status(f: &mut Facts, i: &Value, saw_call: bool) {
 
 fn interactions_request(f: &mut Facts, p: &Value) {
     tool_defs(f, &p["tools"], &["name"]);
+    let config = &p["generation_config"];
+    f.reasoning |= on(&config["thinking_level"]) || on(&config["thinking_config"]["thinking_budget"]);
     interactions_content(f, &p["system_instruction"], false);
     if let Some(text) = p["input"].as_str() {
         f.text.push_str(text);

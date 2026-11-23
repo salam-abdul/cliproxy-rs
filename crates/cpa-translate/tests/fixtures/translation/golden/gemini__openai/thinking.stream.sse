@@ -1,0 +1,12 @@
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Check divisors"}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":" up to 4."}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Yes, 17"}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" is prime."}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"index":0,"finishReason":"STOP"}],"model":"kimi-k2.5"}
+
+data: {"candidates":[],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"model":"kimi-k2.5"}
+

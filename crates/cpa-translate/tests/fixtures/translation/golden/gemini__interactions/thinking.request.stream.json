@@ -1,0 +1,1 @@
+{"model":"gemini-2.5-pro","input":[{"type":"user_input","content":[{"type":"text","text":"Is 17 prime?"}]}],"generation_config":{"thinking_config":{"include_thoughts":true,"thinking_budget":4096},"thinking_budget":4096,"thinking_summaries":"auto"},"stream":true}

@@ -12,6 +12,7 @@ pub enum Fact {
     ToolCall,
     ToolResult,
     ToolDef,
+    Reasoning,
     Image,
     Usage,
     Stop,
@@ -24,6 +25,7 @@ pub struct Expected {
     pub tool_calls: Vec<(&'static str, Value)>,
     pub tool_results: Vec<&'static str>,
     pub tool_defs: Vec<&'static str>,
+    pub reasoning: bool,
     pub images: usize,
     pub usage: Option<(i64, i64)>,
     pub stop: Option<Stop>,
@@ -60,6 +62,15 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             ..Expected::default()
         },
         ("tool_result", _) => reply(vec!["It is sunny."], Stop::End),
+        ("thinking", Kind::Request) => Expected {
+            text: vec!["Is 17 prime?"],
+            reasoning: true,
+            ..Expected::default()
+        },
+        ("thinking", _) => Expected {
+            thinking: vec!["Check divisors up to 4."],
+            ..reply(vec!["Yes, 17 is prime."], Stop::End)
+        },
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }
@@ -67,14 +78,32 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
 /// A fact a pair's output does not carry, and why: (pair directory, scenario, output
 /// kind, fact, reason). `executor` means the executor adds the fact after translation.
 /// An entry whose fact the output does carry fails, so this list cannot go stale.
-pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[(
-    "gemini__interactions",
-    "tool_call",
-    Kind::Stream,
-    Fact::ToolCall,
-    "each arguments_delta becomes its own functionCall, and a piece that is not whole JSON is dropped; \
+pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
+    (
+        "gemini__interactions",
+        "tool_call",
+        Kind::Stream,
+        Fact::ToolCall,
+        "each arguments_delta becomes its own functionCall, and a piece that is not whole JSON is dropped; \
      the fix also changes a recorded Devin executor fixture in cpa-exec, so it waits for a decision",
-)];
+    ),
+    (
+        "claude__gemini",
+        "thinking",
+        Kind::Response,
+        Fact::Text,
+        "an answer part that carries a thoughtSignature becomes thinking, so the signature can return \
+         to Gemini on the next turn; treating it as text, as portable output does, waits for a decision",
+    ),
+    (
+        "claude__gemini",
+        "thinking",
+        Kind::Stream,
+        Fact::Text,
+        "an answer part that carries a thoughtSignature becomes thinking, so the signature can return \
+         to Gemini on the next turn; treating it as text, as portable output does, waits for a decision",
+    ),
+];
 
 /// Each fact `expected` names that `actual` lacks, with a description.
 pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
@@ -112,6 +141,9 @@ pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
                 format!("tool {t:?} not declared in {:?}", actual.tool_defs),
             ));
         }
+    }
+    if expected.reasoning && !actual.reasoning {
+        out.push((Fact::Reasoning, "no reasoning setting".to_string()));
     }
     if actual.images < expected.images {
         out.push((

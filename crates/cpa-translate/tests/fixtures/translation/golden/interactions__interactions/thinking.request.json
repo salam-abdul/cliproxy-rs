@@ -1,0 +1,1 @@
+{"model":"client-model","input":[{"type":"user_input","content":[{"type":"text","text":"Is 17 prime?"}]}],"generation_config":{"thinking_level":"high","thinking_summaries":"auto"}}

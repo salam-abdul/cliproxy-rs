@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-6","max_tokens":32000,"messages":[{"role":"user","content":"Is 17 prime?"}],"metadata":{"user_id":"e9873ff5e259cd5e80a60b66b39526c0906f1efc69d9a366710cb998a43b30fb"},"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"},"stream":false}

@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Check divisors","thought":true}]},"index":0}],"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" up to 4.","thought":true}]},"index":0}],"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Yes, 17","thoughtSignature":"c3ludGhldGljLXNpZ25hdHVyZS1mb3ItdHJhbnNsYXRpb24tdGVzdHMtb25seS0wMTIzNDU2Nzg5"}]},"index":0}],"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" is prime."}]},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+

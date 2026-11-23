@@ -1,0 +1,12 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Check divisors","thought":true}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" up to 4.","thought":true}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"c3ludGhldGljLXNpZ25hdHVyZS1mb3ItdHJhbnNsYXRpb24tdGVzdHMtb25seS0wMTIzNDU2Nzg5"}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Yes, 17"}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" is prime."}],"role":"model"},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1"}
+
+data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"},"index":0,"finishReason":"STOP"}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1","usageMetadata":{"promptTokenCount":12,"promptTokensDetails":[{"modality":"TEXT","tokenCount":12}],"candidatesTokenCount":3,"totalTokenCount":15}}
+

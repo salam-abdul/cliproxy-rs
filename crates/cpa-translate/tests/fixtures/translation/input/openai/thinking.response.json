@@ -1,0 +1,1 @@
+{"id":"chatcmpl-fixture","object":"chat.completion","created":1700000000,"model":"kimi-k2.5","choices":[{"index":0,"message":{"role":"assistant","content":"Yes, 17 is prime.","reasoning_content":"Check divisors up to 4."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}
