@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
+import math
 import os
 import re
 import secrets
@@ -98,9 +100,14 @@ class Selection:
     skipped: Counter
 
 
+def _reject_constant(name: str):
+    raise ValueError(f"{name} is not JSON")
+
+
 def _load(path: Path) -> Optional[dict]:
+    # The server's JSON parser refuses NaN and Infinity, so a file holding one is not loaded.
     try:
-        data = json.loads(path.read_bytes())
+        data = json.loads(path.read_bytes(), parse_constant=_reject_constant)
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -153,10 +160,10 @@ def _parse_time(value) -> Optional[datetime]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return _from_unix(int(value))
+        return _from_unix(int(value)) if math.isfinite(value) else None
     if isinstance(value, str):
         text = value.strip()
-        if re.fullmatch(r"[+-]?\d+", text):
+        if re.fullmatch(r"[+-]?[0-9]{1,20}", text):
             return _from_unix(int(text))
         parsed = _parse_rfc3339(text)
         if parsed:
@@ -188,7 +195,7 @@ def _jwt_exp(token) -> Optional[datetime]:
             exp = int(exp.strip())
         except ValueError:
             return None
-    if not isinstance(exp, (int, float)) or exp <= 0:
+    if not isinstance(exp, (int, float)) or not math.isfinite(exp) or exp <= 0:
         return None
     return _from_unix(int(exp))
 
@@ -209,7 +216,11 @@ def expiry(provider: str, meta: dict) -> Optional[datetime]:
 
 
 def _auth_files(src_dir: Path) -> List[Path]:
-    return sorted(p for p in src_dir.glob("*.json") if p.is_file())
+    try:
+        entries = list(src_dir.iterdir())
+    except OSError:
+        return []
+    return sorted(p for p in entries if p.name.lower().endswith(".json") and p.is_file())
 
 
 def select(src_dir: Path, provider: str, now: datetime) -> Selection:
@@ -407,13 +418,23 @@ def _json(text):
         return None
 
 
+def _field(value, key):
+    """`value[key]` when `value` is an object, else None."""
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _items(value) -> list:
+    """`value` when it is an array, else nothing to iterate."""
+    return value if isinstance(value, list) else []
+
+
 def _responses_text(response) -> str:
     if not isinstance(response, dict):
         return ""
     text = response.get("output_text") if isinstance(response.get("output_text"), str) else ""
-    for item in response.get("output") or []:
+    for item in _items(response.get("output")):
         if isinstance(item, dict):
-            for part in item.get("content") or []:
+            for part in _items(item.get("content")):
                 if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
                     text += part["text"]
     return text
@@ -424,7 +445,7 @@ def _messages_text(message) -> str:
         return ""
     return "".join(
         part.get("text", "")
-        for part in message.get("content") or []
+        for part in _items(message.get("content"))
         if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
     )
 
@@ -433,8 +454,8 @@ def _chat_text(reply) -> str:
     if not isinstance(reply, dict):
         return ""
     text = ""
-    for choice in reply.get("choices") or []:
-        content = (choice.get("message") or {}).get("content") if isinstance(choice, dict) else None
+    for choice in _items(reply.get("choices")):
+        content = _field(_field(choice, "message"), "content")
         if isinstance(content, str):
             text += content
     return text
@@ -443,7 +464,7 @@ def _chat_text(reply) -> str:
 def check_reply(route: str, stream: bool, status: int, body: bytes) -> Optional[str]:
     """None when the reply passes, else the reason it does not."""
     if status != 200:
-        return f"{status} {body[:EXCERPT].decode('utf-8', 'replace')}"
+        return f"{status} {body.decode('utf-8', 'replace')}"
     if not stream:
         reply = _json(body)
         text = {
@@ -459,8 +480,8 @@ def check_reply(route: str, stream: bool, status: int, body: bytes) -> Optional[
                 done = True
                 continue
             chunk = _json(data)
-            for choice in (chunk or {}).get("choices") or [] if isinstance(chunk, dict) else []:
-                content = (choice.get("delta") or {}).get("content") if isinstance(choice, dict) else None
+            for choice in _items(_field(chunk, "choices")):
+                content = _field(_field(choice, "delta"), "content")
                 if isinstance(content, str):
                     text += content
             continue
@@ -468,8 +489,8 @@ def check_reply(route: str, stream: bool, status: int, body: bytes) -> Optional[
         kind = event.get("type") if isinstance(event, dict) else None
         if route == "/v1/messages":
             if kind == "content_block_delta":
-                delta = event.get("delta") or {}
-                if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                delta = event.get("delta")
+                if _field(delta, "type") == "text_delta" and isinstance(_field(delta, "text"), str):
                     text += delta["text"]
             elif kind == "message_stop" or name == "message_stop":
                 done = True
@@ -490,7 +511,7 @@ def pick_model(provider: str, models_body: bytes) -> Optional[str]:
     reply = _json(models_body)
     ids = [
         m.get("id")
-        for m in (reply.get("data") or [] if isinstance(reply, dict) else [])
+        for m in _items(_field(reply, "data"))
         if isinstance(m, dict) and isinstance(m.get("id"), str)
     ]
     usable = [i for i in ids if not any(word in i.lower() for word in MODEL_EXCLUDE)]
@@ -562,6 +583,11 @@ def _skips(skipped: Counter) -> str:
     return ", ".join(f"{n} {reason}" for reason, n in sorted(skipped.items()))
 
 
+def _excerpt(reason: str, redactor: Redactor) -> str:
+    """The start of a failure reason, cut only after redaction so no part of a value prints."""
+    return redactor.clean(reason)[:EXCERPT]
+
+
 def report_line(result: ProviderResult, redactor: Redactor) -> str:
     name = result.provider
     if result.accounts == 0:
@@ -570,7 +596,7 @@ def report_line(result: ProviderResult, redactor: Redactor) -> str:
     if result.skipped:
         tail += f", skipped ({_skips(result.skipped)})"
     if result.error is not None:
-        return redactor.clean(f"{name}: FAIL {result.error}{tail}")
+        return f"{name}: FAIL {_excerpt(result.error, redactor)}{tail}"
     passed = sum(1 for o in result.outcomes if o.reason is None)
     total = len(result.outcomes)
     failures = [o for o in result.outcomes if o.reason is not None]
@@ -578,10 +604,10 @@ def report_line(result: ProviderResult, redactor: Redactor) -> str:
         return f"{name}: pass ({passed}/{total}){tail}"
     first = failures[0]
     label = first.route + (" stream" if first.stream else "")
-    line = f"{name}: FAIL ({passed}/{total}) {label}: {first.reason}"
+    line = f"{name}: FAIL ({passed}/{total}) {label}: {_excerpt(first.reason, redactor)}"
     if any(o.status == 401 for o in failures):
         line += " (the installed service may have refreshed the account during the run; a rerun tells the two apart)"
-    return redactor.clean(line + tail)
+    return line + tail
 
 
 # Run
@@ -618,7 +644,7 @@ class Server:
                 with _OPENER.open(self.base + "/healthz", timeout=2) as resp:
                     if resp.status == 200:
                         return True
-            except (OSError, urllib.error.URLError):
+            except TRANSPORT_ERRORS:
                 pass
             time.sleep(0.25)
         return False
@@ -657,6 +683,10 @@ class Server:
         shutil.rmtree(self.work, ignore_errors=True)
 
 
+# A refused connection, a timeout, or a reply that broke off (`IncompleteRead` is not an
+# `OSError`).
+TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
+
 # Requests to the local server must not go through a caller's HTTP proxy.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -669,9 +699,12 @@ def _free_port() -> int:
 
 def check_provider(server: Server, provider: str) -> tuple:
     """(outcomes, error) for one provider's six requests."""
-    status, body = server.call("GET", "/v1/models")
+    try:
+        status, body = server.call("GET", "/v1/models")
+    except TRANSPORT_ERRORS as err:
+        return [], f"/v1/models: transport error {type(err).__name__}"
     if status != 200:
-        return [], f"/v1/models: {status} {body[:EXCERPT].decode('utf-8', 'replace')}"
+        return [], f"/v1/models: {status} {body.decode('utf-8', 'replace')}"
     model = pick_model(provider, body)
     if model is None:
         return [], "no usable model in /v1/models"
@@ -680,7 +713,7 @@ def check_provider(server: Server, provider: str) -> tuple:
         try:
             status, reply = server.call("POST", route, request_body(route, model, stream))
             reason = check_reply(route, stream, status, reply)
-        except (OSError, urllib.error.URLError) as err:
+        except TRANSPORT_ERRORS as err:
             status, reason = 0, f"transport error {type(err).__name__}"
         outcomes.append(Outcome(route, stream, status, reason))
     return outcomes, None
@@ -688,7 +721,10 @@ def check_provider(server: Server, provider: str) -> tuple:
 
 def _build() -> Path:
     env = dict(os.environ, CARGO_BUILD_JOBS="2")
-    result = subprocess.run(["cargo", "build", "-p", "cliproxy", "--locked"], cwd=str(REPO), env=env)
+    try:
+        result = subprocess.run(["cargo", "build", "-p", "cliproxy", "--locked"], cwd=str(REPO), env=env)
+    except OSError as err:
+        raise SetupError(f"cargo could not start: {type(err).__name__}") from err
     if result.returncode != 0:
         raise SetupError("cargo build failed")
     target = Path(os.environ.get("CARGO_TARGET_DIR") or REPO / "target")
@@ -757,8 +793,8 @@ def run(argv: Optional[List[str]] = None) -> int:
             other = count_not_covered(src)
             if other:
                 print(f"not covered: {other} credential{'s' if other != 1 else ''} of other types")
-    except SetupError as err:
-        print(f"setup failed: {err}", file=sys.stderr)
+    except (SetupError, OSError) as err:
+        print(f"setup failed: {redactor.clean(str(err))}", file=sys.stderr)
         return 2
     finally:
         if server is not None:

@@ -94,6 +94,21 @@ class SelectionTest(TempDir):
         self.write("garbage.json", {"type": "xai", "access_token": "a.b.c", "expired": "soon"})
         self.assertEqual(self.selected("xai"), ["garbage.json", "none.json"])
 
+    def test_non_finite_and_oversized_numbers_do_not_break_selection(self):
+        # The server refuses a file holding NaN or Infinity; a JWT's own claims are only read.
+        self.write("nan.json", {"type": "kimi", "expires_at": float("nan")})
+        self.write("inf.json", {"type": "kimi", "expires_at": float("inf")})
+        self.write("jwt.json", {"type": "kimi", "access_token": jwt({"exp": float("inf")})})
+        self.write("long.json", {"type": "kimi", "expires_at": "9" * 5000})
+        self.assertEqual(self.selected("kimi"), ["jwt.json", "long.json"])
+
+    def test_the_json_suffix_matches_in_any_case(self):
+        self.write("upper.JSON", {"type": "codex"})
+        self.write(".json", {"type": "codex"})
+        self.write("other.JSON", {"type": "gemini"})
+        self.assertEqual(self.selected("codex"), [".json", "upper.JSON"])
+        self.assertEqual(lc.count_not_covered(self.dir), 1)
+
     def test_expiring_within_ten_minutes_is_skipped(self):
         self.write("nine.json", {"type": "kimi", "expired": rfc3339(NOW + timedelta(minutes=9))})
         self.write("eleven.json", {"type": "kimi", "expired": rfc3339(NOW + timedelta(minutes=11))})
@@ -307,9 +322,21 @@ class ReplyTest(unittest.TestCase):
         completed_only = sse(("response.completed", {"type": "response.completed", "response": body}))
         self.ok("/v1/responses", True, completed_only)
 
-    def test_a_non_200_status_fails_with_the_start_of_the_body(self):
+    def test_a_non_200_status_keeps_the_whole_body_for_redaction(self):
         reason = self.bad("/v1/messages", False, b"x" * 300, status=400)
-        self.assertEqual(reason, "400 " + "x" * 200)
+        self.assertEqual(reason, "400 " + "x" * 300)
+
+    def test_a_reply_of_the_wrong_shape_fails_without_raising(self):
+        self.bad("/v1/chat/completions", False, json.dumps({"choices": [{"message": "ok"}]}).encode())
+        self.bad("/v1/chat/completions", False, json.dumps({"choices": "ok"}).encode())
+        self.bad("/v1/chat/completions", True, sse((None, {"choices": [{"delta": "ok"}]}), (None, "[DONE]")))
+        self.bad("/v1/messages", True, sse(("content_block_delta", {"type": "content_block_delta", "delta": "ok"}), ("message_stop", {"type": "message_stop"})))
+        self.bad("/v1/responses", True, sse(("response.completed", {"type": "response.completed", "response": "ok"})))
+        for body in ({"choices": 5}, {"content": True}, {"output": 5}, {"output": [{"content": 5}]}):
+            for route in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+                self.bad(route, False, json.dumps(body).encode())
+        self.bad("/v1/chat/completions", True, sse((None, {"choices": 5}), (None, "[DONE]")))
+        self.assertIsNone(lc.pick_model("codex", json.dumps({"data": 5}).encode()))
 
     def test_pick_model_skips_media_models(self):
         models = {"data": [{"id": "grok-imagine-image"}, {"id": "grok-4.7"}, {"id": "grok-4"}]}
@@ -345,6 +372,14 @@ class ReportTest(TempDir):
         self.assertTrue(line.startswith("claude: FAIL (5/6) /v1/responses stream: 401 unauthorized"), line)
         self.assertIn("installed service may have refreshed", line)
         self.assertIn("rerun", line)
+
+    def test_a_failure_shows_the_start_of_the_reason_cut_after_redaction(self):
+        cut = "400 " + "x" * (lc.EXCERPT - 10)
+        failure = lc.Outcome("/v1/messages", False, 400, cut + "sk-synthetic-access" + "y" * 100)
+        line = lc.report_line(lc.ProviderResult("claude", 1, Counter(), self.outcomes(failure)), self.redactor)
+        self.assertIn(cut + "<redac,", line)
+        self.assertNotIn("sk-synth", line)
+        self.assertNotIn("yyyy", line)
 
     def test_report_lines_never_name_a_source_file(self):
         body = f"400 bad credential {self.name} for synthetic.user@example.test token sk-synthetic-access"
@@ -398,11 +433,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def break_off(self, body):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body) + 100))
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
     def do_GET(self):
         if self.path == "/healthz":
             return self.send(200 if healthy else 500, b"")
         if self.headers.get("Authorization") != "Bearer " + key:
             return self.send(401, b"no key")
+        if mode == "models-break":
+            return self.break_off(b'{"data": [')
         ids = ["claude-haiku-synthetic", "gpt-synthetic-mini", "grok-synthetic", "kimi-k2-synthetic"]
         if self.headers.get("anthropic-version"):
             # An Anthropic client gets the list in Claude form, other providers' ids disguised.
@@ -416,6 +460,8 @@ class Handler(BaseHTTPRequestHandler):
         route = (self.path, bool(body.get("stream")))
         if mode == "fail" and route == ("/v1/responses", True):
             return self.send(400, b"synthetic rejection")
+        if mode == "stream-break" and route == ("/v1/messages", True):
+            return self.break_off(REPLIES[route][:40])
         self.send(200, REPLIES[route])
 
 HTTPServer(("127.0.0.1", config["server"]["port"]), Handler).serve_forever()
@@ -475,6 +521,25 @@ class RunTest(TempDir):
         code, out = self.run_tool("--provider", "codex")
         self.assertEqual(code, 1, out)
         self.assertIn("codex: FAIL (5/6) /v1/responses stream: 400 synthetic rejection", out)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_a_stream_that_breaks_off_fails_its_request_and_the_run_goes_on(self):
+        self.mode.write_text("stream-break")
+        self.write("a.json", {"type": "claude"}, self.auth)
+        self.write("b.json", {"type": "codex"}, self.auth)
+        code, out = self.run_tool()
+        self.assertEqual(code, 1, out)
+        self.assertIn("claude: FAIL (5/6) /v1/messages stream: transport error IncompleteRead", out)
+        self.assertIn("codex: FAIL (5/6)", out)
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_a_model_list_that_breaks_off_fails_the_provider(self):
+        self.mode.write_text("models-break")
+        self.write("a.json", {"type": "kimi"}, self.auth)
+        code, out = self.run_tool("--provider", "kimi")
+        self.assertEqual(code, 1, out)
+        self.assertIn("kimi: FAIL /v1/models: transport error IncompleteRead, 1 account", out)
         self.assertEqual(list(self.tmp.iterdir()), [])
 
     def test_a_run_with_only_skipped_credentials_checks_nothing(self):
