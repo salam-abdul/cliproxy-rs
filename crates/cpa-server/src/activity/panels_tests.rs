@@ -323,3 +323,22 @@ fn short_window_readings_make_no_cycles() {
     let panels = store.over(Range::Day, now);
     assert_eq!(panels["cycles"], json!([]), "{panels}");
 }
+
+#[test]
+fn an_ended_cycle_in_range_leaves_out_the_one_before_it() {
+    let store = Store::new();
+    let now = epoch_ms();
+    let hour = 3_600_000;
+    let record = |at, reading| store.activity.record_readings("codex", "codex-a.json", at, &[reading]);
+    record(now - 3 * DAY_MS, weekly(10.0, now - 2 * DAY_MS));
+    record(now - 2 * DAY_MS + 20 * 60_000, weekly(2.0, now - hour));
+    record(now - 5 * hour, weekly(40.0, now - hour));
+    let panels = store.over(Range::Day, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 1, "{panels}");
+    assert_eq!(
+        [&cycles[0]["inRange"], &cycles[0]["ended"]],
+        [&json!(true), &json!(true)],
+        "{panels}"
+    );
+}

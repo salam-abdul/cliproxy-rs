@@ -133,7 +133,8 @@ fn read(
 }
 
 /// Each credential's weekly quota cycles that end at or after `from`, plus its latest ended
-/// cycle before `from`, computed from readings since a week before `from`.
+/// cycle before `from` when none of the former has ended, computed from readings since a
+/// week before `from`.
 fn weekly_cycles(
     conn: &Connection,
     from: i64,
@@ -171,7 +172,11 @@ fn weekly_cycles(
         };
         let points: Vec<Point> = group.iter().map(|(_, _, point)| *point).collect();
         let all = cycles(&points, now);
-        let earlier = all.iter().rposition(|cycle| cycle.end < from);
+        let ended_in_range = all.iter().any(|cycle| cycle.end >= from && cycle.ended);
+        let earlier = all
+            .iter()
+            .rposition(|cycle| cycle.end < from)
+            .filter(|_| !ended_in_range);
         for (index, cycle) in all.iter().enumerate() {
             let in_range = cycle.end >= from;
             if !in_range && !(Some(index) == earlier && cycle.ended) {
