@@ -52,6 +52,14 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
             tool_calls: vec![("get_weather", serde_json::json!({"city": "Paris"}))],
             ..reply(vec![], Stop::ToolUse)
         },
+        ("tool_result", Kind::Request) => Expected {
+            text: vec!["Weather in Paris?"],
+            tool_calls: vec![("get_weather", serde_json::json!({"city": "Paris"}))],
+            tool_results: vec!["Sunny, 21 C"],
+            tool_defs: vec!["get_weather"],
+            ..Expected::default()
+        },
+        ("tool_result", _) => reply(vec!["It is sunny."], Stop::End),
         _ => panic!("no expectations for scenario {scenario}"),
     }
 }

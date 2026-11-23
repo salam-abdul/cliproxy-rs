@@ -1,0 +1,4 @@
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"It is"}]},"index":0}],"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"},"traceId":"trace-fixture"}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" sunny."}]},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"},"traceId":"trace-fixture"}
+
