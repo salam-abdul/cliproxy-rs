@@ -123,7 +123,7 @@ impl Activity {
         )?;
         db.busy_timeout(Duration::from_secs(2))?;
         let mut statement = db.prepare("SELECT * FROM sends ORDER BY at_ms, request_id, turn, send")?;
-        let names: Vec<String> = statement.column_names().into_iter().map(str::to_owned).collect();
+        let names: Vec<String> = statement.column_names().map(str::to_owned).collect();
         let rows = statement
             .query_map([], |row| {
                 let mut object = Map::new();
