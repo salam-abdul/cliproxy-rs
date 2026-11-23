@@ -451,6 +451,8 @@ struct ToInteractions {
     step_index: i64,
     step_open: bool,
     usage: Option<Vec<u8>>,
+    /// The reply stopped at its output limit (`finish_reason: length`).
+    limited: bool,
 }
 
 pub(crate) fn openai_to_interactions_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
@@ -561,6 +563,9 @@ impl ToInteractions {
         } else if let Some(saved) = &self.usage {
             set_interactions_usage(&mut completed, "interaction.usage", &gj::parse(saved));
         }
+        if self.limited {
+            gj::set_str(&mut completed, "interaction.status", "incomplete");
+        }
         out.push(sse_event("interaction.completed", &completed));
         self.completed = true;
     }
@@ -668,6 +673,7 @@ impl GoStream for ToInteractions {
             // as in the Gemini-client translator of the same stream.
             let finish = choice.get("finish_reason");
             if finish.kind == Kind::String && !finish.s.is_empty() {
+                self.limited |= finish.s.as_ref() == b"length";
                 self.stop_step(&mut out);
             }
             true
@@ -711,6 +717,10 @@ pub(crate) fn openai_to_interactions_non_stream(ctx: &ResponseCtx<'_>, body: &[u
         let reason = choice.get("finish_reason");
         if reason.exists() {
             gj::set_str(&mut out, "finish_reason", reason.bytes());
+            // A reply cut off at its output limit is an incomplete interaction.
+            if reason.bytes().as_ref() == b"length" {
+                gj::set_str(&mut out, "status", "incomplete");
+            }
         }
         true
     });
