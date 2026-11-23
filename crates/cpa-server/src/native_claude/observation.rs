@@ -344,6 +344,47 @@ pub(super) struct Exchange {
     pub(super) digest: String,
     pub(super) body_bytes: usize,
     pub(super) started: Instant,
+    /// When this send started, the origin of its row's times.
+    pub(super) sent_at: Instant,
+    /// This send's index within the request.
+    pub(super) send: i32,
+}
+
+fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// The activity row of send `send` of `request_id`, which started at `sent_at` and ends now
+/// with `outcome`. Its times count from `sent_at`: the request's own timings count from its
+/// arrival and include admission and earlier sends.
+pub(super) fn send_row(
+    request_id: &str,
+    send: i32,
+    a: &Account,
+    model: &str,
+    request_started: Instant,
+    sent_at: Instant,
+    outcome: crate::request_logging::history::row::Outcome,
+) -> crate::activity::sends::SendRow {
+    let latency = millis(sent_at.elapsed());
+    crate::activity::sends::SendRow {
+        request_id: request_id.to_owned(),
+        turn: 0,
+        send,
+        parent_request: None,
+        at_ms: chrono::Utc::now().timestamp_millis().saturating_sub(latency),
+        source: crate::request_logging::history::row::Source::Native,
+        provider: "claude".into(),
+        credential: Some(a.file_id.clone()).filter(|id| !id.is_empty()),
+        model: Some(model.to_owned()),
+        outcome,
+        status: None,
+        stream: false,
+        start_ms: millis(sent_at.saturating_duration_since(request_started)),
+        latency_ms: Some(latency),
+        ttft: None,
+        tokens: None,
+    }
 }
 pub(super) struct Observation {
     s: Arc<State>,
@@ -355,7 +396,7 @@ pub(super) struct Observation {
     decoder: Option<JoinHandle<()>>,
     published: bool,
     finalizer: bool,
-    first_byte_ms: Option<u128>,
+    first_byte_at: Option<Instant>,
 }
 impl Observation {
     pub(super) fn new(
@@ -402,7 +443,7 @@ impl Observation {
             decoder: Some(decoder),
             published: false,
             finalizer: false,
-            first_byte_ms: None,
+            first_byte_at: None,
         }
     }
     pub(super) async fn observe(&mut self, b: &axum::body::Bytes) {
@@ -410,8 +451,8 @@ impl Observation {
         if let Some(history) = self.history.as_mut() {
             history.push(b);
         }
-        if !b.is_empty() && self.first_byte_ms.is_none() {
-            self.first_byte_ms = Some(self.facts.started.elapsed().as_millis());
+        if !b.is_empty() && self.first_byte_at.is_none() {
+            self.first_byte_at = Some(Instant::now());
         }
         if let Some(writer) = self.writer.as_mut()
             && writer.write_all(b).await.is_err()
@@ -455,7 +496,10 @@ impl Observation {
             }
         };
         let mut timing = f.timing.clone();
-        timing["firstByteMs"] = json!(self.first_byte_ms);
+        timing["firstByteMs"] = json!(
+            self.first_byte_at
+                .map(|at| at.saturating_duration_since(f.started).as_millis())
+        );
         timing["responseStreamMs"] = json!(f.headers_at.elapsed().as_millis());
         timing["totalMs"] = json!(f.started.elapsed().as_millis());
         self.s.event(json!({"type":"inference","requestId":f.request_id,"session":f.sid,"account":f.a.id,"model":f.model,"status":status,"upstreamStatus":f.status,"complete":complete,"outcome":outcome,"attempts":f.attempts,"recovered":success && f.attempts>1,"timing":timing,"bodySha256":f.digest,"bodyBytes":f.body_bytes,"usage":usage}));
@@ -466,20 +510,35 @@ impl Observation {
             .map(|c| cpa_core::config::credentials::auth_index(c))
             .unwrap_or_default();
         let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
-        if let Some(history) = history {
+        let ended = {
             use crate::request_logging::history::row::Outcome;
+            match (end, success) {
+                ("client_cancelled", _) => Outcome::Cancelled,
+                ("upstream_stream_error", _) => Outcome::StreamError,
+                (_, true) => Outcome::Complete,
+                _ => Outcome::Failed,
+            }
+        };
+        if let Some(history) = history {
             history.finish(crate::request_logging::history::native::NativeEnd {
                 stream: f.sse,
-                outcome: match (end, success) {
-                    ("client_cancelled", _) => Outcome::Cancelled,
-                    ("upstream_stream_error", _) => Outcome::StreamError,
-                    (_, true) => Outcome::Complete,
-                    _ => Outcome::Failed,
-                },
+                outcome: ended,
                 detail: Some(&detail),
                 error: (!success).then(|| outcome.to_owned()),
             });
         }
+        self.s.rt.record_send(crate::activity::sends::SendRow {
+            status: (!success).then_some(i64::from(status)),
+            stream: f.sse,
+            ttft: self.first_byte_at.map(|at| {
+                (
+                    millis(at.saturating_duration_since(f.sent_at)),
+                    crate::activity::sends::TtftKind::Byte,
+                )
+            }),
+            tokens: crate::activity::sends::Tokens::of(&detail, "claude", "claude"),
+            ..send_row(&f.request_id, f.send, &f.a, &f.model, f.started, f.sent_at, ended)
+        });
         let record = crate::usage_record::Record {
             timestamp: chrono::Utc::now().to_rfc3339(),
             execution_id: uuid::Uuid::new_v4().to_string(),
@@ -533,7 +592,7 @@ impl Drop for Observation {
             decoder: self.decoder.take(),
             published: false,
             finalizer: true,
-            first_byte_ms: self.first_byte_ms,
+            first_byte_at: self.first_byte_at,
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {

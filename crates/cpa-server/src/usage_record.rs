@@ -1604,6 +1604,8 @@ pub struct Facts {
     pub(crate) history: Option<crate::request_logging::history::capture::HistoryExchange>,
     /// The WebSocket connection ID and turn index, from its trace.
     pub(crate) turn: Option<(String, i32)>,
+    /// The request this one's sends serve, from its trace.
+    pub(crate) parent_request: Option<String>,
 }
 
 impl Facts {
@@ -1635,6 +1637,7 @@ impl Facts {
             attempts: Default::default(),
             history: None,
             turn: trace.turn(),
+            parent_request: trace.parent().map(str::to_owned),
         }
     }
 
@@ -2363,7 +2366,7 @@ impl Tracker {
             request_id,
             turn,
             send: i32::try_from(self.attempt).unwrap_or(i32::MAX),
-            parent_request: None,
+            parent_request: self.facts.parent_request.clone(),
             at_ms: self.requested_at.timestamp_millis(),
             source: crate::request_logging::history::row::Source::Proxy,
             provider: record.provider.clone(),
@@ -3292,6 +3295,7 @@ mod tests {
                 attempts: Default::default(),
                 history: Default::default(),
                 turn: None,
+                parent_request: None,
             };
             rt.usage_queue().pop_oldest(100);
             let body = case["body"].as_str().unwrap_or_default();

@@ -252,6 +252,31 @@ async fn exhausted_quota_is_served_by_the_mapped_model() {
 }
 
 #[tokio::test]
+async fn a_fallback_send_names_the_native_request_it_serves() {
+    let local = Local::start(200).await;
+    let fixture = fixture(ok(), exhausted(), mapped("local-test"), local.yaml()).await;
+    let response = post(&fixture, REQUEST).await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let sends = super::entitlement_tests::activity_sends(&fixture).await;
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    let db = rusqlite::Connection::open(fixture.dir.join("events.sqlite")).unwrap();
+    let native: Vec<String> = db
+        .prepare("SELECT request_id FROM requests")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let [native] = native.as_slice() else {
+        panic!("one native request, saw {native:?}")
+    };
+    assert_eq!(sends[0]["source"], "proxy");
+    assert_eq!(sends[0]["parent_request"], native.as_str());
+    assert_ne!(sends[0]["request_id"], native.as_str());
+}
+
+#[tokio::test]
 async fn a_buffered_request_falls_back_as_json() {
     let local = Local::start(200).await;
     let fixture = fixture(ok(), exhausted(), mapped("local-test"), local.yaml()).await;

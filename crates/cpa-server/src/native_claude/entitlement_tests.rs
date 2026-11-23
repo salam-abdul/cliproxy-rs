@@ -579,6 +579,8 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
             digest: String::new(),
             body_bytes: 0,
             started: std::time::Instant::now(),
+            sent_at: std::time::Instant::now(),
+            send: 0,
         };
         let observation = Observation::new(fixture.state.clone(), facts, "identity", None);
         tokio::spawn(async move {
@@ -993,4 +995,65 @@ async fn a_pool_of_only_skipped_files_is_a_routing_error() {
     let response = fixture.request().await;
     assert_eq!(response.status(), 502);
     assert!(fixture.seen.lock().unwrap().is_empty());
+}
+
+/// The fixture's `sends` rows once every queued record is written.
+pub(super) async fn activity_sends(fixture: &Fixture) -> Vec<Value> {
+    let rt = fixture.state.rt.clone();
+    tokio::task::spawn_blocking(move || crate::testing::activity_sends(&rt))
+        .await
+        .unwrap()
+}
+
+fn send_column(sends: &[Value], name: &str) -> Vec<Value> {
+    sends.iter().map(|send| send[name].clone()).collect()
+}
+
+#[tokio::test]
+async fn a_failover_then_a_success_is_two_native_sends_each_timed_from_its_own_start() {
+    let fixture = Fixture::new(Reply {
+        status: 403,
+        body: br#"{"error":{"code":"model_access_denied"}}"#.to_vec(),
+        broken: false,
+    })
+    .await;
+    let began = std::time::Instant::now();
+    let response = fixture.request().await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let elapsed = i64::try_from(began.elapsed().as_millis()).unwrap();
+    let sends = activity_sends(&fixture).await;
+    assert_eq!(sends.len(), 2, "{sends:?}");
+    assert_eq!(sends[0]["request_id"], sends[1]["request_id"]);
+    assert_eq!(send_column(&sends, "send"), [0, 1]);
+    assert_eq!(send_column(&sends, "outcome"), ["failover", "complete"]);
+    assert_eq!(sends[0]["status"], 403);
+    assert_eq!(send_column(&sends, "source"), ["native", "native"]);
+    assert_eq!(send_column(&sends, "provider"), ["claude", "claude"]);
+    assert_eq!(send_column(&sends, "turn"), [0, 0]);
+    let start = |i: usize| sends[i]["start_ms"].as_i64().unwrap();
+    let latency = sends[0]["latency_ms"].as_i64().unwrap();
+    assert!(start(1) >= start(0) + latency, "{sends:?}");
+    // A send's latency counts from its own start, so it ends inside the client's wait.
+    for send in &sends {
+        let end = send["start_ms"].as_i64().unwrap() + send["latency_ms"].as_i64().unwrap();
+        assert!(end <= elapsed, "{send} ended after the {elapsed} ms the client waited");
+    }
+}
+
+#[tokio::test]
+async fn an_account_without_a_credential_file_is_recorded_with_no_credential() {
+    let fixture = Fixture::new(Reply {
+        status: 200,
+        body: SUCCESS.to_vec(),
+        broken: false,
+    })
+    .await;
+    assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
+    let sends = activity_sends(&fixture).await;
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert_eq!(sends[0]["credential"], Value::Null);
+    assert_eq!(sends[0]["ttft_kind"], "byte");
+    assert_eq!(sends[0]["outcome"], "complete");
+    assert_eq!(sends[0]["model"], "claude-opus-test");
 }

@@ -953,6 +953,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             return Ok(error(502, "Native routing state unavailable; no request sent"));
         };
         let started = Instant::now();
+        let send = i32::try_from(tried.len().saturating_sub(1)).unwrap_or(i32::MAX);
         let mut capture = crate::request_logging::history::native::NativeCapture::start(
             &s.rt,
             crate::request_logging::history::native::NativeSend {
@@ -998,6 +999,15 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         error: Some(failure_kind.to_owned()),
                     });
                 }
+                s.rt.record_send(observation::send_row(
+                    &request_id,
+                    send,
+                    &a,
+                    &model,
+                    request_started,
+                    started,
+                    crate::request_logging::history::row::Outcome::TransportLost,
+                ));
                 s.cool(&a, &model, 0, None, false).await?;
                 s.rt.store().note_activity(&a.file_id, false);
                 s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
@@ -1047,6 +1057,18 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     error: Some(outcome.to_owned()),
                 });
             }
+            s.rt.record_send(crate::activity::sends::SendRow {
+                status: Some(i64::from(status.as_u16())),
+                ..observation::send_row(
+                    &request_id,
+                    send,
+                    &a,
+                    &model,
+                    request_started,
+                    started,
+                    crate::request_logging::history::row::Outcome::Failover,
+                )
+            });
             s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
             if !entitlement {
                 s.rt.claude_usage.invalidate(&a.token).await;
@@ -1074,6 +1096,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             digest: hash(&raw),
             body_bytes: raw.len(),
             started: request_started,
+            sent_at: started,
+            send,
         };
         let mut record = Some(Observation::new(s.clone(), facts, &encoding, capture));
         // The server stops polling a body once it has sent the declared content-length, so the

@@ -401,6 +401,7 @@ fn report_unauthorized(rt: &Runtime, credential: &Credential, model: &str, body:
         attempts: Default::default(),
         history: Default::default(),
         turn: None,
+        parent_request: None,
     };
     crate::usage_record::publish_home_unauthorized(
         rt,

@@ -154,6 +154,7 @@ async fn alpha_search(
             attempts: Default::default(),
             history: Default::default(),
             turn: None,
+            parent_request: None,
         };
         return search(&rt, lease, &body, &headers, &model, &cfg, &capture, Some(&facts)).await;
     }

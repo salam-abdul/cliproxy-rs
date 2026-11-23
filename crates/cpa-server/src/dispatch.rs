@@ -677,6 +677,8 @@ pub struct Trace(
     /// The client's prompt prefix (`crate::usage_record::prompt_prefix`).
     std::sync::OnceLock<String>,
     crate::request_logging::history::capture::TraceExchange,
+    /// The request this trace's sends serve in place of its own.
+    Option<String>,
 );
 
 impl Trace {
@@ -692,11 +694,24 @@ impl Trace {
             crate::observability::current_clock(),
             Default::default(),
             Default::default(),
+            None,
         );
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             let _ = trace.1.set(id);
         }
         trace
+    }
+
+    /// A trace with its own request ID whose sends serve `parent_request`.
+    pub(crate) fn serving(parent_request: String) -> Self {
+        let mut trace = Self::with_request_id(None);
+        trace.6 = Some(parent_request);
+        trace
+    }
+
+    /// The request this trace's sends serve, when they serve another.
+    pub(crate) fn parent(&self) -> Option<&str> {
+        self.6.as_deref()
     }
 
     /// The request ID (Go `logging.GetRequestID`), created on first use.
