@@ -66,3 +66,5 @@ Operation docs live only in these files. When a behavior changes, update the pag
 - [Upstream review](docs/UPSTREAM-REVIEW.md): reviewed upstream hashes and pending ports.
 - [Dashboard](ui/README.md): build, budgets and page layout.
 - [Patched crates](vendor/README.md): what each vendored crate changes.
+
+One design is kept in the repo at the owner's request, as an exception to the rule that plans stay outside it: [Usage insights](docs/USAGE-INSIGHTS.md), the proposed provider, speed and tool panels. Each part leaves that file when it is built.
