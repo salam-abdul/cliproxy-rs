@@ -298,6 +298,42 @@ async fn environment_proxy_bypasses_loopback_and_proxies_the_rest() {
     assert_eq!(proxied.await.unwrap(), "POST http://upstream.invalid/v1 HTTP/1.1");
 }
 
+/// The environment is passed in, not set, so no other test sees it: its proxy is a
+/// loopback port where nothing listens.
+#[tokio::test]
+async fn a_pinned_host_is_reached_whatever_the_environment_proxies_are() {
+    use std::sync::atomic::Ordering::SeqCst;
+    const DEAD: &str = "http://127.0.0.1:9";
+    let host = "pinned.test";
+    let (ca, addr, accepted) = crate::test_tls::counting_upstream(host, b"\x08http/1.1").await;
+    let env = EnvProxy::from_lookup(|name| (name == "HTTPS_PROXY").then(|| DEAD.to_owned()));
+    let url = format!("https://{host}:{}/v1/messages", addr.port());
+    let clients = |resolve| {
+        GoClients::new(Hooks {
+            trust: Some(CertStore::from_pem_stack(ca.clone()).unwrap()),
+            resolve,
+        })
+    };
+    let refused = |error: wreq::Error| {
+        assert!(format!("{error:?}").contains("Connection refused"), "{error:?}");
+    };
+
+    let pinned = clients(vec![(host.to_owned(), addr)]);
+    let inherit = pinned.build(&Proxy::Inherit, &env).unwrap();
+    let response = inherit.post(&url).body("{}").send().await.unwrap();
+    assert_eq!(response.text().await.unwrap(), "ok");
+    assert_eq!(accepted.load(SeqCst), 1);
+
+    // A configured proxy still applies to a pinned host.
+    let configured = pinned.build(&Proxy::Url(DEAD.into()), &env).unwrap();
+    refused(configured.post(&url).body("{}").send().await.unwrap_err());
+
+    // Without a pin the same environment proxies the request, as in production.
+    let unpinned = clients(Vec::new()).build(&Proxy::Inherit, &env).unwrap();
+    refused(unpinned.post(&url).body("{}").send().await.unwrap_err());
+    assert_eq!(accepted.load(SeqCst), 1);
+}
+
 #[test]
 fn canonical_header_matches_go() {
     assert_eq!(canonical_header("x-msh-device-id"), "X-Msh-Device-Id");
@@ -729,6 +765,66 @@ async fn redirects_follow_go_http_client() {
             .collect();
         assert_eq!(&got, case["hops"].as_array().unwrap(), "{name}");
     }
+}
+
+/// A redirect to another host drops the provider key headers along with
+/// `Authorization`; a redirect on the same host keeps all three.
+#[tokio::test]
+async fn cross_host_redirect_drops_provider_key_headers() {
+    use axum::response::IntoResponse;
+    const KEYS: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+    let main = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (main_addr, other_port) = (main.local_addr().unwrap(), second.local_addr().unwrap().port());
+    type Hops = Arc<Mutex<Vec<(String, Vec<&'static str>)>>>;
+    let seen: Hops = Arc::default();
+    for listener in [main, second] {
+        let seen = seen.clone();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let seen = seen.clone();
+            async move {
+                let path = req.uri().path().to_owned();
+                let sent = KEYS.into_iter().filter(|k| req.headers().contains_key(*k)).collect();
+                seen.lock().unwrap().push((path.clone(), sent));
+                let to = |location: String| {
+                    (
+                        http::StatusCode::TEMPORARY_REDIRECT,
+                        [(http::header::LOCATION, location)],
+                    )
+                        .into_response()
+                };
+                match path.as_str() {
+                    "/start" => to("/same-host".to_owned()),
+                    "/same-host" => to(format!("http://localhost:{other_port}/other-host")),
+                    _ => "done".into_response(),
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    }
+    let mut headers = GoHeaders::new();
+    for name in ["Authorization", "X-Api-Key", "X-Goog-Api-Key"] {
+        headers.set(name, "synthetic");
+    }
+    let upstream = request(
+        &default_client(),
+        wreq::Method::GET,
+        &format!("http://{main_addr}/start"),
+        headers,
+        None,
+        Some(std::time::Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status, 200);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("/start".to_owned(), KEYS.to_vec()),
+            ("/same-host".to_owned(), KEYS.to_vec()),
+            ("/other-host".to_owned(), Vec::new()),
+        ]
+    );
 }
 
 /// Go's `Client.Timeout` bounds the whole exchange: redirect hops share one deadline

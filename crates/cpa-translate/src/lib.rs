@@ -202,6 +202,10 @@ pub struct ResponseCtx<'a> {
     pub model: &'a str,
     pub original_request: &'a [u8],
     pub translated_request: &'a [u8],
+    /// The client will replay this output to another provider: emit no thinking blocks
+    /// and give each tool use a fresh ID. Honored by the Claude-facing Gemini and OpenAI
+    /// translators.
+    pub portable: bool,
 }
 
 pub trait StreamTranslator: Send {

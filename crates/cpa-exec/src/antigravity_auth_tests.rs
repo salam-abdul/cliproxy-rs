@@ -335,6 +335,28 @@ async fn auth_matches_go() {
     }
 }
 
+/// Google refuses a revoked or expired refresh token with a 4xx `invalid_grant`, which
+/// the refresh reports as a refusal. Another code or a server fault is not one.
+#[tokio::test]
+async fn a_refused_refresh_grant_reports_its_refusal() {
+    use cpa_core::exec::Refusal;
+    for (status, body, refusal) in [
+        (
+            400,
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#,
+            Some(Refusal::InvalidGrant),
+        ),
+        (400, r#"{"error":"invalid_request"}"#, None),
+        (503, r#"{"error":"invalid_grant"}"#, None),
+    ] {
+        let mock = Mock::start(vec![(status, body.to_owned())]).await;
+        let oauth = OAuth::new(mock.clients().get(&Proxy::Direct));
+        let error = oauth.refresh("fake-refresh-token").await.unwrap_err();
+        assert_eq!(error.refusal, refusal, "{status} {body}");
+        assert_eq!(mock.requests.lock().unwrap().len(), 1, "{status} {body}");
+    }
+}
+
 /// `BuildAntigravityAuthURL` as Go built it.
 #[test]
 fn auth_url_matches_go() {

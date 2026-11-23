@@ -1211,6 +1211,7 @@ async fn session_turns_honour_pin_callback_and_session() {
         })
     };
     let call = |turn| Call {
+        portable_output: false,
         entry: Format::Claude,
         response: Format::Claude,
         operation: Operation::Generate,
@@ -1259,4 +1260,78 @@ async fn session_turns_honour_pin_callback_and_session() {
         error.failure.text()
     );
     assert!(tokens().is_empty());
+}
+
+/// Open access on a loopback listener refuses a request from another origin or under
+/// another host name, on the relay route too. Client keys lift both checks.
+#[tokio::test]
+async fn keyless_loopback_refuses_other_sites_and_host_names() {
+    use tower::ServiceExt;
+    async fn get(config: &str, uri: &str, headers: &[(&str, &str)]) -> (u16, String) {
+        let executors = Executors {
+            claude: ClaudeExecutor::new("http://127.0.0.1:9").unwrap(),
+            codex: Default::default(),
+            devices: Default::default(),
+            openai: Default::default(),
+            google: Default::default(),
+        };
+        let config = cpa_server::testing::config(config);
+        let app = router(Arc::new(cpa_server::testing::runtime(config, Vec::new(), executors)));
+        let mut request = axum::http::Request::builder().uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+    async fn models(config: &str, headers: &[(&str, &str)]) -> (u16, String) {
+        get(config, "/v1/models", headers).await
+    }
+    const KEYLESS: &str = "server: {host: 127.0.0.1}\n";
+    assert_eq!(models(KEYLESS, &[("host", "127.0.0.1:8317")]).await.0, 200);
+    assert_eq!(
+        models(
+            KEYLESS,
+            &[("host", "127.0.0.1:8317"), ("origin", "https://app.example")]
+        )
+        .await,
+        (
+            403,
+            r#"{"error":"Origin is not this machine: add a client key to access.api-keys to call from another site"}"#
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        models(KEYLESS, &[("host", "rebind.example:8317")]).await,
+        (
+            403,
+            r#"{"error":"Host is not this machine: add a client key to access.api-keys to use another name"}"#
+                .to_owned()
+        )
+    );
+    const KEYED: &str = "server: {host: 127.0.0.1}\naccess: {api-keys: [client-key]}\n";
+    let other_site = [
+        ("host", "rebind.example:8317"),
+        ("origin", "https://app.example"),
+        ("authorization", "Bearer client-key"),
+    ];
+    assert_eq!(models(KEYED, &other_site).await.0, 200);
+
+    // The AI Studio relay's bridge is a page on another site, so it needs a key too. With
+    // one, the request reaches the upgrade, which refuses a plain GET.
+    let bridge = [("host", "127.0.0.1:8317"), ("origin", "https://app.example")];
+    assert_eq!(
+        get(KEYLESS, "/v1/ws", &bridge).await,
+        (
+            403,
+            r#"{"error":"Origin is not this machine: add a client key to access.api-keys to call from another site"}"#
+                .to_owned()
+        )
+    );
+    assert_eq!(get(KEYED, "/v1/ws?key=client-key", &bridge).await.0, 400);
 }

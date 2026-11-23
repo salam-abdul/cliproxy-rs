@@ -9,7 +9,9 @@ const tokenRows = () =>
     reported: 0,
   }));
 export const isFailure = (e: Data) =>
-  !["success", "pending", "client_cancelled"].includes(e.outcome);
+  !["success", "pending", "client_cancelled", "fallback_served"].includes(
+    e.outcome,
+  );
 const outcomes: Record<string, string> = {
   success: "Succeeded",
   client_cancelled: "Cancelled by client",
@@ -24,12 +26,24 @@ const outcomes: Record<string, string> = {
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
 };
+const fallbackFailures: Record<string, string> = {
+  unknown_model: "no provider serves it",
+  provider_not_allowed: "its provider cannot serve a fallback",
+  no_output: "it gave no answer",
+};
+/** Why a rejected request's quota fallback did not answer. */
+export const fallbackNote = (e: Data) =>
+  e.fallbackFailure && e.fallbackModel
+    ? `Fallback to ${e.fallbackModel} failed: ${fallbackFailures[e.fallbackFailure] || e.fallbackFailure}`
+    : undefined;
 export const outcomeLabel = (e: Data) =>
   e.recovered
     ? "Recovered after account switch"
-    : Object.hasOwn(outcomes, e.outcome)
-      ? outcomes[e.outcome]
-      : String(e.outcome || "Unknown outcome").replaceAll("_", " ");
+    : e.outcome === "fallback_served"
+      ? `Fell back to ${e.fallbackModel || "another model"}`
+      : Object.hasOwn(outcomes, e.outcome)
+        ? outcomes[e.outcome]
+        : String(e.outcome || "Unknown outcome").replaceAll("_", " ");
 
 export function summarizeHistory(history: Data) {
   const buckets = Array.isArray(history.buckets)

@@ -11,24 +11,37 @@ use btls::{
 };
 use cpa_core::credential::Credential;
 
-const REQUEST: &[u8] =
+pub(super) const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
-const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
+pub(super) const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
 
 #[derive(Clone)]
-struct Reply {
-    status: u16,
-    body: Vec<u8>,
-    broken: bool,
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) body: Vec<u8>,
+    pub(super) broken: bool,
 }
 type Seen = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-struct Fixture {
-    state: Arc<State>,
-    url: String,
-    seen: Seen,
+pub(super) struct Fixture {
+    pub(super) state: Arc<State>,
+    pub(super) url: String,
+    pub(super) seen: Seen,
     tasks: Vec<JoinHandle<()>>,
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
+}
+/// What a test changes about the default fixture: two enabled accounts with quota.
+#[derive(Default)]
+pub(super) struct Setup {
+    /// `fixtureAccounts`, when not the default pair.
+    pub(super) accounts: Option<Value>,
+    /// Native configuration keys merged over the fixture's.
+    pub(super) native: Value,
+    /// Runtime YAML appended to the fixture's; its `api-keys` become credentials.
+    pub(super) yaml: String,
+    /// A Claude token endpoint. Account `a` is then the signed-in file `a.json` in the
+    /// auth-dir, holding `token-a` and a refresh token.
+    pub(super) token_url: Option<String>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -88,8 +101,25 @@ impl Fixture {
         proxy: Option<&str>,
         accounts: bool,
     ) -> Self {
+        let setup = Setup {
+            accounts: (!accounts).then(|| json!([])),
+            ..Setup::default()
+        };
+        Self::build_from(reply, history, credential, proxy, setup).await
+    }
+    pub(super) async fn custom(reply: Reply, setup: Setup) -> Self {
+        Self::build_from(reply, None, None, None, setup).await
+    }
+    async fn build_from(
+        reply: Reply,
+        history: Option<&Path>,
+        credential: Option<Credential>,
+        proxy: Option<&str>,
+        setup: Setup,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("native-entitlement-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
+        let credential = credential.or_else(|| setup.token_url.as_ref().map(|_| signed_in(&dir)));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -127,6 +157,7 @@ impl Fixture {
                                 && cpa_common::gostr::contains(&body, b"claude-opus-test")
                             {
                                 let zstd = reply.body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]);
+                                let exhausted = cpa_common::gostr::contains(&body, b"MODE_EXHAUSTED");
                                 let body = if reply.broken {
                                     let stream = futures_util::stream::once(async move {
                                         Ok::<_, std::io::Error>(Bytes::from(reply.body))
@@ -146,6 +177,16 @@ impl Fixture {
                                 if zstd {
                                     response = response.header("content-encoding", "zstd");
                                 }
+                                // The rate-limit headers of an account whose five-hour
+                                // window is used up.
+                                if exhausted {
+                                    response = response
+                                        .header("anthropic-ratelimit-unified-5h-status", "rejected")
+                                        .header(
+                                            "anthropic-ratelimit-unified-5h-reset",
+                                            (now() / 1000 + 4 * 3600).to_string(),
+                                        );
+                                }
                                 response.body(body).unwrap()
                             } else {
                                 Response::builder()
@@ -163,17 +204,20 @@ impl Fixture {
             }
         });
         let quota = json!({"five_hour":{"utilization":1},"seven_day":{"utilization":1}});
-        let native: Config = serde_json::from_value(json!({
+        let mut native = json!({
             "port":0,"httpProxyPort":0,"database":dir.join("routing.json"),"events":dir.join("events.jsonl"),
             "proxySecret":dir.join("secret"),"key":dir.join("key"),"cert":dir.join("cert"),"authDir":dir,
-            "fixtureAccounts":if accounts {json!([
+            "fixtureAccounts":setup.accounts.unwrap_or_else(|| json!([
                 {"id":"a","token":"token-a","quota":quota,"fileId":credential.as_ref().map(|c| c.id.clone()).unwrap_or_default(),"proxyUrl":proxy},
                 {"id":"b","token":"token-b","quota":quota}
-            ])} else {json!([])},
+            ])),
             "upstream":{"hostname":"127.0.0.1","port":port}
-        }))
-        .unwrap();
-        let mut rt_yaml = format!("auth-dir: {}\n", dir.display());
+        });
+        for (key, value) in setup.native.as_object().into_iter().flatten() {
+            native[key] = value.clone();
+        }
+        let native: Config = serde_json::from_value(native).unwrap();
+        let mut rt_yaml = format!("auth-dir: {}\n{}", dir.display(), setup.yaml);
         if let Some(history) = history {
             rt_yaml.push_str(&format!(
                 "observability: {{history: {{enable: true, dir: '{}'}}}}\n",
@@ -181,11 +225,26 @@ impl Fixture {
             ));
         }
         let rt_config = cpa_core::config::Config::parse(&rt_yaml).unwrap();
+        let credentials = credential
+            .into_iter()
+            .chain(cpa_core::config::credentials::from_config(&rt_config))
+            .collect();
         let rt = Arc::new(crate::testing::runtime(
             rt_config,
-            credential.into_iter().collect(),
+            credentials,
             cpa_exec::Executors {
-                claude: cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap(),
+                claude: {
+                    let claude = cpa_exec::claude::ClaudeExecutor::new(format!("https://127.0.0.1:{port}")).unwrap();
+                    match setup.token_url.as_deref() {
+                        Some(url) => claude.with_oauth(cpa_exec::oauth::OAuth::with_endpoints(
+                            wreq::Client::builder().no_proxy().build().unwrap(),
+                            url,
+                            url,
+                            url,
+                        )),
+                        None => claude,
+                    }
+                },
                 codex: Default::default(),
                 devices: Default::default(),
                 openai: Default::default(),
@@ -226,10 +285,10 @@ impl Fixture {
             dir,
         }
     }
-    async fn request(&self) -> wreq::Response {
+    pub(super) async fn request(&self) -> wreq::Response {
         self.request_body(REQUEST).await
     }
-    async fn request_body(&self, body: &'static [u8]) -> wreq::Response {
+    pub(super) async fn request_body(&self, body: &'static [u8]) -> wreq::Response {
         wreq::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
@@ -243,6 +302,73 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+/// A private Claude sign-in file `a.json` in `dir` with an access token that has not
+/// expired, and its credential.
+fn signed_in(dir: &Path) -> Credential {
+    let file = json!({"type":"claude","access_token":"token-a","refresh_token":"fake-rt-a",
+        "expired":"2099-01-01T00:00:00Z","account_uuid":"acct-a","claude_device_ids":["b".repeat(64)]});
+    let path = dir.join("a.json");
+    std::fs::write(&path, file.to_string()).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    crate::testing::local(Credential::from_file(dir, &path, file.as_object().unwrap().clone()).unwrap())
+}
+
+/// An upstream 401 on native routing refreshes that account once, off the request. When
+/// the token endpoint refuses the refresh token, native routing stops offering the
+/// account, as it does an expired one.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_native_401_takes_an_account_with_a_refused_refresh_token_out_of_rotation() {
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let token = axum::Router::new().route(
+        "/token",
+        axum::routing::post({
+            let refreshes = refreshes.clone();
+            move || async move {
+                refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+    let token = tokio::spawn(async move { axum::serve(listener, token).await.unwrap() });
+    let mut fixture = Fixture::custom(
+        Reply {
+            status: 401,
+            body: br#"{"error":{"type":"authentication_error","message":"Invalid bearer token"}}"#.to_vec(),
+            broken: false,
+        },
+        Setup {
+            token_url: Some(token_url),
+            ..Setup::default()
+        },
+    )
+    .await;
+    fixture.tasks.push(token);
+    let offered = |fixture: &Fixture| {
+        let accounts = fixture.state.read_accounts().unwrap();
+        accounts.iter().find(|a| a.file_id == "a.json").unwrap().enabled
+    };
+    assert!(offered(&fixture));
+
+    assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
+    let tokens: Vec<_> = fixture.seen.lock().unwrap().iter().map(|(t, _)| t.clone()).collect();
+    assert_eq!(tokens, ["Bearer token-a", "Bearer token-b"]);
+    let store = fixture.state.rt.store();
+    let a = store.get("a.json").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !store.out_of_rotation(&a) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the 401 recorded the refused refresh token");
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!offered(&fixture), "native routing still offers the refused account");
 }
 
 #[tokio::test]

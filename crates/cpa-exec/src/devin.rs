@@ -169,6 +169,7 @@ fn upstream_error(status: u16, headers: http::HeaderMap, body: Bytes) -> ExecErr
         addon: None,
         after_accept: None,
         held: None,
+        refusal: None,
     }
 }
 
@@ -528,6 +529,7 @@ impl DevinExecutor {
             model: &req.model,
             original_request: &ctx_original,
             translated_request: &req.body,
+            portable: false,
         };
         if req.stream {
             let translator = pair.map(|pair| (pair.stream)(&ctx));

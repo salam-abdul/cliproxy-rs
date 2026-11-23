@@ -101,6 +101,10 @@ pub struct ExecRequest {
     /// should forward the upstream payloads Go parses; `UsageSink::default()` is a
     /// no-op.
     pub usage: UsageSink,
+    /// The client will replay the response to another provider: the Gemini and
+    /// OpenAI-compatible executors then translate it without thinking blocks and with a
+    /// fresh ID for each tool use (`cpa_translate::ResponseCtx::portable`).
+    pub portable_output: bool,
 }
 
 /// Receives the upstream payloads Go's executors feed their usage reporter.
@@ -594,6 +598,42 @@ pub struct ExecError {
     /// fails like the same status returned as an HTTP error, and when no other account
     /// remains the client receives this stream instead, as if it had not been held.
     pub held: Option<std::sync::Arc<HeldStream>>,
+    /// Set when a refresh grant's token endpoint refused the refresh token.
+    pub refusal: Option<Refusal>,
+}
+
+/// A token endpoint's answer to a refresh grant that refuses the refresh token itself,
+/// as opposed to a transient or unknown failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// `invalid_grant` with no more specific reason.
+    InvalidGrant,
+    /// `refresh_token_expired`, or Anthropic's `invalid_grant` described as "Refresh
+    /// token expired".
+    Expired,
+    /// `refresh_token_reused`.
+    Reused,
+    /// `refresh_token_invalidated`.
+    Invalidated,
+    /// `token_revoked`.
+    Revoked,
+}
+
+impl Refusal {
+    /// The refusal an OAuth error `code` and its `description` state, if any.
+    pub fn from_oauth(code: &str, description: &str) -> Option<Self> {
+        match code {
+            "invalid_grant" if description.to_ascii_lowercase().contains("refresh token expired") => {
+                Some(Self::Expired)
+            }
+            "invalid_grant" => Some(Self::InvalidGrant),
+            "refresh_token_expired" => Some(Self::Expired),
+            "refresh_token_reused" => Some(Self::Reused),
+            "refresh_token_invalidated" => Some(Self::Invalidated),
+            "token_revoked" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
 }
 
 /// A stream held back because its first event declared an upstream error.
@@ -631,6 +671,7 @@ impl ExecError {
             addon: None,
             after_accept: None,
             held: None,
+            refusal: None,
         }
     }
 
@@ -723,5 +764,34 @@ impl ExecError {
         self.status == 426
             && self.scope == FailureScope::Request
             && self.body.as_ref() == Self::REPLAY_REQUIRED.as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Refusal;
+
+    #[test]
+    fn only_a_refresh_token_refusal_code_is_a_refusal() {
+        for (code, description, refusal) in [
+            ("invalid_grant", "", Some(Refusal::InvalidGrant)),
+            ("invalid_grant", "Refresh token not found", Some(Refusal::InvalidGrant)),
+            ("invalid_grant", "Refresh token expired", Some(Refusal::Expired)),
+            ("invalid_grant", "REFRESH TOKEN EXPIRED.", Some(Refusal::Expired)),
+            ("refresh_token_expired", "", Some(Refusal::Expired)),
+            ("refresh_token_reused", "", Some(Refusal::Reused)),
+            ("refresh_token_invalidated", "", Some(Refusal::Invalidated)),
+            ("token_revoked", "", Some(Refusal::Revoked)),
+            ("invalid_request", "Refresh token expired", None),
+            ("invalid_client", "invalid_grant", None),
+            ("Invalid_Grant", "", None),
+            ("", "", None),
+        ] {
+            assert_eq!(
+                Refusal::from_oauth(code, description),
+                refusal,
+                "{code} / {description}"
+            );
+        }
     }
 }

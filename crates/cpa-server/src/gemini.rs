@@ -44,6 +44,7 @@ pub async fn action(
         _ => return ().into_response(),
     };
     let call = Call {
+        portable_output: false,
         entry: Format::Gemini,
         response: Format::Gemini,
         operation,
@@ -155,6 +156,7 @@ pub async fn interactions(
         )
     };
     let call = Call {
+        portable_output: false,
         entry: Format::Interactions,
         response: Format::Interactions,
         operation: Operation::Generate,

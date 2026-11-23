@@ -197,6 +197,7 @@ impl Conductor {
     /// rest, as one stream.
     async fn stream(&self) -> ExecStream {
         let call = Call {
+            portable_output: false,
             entry: Format::OpenAIResponse,
             response: Format::OpenAIResponse,
             operation: Operation::Generate,

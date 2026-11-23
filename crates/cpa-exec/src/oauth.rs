@@ -104,7 +104,8 @@ impl OAuth {
         }
     }
 
-    async fn json(&self, request: wreq::RequestBuilder) -> Result<Value, ExecError> {
+    /// `refresh` marks a refresh grant, the only answer that can refuse a refresh token.
+    async fn json(&self, request: wreq::RequestBuilder, refresh: bool) -> Result<Value, ExecError> {
         let response = request
             .send()
             .await
@@ -117,6 +118,7 @@ impl OAuth {
         // Never expose a control-plane body: providers may echo tokens in errors.
         let response = into_response(response).await.map_err(|error| {
             let mut safe = ExecError::local(error.status, error.scope, HTTP_FAILURE);
+            safe.refusal = refresh.then(|| refusal(error.status, &error.body)).flatten();
             safe.retry_after = backoff.or(error.retry_after);
             safe
         })?;
@@ -151,6 +153,7 @@ impl OAuth {
             self.request(wreq::Method::GET, &self.profile_url)?
                 .header("authorization", format!("Bearer {token}"))
                 .header("cache-control", "no-cache"),
+            false,
         )
         .await
     }
@@ -158,7 +161,7 @@ impl OAuth {
     async fn tokens(&self, body: Vec<u8>, previous_refresh: &str, login: bool) -> Result<MetadataPatch, ExecError> {
         let value = tokio::time::timeout(
             Duration::from_secs(30),
-            self.json(self.request(wreq::Method::POST, &self.token_url)?.body(body)),
+            self.json(self.request(wreq::Method::POST, &self.token_url)?.body(body), !login),
         )
         .await
         .map_err(|_| acquisition_error("Claude token acquisition timed out"))??;
@@ -210,6 +213,7 @@ impl OAuth {
                     self.request(wreq::Method::GET, &self.roles_url)?
                         .header("authorization", format!("Bearer {access}"))
                         .header("cache-control", "no-cache"),
+                    false,
                 )
                 .await
             })
@@ -440,6 +444,17 @@ pub(crate) fn needs_identity(credential: &Credential) -> bool {
             || credential.str("account_uuid").unwrap_or_default().trim().is_empty())
 }
 
+/// When the access token expires, if it has one and its `expired` time is readable.
+pub(crate) fn access_expiry(credential: &Credential) -> Option<DateTime<Utc>> {
+    if credential.str("access_token").unwrap_or_default().trim().is_empty() {
+        return None;
+    }
+    credential
+        .str("expired")
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc))
+}
+
 fn refresh_token(credential: &Credential) -> &str {
     credential
         .str("refresh_token")
@@ -620,6 +635,20 @@ pub(crate) fn random_hex(n: usize) -> Result<String, ExecError> {
     let mut bytes = vec![0; n];
     getrandom::fill(&mut bytes).map_err(|_| acquisition_error("secure random source unavailable"))?;
     Ok(cpa_core::hex::encode(&bytes))
+}
+
+/// The refresh-token refusal a 4xx token endpoint answer states. Only the OAuth `error`
+/// code and whether its description says the refresh token expired are read; nothing of
+/// the body is kept, since the request carried the refresh token.
+fn refusal(status: u16, body: &[u8]) -> Option<cpa_core::exec::Refusal> {
+    if !(400..500).contains(&status) {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(body).ok()?;
+    cpa_core::exec::Refusal::from_oauth(
+        value["error"].as_str()?,
+        value["error_description"].as_str().unwrap_or_default(),
+    )
 }
 
 fn acquisition_error(message: &str) -> ExecError {

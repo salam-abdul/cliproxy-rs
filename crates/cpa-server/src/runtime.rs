@@ -22,7 +22,7 @@ use cpa_exec::{Executors, Readiness};
 use futures_util::{Stream, StreamExt};
 use serde_json::{Map, Value};
 
-use crate::refresh::RefreshState;
+use crate::refresh::{RefreshState, Trigger};
 use crate::registry::Registry;
 use crate::scheduler::{Candidate, Policy, Profile, Scheduler};
 
@@ -372,7 +372,7 @@ impl Runtime {
             return Ok(lease);
         }
         let id = lease.credential.id.clone();
-        match self.prepare_credential(&id, cfg, None).await {
+        match self.prepare_credential(&id, cfg, Trigger::Due).await {
             Ok(current) => lease.credential = current,
             Err(error) => {
                 lease.complete(Outcome::Failure(error.clone()));
@@ -393,9 +393,9 @@ impl Runtime {
         cfg: &Config,
         prepare: impl FnOnce(&Credential) -> Credential,
     ) -> Option<Lease> {
-        let mut credential = self.store.get(id)?;
+        let mut credential = self.store.get(id).filter(|c| !self.store.out_of_rotation(c))?;
         if self.executors.readiness(&credential, cfg) == Readiness::PrepareNow {
-            credential = self.prepare_credential(id, cfg, None).await.ok()?;
+            credential = self.prepare_credential(id, cfg, Trigger::Due).await.ok()?;
         }
         // Outside selection: the lease answers no bounded window or probe reservation.
         let picked = self
@@ -482,15 +482,11 @@ impl Runtime {
         Ok(())
     }
 
-    /// Prepares and commits one credential. `failed` is the revision whose token an
-    /// upstream rejected: preparation then runs even when not due, unless another task
-    /// already replaced that revision (Go `refreshAuthForRequest`).
-    async fn prepare_credential(
-        &self,
-        id: &str,
-        cfg: &Config,
-        failed: Option<u64>,
-    ) -> Result<Arc<Credential>, ExecError> {
+    /// Prepares and commits one credential (Go `refreshAuthForRequest` for a forced
+    /// `trigger`). A refresh token refused for good is sent again only for
+    /// [`Trigger::Management`], and a refusal is recorded before the preparation lock is
+    /// released, so a refresh queued behind this one sends nothing.
+    async fn prepare_credential(&self, id: &str, cfg: &Config, trigger: Trigger) -> Result<Arc<Credential>, ExecError> {
         let lock = self.store.prepare_lock(id);
         let guard = lock.lock_owned().await;
         // Another request may have prepared it while we waited.
@@ -505,13 +501,42 @@ impl Runtime {
                     "credential removed or disabled during preparation",
                 )
             })?;
-        match failed {
-            Some(revision) if current.revision != revision => return Ok(current),
-            Some(_) => {}
-            None if self.executors.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
-            None => {}
+        match trigger {
+            Trigger::Unauthorized(revision) | Trigger::Management(revision) if current.revision != revision => {
+                return Ok(current);
+            }
+            Trigger::Due if self.executors.readiness(&current, cfg) == Readiness::Ready => return Ok(current),
+            Trigger::Unauthorized(_) | Trigger::Management(_) | Trigger::Due => {}
         }
-        let patch = self.executors.prepare(&self.for_executor(&current), cfg).await?;
+        // After a 401 on this revision the access token is refused too.
+        let unauthorized = matches!(trigger, Trigger::Unauthorized(_));
+        if let Some(refusal) = self.store.tokens_refused(&current)
+            && !matches!(trigger, Trigger::Management(_))
+        {
+            if unauthorized {
+                self.record_refusal(&current, version, refusal, None);
+            }
+            return Err(ExecError::local(
+                401,
+                FailureScope::Credential,
+                "credential refresh token was refused; sign in again",
+            ));
+        }
+        let patch = match self.executors.prepare(&self.for_executor(&current), cfg).await {
+            Ok(patch) => patch,
+            Err(error) => {
+                let until = self
+                    .executors
+                    .access_expiry(&current)
+                    .and_then(system_time)
+                    .filter(|_| !unauthorized);
+                let serves = until.is_some_and(|until| until > std::time::SystemTime::now());
+                if let Some(refusal) = crate::refresh::definite(&current, &error, serves) {
+                    self.record_refusal(&current, version, refusal, until);
+                }
+                return Err(error);
+            }
+        };
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
@@ -529,29 +554,76 @@ impl Runtime {
         })
     }
 
+    /// Records a refresh token refused for good ([`CredentialStore::refuse_tokens`]) and
+    /// logs each change once. Only the refusal kind is logged, never the error body.
+    fn record_refusal(
+        &self,
+        c: &Credential,
+        version: credential_updates::Version,
+        refusal: cpa_core::exec::Refusal,
+        usable_until: Option<std::time::SystemTime>,
+    ) {
+        if !self.store.refuse_tokens(&c.id, version, refusal, usable_until) {
+            return;
+        }
+        let until = self
+            .store
+            .read()
+            .refused(&c.id)
+            .and_then(|r| r.usable_until)
+            .filter(|until| *until > std::time::SystemTime::now());
+        match until {
+            Some(until) => tracing::warn!(
+                "credential refresh token refused: {} ({}) refusal={refusal:?}; not refreshed until its tokens change, used until its access token expires at {}",
+                c.id,
+                c.provider,
+                chrono::DateTime::<chrono::Utc>::from(until).to_rfc3339(),
+            ),
+            None => tracing::warn!(
+                "credential refresh token refused: {} ({}) refusal={refusal:?}; out of rotation until its tokens change",
+                c.id,
+                c.provider,
+            ),
+        }
+    }
+
     /// Go `tryRefreshAfterUnauthorized`: after an upstream 401 on a credential whose
     /// executor reports a refresh credential, prepare it once (due or not) and return the
     /// committed replacement to retry with.
-    // ponytail: refresh goes through `Executors::prepare`; a provider whose prepare only
-    // refreshes inside its lead (Claude) cannot recover a revoked but unexpired token.
-    // Force a refresh past the lead here to recover it.
+    /// ponytail: Codex `prepare` refreshes only inside its 24-hour lead, so a Codex token
+    /// revoked earlier gets no refresh here, no refusal is recorded and the account stays
+    /// in rotation on its 401 cooldowns. Refresh past the lead in `CodexExecutor::prepare`
+    /// when the caller saw a 401 to recover or refuse it at once.
     pub async fn refresh_after_unauthorized(&self, credential: &Credential, cfg: &Config) -> Option<Arc<Credential>> {
         if !self.executors.has_refresh_credential(credential) {
             return None;
         }
         let refreshed = self
-            .prepare_credential(&credential.id, cfg, Some(credential.revision))
+            .prepare_credential(&credential.id, cfg, Trigger::Unauthorized(credential.revision))
             .await
             .ok()?;
         (refreshed.revision != credential.revision).then_some(refreshed)
     }
 
+    /// [`Self::refresh_after_unauthorized`] for a path that answers the 401 without
+    /// retrying on the same account (native Claude routing, Codex live and Alpha
+    /// Search). It runs in the background, so that answer is not delayed and the next
+    /// request finds the new tokens or the recorded refusal.
+    pub(crate) fn refresh_unauthorized(self: &Arc<Self>, credential: Arc<Credential>) {
+        let rt = self.clone();
+        tokio::spawn(async move {
+            let cfg = rt.config();
+            rt.refresh_after_unauthorized(&credential, &cfg).await;
+        });
+    }
+
     /// One replaceable refresh loop. Uses the same preparation lock and atomic
     /// revision-checked commit as request acquisition; executors never persist files.
-    /// ponytail: the executor's `needs_prepare_at` alone decides eligibility, and a
-    /// failed refresh only backs off (`refresh.rs`: `invalid_grant` doubles up to 30
-    /// minutes), so a revoked refresh token is retried at that cap indefinitely. Record a
-    /// terminal refresh state on the credential if those retries must stop.
+    /// A failed refresh backs off (`refresh.rs`), except one refused for good
+    /// ([`crate::refresh::definite`]), whose credential is skipped until its tokens
+    /// change.
+    /// ponytail: the refusal is kept in memory, so a restart tries the refused refresh
+    /// token once more. Persist it with the credential if that one exchange matters.
     pub fn start_auto_refresh(self: &Arc<Self>) {
         let mut task = self.refresh_task.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(previous) = task.take() {
@@ -582,13 +654,22 @@ impl Runtime {
                 let horizon = chrono::Duration::from_std(HORIZON).unwrap_or_default();
                 let mut wake: Option<Instant> = None;
                 let mut soonest = |at: Instant| wake = Some(wake.map_or(at, |w| w.min(at)));
+                let refused: std::collections::HashSet<&str> = snapshot
+                    .iter()
+                    .filter(|c| rt.store.tokens_refused(c).is_some())
+                    .map(|c| c.id.as_str())
+                    .collect();
                 let jobs: Vec<_> = {
                     let mut state = rt.refresh_state.lock().unwrap_or_else(PoisonError::into_inner);
                     state.reconcile(&snapshot);
                     let mut jobs = Vec::new();
                     // Far enough ahead that any expiry has passed, near enough for chrono.
                     let eventually = wall + chrono::Duration::days(36_500);
-                    for c in snapshot.iter().filter(|c| refresh_candidate(c)) {
+                    // A refused credential sets no timer: new tokens arrive as a store change.
+                    for c in snapshot
+                        .iter()
+                        .filter(|c| refresh_candidate(c) && !refused.contains(c.id.as_str()))
+                    {
                         if rt.executors.needs_prepare_at(c, &cfg, eventually) {
                             soonest(now + HORIZON);
                         }
@@ -614,7 +695,7 @@ impl Runtime {
                         let rt = rt.clone();
                         let cfg = cfg.clone();
                         async move {
-                            let result = rt.prepare_credential(&credential.id, &cfg, None).await;
+                            let result = rt.prepare_credential(&credential.id, &cfg, Trigger::Due).await;
                             let Some(current) = rt.store.get(&credential.id) else {
                                 return;
                             };
@@ -638,7 +719,10 @@ impl Runtime {
                                 Instant::now(),
                             );
                             // The error body can echo request fields, so only its classification is logged.
-                            if let Err(error) = &result {
+                            // A refusal was logged when it was recorded, here or by a request.
+                            if let Err(error) = &result
+                                && rt.store.tokens_refused(&current).is_none()
+                            {
                                 tracing::warn!(
                                     "credential refresh failed: {} ({}) status={} scope={:?} invalid_grant={} retry_in={}s",
                                     current.id,
@@ -709,6 +793,14 @@ fn cooldown_dir(cfg: &Config, policy: &Policy) -> Option<std::path::PathBuf> {
     policy.save_cooldown_status.then(|| cfg.auth_dir.clone())
 }
 
+/// `at` as a `SystemTime`, or `None` before 1970 and past what the platform can hold:
+/// `SystemTime::from` panics on Windows for Go's zero time. Both read as an access token
+/// that no longer serves.
+fn system_time(at: chrono::DateTime<chrono::Utc>) -> Option<std::time::SystemTime> {
+    let seconds = u64::try_from(at.timestamp()).ok()?;
+    std::time::SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds, at.timestamp_subsec_nanos()))
+}
+
 /// `oauth.auth-auto-refresh-workers`: non-positive means Go's default of 16.
 fn refresh_workers(cfg: &Config) -> usize {
     cfg.document
@@ -720,12 +812,35 @@ fn refresh_workers(cfg: &Config) -> usize {
 }
 
 impl Runtime {
-    /// Runs the executor's single-flighted preparation now, due or not (management
-    /// refresh, Go `RefreshAuthFile`). Returns the committed credential.
+    /// Runs the executor's single-flighted preparation now for a management refresh (Go
+    /// `RefreshAuthFile`), due or not, except that Codex refreshes only inside its
+    /// 24-hour lead. Returns the committed credential.
     pub async fn refresh_credential(&self, id: &str) -> Result<Arc<Credential>, ExecError> {
         let cfg = self.config();
-        let revision = self.store.get(id).map(|c| c.revision);
-        self.prepare_credential(id, &cfg, revision).await
+        let revision = self.store.get(id).map(|c| c.revision).ok_or_else(|| {
+            ExecError::local(
+                409,
+                FailureScope::Request,
+                "credential removed or disabled during preparation",
+            )
+        })?;
+        self.prepare_credential(id, &cfg, Trigger::Management(revision)).await
+    }
+
+    /// The credential a management `api-call` fills `$TOKEN$` from. Go refreshes
+    /// antigravity, meta and xai tokens here when due; that is a due refresh, so a refused
+    /// refresh token is not sent again, and a failed refresh keeps the stored token.
+    pub(crate) async fn api_call_credential(&self, c: Arc<Credential>) -> Arc<Credential> {
+        let refreshes = [
+            cpa_exec::antigravity::PROVIDER,
+            cpa_exec::meta::PROVIDER,
+            cpa_exec::xai::PROVIDER,
+        ]
+        .contains(&c.provider.as_str());
+        if !refreshes || !self.executors.needs_prepare(&c, &self.config()) {
+            return c;
+        }
+        self.ready_credential(&c.id).await.unwrap_or(c)
     }
 
     /// The credential prepared for a one-off account call, under the same single-flight
@@ -740,8 +855,11 @@ impl Runtime {
             .ok_or_else(|| ExecError::local(404, FailureScope::Request, "credential not found"))?;
         match self.executors.readiness(&credential, &cfg) {
             Readiness::Ready => Ok(credential),
-            Readiness::PrepareNow => self.prepare_credential(id, &cfg, None).await,
-            Readiness::RefreshSoon => Ok(self.prepare_credential(id, &cfg, None).await.unwrap_or(credential)),
+            Readiness::PrepareNow => self.prepare_credential(id, &cfg, Trigger::Due).await,
+            Readiness::RefreshSoon => Ok(self
+                .prepare_credential(id, &cfg, Trigger::Due)
+                .await
+                .unwrap_or(credential)),
         }
     }
 }

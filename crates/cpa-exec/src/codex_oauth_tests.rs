@@ -192,6 +192,38 @@ async fn refresh_retry_policy_matches_go_attempt_counts() {
     }
 }
 
+/// A 400 to 403 answer whose `error` code, flat or nested, refuses the refresh token is
+/// reported as that refusal. A server fault never is, whatever its body says.
+#[test]
+fn a_token_error_reports_the_refusal_its_code_states() {
+    use cpa_core::exec::Refusal;
+    for (status, body, refusal) in [
+        (400, r#"{"error":"invalid_grant"}"#, Some(Refusal::InvalidGrant)),
+        (
+            401,
+            r#"{"error":{"code":"refresh_token_reused"}}"#,
+            Some(Refusal::Reused),
+        ),
+        (
+            401,
+            r#"{"error":{"code":"refresh_token_expired"}}"#,
+            Some(Refusal::Expired),
+        ),
+        (
+            403,
+            r#"{"error":{"code":"refresh_token_invalidated"}}"#,
+            Some(Refusal::Invalidated),
+        ),
+        (400, r#"{"error":"token_revoked"}"#, Some(Refusal::Revoked)),
+        (400, r#"{"error":"invalid_request"}"#, None),
+        (400, "not json", None),
+        (429, r#"{"error":"invalid_grant"}"#, None),
+        (500, r#"{"error":"invalid_grant"}"#, None),
+    ] {
+        assert_eq!(token_error(status, body.as_bytes()).refusal, refusal, "{status} {body}");
+    }
+}
+
 /// Go reports `failed to parse token response: <decoder error>`; the decoder can quote
 /// response values, so only Go's prefix is reported.
 #[tokio::test]

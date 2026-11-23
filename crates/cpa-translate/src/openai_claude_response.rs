@@ -7,7 +7,7 @@
 
 use crate::{
     Error, ResponseCtx,
-    common::{self, fix_json, map_tool_name, sanitize_claude_tool_id, sse_event},
+    common::{self, claude_tool_id, fix_json, map_tool_name, sse_event},
     stream::GoStream,
 };
 use cpa_common::json::{self as gj, Kind, Res};
@@ -104,9 +104,9 @@ fn collect_reasoning(node: &Res<'_>, texts: &mut Vec<Vec<u8>>) {
 
 /// A tool_use block from an OpenAI tool call; arguments that are not a JSON object
 /// (after FixJSON) become `{}`.
-fn tool_use_block(call: &Res<'_>, names: Option<&ToolNames>) -> Vec<u8> {
+fn tool_use_block(call: &Res<'_>, names: Option<&ToolNames>, portable: bool) -> Vec<u8> {
     let mut block = br#"{"type":"tool_use","id":"","name":"","input":{}}"#.to_vec();
-    gj::set_str(&mut block, "id", sanitize_claude_tool_id(&call.get("id").bytes()));
+    gj::set_str(&mut block, "id", claude_tool_id(&call.get("id").bytes(), portable));
     let name = call.get("function.name").bytes();
     match names {
         Some(names) => gj::set_str(&mut block, "name", map_tool_name(names.as_ref(), &name)),
@@ -132,7 +132,7 @@ const MESSAGE_TEMPLATE: &[u8] = br#"{"id":"","type":"message","role":"assistant"
 
 /// convertOpenAINonStreamingToAnthropic: a whole chat completion seen on the stream path
 /// of a non-streaming Claude request.
-fn stream_non_streaming(payload: &[u8]) -> Vec<u8> {
+fn stream_non_streaming(payload: &[u8], portable: bool) -> Vec<u8> {
     let root = gj::parse(payload);
     let mut out = MESSAGE_TEMPLATE.to_vec();
     gj::set_str(&mut out, "id", root.get("id").bytes());
@@ -143,7 +143,7 @@ fn stream_non_streaming(payload: &[u8]) -> Vec<u8> {
     {
         let mut blocks: Vec<Vec<u8>> = reasoning_texts(&choice.get("message"))
             .iter()
-            .filter(|t| !t.is_empty())
+            .filter(|t| !t.is_empty() && !portable)
             .map(|t| text_block("thinking", t))
             .collect();
         let content = choice.get("message.content");
@@ -153,7 +153,7 @@ fn stream_non_streaming(payload: &[u8]) -> Vec<u8> {
         let calls = choice.get("message.tool_calls");
         if calls.is_array() {
             calls.each(|_, call| {
-                blocks.push(tool_use_block(&call, None));
+                blocks.push(tool_use_block(&call, None, portable));
                 true
             });
         }
@@ -215,11 +215,12 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                             if calls.is_array() {
                                 calls.each(|_, call| {
                                     has_tool_call = true;
-                                    blocks.push(tool_use_block(&call, Some(&names)));
+                                    blocks.push(tool_use_block(&call, Some(&names), ctx.portable));
                                     true
                                 });
                             }
                         }
+                        b"reasoning" if ctx.portable => {}
                         b"reasoning" => {
                             flush(&mut blocks, &mut text, "text");
                             thinking.extend_from_slice(&item.get("text").bytes());
@@ -236,7 +237,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
                 blocks.push(text_block("text", &content.s));
             }
             for text in reasoning_texts(&message) {
-                if !text.is_empty() {
+                if !text.is_empty() && !ctx.portable {
                     blocks.push(text_block("thinking", &text));
                 }
             }
@@ -244,7 +245,7 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
             if calls.is_array() {
                 calls.each(|_, call| {
                     has_tool_call = true;
-                    blocks.push(tool_use_block(&call, Some(&names)));
+                    blocks.push(tool_use_block(&call, Some(&names), ctx.portable));
                     true
                 });
             }
@@ -272,6 +273,7 @@ pub fn go_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
     Box::new(State {
         original: ctx.original_request.to_vec(),
         streaming: stream.exists() && stream.kind != Kind::False,
+        portable: ctx.portable,
         names: None,
         text_index: -1,
         thinking_index: -1,
@@ -292,6 +294,8 @@ struct ToolCall {
 struct State {
     original: Vec<u8>,
     streaming: bool,
+    /// [`ResponseCtx::portable`]: reasoning is dropped.
+    portable: bool,
     names: ToolNames,
     message_id: Vec<u8>,
     model: Vec<u8>,
@@ -347,7 +351,7 @@ impl GoStream for State {
             self.message_delta(&mut out);
             self.message_stop(&mut out);
         } else if !self.streaming {
-            out.push(stream_non_streaming(payload));
+            out.push(stream_non_streaming(payload, self.portable));
         } else {
             self.chunk(payload, &mut out);
         }
@@ -374,7 +378,7 @@ impl State {
                 self.message_started = true;
             }
             for text in reasoning_texts(&delta) {
-                if text.is_empty() {
+                if text.is_empty() || self.portable {
                     continue;
                 }
                 if self.open_tool != -1 {
@@ -548,7 +552,7 @@ impl State {
         let call = &self.tools[&tool];
         let mut start = br#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}"#.to_vec();
         gj::set_int(&mut start, "index", index);
-        gj::set_str(&mut start, "content_block.id", sanitize_claude_tool_id(&call.id));
+        gj::set_str(&mut start, "content_block.id", claude_tool_id(&call.id, self.portable));
         gj::set_str(&mut start, "content_block.name", &call.name);
         out.push(sse_event("content_block_start", &start));
         self.tools.get_mut(&tool).unwrap().started = true;

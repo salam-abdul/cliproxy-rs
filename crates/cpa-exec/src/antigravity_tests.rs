@@ -72,6 +72,7 @@ fn request(s: &Value) -> ExecRequest {
         );
     }
     ExecRequest {
+        portable_output: false,
         operation: if op == "count" {
             Operation::CountTokens
         } else {

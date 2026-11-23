@@ -26,6 +26,7 @@ Keep the listener on loopback, configure separate client and management keys, an
 | [Native Claude](native/README.md) | Claude Code, Desktop and Zed setup, routing behavior and qualification |
 | [Dashboard](ui/README.md) | Building the embedded dashboard |
 | [Upstream review](docs/UPSTREAM-REVIEW.md) | Reviewed upstream hashes and pending ports |
+| [Usage insights](docs/USAGE-INSIGHTS.md) | Proposed design for provider, speed and tool panels; not built |
 | [Patched crates](vendor/README.md) | Vendored third-party crates and their changes |
 
 ## Development
