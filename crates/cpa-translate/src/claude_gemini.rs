@@ -45,8 +45,10 @@ fn convert(model: &str, raw: &[u8], stream: bool) -> Vec<u8> {
         copy_generation_config(&mut out, &config, model);
     }
     let mut messages = Accumulator::default();
-    let parts = root.get("system_instruction.parts");
-    if root.get("system_instruction").exists() && parts.is_array() {
+    // The Gemini API takes either spelling, as the other Gemini-client translators read it.
+    let instruction = crate::gemini_interactions::first_existing(&root, &["system_instruction", "systemInstruction"]);
+    let parts = instruction.get("parts");
+    if instruction.exists() && parts.is_array() {
         let mut system = vec![];
         parts.each(|_, part| {
             if is_gemini_thought_part(&part) {
