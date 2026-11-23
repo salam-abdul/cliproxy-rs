@@ -10,6 +10,10 @@
 
 #[path = "translation/deliver.rs"]
 mod deliver;
+#[path = "translation/expect.rs"]
+mod expect;
+#[path = "translation/facts.rs"]
+mod facts;
 #[path = "translation/golden.rs"]
 mod golden;
 #[path = "translation/normalize.rs"]
@@ -20,6 +24,7 @@ use cpa_translate::{
     RequestCtx, ResponseCtx, pair, stream_with, token_count, translate_request, translate_token_count,
 };
 use deliver::Family;
+use facts::{Kind, facts};
 use golden::Goldens;
 use normalize::normalize;
 
@@ -161,6 +166,14 @@ fn translations_match_their_goldens() {
                     let buffered = twice(&format!("{label}.request"), &mut failures, || translate(false));
                     let streamed = twice(&format!("{label}.request.stream"), &mut failures, || translate(true));
                     goldens.check(&format!("{label}.request.json"), &buffered);
+                    for out in [&buffered, &streamed] {
+                        failures.extend(expect::check(
+                            &dir,
+                            scenario,
+                            Kind::Request,
+                            &facts(upstream, Kind::Request, out),
+                        ));
+                    }
                     if streamed != buffered {
                         goldens.check(&format!("{label}.request.stream.json"), &streamed);
                     }
@@ -183,6 +196,12 @@ fn translations_match_their_goldens() {
                             shown((p.non_stream)(&ctx, &body))
                         });
                         goldens.check(&format!("{label}.response.json"), &out);
+                        failures.extend(expect::check(
+                            &dir,
+                            scenario,
+                            Kind::Response,
+                            &facts(client, Kind::Response, &out),
+                        ));
                     }
                     if let Some(sse) = &sse {
                         let ctx = ResponseCtx {
@@ -195,6 +214,12 @@ fn translations_match_their_goldens() {
                             run_stream(client, upstream, &ctx, sse)
                         });
                         goldens.check(&format!("{label}.stream.sse"), &out);
+                        failures.extend(expect::check(
+                            &dir,
+                            scenario,
+                            Kind::Stream,
+                            &facts(client, Kind::Stream, &out),
+                        ));
                     }
                 }
             }
