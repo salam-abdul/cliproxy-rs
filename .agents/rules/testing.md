@@ -15,7 +15,7 @@
 
 ## Traps
 
-- Nextest skips doc tests. CI runs `cargo test --workspace --doc` after it.
+- Nextest skips doc tests. CI's Linux test job runs `cargo test --workspace --doc` after it.
 - The heap gate (`crates/cpa-server/tests/alloc_budget.rs`, budgets in `tests/fixtures/allocation_limits.txt`) and the tests that bound wall-clock time run alone only when `.config/nextest.toml` lists them. Add a new timing test there.
 - The heap budgets are measured on Linux with the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes. macOS counts fewer allocations, so its CI job skips the heap gate; never set budgets from a macOS run.
 - The Codex Live media relay tests run only with the feature on: `cargo nextest run -p cpa-server --features media-relay --lib`.
