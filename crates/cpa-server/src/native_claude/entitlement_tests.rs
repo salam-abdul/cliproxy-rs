@@ -1045,17 +1045,35 @@ async fn a_failover_then_a_success_is_two_native_sends_each_timed_from_its_own_s
 }
 
 #[tokio::test]
-async fn an_account_without_a_credential_file_is_recorded_with_no_credential() {
+async fn an_account_without_a_credential_file_is_recorded_under_its_account_id() {
     let fixture = Fixture::new(Reply {
         status: 200,
         body: SUCCESS.to_vec(),
         broken: false,
     })
     .await;
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-ratelimit-unified-5h-utilization", "0.3".parse().unwrap());
+    fixture
+        .state
+        .rt
+        .executors
+        .claude
+        .quota()
+        .observe_model("a", "claude-opus-test", &headers);
     assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
     let sends = activity_sends(&fixture).await;
     assert_eq!(sends.len(), 1, "{sends:?}");
-    assert_eq!(sends[0]["credential"], Value::Null);
+    assert_eq!(sends[0]["credential"], "a");
+    let db = rusqlite::Connection::open(fixture.dir.join("events.sqlite")).unwrap();
+    let readings: Vec<(String, f64)> = db
+        .prepare("SELECT credential, used FROM quota_readings")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(readings, [("a".to_owned(), 30.0)]);
     assert_eq!(sends[0]["ttft_kind"], "byte");
     assert_eq!(sends[0]["outcome"], "complete");
     assert_eq!(sends[0]["model"], "claude-opus-test");

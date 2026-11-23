@@ -375,7 +375,8 @@ pub(super) fn send_row(
         at_ms: chrono::Utc::now().timestamp_millis().saturating_sub(latency),
         source: crate::request_logging::history::row::Source::Native,
         provider: "claude".into(),
-        credential: Some(a.file_id.clone()).filter(|id| !id.is_empty()),
+        // The key native quota and the Claude executor's snapshots use.
+        credential: Some(a.quota_id().to_owned()).filter(|id| !id.is_empty()),
         model: Some(model.to_owned()),
         outcome,
         status: None,
