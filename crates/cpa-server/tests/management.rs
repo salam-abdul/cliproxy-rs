@@ -1386,12 +1386,12 @@ async fn activity_route_reads_the_running_store() {
             "buckets",
             "coverageUncertain",
             "credentials",
+            "cycles",
             "from",
             "lostEvents",
             "oldestSend",
             "providers",
             "range",
-            "readings",
             "to"
         ]
     );
