@@ -2,10 +2,8 @@
 //! registry_bytes_test.go) against Go-generated vectors in tests/fixtures/sdk_registry.json
 //! (tests/reference/sdk.go).
 //!
-//! Covered elsewhere: summary intent through registered pairs, envelope dispatch, byte
-//! outputs and apply_patch nil results are byte goldens in tests/golden.rs (the generator
-//! calls sdk.TranslateRequest, TranslateRequestEnvelope, TranslateNonStream,
-//! TranslateStream and TranslateTokenCount).
+//! Each registered pair's request, reply and token-count output is covered by
+//! tests/translation.rs.
 //! Go's plugin-hook tests are not ported: the fork has no plugin host.
 use cpa_core::format::Format;
 use cpa_translate::{RequestCtx, pair, token_count, translate_request, translate_token_count};

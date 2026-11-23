@@ -52,6 +52,7 @@ Out of scope: the plugin host, the Copilot provider, the WebSocket data tunnel, 
 
 - The Go `GET /v8/management/server/latest-version` and `/v0/management/latest-version` release checks are not served; this fork has no release feed. `POST /v0/management/quota/fetch` answers 400 for a `plugin_id` and 422 for a credential without a usable quota probe, where Go answered 501.
 - The Go `POST /v0/management/quota/reset` plugin hook is not served. `GET` and `POST /v8/management/quota/resets` list and spend the Claude grants and Codex credits that the providers expose, with no plugin layer.
+- Translator fixes with no upstream counterpart, found by the translation goldens: Gemini `systemInstruction` and Claude input tokens between Gemini clients and Claude; finish reasons for Gemini clients of Codex, Claude and Interactions; reasoning in buffered Codex replies to Gemini clients; typed text and thought items and output-limit status in replies to Interactions clients; one step per OpenAI chat stream item and one copy of Codex tool arguments for Interactions clients; the output limit on Interactions requests to Responses; and `response.failed` when a Claude stream fails for Responses clients.
 
 ## Next review
 
