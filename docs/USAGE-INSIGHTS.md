@@ -1,6 +1,6 @@
 # Usage insights: ideas and design
 
-Status: proposed. Nothing here is built. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
+Status: proposed. Part 1 is built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
 
 Read at fork `8e66c70` and [cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper) `e5e8f1a` (K in [Upstream review](UPSTREAM-REVIEW.md)). File and line references are to that fork commit.
 
@@ -22,9 +22,9 @@ Cost in dollars is not wanted, so Keeper's price tables and cost panels are out.
 | Not goals | Per-client-key views. Compatibility with Keeper, its login, backups or priority editing. Judging whether a tool's result was useful. Live streaming panels. |
 | Must not happen | A request waits on any of this. A stored body is parsed on the request path. Prompts, outputs or tool results are copied out of body history. A body is re-serialized or replayed. |
 
-## What exists today
+## What existed before part 1
 
-The fork has two stores. Neither answers the three questions alone.
+The fork had two stores. Neither answers the three questions alone.
 
 | | Activity store (SQLite) | Body history (Parquet) |
 | --- | --- | --- |
@@ -96,41 +96,13 @@ Four parts, built in order. Part 1 unlocks parts 2 and 3. Part 4 stands on body 
 
 ### Part 1: one activity store for every provider
 
-**Ownership.** The store moves out of `native_claude/history.rs` into a server-level module that the runtime owns and starts with the server. Native routing becomes one of its two feeds.
+Built. [Configuration](CONFIGURATION.md#activity-store) and [Native Claude](../native/README.md#diagnostics-and-history) own it. Facts of the built store that later parts rely on:
 
-**Two tables, two grains.**
-
-- `requests` keeps its key and its meaning: one row per client request, including one refused before any send. Existing rows stay valid. It gains `source` (`native` or `proxy`; absent means native, as every existing row is) and `total_ms`, the time from the request's arrival to its end.
-- `sends` is new: one row per upstream send, keyed by request, WebSocket turn and send number, the same three values body history calls `exchange_id`, `turn` and `send`. A request-level panel counts `requests`; a provider panel counts `sends`, because each send landed on one account. Neither needs a flag to tell the two apart.
-
-**`sends` columns.**
-
-| Column | Meaning |
-| --- | --- |
-| `provider`, `credential`, `model` | Where the send went. `credential` is the credential file ID on both paths. |
-| `outcome`, `status`, `stream` | As body history records them |
-| `latency_ms`, `ttft_ms` | From the start of this send to its end and to its first response, as body history times them. Never from the request's arrival. |
-| `ttft_kind` | `byte`, `token` or `event`: which of the three measurements `ttft_ms` is |
-| `uncached_input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `reasoning_tokens` | From the usage breakdown, which separates them the same way for every provider (`usage_record.rs:27`). `output_tokens` includes reasoning. |
-| `tokens_exact` | False when the provider's counts did not add up to a complete breakdown. Such a send is left out of cache rate and speed. |
-
-**Feeds.**
-
-- Native routing writes the request row as today, and one `sends` row per send, timed from the send.
-- The translating proxy writes one `sends` row where an attempt is settled (`usage_record.rs:2145`) and the request row when dispatch ends.
-- A fallback send carries the native request's ID, and the fallback dispatch writes no request row of its own, so a fallback-served request stays one request with its sends.
-
-**Request-path cost.** Feeding the store turns on the usage tracker and its scan of response events for token counts on every translating-proxy generate request. Today both run only while the usage queue or body history is on. This is the one new cost on the request path, and it is unmeasured.
-
-**Quota readings.** A new `quota_readings` table holds one row per credential, quota window and time bucket: percent used and reset time. Claude readings come from the status loop as today, and Codex readings from the quota headers its executor already keeps per account (`crates/cpa-exec/src/codex_quota.rs:427`). The existing `account_status` table and its panel stay as they are. Other providers report no quota, so their accounts show work, reliability and speed only.
-
-**Unchanged contracts.**
-
-- Writes never block a request: the bounded queue and `try_send` stay, and dropped rows are counted in `lost_events`.
-- The store holds no session IDs, prompts, outputs, tool names or anything else read from a body.
-- Rows older than 31 days are removed.
-
-**Route.** One new management route returns the store's panels for a range, with optional provider and credential filters. `observability/native/history` (`crates/cpa-server/src/management.rs:470`) keeps answering until the dashboard has moved, then goes. Send-level panels start at the upgrade and show the date of their oldest send.
+- The store's file stays beside the native routing event log, and the store runs only while native routing runs. The server has no state folder of its own.
+- The translating proxy writes no request row, and `requests` gained no columns. Each send stores `start_ms`, the time from its request's arrival to the send's start, so a request's total and its time in the server follow from its sends.
+- On the translating proxy `send` is the attempt number. It equals body history's send number unless one attempt resent its request.
+- Quota readings come from response headers for Claude and Codex alike, on both paths, from the snapshots the executors keep. The native status loop and `account_status` are unchanged.
+- With the store on, a 306 KB proxy request allocates 4.75 percent more (2,082 to 2,181 allocations) and a 1.9 MB one 1.67 percent more, with peak heap up under 0.2 percent.
 
 ### Part 2: which providers earn their keep
 
@@ -256,38 +228,32 @@ The server cannot tell whether a result helped. The panel says so.
 
 ## Build order
 
-1. The activity store for every provider.
+1. The activity store for every provider. Built.
 2. Providers table, health strip, quota cycles, cache read rate.
 3. Speed section.
 4. Tool and skill indexer, then its tab.
 
-Each is its own change. Tests worth naming now: a request with two sends is one request and two sends; a fallback-served request is one request; a WebSocket turn's frames are indexed; a cloaked proxy row adds no tool names; a delete during a running server leaves no fact from a deleted row.
+Each is its own change. Tests worth naming now: a WebSocket turn's frames are indexed; a cloaked proxy row adds no tool names; a delete during a running server leaves no fact from a deleted row.
 
 ## Decisions that need approval
 
 | Decision | Proposal |
 | --- | --- |
-| Usage tracking always on for the translating proxy | Accept it as the cost of part 1, after measuring it on a busy stream. |
-| Where the store's file lives | One fixed file in the server's state folder, with or without native routing. On first start the existing native file is copied there. No setting. |
-| Row caps | 250,000 requests as today, 1,000,000 sends, 200,000 quota readings. Each panel shows the date of its oldest row. |
-| The new management route, and when the native one goes | One route for the store's panels; the native route is removed in the change that moves the dashboard. |
+| When the native history route goes | In the change that moves the dashboard to the activity route. |
 | Dashboard elements | Providers table, health strip, Speed section, Tools tab. Each must fit the bundle budgets. |
-| Recording Codex quota readings | As described in part 1. |
 | First-byte marks in the Codex and Gemini executors | Add them, so their time to first response is comparable. Until then part 3 labels it. |
 | The tool index file in the history folder, and the delete command updating it | As described in part 4. No new setting: the indexer runs whenever body history is on. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
 
 ## Left to the builder
 
-Module, table and file names, SQL, the route's JSON shape, the split into Svelte components, fixtures, and where dispatch writes a proxy request's row.
+Module, table and file names, SQL, the split into Svelte components, and fixtures.
 
 ## Not verified
 
 - **Skills on the wire.** That a skill appears as a `Skill` tool call with its name in `input.skill` is assumed, not read from a stored request. What a skill loads into the conversation is not measured: its tool result may be a short launch line with the skill text sent separately.
 - **Codex WebSocket frames.** Which frame carries a finished `function_call` item was not read from a stored turn.
-- **Codex quota headers.** The reading is a map of response headers. Which carry each window's percent and reset time was not read.
 - **Other body formats.** Gemini and Antigravity tool calls carry no call ID and are not designed. Kimi and xAI are assumed to use the OpenAI Chat shape.
 - **Reversing a tool alias.** Whether the client's name can be recovered from an alias without the client key was not checked.
-- **The proxy's request end.** The place where dispatch knows a request has ended, with its arrival time, was not located.
-- **Costs.** Nothing was measured: usage tracking on every proxy request, indexing a 512 MiB file, the index's size, or percentile queries at the row cap.
+- **Costs.** Not measured: indexing a 512 MiB file, the index's size, or percentile queries at the row cap.
 - **Calls with no later request.** The last call of a session is never resent, so it is not counted.

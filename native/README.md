@@ -90,6 +90,8 @@ A fallback writes no routing state: session affinity and cooldowns are as the Cl
 
 **Overview** reads `GET /v8/management/observability/native/history?range=24h|7d|30d` from a private SQLite file beside the event log. It keeps final request outcomes, token counters and account availability, and excludes sessions, request bodies and body fingerprints. Account status is sampled without inference calls. An unavailable history file does not stop routing. History starts when this version first runs; older event logs are not backfilled. The dashboard marks incomplete token totals, dropped records and possible gaps after an unclean shutdown.
 
+The same file is the activity store. It also records one row per upstream send, from native routing and from the translating proxy: provider, account, model, outcome, status, latency and time to first response measured from the send's own start, and token counts. It keeps Claude and Codex quota readings taken from response headers, the latest per account, window and 10 minutes. It holds no prompts, outputs, tool names or session IDs. `GET /v8/management/observability/activity` reads it ([Configuration](../docs/CONFIGURATION.md#activity-store)).
+
 With `observability.history` on, every native send is also recorded with its request and response bodies in the model-traffic history ([Configuration](../docs/CONFIGURATION.md#history)). The SQLite history above stays free of content either way.
 
 Timing fields separate body preparation, session waiting, quota admission, upstream headers across attempts and response streaming. First-byte time is measured from request arrival and can precede generated text, so it is not time to first token. The fields are elapsed time, not CPU cost.
@@ -99,7 +101,7 @@ Timing fields separate body preparation, session waiting, quota admission, upstr
 | Events in memory | 512 since startup |
 | Event write queue | 256 events, 8 KiB per event, on a background thread |
 | Event file | Rotates at 8 MiB, keeps one previous file |
-| History | 31 days, trimmed hourly to 250,000 requests and 50,000 status records |
+| History | 31 days, trimmed hourly to 250,000 requests, 1,000,000 sends, 200,000 quota readings and 50,000 status records |
 | Account status samples | Every 5 minutes |
 | Session affinity | 4,096 bindings, expired after 30 idle days, checkpointed hourly |
 
