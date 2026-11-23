@@ -687,7 +687,8 @@ impl GoStream for ToGemini {
             b"step.delta" => return Ok(self.step_delta(&root).into_iter().collect()),
             b"interaction.completed" | b"finish" => {
                 self.adopt(&root.get("interaction"), true);
-                return Ok(vec![self.chunk(vec![], "STOP", &interactions_usage(&root), true)]);
+                let finish = gemini_finish(&root.get("interaction"), &root);
+                return Ok(vec![self.chunk(vec![], finish, &interactions_usage(&root), true)]);
             }
             b"response.failed" | b"interaction.failed" => {
                 let mut error = root.get("error");
@@ -848,7 +849,22 @@ pub(crate) fn interactions_to_gemini_non_stream(ctx: &ResponseCtx<'_>, body: &[u
         parts.extend(step_to_parts(&step));
         true
     });
-    Ok(state.chunk(parts, "STOP", &interactions_usage(&root), true))
+    Ok(state.chunk(
+        parts,
+        gemini_finish(&interaction, &root),
+        &interactions_usage(&root),
+        true,
+    ))
+}
+
+/// Gemini's finish reason for an interaction: `MAX_TOKENS` when it ended on its token
+/// limit, else `STOP`.
+fn gemini_finish(interaction: &Res<'_>, root: &Res<'_>) -> &'static str {
+    if crate::interactions_claude::hit_limit(interaction, root) {
+        "MAX_TOKENS"
+    } else {
+        "STOP"
+    }
 }
 
 #[cfg(test)]
