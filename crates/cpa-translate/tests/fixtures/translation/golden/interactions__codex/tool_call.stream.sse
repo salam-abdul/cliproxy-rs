@@ -13,9 +13,6 @@ data: {"index":0,"delta":{"arguments":"{\"city\":","type":"arguments_delta"},"ev
 event: step.delta
 data: {"index":0,"delta":{"arguments":"\"Paris\"}","type":"arguments_delta"},"event_type":"step.delta"}
 
-event: step.delta
-data: {"index":0,"delta":{"arguments":"{\"city\":\"Paris\"}","type":"arguments_delta"},"event_type":"step.delta"}
-
 event: step.stop
 data: {"index":0,"event_type":"step.stop"}
 
