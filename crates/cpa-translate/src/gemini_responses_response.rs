@@ -1337,6 +1337,18 @@ impl State {
         }
 
         let mut completed = br#"{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}"#.to_vec();
+        // A reply cut off at its output limit ends incomplete, as the Claude translator to
+        // Responses reports it.
+        let limited = hit_output_limit(root);
+        if limited {
+            gj::set_str(&mut completed, "type", "response.incomplete");
+            gj::set_str(&mut completed, "response.status", "incomplete");
+            gj::set_raw(
+                &mut completed,
+                "response.incomplete_details",
+                br#"{"reason":"max_output_tokens"}"#,
+            );
+        }
         let seq = self.next_seq();
         gj::set_int(&mut completed, "sequence_number", seq);
         gj::set_str(&mut completed, "response.id", &self.response_id);
@@ -1397,7 +1409,14 @@ impl State {
         if usage.exists() {
             set_usage(&mut completed, "response.usage.", &usage, true);
         }
-        out.push(event("response.completed", &completed));
+        out.push(event(
+            if limited {
+                "response.incomplete"
+            } else {
+                "response.completed"
+            },
+            &completed,
+        ));
         self.completed = true;
     }
 }
@@ -1542,6 +1561,11 @@ enum Output {
 
 // The flush macros mirror Go's closures, which reset state their last call never reads.
 #[allow(unused_assignments)]
+/// Whether a Gemini response stopped at its output limit.
+fn hit_output_limit(root: &Res<'_>) -> bool {
+    root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
+}
+
 pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     let root = unwrap_response_root(gj::parse(body));
     let request = pick_request(ctx.original_request, ctx.translated_request);
@@ -1551,6 +1575,10 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
     let mut resp =
         br#"{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}"#
             .to_vec();
+    if hit_output_limit(&root) {
+        gj::set_str(&mut resp, "status", "incomplete");
+        gj::set_raw(&mut resp, "incomplete_details", br#"{"reason":"max_output_tokens"}"#);
+    }
     let mut id = root.get("responseId").bytes().into_owned();
     if id.is_empty() {
         id = format!(
