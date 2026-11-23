@@ -2468,8 +2468,42 @@ fn a_window_that_states_no_use_gives_no_reading() {
     let now = SystemTime::now();
     let reset_only = quota_signals(&[("X-Codex-Primary-Reset-After-Seconds", "3600")]);
     assert_eq!(readings("codex", &reset_only, now), []);
-    for utilization in ["NaN", "1.5"] {
+    for utilization in ["NaN", "-0.1", "over"] {
         let claude = quota_signals(&[("Anthropic-Ratelimit-Unified-5h-Utilization", utilization)]);
         assert_eq!(readings("claude", &claude, now), [], "{utilization}");
     }
+}
+
+#[test]
+fn use_past_the_limit_reads_as_the_whole_window() {
+    let now = SystemTime::now();
+    let claude = quota_signals(&[("Anthropic-Ratelimit-Unified-5h-Utilization", "1.5")]);
+    let codex = quota_signals(&[("X-Codex-Primary-Used-Percent", "104")]);
+    for (provider, signals) in [("claude", claude), ("codex", codex)] {
+        let used: Vec<f64> = readings(provider, &signals, now)
+            .iter()
+            .map(|r| r.used_percent)
+            .collect();
+        assert_eq!(used, [100.0], "{provider}");
+    }
+}
+
+#[test]
+fn a_zero_second_codex_reset_is_no_reset() {
+    let now = SystemTime::now();
+    let zero = quota_signals(&[
+        ("X-Codex-Primary-Used-Percent", "100"),
+        ("X-Codex-Primary-Reset-After-Seconds", "0"),
+    ]);
+    let read = readings("codex", &zero, now);
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert_eq!(read[0].reset, None);
+    let hour = quota_signals(&[
+        ("X-Codex-Primary-Used-Percent", "100"),
+        ("X-Codex-Primary-Reset-After-Seconds", "3600"),
+    ]);
+    assert_eq!(
+        readings("codex", &hour, now)[0].reset,
+        Some(now + Duration::from_secs(3600))
+    );
 }

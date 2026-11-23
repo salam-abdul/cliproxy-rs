@@ -180,7 +180,9 @@ pub struct Reading {
 }
 
 /// Each quota window's use in a snapshot's `signals`, for `claude` or `codex`.
-/// A window that states no use gives no reading.
+/// A window that states no use, or a negative one, gives no reading; use above 100
+/// percent reads as 100. A reset is kept only when upstream stated one: a zero delay
+/// names no time.
 pub fn readings(
     provider: &str,
     signals: &std::collections::BTreeMap<String, String>,
@@ -191,11 +193,11 @@ pub fn readings(
         .into_iter()
         .filter_map(|(long, window)| {
             let window = window?;
-            let used_percent = window.used.filter(|u| (0.0..=100.0).contains(u))?;
+            let used_percent = window.used.filter(|u| *u >= 0.0)?.min(100.0);
             Some(Reading {
                 long,
                 used_percent,
-                reset: window.reset,
+                reset: window.stated_reset,
             })
         })
         .collect()
