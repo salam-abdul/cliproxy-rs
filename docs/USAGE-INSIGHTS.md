@@ -132,11 +132,11 @@ There is no single score. An account that serves little, leaves most of its week
 
 ### Part 3: what slows responses
 
-A request's time splits into four parts that add up to `total_ms`:
+A request's total is its last send's `start_ms + latency_ms`. It splits into four parts that add up to it:
 
 | Part | Computed as |
 | --- | --- |
-| In the server | `total_ms` minus the summed `latency_ms` of the request's sends: preparation, session wait and quota admission on native routing; routing and translation on the proxy |
+| In the server | The last send's `start_ms` minus the summed `latency_ms` of the sends before it: preparation, session wait and quota admission on native routing; routing and translation on the proxy |
 | Earlier sends | Summed `latency_ms` of every send before the last: failovers and retries |
 | Last send until its first response | Its `ttft_ms` |
 | Generation | Its `latency_ms - ttft_ms` |
