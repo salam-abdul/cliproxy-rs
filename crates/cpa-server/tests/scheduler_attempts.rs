@@ -271,6 +271,50 @@ async fn same_round_failover_preserves_lease_counts_and_last_error() {
 }
 
 #[tokio::test]
+async fn a_failover_is_two_sends_of_one_request_on_two_credentials() {
+    let fixture = Fixture::new(
+        Mode::FirstFails,
+        &[serde_json::json!({}), serde_json::json!({})],
+        Policy::default(),
+    )
+    .await;
+    let dir = std::env::temp_dir().join(format!("cpa-scheduler-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    cpa_server::testing::start_activity(&fixture.rt, dir.join("activity.sqlite")).unwrap();
+    let response = fixture.request(false).await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
+    let sends = cpa_server::testing::activity_sends(&fixture.rt);
+    fixture.rt.stop_activity();
+    let _ = std::fs::remove_dir_all(&dir);
+    let column = |name: &str| sends.iter().map(|send| send[name].clone()).collect::<Vec<_>>();
+    assert_eq!(column("send"), [0, 1], "{sends:?}");
+    assert_eq!(column("outcome"), ["failed", "complete"]);
+    assert_eq!(column("status"), [Value::from(503), Value::Null]);
+    let ids = column("request_id");
+    assert!(ids[0].as_str().is_some_and(|id| !id.is_empty()), "{ids:?}");
+    assert_eq!(ids[0], ids[1]);
+    let credentials = column("credential");
+    assert!(credentials.iter().all(Value::is_string), "{credentials:?}");
+    assert_ne!(credentials[0], credentials[1]);
+}
+
+#[tokio::test]
+async fn without_the_store_a_request_is_served_and_nothing_is_recorded() {
+    let fixture = Fixture::new(
+        Mode::FirstFails,
+        &[serde_json::json!({}), serde_json::json!({})],
+        Policy::default(),
+    )
+    .await;
+    assert!(!fixture.rt.usage_queue().accepts());
+    let response = fixture.request(false).await;
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
+    assert!(cpa_server::testing::activity_sends(&fixture.rt).is_empty());
+}
+
+#[tokio::test]
 async fn cap_is_per_round_and_skipped_credentials_age_by_round() {
     let policy = Policy {
         max_retry_credentials: 1,

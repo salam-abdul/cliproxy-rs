@@ -721,6 +721,12 @@ impl Trace {
         self.5.exchange()
     }
 
+    /// The WebSocket connection ID and turn index, without creating the history's send
+    /// counter.
+    pub(crate) fn turn(&self) -> Option<(String, i32)> {
+        self.5.turn.clone()
+    }
+
     /// The `X-CPA-TRACE-ID` value of the credential selected so far.
     fn header(&self) -> Option<axum::http::HeaderValue> {
         let id = self
@@ -925,24 +931,25 @@ async fn run_attempts(
         call.execution_session.as_deref(),
         &call.caller.principal,
     );
-    // Go's usage reporter: one record per Generate attempt while the queue accepts.
+    // Go's usage reporter: one record per Generate attempt while the queue accepts. The
+    // activity store takes one send per Generate attempt while it runs.
     // Home count-tokens attempts record only their upstream 401s (`reportHomeUnauthorized`).
     let home_count = call.operation == Operation::CountTokens && rt.remote_dispatch().is_some();
     let history = call.operation == Operation::Generate && crate::request_logging::history::on(&cfg);
-    let facts = ((call.operation == Operation::Generate && (rt.usage_queue().accepts() || history))
-        || (home_count && rt.usage_queue().accepts()))
-    .then(|| {
-        let facts = crate::usage_record::Facts::new(
-            usage_client(&cfg, &call, trace, &session),
-            call.entry,
-            call.response,
-            &call.model,
-            &call.body,
-            call.stream,
-            trace,
-        );
-        Arc::new(if history { facts.recording(trace) } else { facts })
-    });
+    let recorded = rt.usage_queue().accepts() || history || rt.activity().is_some();
+    let facts = ((call.operation == Operation::Generate && recorded) || (home_count && rt.usage_queue().accepts()))
+        .then(|| {
+            let facts = crate::usage_record::Facts::new(
+                usage_client(&cfg, &call, trace, &session),
+                call.entry,
+                call.response,
+                &call.model,
+                &call.body,
+                call.stream,
+                trace,
+            );
+            Arc::new(if history { facts.recording(trace) } else { facts })
+        });
     let (usage, unauthorized) = if home_count { (None, facts) } else { (facts, None) };
     // `WithPinnedAuthID`: every other credential is excluded in every round.
     // A remote dispatcher receives the pinned ID itself.

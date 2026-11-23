@@ -8,7 +8,6 @@ use crate::usage_record::{Detail, ensure_breakdown, has_tokens};
 
 /// Which measurement a send's time to first response is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code, reason = "no request path records sends yet")]
 pub(crate) enum TtftKind {
     Byte,
     Token,
@@ -41,7 +40,6 @@ impl Tokens {
     /// The provider's counts in one meaning: cache inside neither input nor output, reasoning
     /// inside output. Counts that make no complete breakdown are kept as reported and marked
     /// inexact.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no request path records sends yet"))]
     pub(crate) fn of(detail: &Detail, provider: &str, executor_type: &str) -> Option<Self> {
         if !has_tokens(detail) {
             return None;

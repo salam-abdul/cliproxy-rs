@@ -176,7 +176,6 @@ impl Runtime {
     }
 
     /// Records one upstream send when the activity store runs; never waits on the store.
-    #[expect(dead_code, reason = "no request path records sends yet")]
     pub(crate) fn record_send(&self, row: crate::activity::sends::SendRow) {
         if let Some(activity) = self.activity() {
             activity.record_send(row);

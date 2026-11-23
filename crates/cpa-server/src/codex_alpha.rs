@@ -153,6 +153,7 @@ async fn alpha_search(
             prompt_prefix_hash: String::new(),
             attempts: Default::default(),
             history: Default::default(),
+            turn: None,
         };
         return search(&rt, lease, &body, &headers, &model, &cfg, &capture, Some(&facts)).await;
     }
