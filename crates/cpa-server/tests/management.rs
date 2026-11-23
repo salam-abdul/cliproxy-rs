@@ -1354,6 +1354,53 @@ async fn usage_queue_pops_records_in_order() {
     server.abort();
 }
 
+/// `GET /observability/activity` refuses a bad range or filter, answers 409 while no
+/// activity store runs, and reads the store once one does.
+#[tokio::test]
+async fn activity_route_reads_the_running_store() {
+    let f = Fixture::new("activity-route");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let get = |query: String| {
+        client
+            .get(format!("{base}/v8/management/observability/activity{query}"))
+            .bearer_auth("fake-management-only")
+            .send()
+    };
+    let status = |response: wreq::Response| response.status().as_u16();
+    assert_eq!(status(get(String::new()).await.unwrap()), 409);
+    assert_eq!(status(get("?range=1h".into()).await.unwrap()), 400);
+    assert_eq!(status(get("?provider=".into()).await.unwrap()), 400);
+    let long = "a".repeat(257);
+    assert_eq!(status(get(format!("?credential={long}")).await.unwrap()), 400);
+    cpa_server::testing::start_activity(&f.rt, f.dir.join("activity.sqlite")).unwrap();
+    let response = get("?range=7d&provider=codex".into()).await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let mut keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "bucketMs",
+            "buckets",
+            "coverageUncertain",
+            "credentials",
+            "from",
+            "lostEvents",
+            "oldestSend",
+            "providers",
+            "range",
+            "readings",
+            "to"
+        ]
+    );
+    assert_eq!(body["range"], "7d");
+    assert_eq!(status(get("?range=1h".into()).await.unwrap()), 400);
+    f.rt.stop_activity();
+    server.abort();
+}
+
 /// api-call HEAD: Go's transport never asks for gzip on HEAD, so the upstream sees no
 /// Accept-Encoding and a gzip Content-Encoding on the answer is relayed untouched.
 #[tokio::test]

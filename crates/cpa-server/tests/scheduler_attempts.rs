@@ -308,10 +308,19 @@ async fn without_the_store_a_request_is_served_and_nothing_is_recorded() {
     )
     .await;
     assert!(!fixture.rt.usage_queue().accepts());
+    assert!(!cpa_server::testing::activity_running(&fixture.rt));
     let response = fixture.request(false).await;
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(response.text().await.unwrap(), "{\"ok\":true}");
-    assert!(cpa_server::testing::activity_sends(&fixture.rt).is_empty());
+    assert!(!cpa_server::testing::activity_running(&fixture.rt));
+    // A store started afterwards holds nothing of the request served without one.
+    let dir = std::env::temp_dir().join(format!("cpa-scheduler-activity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    cpa_server::testing::start_activity(&fixture.rt, dir.join("activity.sqlite")).unwrap();
+    let sends = cpa_server::testing::activity_sends(&fixture.rt);
+    fixture.rt.stop_activity();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(sends.is_empty(), "{sends:?}");
 }
 
 #[tokio::test]

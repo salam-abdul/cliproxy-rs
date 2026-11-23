@@ -523,7 +523,21 @@ async fn large_requests_stay_within_their_heap_budget() {
         let body = conversation(target);
         gate(name, &body, measure("claude", &body).await, &mut over);
     }
+    // Outside the counted sends: each case's warm-up and three counted sends were recorded.
+    let recorded = rt.clone();
+    let sends = tokio::task::spawn_blocking(move || cpa_server::testing::activity_sends(&recorded))
+        .await
+        .unwrap();
     rt.stop_activity();
+    assert_eq!(sends.len(), 8, "{sends:?}");
+    for send in &sends {
+        assert!(
+            send["source"] == "proxy" && send["provider"] == "claude" && send["outcome"] == "complete",
+            "{send}"
+        );
+    }
+    let requests: std::collections::HashSet<_> = sends.iter().map(|send| send["request_id"].clone()).collect();
+    assert_eq!(requests.len(), 8, "{sends:?}");
     let _ = std::fs::remove_dir_all(dir);
     assert!(
         over.is_empty(),
