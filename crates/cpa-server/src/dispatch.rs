@@ -706,9 +706,11 @@ impl Trace {
         trace
     }
 
-    /// A trace with its own request ID whose sends serve `parent_request`.
-    pub(crate) fn serving(parent_request: String) -> Self {
+    /// A trace with its own request ID whose sends serve `parent_request`, which arrived
+    /// at `arrived`: its sends' times count from there.
+    pub(crate) fn serving(parent_request: String, arrived: std::time::Instant) -> Self {
         let mut trace = Self::with_request_id(None);
+        trace.3 = Arc::new(crate::observability::Clock::accepted_at(arrived));
         trace.6 = Some(parent_request);
         trace
     }

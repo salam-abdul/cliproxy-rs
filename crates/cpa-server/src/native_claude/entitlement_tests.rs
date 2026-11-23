@@ -144,6 +144,9 @@ impl Fixture {
                             if cpa_common::gostr::contains(&body, b"MODE_STALL") {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
+                            if cpa_common::gostr::contains(&body, b"MODE_SLOW") {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                            }
                             let response = if cpa_common::gostr::contains(&body, b"MODE_OPEN_STREAM") {
                                 let stream = futures_util::stream::once(async {
                                     Ok::<_, std::io::Error>(Bytes::from_static(b"event: ping\n\n"))

@@ -276,6 +276,30 @@ async fn a_fallback_send_names_the_native_request_it_serves() {
     assert_ne!(sends[0]["request_id"], native.as_str());
 }
 
+/// The fallback's sends count from the native request's arrival, so the time Claude took
+/// to refuse it is part of their `start_ms`.
+#[tokio::test]
+async fn a_fallback_send_starts_after_the_native_time_before_it() {
+    let limited = Reply {
+        status: 429,
+        body: br#"{"type":"error","error":{"type":"rate_limit_error","message":"Limited"}}"#.to_vec(),
+        broken: false,
+    };
+    let local = Local::start(200).await;
+    let fixture = fixture(limited, only_a(), mapped("local-test"), local.yaml()).await;
+    let slow = br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [{"role":"user","content":"MODE_EXHAUSTED MODE_SLOW"}] }"#;
+    let response = post(&fixture, slow).await;
+    assert_eq!(response.status(), 200);
+    response.bytes().await.unwrap();
+    let sends = super::entitlement_tests::activity_sends(&fixture).await;
+    let fallback: Vec<&Value> = sends.iter().filter(|send| send["source"] == "proxy").collect();
+    let [fallback] = fallback.as_slice() else {
+        panic!("one fallback send, saw {sends:?}")
+    };
+    // The Claude answer took 150 ms before the fallback began.
+    assert!(fallback["start_ms"].as_i64().is_some_and(|ms| ms >= 150), "{fallback}");
+}
+
 #[tokio::test]
 async fn a_buffered_request_falls_back_as_json() {
     let local = Local::start(200).await;

@@ -835,6 +835,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                             raw: &raw,
                             headers: &parts.headers,
                             attempts: tried.len(),
+                            started: request_started,
                         },
                         rejected,
                     )
@@ -878,6 +879,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                                 raw: &raw,
                                 headers: &parts.headers,
                                 attempts: tried.len(),
+                                started: request_started,
                             },
                             rejected,
                         )
@@ -929,6 +931,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                                 raw: &raw,
                                 headers: &parts.headers,
                                 attempts: tried.len(),
+                                started: request_started,
                             },
                             rejected,
                         )
