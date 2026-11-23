@@ -1778,3 +1778,24 @@ async fn the_activity_store_starts_once_and_is_shared() {
     assert!(!dir.join("other.sqlite").exists());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Stopping the store marks its file clean even though the runtime still holds the store,
+/// so the next start does not report uncertain coverage.
+#[tokio::test]
+async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
+    let (rt, dir, _) = oauth_accounts("claude", &[], answer(|_| (500, "{}"))).await;
+    let path = dir.join("activity.sqlite");
+    rt.start_activity(path.clone()).unwrap();
+    rt.activity()
+        .unwrap()
+        .record_event(&serde_json::json!({"type":"inference","requestId":"one",
+        "at":chrono::Utc::now().to_rfc3339(),"outcome":"success"}));
+    rt.stop_activity();
+    assert!(rt.activity().is_some());
+    let next = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0))).unwrap();
+    let data = next.query(crate::activity::Range::Day, None).await.unwrap();
+    assert_eq!(data["buckets"][0]["requests"], 1);
+    assert_eq!(data["coverageUncertain"], false);
+    drop(next);
+    let _ = std::fs::remove_dir_all(dir);
+}

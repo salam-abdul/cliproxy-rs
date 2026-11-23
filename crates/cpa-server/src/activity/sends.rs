@@ -94,8 +94,8 @@ pub(crate) struct SendRow {
 }
 
 impl SendRow {
-    /// Applies the store's string bound. A row without a storable request ID or provider is
-    /// dropped, as a request event without an ID is.
+    /// Applies the store's string bound. A row without a storable request ID or provider
+    /// cannot be written.
     fn bounded(mut self) -> Option<Self> {
         self.request_id = bounded(Some(&self.request_id))?;
         self.provider = bounded(Some(&self.provider))?;
@@ -108,8 +108,11 @@ impl SendRow {
 
 impl Activity {
     pub(crate) fn record_send(&self, row: SendRow) {
-        if let Some(row) = row.bounded() {
-            self.send(Command::Send(Box::new(row)));
+        match row.bounded() {
+            Some(row) => self.send(Command::Send(Box::new(row))),
+            None => {
+                self.lost.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 

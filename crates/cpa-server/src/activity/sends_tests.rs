@@ -188,6 +188,16 @@ fn sends_past_31_days_or_the_cap_are_removed_oldest_first() {
 }
 
 #[test]
+fn a_send_whose_request_id_cannot_be_stored_is_counted_as_lost() {
+    let store = Store::new();
+    let (activity, lost) = store.start();
+    activity.record_send(row(&"r".repeat(257), 0));
+    activity.flush();
+    assert_eq!(lost.load(Ordering::Relaxed), 1);
+    assert!(activity.sends().unwrap().is_empty());
+}
+
+#[test]
 fn a_full_queue_counts_the_send_as_lost_and_returns() {
     let store = Store::new();
     let (activity, lost) = store.start();

@@ -292,6 +292,15 @@ impl Activity {
         }
     }
 
+    /// Writes what is queued, marks the file clean and stops the writer, waiting at most two
+    /// seconds. Later records are counted as lost; a second call does nothing.
+    pub(crate) fn finish(&self) {
+        let (done, ack) = std::sync::mpsc::channel();
+        if self.tx.try_send(Command::Finish(done)).is_ok() {
+            let _ = ack.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
     /// Stops the writer until the returned sender is dropped, so the queue fills.
     #[cfg(test)]
     fn hold(&self) -> std::sync::mpsc::Sender<()> {
@@ -305,10 +314,7 @@ impl Activity {
 
 impl Drop for Activity {
     fn drop(&mut self) {
-        let (done, ack) = std::sync::mpsc::channel();
-        if self.tx.try_send(Command::Finish(done)).is_ok() {
-            let _ = ack.recv_timeout(Duration::from_secs(2));
-        }
+        self.finish();
     }
 }
 

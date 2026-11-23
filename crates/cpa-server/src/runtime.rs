@@ -73,6 +73,8 @@ pub struct Runtime {
     quota_windows: Mutex<HashMap<String, crate::scheduler::Observation>>,
     history: crate::request_logging::history::writer::Writer,
     activity: std::sync::OnceLock<Arc<crate::activity::Activity>>,
+    /// Held while the store starts, so concurrent first starts open the file once.
+    activity_start: Mutex<()>,
 }
 
 /// One config publication: requests read the config and its policy from the same one.
@@ -130,6 +132,7 @@ impl Runtime {
             quota_windows: Mutex::default(),
             history: Default::default(),
             activity: std::sync::OnceLock::new(),
+            activity_start: Mutex::default(),
         };
         rt.publish(config, policy);
         rt.store.configure_cooldown_store(cooldown_dir);
@@ -151,12 +154,21 @@ impl Runtime {
 
     /// Starts the activity store at `path` unless one already runs; a later call opens nothing.
     pub(crate) fn start_activity(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+        let _starting = self.activity_start.lock().unwrap_or_else(PoisonError::into_inner);
         if self.activity.get().is_some() {
             return Ok(());
         }
         let activity = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0)))?;
         let _ = self.activity.set(Arc::new(activity));
         Ok(())
+    }
+
+    /// Writes what the activity store has queued and marks its file clean; call before exit.
+    /// Blocks for at most two seconds.
+    pub fn stop_activity(&self) {
+        if let Some(activity) = self.activity() {
+            activity.finish();
+        }
     }
 
     pub(crate) fn activity(&self) -> Option<&Arc<crate::activity::Activity>> {
