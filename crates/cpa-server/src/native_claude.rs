@@ -54,6 +54,10 @@ pub struct Config {
     port: u16,
     #[serde(default)]
     http_proxy_port: u16,
+    /// The CONNECT listener's address. Loopback unless a container's port mapping has
+    /// to reach it; an IP address only, so a hostname cannot resolve somewhere else.
+    #[serde(default = "loopback")]
+    http_proxy_host: std::net::IpAddr,
     database: PathBuf,
     events: PathBuf,
     proxy_secret: PathBuf,
@@ -79,6 +83,9 @@ pub struct Config {
     fixture_accounts: Option<Vec<Account>>,
     fixture_quota: Option<Value>,
     upstream: Option<Target>,
+}
+fn loopback() -> std::net::IpAddr {
+    std::net::Ipv4Addr::LOCALHOST.into()
 }
 fn minimum_remaining() -> f64 {
     5.0
@@ -1321,9 +1328,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         sessions: Default::default(),
         skipped: Default::default(),
     });
-    let plain = TcpListener::bind(("127.0.0.1", c.http_proxy_port))
-        .await
-        .context("native CONNECT listener")?;
+    let plain = connect_listener(&c).await.context("native CONNECT listener")?;
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
@@ -1399,10 +1404,14 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         },
     ));
     println!(
-        "Native Claude transparent router ready on loopback:{}",
-        c.http_proxy_port
+        "Native Claude transparent router ready on {}",
+        std::net::SocketAddr::new(c.http_proxy_host, c.http_proxy_port)
     );
     Ok(Running(vec![a, b, certificate, health], owner))
+}
+
+async fn connect_listener(c: &Config) -> std::io::Result<TcpListener> {
+    TcpListener::bind((c.http_proxy_host, c.http_proxy_port)).await
 }
 
 /// Hands every connection `accept` yields to `handle`. An accept error never ends the
@@ -1538,6 +1547,26 @@ fn new_ssl(s: &State) -> Result<Ssl, btls::error::ErrorStack> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The CONNECT listener binds loopback unless `httpProxyHost` names another
+    /// address, and a hostname is refused when the configuration is read.
+    #[tokio::test]
+    async fn connect_listener_binds_http_proxy_host_and_defaults_to_loopback() {
+        let config = |extra: Value| {
+            let mut v = json!({"port":0,"database":"d","events":"e","proxySecret":"s","key":"k","cert":"c"});
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<Config>(v)
+        };
+        let bound = |c: Config| async move { connect_listener(&c).await.unwrap().local_addr().unwrap().ip() };
+        assert_eq!(
+            bound(config(json!({})).unwrap()).await,
+            std::net::IpAddr::from([127, 0, 0, 1])
+        );
+        assert_eq!(
+            bound(config(json!({"httpProxyHost":"0.0.0.0"})).unwrap()).await,
+            std::net::IpAddr::from([0, 0, 0, 0])
+        );
+        assert!(config(json!({"httpProxyHost":"localhost"})).is_err());
+    }
     #[test]
     fn new_sessions_choose_soonest_weekly_reset_but_existing_pins_win() {
         let at = 2_000_000_000_000;

@@ -55,3 +55,11 @@ docker run --rm -p 127.0.0.1:8317:8317 -p 127.0.0.1:51121:51121 -v /path/to/priv
 The image runs as UID and GID 10001 and reads `/data/config.yaml`. Give that identity access to the mounted directory, and set a listener address the port mapping can reach.
 
 Port 51121 receives Google's redirect while an Antigravity sign-in started from the dashboard is pending. Google sends the browser to `localhost:51121`, so publish it on loopback only, on the machine that runs the browser. Without the mapping, the redirect page fails to load; paste its address into the dashboard's Callback address field to finish the sign-in.
+
+To run [native routing](../native/README.md) in the container, set `native-claude.config-file` to a native JSON under `/data` whose paths are container paths, set its `httpProxyHost` to `0.0.0.0`, and publish its `httpProxyPort` on loopback:
+
+```sh
+docker run --rm -p 127.0.0.1:8317:8317 -p 127.0.0.1:51121:51121 -p 127.0.0.1:20152:20152 -v /path/to/private/data:/data ghcr.io/salam-abdul/cliproxy-rs:latest
+```
+
+Clients on the host then connect through `http://claude:<proxy secret>@127.0.0.1:20152` and trust the CA certificate the native JSON names in `ca`, the settings the Claude launcher applies. The listener refuses a CONNECT without the proxy secret, but other containers on the same Docker network can reach it.
