@@ -783,12 +783,23 @@ async fn oauth_first_event_401(State(mock): State<Arc<OAuthMock>>, req: Request)
         .into_response()
 }
 
-/// A buffered client's Claude stream that opens with an `authentication_error` already
-/// had the upstream accept the request, so the request is not sent to that account
-/// again, as it would be after refreshing for an HTTP 401: the client gets the 401, and
-/// the token is refreshed in the background for the next request.
+/// A Claude stream that opens with an `authentication_error` already had the upstream
+/// accept the request, so the request is not sent to that account again, as it would be
+/// after refreshing for an HTTP 401: the client gets the error, and the token is
+/// refreshed in the background for the next request.
 #[tokio::test]
 async fn a_buffered_first_event_401_refreshes_without_resending() {
+    first_event_401_refreshes_without_resending("buffered", "", 401).await;
+}
+
+/// A streaming client reads the held error after the response opened, which is the
+/// same accepted request and gets the same background refresh.
+#[tokio::test]
+async fn a_streaming_first_event_401_refreshes_without_resending() {
+    first_event_401_refreshes_without_resending("streaming", r#","stream":true"#, 200).await;
+}
+
+async fn first_event_401_refreshes_without_resending(name: &str, stream: &str, expected: u16) {
     let mock = Arc::new(OAuthMock::default());
     let upstream_url = serve(
         axum::Router::new()
@@ -796,7 +807,7 @@ async fn a_buffered_first_event_401_refreshes_without_resending() {
             .with_state(mock.clone()),
     )
     .await;
-    let dir = std::env::temp_dir().join(format!("cpa-routes-first-401-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cpa-routes-first-401-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("claude.json");
     let metadata = serde_json::json!({"type":"claude","access_token":"sk-ant-oat-old-fake","refresh_token":"fake-refresh",
@@ -824,10 +835,10 @@ async fn a_buffered_first_event_401_refreshes_without_resending() {
     let (status, _, text) = post(
         &url,
         "/v1/chat/completions",
-        &format!(r#"{{"model":"{MODEL}","messages":[{{"role":"user","content":"fixture"}}]}}"#),
+        &format!(r#"{{"model":"{MODEL}","messages":[{{"role":"user","content":"fixture"}}]{stream}}}"#),
     )
     .await;
-    assert_eq!(status, 401, "{text}");
+    assert_eq!(status, expected, "{text}");
     assert!(text.contains("synthetic token rejected"), "{text}");
     let refreshed = async {
         while !mock.calls.lock().unwrap().iter().any(|c| c == "/token") {

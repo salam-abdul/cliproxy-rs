@@ -2187,15 +2187,9 @@ async fn attempt(
         // Go `tryRefreshAfterUnauthorized`: one refresh-and-retry per credential. Home
         // credentials never refresh here (Go home_unauthorized_refresh): the 401 goes to
         // Home and the round moves on, even when a local credential shares the ID. A
-        // held first-event error came after the upstream accepted the request, so it is
-        // not sent to the same account again: its refresh runs in the background.
+        // held first-event error is refreshed below instead.
         if let Err(error) = &executed
-            && error.held.is_some()
-            && !lease.is_remote()
-            && classify::is_unauthorized(error)
-        {
-            rt.refresh_unauthorized(lease.credential.clone());
-        } else if let Err(error) = &executed
+            && error.held.is_none()
             && !refreshed
             && !lease.is_remote()
             && classify::is_unauthorized(error)
@@ -2257,8 +2251,15 @@ async fn attempt(
             }
         };
         let error = &fault.error;
+        let unauthorized = classify::is_unauthorized(error);
+        // A held first-event error came after the upstream accepted the request, however
+        // the response was read, so it is not sent to the same account again: its
+        // refresh runs in the background.
+        if unauthorized && error.held.is_some() && !refreshed && !lease.is_remote() {
+            rt.refresh_unauthorized(lease.credential.clone());
+        }
         if let Some(facts) = target.unauthorized
-            && classify::is_unauthorized(error)
+            && unauthorized
         {
             crate::usage_record::publish_home_unauthorized(
                 rt,
