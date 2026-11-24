@@ -8,11 +8,12 @@ use crate::scheduler::Reading;
 const BUCKET_MS: i64 = 600_000;
 
 /// `reset_slot` is the stated reset in units of [`BUCKET_MS`], or -1 when none was stated,
-/// so the last reading before a reset is not replaced by the first one after it.
+/// so the last reading before a reset is not replaced by the first one after it. Its default
+/// lets an older build, which does not write it, still insert readings.
 pub(super) const READINGS_TABLE: &str = "CREATE TABLE IF NOT EXISTS quota_readings (
         credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
         bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
-        reset_slot INTEGER NOT NULL,
+        reset_slot INTEGER NOT NULL DEFAULT -1,
         PRIMARY KEY (credential, long, bucket_ms, reset_slot)
     );";
 

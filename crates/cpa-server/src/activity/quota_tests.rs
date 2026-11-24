@@ -175,3 +175,31 @@ fn a_store_with_the_old_reading_key_opens_with_its_readings() {
     activity.flush();
     assert_eq!(store.rows(), [(false, bucket, 30.0), (true, bucket, 41.0)]);
 }
+
+#[test]
+fn a_build_that_writes_no_reset_slot_can_still_insert_into_the_migrated_table() {
+    let store = Store::new();
+    Connection::open(&store.path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE quota_readings (
+                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
+                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
+                PRIMARY KEY (credential, long, bucket_ms)
+            );",
+        )
+        .unwrap();
+    let activity = store.start();
+    activity.flush();
+    let conn = Connection::open(&store.path).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO quota_readings (credential, provider, long, bucket_ms, at_ms, used, reset_ms)
+        VALUES ('codex-a.json', 'codex', 1, 0, 60000, 12.0, NULL)",
+        [],
+    )
+    .unwrap();
+    let slot: i64 = conn
+        .query_row("SELECT reset_slot FROM quota_readings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(slot, -1);
+}
