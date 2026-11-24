@@ -342,3 +342,37 @@ fn an_ended_cycle_in_range_leaves_out_the_one_before_it() {
         "{panels}"
     );
 }
+
+/// The `tokensPerPercent` of the one cycle on `codex-a.json` whose use rises from 10 to
+/// `last`, with one send carrying 1000 output tokens that are exact when `exact`.
+fn tokens_per_percent(last: f64, exact: bool) -> Value {
+    let store = Store::new();
+    let now = epoch_ms();
+    let hour = 3_600_000;
+    let reset = now + 3 * DAY_MS;
+    let record = |at, reading| store.activity.record_readings("codex", "codex-a.json", at, &[reading]);
+    record(now - 5 * hour, weekly(10.0, reset));
+    record(now - hour, weekly(last, reset));
+    let mut row = send("r1", 0, "codex", Outcome::Complete, None);
+    row.at_ms = now - 3 * hour;
+    row.tokens = Some(Tokens {
+        uncached_input: 0,
+        cache_read: 0,
+        cache_write: 0,
+        output: 1000,
+        reasoning: 0,
+        exact,
+    });
+    store.activity.record_send(row);
+    let panels = store.over(Range::Day, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 1, "{panels}");
+    cycles[0]["tokensPerPercent"].clone()
+}
+
+#[test]
+fn tokens_per_percent_has_no_figure_without_exact_sends_or_for_a_small_rise() {
+    assert_eq!(tokens_per_percent(30.0, true), json!(50.0));
+    assert_eq!(tokens_per_percent(30.0, false), Value::Null);
+    assert_eq!(tokens_per_percent(14.0, true), Value::Null);
+}

@@ -132,6 +132,11 @@ fn read(
     )
 }
 
+/// A cycle first seen at this use or more began before its first reading.
+const PARTIAL_FROM: f64 = 5.0;
+/// The smallest rise in use, in points, that gets a tokens-per-percent figure.
+const MIN_RISE: f64 = 5.0;
+
 /// Each credential's weekly quota cycles that end at or after `from`, plus its latest ended
 /// cycle before `from` when none of the former has ended, computed from readings since a
 /// week before `from`.
@@ -189,8 +194,8 @@ fn weekly_cycles(
                 "start": cycle.start, "end": cycle.end, "reset": cycle.reset,
                 "first": cycle.first, "peak": cycle.peak, "last": cycle.last, "ended": cycle.ended,
                 "unused": cycle.ended.then_some(100.0 - cycle.last),
-                "partial": cycle.first >= 5.0, "inRange": in_range, "tokens": tokens,
-                "tokensPerPercent": (rise >= 5.0).then(|| tokens as f64 / rise),
+                "partial": cycle.first >= PARTIAL_FROM, "inRange": in_range, "tokens": tokens,
+                "tokensPerPercent": (rise >= MIN_RISE && tokens > 0).then(|| tokens as f64 / rise),
             }));
         }
     }
