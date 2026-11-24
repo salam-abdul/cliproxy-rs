@@ -1,6 +1,6 @@
 # Usage insights: ideas and design
 
-Status: proposed. Part 1 is built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
+Status: proposed. Parts 1 and 2 are built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
 
 Read at fork `8e66c70` and [cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper) `e5e8f1a` (K in [Upstream review](UPSTREAM-REVIEW.md)). File and line references are to that fork commit.
 
@@ -106,29 +106,13 @@ Built. [Configuration](CONFIGURATION.md#activity-store) and [Native Claude](../n
 
 ### Part 2: which providers earn their keep
 
-Measured per provider, and per account under it, over the selected range:
+Built. [Configuration](CONFIGURATION.md#activity-store) owns the route's totals and quota cycles, and the [dashboard](../ui/README.md#pages) the Provider activity section on Overview. Facts of the built part that later parts rely on:
 
-| Group | Measure | Definition |
-| --- | --- | --- |
-| Work | Sends, output tokens, and each one's share of the total | Counts over `sends` |
-| Reliability | Failure rate | Failed sends over all sends, leaving client cancels and 429 answers out of both |
-| | Quota rejections | Sends answered 429, shown apart so a used-up account does not read as broken |
-| | Failovers away | Sends after which the request moved to another account |
-| Quota | Peak use per cycle | Highest reading among those that share a reset time |
-| | Unused at reset | 100 minus the last reading before the reset |
-| | Tokens per percent | Uncached input, cache write and output tokens sent in a cycle, over the rise in use across it. No figure for a rise under 5 points. A cycle first seen partway is marked partial, as Keeper does. |
-| Cache | Cache read rate | `cache_read / (uncached_input + cache_read + cache_write)` |
-| Speed | Median time to first response, tokens per second | From part 3 |
+- Quota cycles cover the weekly window only. The 5-hour window has none.
+- Tokens per percent counts exact sends only: the uncached input, cache write and output tokens of sends whose token counts are exact.
+- The section has no speed columns; part 3 adds them.
 
-Tokens per percent is a rough guide. It moves with the model mix, and with any use of the account outside this server.
-
-There is no single score. An account that serves little, leaves most of its weekly quota unused or fails often is visible in its row, and a composite number would hide which of the three it is.
-
-**Dashboard.**
-
-- Overview gains a Providers table: one row per provider, opening to its accounts, with the measures above. It sorts by unused weekly quota.
-- A health strip per provider: one block per time bucket, colored by success rate with Keeper's steps at 50, 65 and 80 percent.
-- The existing history panels gain a provider filter, and top models gains a provider split.
+Deferred to one later change: a provider filter on the history panels, a provider split of top models, and retiring the native history route, which the history panels still read.
 
 ### Part 3: what slows responses
 
@@ -229,7 +213,7 @@ The server cannot tell whether a result helped. The panel says so.
 ## Build order
 
 1. The activity store for every provider. Built.
-2. Providers table, health strip, quota cycles, cache read rate.
+2. Providers table, health strip, quota cycles, cache read rate. Built.
 3. Speed section.
 4. Tool and skill indexer, then its tab.
 
@@ -240,7 +224,7 @@ Each is its own change. Tests worth naming now: a WebSocket turn's frames are in
 | Decision | Proposal |
 | --- | --- |
 | When the native history route goes | In the change that moves the dashboard to the activity route. |
-| Dashboard elements | Providers table, health strip, Speed section, Tools tab. Each must fit the bundle budgets. |
+| Dashboard elements | Speed section, Tools tab. Each must fit the bundle budgets. |
 | First-byte marks in the Codex and Gemini executors | Add them, so their time to first response is comparable. Until then part 3 labels it. |
 | The tool index file in the history folder, and the delete command updating it | As described in part 4. No new setting: the indexer runs whenever body history is on. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |

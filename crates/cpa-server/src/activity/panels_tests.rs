@@ -2,7 +2,7 @@ use super::*;
 use crate::activity::sends::{SendRow, Tokens};
 use crate::activity::{Activity, DAY_MS, Range, epoch_ms};
 use crate::request_logging::history::row::{Outcome, Source};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -25,6 +25,11 @@ impl Store {
     fn panels(&self, provider: Option<&str>, credential: Option<&str>) -> Value {
         self.activity.flush();
         read(&self.path, Range::Day, provider, credential, epoch_ms(), 0).unwrap()
+    }
+
+    fn over(&self, range: Range, now: i64) -> Value {
+        self.activity.flush();
+        read(&self.path, range, None, None, now, 0).unwrap()
     }
 }
 
@@ -88,6 +93,34 @@ fn a_provider_row_counts_requests_sends_and_each_kind_of_failure_once() {
         [3, 4, 1, 1, 1],
         "{panels}"
     );
+    assert_eq!([&codex["cancelled"], &codex["exactSends"]], [1, 0], "{panels}");
+}
+
+#[test]
+fn buckets_count_rate_limited_and_cancelled_sends() {
+    let store = Store::new();
+    for row in [
+        send("r1", 0, "codex", Outcome::Failed, Some(500)),
+        send("r1", 1, "codex", Outcome::Complete, None),
+        send("r2", 0, "codex", Outcome::Failed, Some(429)),
+        send("r3", 0, "codex", Outcome::Cancelled, None),
+    ] {
+        store.activity.record_send(row);
+    }
+    let panels = store.panels(None, None);
+    let buckets = panels["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), 1, "{panels}");
+    let bucket = &buckets[0];
+    assert_eq!(
+        [
+            &bucket["sends"],
+            &bucket["failed"],
+            &bucket["rateLimited"],
+            &bucket["cancelled"]
+        ],
+        [4, 1, 1, 1],
+        "{panels}"
+    );
 }
 
 #[test]
@@ -149,17 +182,15 @@ fn the_provider_and_credential_filters_narrow_every_list() {
     let at = epoch_ms() - 60_000;
     store.activity.record_readings("codex", "a.json", at, &[reading(true)]);
     store.activity.record_readings("codex", "b.json", at, &[reading(true)]);
-    store
-        .activity
-        .record_readings("claude", "c.json", at, &[reading(false)]);
+    store.activity.record_readings("claude", "c.json", at, &[reading(true)]);
     let counts = |panels: &Value| {
-        ["providers", "credentials", "buckets", "readings"].map(|list| panels[list].as_array().unwrap().len())
+        ["providers", "credentials", "buckets", "cycles"].map(|list| panels[list].as_array().unwrap().len())
     };
     assert_eq!(counts(&store.panels(None, None)), [2, 3, 2, 3]);
     assert_eq!(counts(&store.panels(Some("codex"), None)), [1, 2, 1, 2]);
     let narrowed = store.panels(None, Some("a.json"));
     assert_eq!(counts(&narrowed), [1, 1, 1, 1]);
-    assert_eq!(narrowed["readings"][0]["credential"], "a.json");
+    assert_eq!(narrowed["cycles"][0]["credential"], "a.json");
 }
 
 #[test]
@@ -175,4 +206,192 @@ fn a_range_excludes_older_sends_and_reports_the_oldest_one() {
     let panels = store.panels(None, None);
     assert_eq!(provider(&panels, "codex")["sends"], 1, "{panels}");
     assert_eq!(panels["oldestSend"], oldest);
+}
+
+fn weekly(used_percent: f64, reset_ms: i64) -> crate::scheduler::Reading {
+    crate::scheduler::Reading {
+        long: true,
+        used_percent,
+        reset: Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(reset_ms as u64)),
+    }
+}
+
+/// Two weekly cycles on `codex-a.json`, the first ended by a reset three days before `now`,
+/// with exact sends worth 2000 tokens and one inexact send inside the first.
+fn two_cycles(store: &Store, now: i64) {
+    let hour = 3_600_000;
+    let first_reset = now - 3 * DAY_MS;
+    let second_reset = now + 4 * DAY_MS;
+    let record = |at, reading| store.activity.record_readings("codex", "codex-a.json", at, &[reading]);
+    record(now - 6 * DAY_MS, weekly(8.0, first_reset));
+    record(now - 4 * DAY_MS, weekly(48.0, first_reset));
+    record(now - 3 * DAY_MS + 20 * 60_000, weekly(2.0, second_reset));
+    record(now - hour, weekly(30.0, second_reset));
+    let tokens = |uncached_input, output, exact| Tokens {
+        uncached_input,
+        cache_read: 0,
+        cache_write: 0,
+        output,
+        reasoning: 0,
+        exact,
+    };
+    for (id, at, tokens) in [
+        ("r1", now - 5 * DAY_MS, tokens(1000, 0, true)),
+        ("r2", now - 5 * DAY_MS + hour, tokens(0, 1000, true)),
+        ("r3", now - 5 * DAY_MS + 2 * hour, tokens(500, 500, false)),
+    ] {
+        let mut row = send(id, 0, "codex", Outcome::Complete, None);
+        row.at_ms = at;
+        row.tokens = Some(tokens);
+        store.activity.record_send(row);
+    }
+}
+
+#[test]
+fn cycles_report_unused_partial_and_tokens_per_percent() {
+    let store = Store::new();
+    let now = epoch_ms();
+    two_cycles(&store, now);
+    let panels = store.over(Range::Week, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 2, "{panels}");
+    let first = &cycles[0];
+    assert_eq!(
+        [
+            &first["first"],
+            &first["peak"],
+            &first["last"],
+            &first["ended"],
+            &first["unused"],
+            &first["partial"],
+            &first["inRange"],
+            &first["tokens"],
+            &first["tokensPerPercent"]
+        ],
+        [
+            &json!(8.0),
+            &json!(48.0),
+            &json!(48.0),
+            &json!(true),
+            &json!(52.0),
+            &json!(true),
+            &json!(true),
+            &json!(2000),
+            &json!(50.0)
+        ],
+        "{panels}"
+    );
+    let second = &cycles[1];
+    assert_eq!(
+        [&second["ended"], &second["unused"], &second["partial"]],
+        [&json!(false), &Value::Null, &json!(false)],
+        "{panels}"
+    );
+}
+
+#[test]
+fn the_day_range_keeps_the_latest_ended_cycle_from_before_it() {
+    let store = Store::new();
+    let now = epoch_ms();
+    two_cycles(&store, now);
+    let panels = store.over(Range::Day, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 2, "{panels}");
+    assert_eq!(
+        [&cycles[0]["inRange"], &cycles[0]["unused"]],
+        [&json!(false), &json!(52.0)],
+        "{panels}"
+    );
+    assert_eq!(cycles[1]["inRange"], true, "{panels}");
+}
+
+#[test]
+fn short_window_readings_make_no_cycles() {
+    let store = Store::new();
+    let now = epoch_ms();
+    let short = |used_percent| crate::scheduler::Reading {
+        long: false,
+        used_percent,
+        reset: None,
+    };
+    store
+        .activity
+        .record_readings("codex", "codex-a.json", now - 7_200_000, &[short(10.0)]);
+    store
+        .activity
+        .record_readings("codex", "codex-a.json", now - 60_000, &[short(20.0)]);
+    let panels = store.over(Range::Day, now);
+    assert_eq!(panels["cycles"], json!([]), "{panels}");
+}
+
+#[test]
+fn an_ended_cycle_in_range_leaves_out_the_one_before_it() {
+    let store = Store::new();
+    let now = epoch_ms();
+    let hour = 3_600_000;
+    let record = |at, reading| store.activity.record_readings("codex", "codex-a.json", at, &[reading]);
+    record(now - 3 * DAY_MS, weekly(10.0, now - 2 * DAY_MS));
+    record(now - 2 * DAY_MS + 20 * 60_000, weekly(2.0, now - hour));
+    record(now - 5 * hour, weekly(40.0, now - hour));
+    let panels = store.over(Range::Day, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 1, "{panels}");
+    assert_eq!(
+        [&cycles[0]["inRange"], &cycles[0]["ended"]],
+        [&json!(true), &json!(true)],
+        "{panels}"
+    );
+}
+
+/// The `tokensPerPercent` of the one cycle on `codex-a.json` whose use rises from 10 to
+/// `last`, with one send carrying 1000 output tokens that are exact when `exact`.
+fn tokens_per_percent(last: f64, exact: bool) -> Value {
+    let store = Store::new();
+    let now = epoch_ms();
+    let hour = 3_600_000;
+    let reset = now + 3 * DAY_MS;
+    let record = |at, reading| store.activity.record_readings("codex", "codex-a.json", at, &[reading]);
+    record(now - 5 * hour, weekly(10.0, reset));
+    record(now - hour, weekly(last, reset));
+    let mut row = send("r1", 0, "codex", Outcome::Complete, None);
+    row.at_ms = now - 3 * hour;
+    row.tokens = Some(Tokens {
+        uncached_input: 0,
+        cache_read: 0,
+        cache_write: 0,
+        output: 1000,
+        reasoning: 0,
+        exact,
+    });
+    store.activity.record_send(row);
+    let panels = store.over(Range::Day, now);
+    let cycles = panels["cycles"].as_array().unwrap();
+    assert_eq!(cycles.len(), 1, "{panels}");
+    cycles[0]["tokensPerPercent"].clone()
+}
+
+#[test]
+fn tokens_per_percent_has_no_figure_without_exact_sends_or_for_a_small_rise() {
+    assert_eq!(tokens_per_percent(30.0, true), json!(50.0));
+    assert_eq!(tokens_per_percent(30.0, false), Value::Null);
+    assert_eq!(tokens_per_percent(14.0, true), Value::Null);
+}
+
+#[test]
+fn a_cancelled_429_counts_as_rate_limited_and_not_as_cancelled() {
+    let store = Store::new();
+    store
+        .activity
+        .record_send(send("r1", 0, "codex", Outcome::Cancelled, Some(429)));
+    let panels = store.panels(None, None);
+    let counts = |row: &Value| {
+        [
+            row["sends"].clone(),
+            row["rateLimited"].clone(),
+            row["cancelled"].clone(),
+        ]
+    };
+    assert_eq!(counts(provider(&panels, "codex")), [1, 1, 0], "{panels}");
+    assert_eq!(counts(&panels["credentials"][0]), [1, 1, 0], "{panels}");
+    assert_eq!(counts(&panels["buckets"][0]), [1, 1, 0], "{panels}");
 }

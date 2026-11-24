@@ -1,3 +1,4 @@
+mod cycles;
 mod panels;
 mod quota;
 pub(crate) mod sends;
@@ -144,7 +145,8 @@ impl Activity {
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.execute_batch(
+        quota::rekey_readings(&mut conn)?;
+        conn.execute_batch(&format!(
             "CREATE TABLE IF NOT EXISTS requests (
                 request_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, account TEXT, model TEXT,
                 outcome TEXT NOT NULL, status INTEGER, input_tokens INTEGER, output_tokens INTEGER,
@@ -174,13 +176,11 @@ impl Activity {
             );
             CREATE INDEX IF NOT EXISTS sends_by_time ON sends(at_ms);
             CREATE INDEX IF NOT EXISTS sends_by_provider_time ON sends(provider, at_ms);
-            CREATE TABLE IF NOT EXISTS quota_readings (
-                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
-                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
-                PRIMARY KEY (credential, long, bucket_ms)
-            );
+            CREATE INDEX IF NOT EXISTS sends_by_credential_time ON sends(credential, at_ms);
+            {}
             CREATE INDEX IF NOT EXISTS quota_readings_by_time ON quota_readings(at_ms);",
-        )?;
+            quota::READINGS_TABLE
+        ))?;
         prune(&conn, epoch_ms())?;
         let previous_lost = meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64;
         lost.store(previous_lost, Ordering::Relaxed);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import QuotaBrief from "../QuotaBrief.svelte";
   import HistoryPanels from "../HistoryPanels.svelte";
+  import ProviderActivity from "../ProviderActivity.svelte";
   import Load from "../Load.svelte";
   import AccountDetail from "../AccountDetail.svelte";
   import { store, every } from "../store.svelte";
@@ -17,6 +18,13 @@
     store.history.data = undefined;
     store.history.error = null;
     return every(30000, () => store.history.load(true), true);
+  });
+  $effect(() => {
+    if (!enabled) return;
+    store.historyRange;
+    store.providerActivity.data = undefined;
+    store.providerActivity.error = null;
+    return every(60000, () => store.providerActivity.load(true), true);
   });
   let refreshing = $state(false);
   let selectedId = $state("");
@@ -41,6 +49,11 @@
   const historyData = $derived(
     store.history.data?.range === store.historyRange
       ? store.history.data
+      : undefined,
+  );
+  const activityData = $derived(
+    store.providerActivity.data?.range === store.historyRange
+      ? store.providerActivity.data
       : undefined,
   );
   const fresh = $derived(
@@ -171,7 +184,7 @@
       </div>{/each}
   </div>{/snippet}</Load>
 </section>
-{#if native?.enabled}<HistoryPanels data={historyData} />{/if}
+{#if native?.enabled}<HistoryPanels data={historyData} /><ProviderActivity data={activityData} />{/if}
 
 {#if selected}{#key selectedId}<AccountDetail a={selected} onclose={() => (selectedId = "")} />{/key}{/if}
 

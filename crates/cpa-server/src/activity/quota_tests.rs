@@ -80,3 +80,126 @@ fn readings_older_than_the_retention_or_past_the_cap_are_removed() {
     trim(&conn, MAX_REQUESTS, MAX_STATUSES, MAX_SENDS, 1).unwrap();
     assert_eq!(used(store.rows()), [30.0]);
 }
+
+fn long(used_percent: f64, reset_ms: i64) -> Reading {
+    Reading {
+        long: true,
+        used_percent,
+        reset: Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(reset_ms as u64)),
+    }
+}
+
+#[test]
+fn a_reading_before_a_reset_survives_one_after_it_in_the_same_ten_minutes() {
+    let store = Store::new();
+    let activity = store.start();
+    let bucket = epoch_ms() / 600_000 * 600_000 - 3_600_000;
+    let minute = 60_000;
+    let reset = bucket + 5 * minute;
+    activity.record_readings("codex", "codex-a.json", bucket + 3 * minute, &[long(88.0, reset)]);
+    activity.record_readings(
+        "codex",
+        "codex-a.json",
+        bucket + 8 * minute,
+        &[long(1.0, reset + 7 * DAY_MS)],
+    );
+    activity.flush();
+    assert_eq!(store.rows(), [(true, bucket, 88.0), (true, bucket, 1.0)]);
+}
+
+#[test]
+fn a_drifting_reset_inside_one_slot_keeps_only_the_latest() {
+    let store = Store::new();
+    let activity = store.start();
+    let bucket = epoch_ms() / 600_000 * 600_000 - 3_600_000;
+    let minute = 60_000;
+    let reset = bucket + 3 * DAY_MS + minute;
+    activity.record_readings("codex", "codex-a.json", bucket + minute, &[long(20.0, reset)]);
+    activity.record_readings(
+        "codex",
+        "codex-a.json",
+        bucket + 6 * minute,
+        &[long(21.0, reset + 2_000)],
+    );
+    activity.flush();
+    assert_eq!(store.rows(), [(true, bucket, 21.0)]);
+}
+
+#[test]
+fn a_store_with_the_old_reading_key_opens_with_its_readings() {
+    let store = Store::new();
+    let bucket = epoch_ms() / 600_000 * 600_000 - 3_600_000;
+    let reset = bucket + 2 * DAY_MS + 123_456;
+    {
+        let conn = Connection::open(&store.path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE quota_readings (
+                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
+                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
+                PRIMARY KEY (credential, long, bucket_ms)
+            );
+            CREATE INDEX IF NOT EXISTS quota_readings_by_time ON quota_readings(at_ms);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO quota_readings VALUES ('codex-a.json', 'codex', 0, ?1, ?2, 30.0, NULL)",
+            [bucket, bucket + 60_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO quota_readings VALUES ('codex-a.json', 'codex', 1, ?1, ?2, 40.0, ?3)",
+            [bucket, bucket + 120_000, reset],
+        )
+        .unwrap();
+    }
+    let activity = store.start();
+    let kept = Connection::open(&store.path)
+        .unwrap()
+        .prepare("SELECT long, used, reset_slot FROM quota_readings ORDER BY at_ms")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<(bool, f64, i64)>>>()
+        .unwrap();
+    assert_eq!(kept, [(false, 30.0, -1), (true, 40.0, reset / 600_000)]);
+    let index: String = Connection::open(&store.path)
+        .unwrap()
+        .query_row(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'quota_readings_by_time'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, "quota_readings");
+    activity.record_readings("codex", "codex-a.json", bucket + 180_000, &[long(41.0, reset)]);
+    activity.flush();
+    assert_eq!(store.rows(), [(false, bucket, 30.0), (true, bucket, 41.0)]);
+}
+
+#[test]
+fn a_build_that_writes_no_reset_slot_can_still_insert_into_the_migrated_table() {
+    let store = Store::new();
+    Connection::open(&store.path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE quota_readings (
+                credential TEXT NOT NULL, provider TEXT NOT NULL, long INTEGER NOT NULL,
+                bucket_ms INTEGER NOT NULL, at_ms INTEGER NOT NULL, used REAL NOT NULL, reset_ms INTEGER,
+                PRIMARY KEY (credential, long, bucket_ms)
+            );",
+        )
+        .unwrap();
+    let activity = store.start();
+    activity.flush();
+    let conn = Connection::open(&store.path).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO quota_readings (credential, provider, long, bucket_ms, at_ms, used, reset_ms)
+        VALUES ('codex-a.json', 'codex', 1, 0, 60000, 12.0, NULL)",
+        [],
+    )
+    .unwrap();
+    let slot: i64 = conn
+        .query_row("SELECT reset_slot FROM quota_readings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(slot, -1);
+}
