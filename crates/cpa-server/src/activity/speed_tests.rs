@@ -567,3 +567,59 @@ fn a_send_without_a_provider_fails_the_read() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(read.is_err(), "{read:?}");
 }
+
+/// The walk for the others' p95 agrees with sorting the others and taking the nearest
+/// rank, over distinct values, ties at the rank, members among and above the others, and
+/// others counts on both sides of each rank step.
+#[test]
+fn the_others_p95_walk_matches_a_full_sort() {
+    let item = |first: i32, member: bool| Item {
+        first,
+        model: if member { Id::new(1) } else { Id::new(2) },
+        credential: None,
+        size: None,
+        cache: None,
+        stream: true,
+        hour: 0,
+    };
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut cases = 0;
+    for others in [30, 31, 39, 40, 41, 100] {
+        for members in [1, 30, 45] {
+            // Distinct values, few values (ties at every rank), and members all above.
+            for layout in 0..3 {
+                for _ in 0..4 {
+                    let marks = (0..others).map(|_| false).chain((0..members).map(|_| true));
+                    let mut items: Vec<Item> = marks
+                        .map(|member| {
+                            let r = next();
+                            let first = match layout {
+                                0 => (r % 100_000) as i32,
+                                1 => (r % 4) as i32 * 10,
+                                _ => (r % 1000) as i32 + if member { 10_000 } else { 0 },
+                            };
+                            item(first, member)
+                        })
+                        .collect();
+                    items.sort_by_key(|item| item.first);
+                    let is_member = |item: &Item| item.model == Id::new(1);
+                    let rest: Vec<i32> = items.iter().filter(|i| !is_member(i)).map(|i| i.first).collect();
+                    assert_eq!(rest.len(), others);
+                    assert_eq!(
+                        others_p95(&items, others, is_member),
+                        percentile(&rest, 95),
+                        "others {others}, members {members}, layout {layout}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 216);
+}

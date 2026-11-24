@@ -368,16 +368,7 @@ fn slow_in(group: (Id, Id, TtftKind), mut items: Vec<Item>, out: &mut Vec<Slow>)
             let Some(p95) = percentile(&firsts, 95) else {
                 continue;
             };
-            // The others' p95 is their (m - ceil(0.95 m) + 1)th largest: walk down from the
-            // top past this value's own requests rather than sorting the others again.
-            let from_top = others - (95 * others).div_ceil(100) + 1;
-            let Some(baseline) = items
-                .iter()
-                .rev()
-                .filter(|item| dimension.code(item) != Some(code))
-                .nth(from_top - 1)
-                .map(|item| item.first)
-            else {
+            let Some(baseline) = others_p95(&items, others, |item| dimension.code(item) == Some(code)) else {
                 continue;
             };
             if p95 > baseline && p95 as f64 >= SLOW_RATIO * baseline as f64 {
@@ -392,6 +383,19 @@ fn slow_in(group: (Id, Id, TtftKind), mut items: Vec<Item>, out: &mut Vec<Slow>)
             }
         }
     }
+}
+
+/// The nearest-rank p95 first response of the `others` items of ascending `items` that are
+/// not members. That is their (m - ceil(0.95 m) + 1)th largest, so this walks down from the
+/// top past the members rather than sorting the others again.
+fn others_p95(items: &[Item], others: usize, member: impl Fn(&Item) -> bool) -> Option<i32> {
+    let from_top = (others + 1).checked_sub((95 * others).div_ceil(100))?;
+    items
+        .iter()
+        .rev()
+        .filter(|item| !member(item))
+        .nth(from_top.checked_sub(1)?)
+        .map(|item| item.first)
 }
 
 /// Nearest rank: the `p`th percentile of ascending `sorted` is `sorted[ceil(p * n / 100) - 1]`.
