@@ -364,8 +364,10 @@ pub(crate) fn relay(
 /// ([`FirstError`]). When the stream then ends with an error, nothing has reached the
 /// client, so the attempt fails with `declare(status, data)` instead, carrying the held
 /// events and that ending error as a [`HeldStream`] for dispatch to fail over or send.
-/// A request-scoped declaration, or a held stream that ends without an error or without
-/// a client event, goes out as it came.
+/// When the client's translator wrote nothing for the error, the attempt fails with the
+/// declared error whatever its scope, so the client gets the declared status rather than
+/// the stream's own. A request-scoped declaration with held events, or a held stream that
+/// ends without an error, goes out as it came.
 pub(crate) fn hold_first_error(
     stream: ExecStream,
     first: FirstError,
@@ -411,8 +413,11 @@ pub(crate) fn hold_first_error(
                 Some(Err(end)) => {
                     st.done = true;
                     let declared = st.declare.take().zip(st.first.get().cloned());
-                    if let Some((declare, (status, data))) = declared.filter(|_| !st.held.is_empty()) {
+                    if let Some((declare, (status, data))) = declared {
                         let mut error = declare(status, data);
+                        if st.held.is_empty() {
+                            return Some((Err(error), st));
+                        }
                         if error.scope != FailureScope::Request {
                             let events = std::mem::take(&mut st.held);
                             error.held = Some(Arc::new(HeldStream { events, end }));
