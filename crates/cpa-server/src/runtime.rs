@@ -693,8 +693,8 @@ impl Runtime {
     }
 
     /// [`Self::refresh_after_unauthorized`] for a path that answers the 401 without
-    /// retrying on the same account (native Claude routing, Codex live and Alpha
-    /// Search). It runs in the background, so that answer is not delayed and the next
+    /// retrying on the same account (native Claude routing, a held Claude first-event
+    /// error, Codex live and Alpha Search). It runs in the background, so that answer is not delayed and the next
     /// request finds the new tokens or the recorded refusal.
     pub(crate) fn refresh_unauthorized(self: &Arc<Self>, credential: Arc<Credential>) {
         let rt = self.clone();

@@ -2251,14 +2251,15 @@ async fn attempt(
             }
         };
         let error = &fault.error;
-        // A held first-event error came after the upstream accepted the request, whether
-        // the send returned it or the stream's first read did, so it is not sent to the
-        // same account again: its refresh runs in the background.
-        if error.held.is_some() && !refreshed && !lease.is_remote() && classify::is_unauthorized(error) {
+        let unauthorized = classify::is_unauthorized(error);
+        // A held first-event error came after the upstream accepted the request, however
+        // the response was read, so it is not sent to the same account again: its
+        // refresh runs in the background.
+        if unauthorized && error.held.is_some() && !refreshed && !lease.is_remote() {
             rt.refresh_unauthorized(lease.credential.clone());
         }
         if let Some(facts) = target.unauthorized
-            && classify::is_unauthorized(error)
+            && unauthorized
         {
             crate::usage_record::publish_home_unauthorized(
                 rt,
