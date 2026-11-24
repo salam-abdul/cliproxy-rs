@@ -72,7 +72,7 @@
     </section>
 
     <section class="section">
-      <div class="section-head"><h2>Excluded</h2><span class="legend">Proxy accounts only: hidden and refused. Native routing and provider keys ignore it. Wildcards allowed.</span></div>
+      <div class="section-head"><h2>Excluded</h2><span class="legend">Hidden and refused for signed-in accounts on the proxy only. Wildcards allowed.</span></div>
       <div class="chips">
         {#each excluded as m, i}<span class="chip"
             >{m}<button
@@ -118,8 +118,7 @@
                       disabled={store.busy || state.lockedBy.length > 0}
                       onclick={() => setModel(m.id, !state.on)}
                       ><span class="switch-track" aria-hidden="true"><span></span></span></button
-                    >{#if state.lockedBy.length}<span class="legend">Excluded by <code>{state.lockedBy.join(", ")}</code></span>{/if}
-                  {:else}<span class="muted">—</span>{/if}
+                    >{#if state.lockedBy.length}<span class="legend">Excluded by <code>{state.lockedBy.join(", ")}</code></span>{/if}{/if}
                 </td>
               </tr>{/each}
           </tbody>
