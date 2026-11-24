@@ -42,14 +42,16 @@ Client keys go in client settings; never share either key. For access from anoth
 CI publishes `ghcr.io/salam-abdul/cliproxy-rs` for linux/amd64 and linux/arm64 after the tests pass on `main` (`.github/workflows/docker.yml`). You can also run the workflow by hand from `main`, which publishes without waiting for CI. Tags are `sha-<first 7 characters of the commit>` and `latest`, which moves only to a published commit that is still the tip of `main`. While the package is private, run `docker login ghcr.io` first.
 
 ```sh
-docker run --rm -p 127.0.0.1:8317:8317 -v /path/to/private/data:/data ghcr.io/salam-abdul/cliproxy-rs:latest
+docker run --rm -p 127.0.0.1:8317:8317 -p 127.0.0.1:51121:51121 -v /path/to/private/data:/data ghcr.io/salam-abdul/cliproxy-rs:latest
 ```
 
 To build the same image locally:
 
 ```sh
 docker build -t cliproxy-local .
-docker run --rm -p 127.0.0.1:8317:8317 -v /path/to/private/data:/data cliproxy-local
+docker run --rm -p 127.0.0.1:8317:8317 -p 127.0.0.1:51121:51121 -v /path/to/private/data:/data cliproxy-local
 ```
 
 The image runs as UID and GID 10001 and reads `/data/config.yaml`. Give that identity access to the mounted directory, and set a listener address the port mapping can reach.
+
+Port 51121 receives Google's redirect while an Antigravity sign-in started from the dashboard is pending. Google sends the browser to `localhost:51121`, so publish it on loopback only, on the machine that runs the browser. Without the mapping, the redirect page fails to load; paste its address into the dashboard's Callback address field to finish the sign-in.
