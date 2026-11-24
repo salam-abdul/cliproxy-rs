@@ -106,16 +106,20 @@ fn read(
     ))?;
     let mut rows = statement.query(params![from, now, provider, credential, bucket_ms])?;
     while let Some(row) = rows.next()? {
+        let name = row.get::<_, String>(2)?;
         let mut object = serde_json::Map::new();
-        object.insert("provider".into(), row.get::<_, String>(2)?.into());
         match row.get::<_, i64>(0)? {
-            0 => providers.push(totals(row, 4, object)?),
+            0 => {
+                object.insert("provider".into(), name.into());
+                providers.push(totals(row, 4, object)?);
+            }
             1 => {
+                object.insert("provider".into(), name.into());
                 object.insert("credential".into(), row.get::<_, String>(3)?.into());
                 credentials.push(totals(row, 4, object)?);
             }
             _ => buckets.push(json!({
-                "at": row.get::<_, i64>(1)?, "provider": object["provider"],
+                "at": row.get::<_, i64>(1)?, "provider": name,
                 "sends": row.get::<_, i64>(5)?, "failed": row.get::<_, i64>(6)?,
                 "rateLimited": row.get::<_, i64>(7)?, "cancelled": row.get::<_, i64>(13)?
             })),
@@ -174,9 +178,8 @@ fn weekly_cycles(
     )?;
     let mut out = Vec::new();
     for group in readings.chunk_by(|a, b| a.1 == b.1) {
-        let Some((provider, credential, _)) = group.first() else {
-            continue;
-        };
+        // `chunk_by` yields only non-empty slices.
+        let (provider, credential, _) = &group[0];
         let points: Vec<Point> = group.iter().map(|(_, _, point)| *point).collect();
         let all = cycles(&points, now);
         let ended_in_range = all.iter().any(|cycle| cycle.end >= from && cycle.ended);
