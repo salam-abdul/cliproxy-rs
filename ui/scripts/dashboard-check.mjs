@@ -14,6 +14,7 @@ let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, 
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false;
+let speedChecks = 0, speedConflict = false, speedEmpty = false;
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
@@ -79,6 +80,22 @@ await page.route("**/*", async route => {
         {at:last,provider:"codex",sends:4,failed:0,rateLimited:0,cancelled:0}],
       cycles:[cycle("account-a.json",{ended:true,last:60,peak:60,unused:40}),cycle("disabled.json",{})],
       oldestSend:now-duration/2,lostEvents:0,coverageUncertain:false});
+  }
+  if (path === "/v8/management/observability/speed") {
+    speedChecks++;
+    const params = new URL(request.url()).searchParams;
+    assert.match(params.get("offset") ?? "", /^-?\d+$/, "speed sends the viewer's offset in whole minutes");
+    if (speedConflict) return route.fulfill({status:409,json:{error:"activity store is not running"}});
+    const range = params.get("range") || "24h";
+    const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
+    const base = {range,from:now-duration,to:now,offset:Number(params.get("offset")),oldestSend:now-duration/2,lostEvents:0,coverageUncertain:false};
+    if (speedEmpty) return send({...base,requests:0,untimed:0,rows:[],parts:[],slow:[]});
+    return send({...base,requests:93,untimed:1,
+      rows:[{provider:"claude",source:"native",model:"claude-opus-4-6",ttftKind:"byte",requests:2,firstP50:800,firstP95:1200,totalP50:4000,totalP95:9000,tokensPerSecond:40.5,decodeSpeed:60.2},
+        {provider:"codex",source:"proxy",model:"gpt-5",ttftKind:"event",requests:90,firstP50:300,firstP95:400,totalP50:2500,totalP95:12345,tokensPerSecond:null,decodeSpeed:null}],
+      parts:[{provider:"codex",source:"proxy",requests:90,server:12.5,earlier:150,first:150,generation:600,total:912.5},
+        {provider:"claude",source:"native",requests:2,server:50,earlier:400,first:50,generation:550,total:1050}],
+      slow:[{slice:"model",value:"b",provider:"codex",source:"proxy",ttftKind:"byte",requests:30,p95:400,baseline:100}]});
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send(config);
   if (path === "/v8/management/config/api-keys/openai-compatibility") {
@@ -427,9 +444,50 @@ try {
   assert.equal(await activity.locator(".alert").count(), 0, "a failed poll does not replace a loaded table");
   assert.equal(await activity.getByText("0.4 of 1 account",{exact:true}).count(), 1, "the loaded table stays after a failed poll");
   activityConflict = false;
+  const speed = page.getByRole("region",{name:"Speed",exact:true});
+  const slowLine = "Model b on Codex (proxy): first response p95 400 ms, 4.0 times the rest (30 requests)";
+  const speedRead = () => page.waitForResponse(r => new URL(r.url()).pathname === "/v8/management/observability/speed");
+  await speed.getByText(slowLine,{exact:true}).waitFor();
+  assert.equal(await speed.locator(".speed-bar").count(),2,"a bar per provider and source");
+  assert.deepEqual(await speed.locator(".speed-bar .sr").allTextContents(),
+    ["In the server 50 ms","Earlier sends 400 ms","First response 50 ms","Generation 550 ms",
+      "In the server 13 ms","Earlier sends 150 ms","First response 150 ms","Generation 600 ms"],"each part of each bar has accessible text, longest bar first");
+  assert.equal(await speed.getByRole("row",{name:/gpt-5/}).getByText("first event",{exact:true}).count(),1,"a row timed by the first translated event is marked");
+  assert.equal(await speed.getByRole("row",{name:/claude-opus-4-6/}).getByText("first event",{exact:true}).count(),0,"a row timed by the first byte is not marked");
+  const speedRange = speedChecks;
+  let reread = speedRead();
+  await page.getByRole("button",{name:"7 days"}).click();
+  await reread;
+  await speed.getByText(slowLine,{exact:true}).waitFor();
+  await settle();
+  assert.equal(speedChecks - speedRange,1,"range selection loads speed once");
+  speedConflict = true;
+  const speedPoll = speedChecks;
+  await page.clock.fastForward(299_000);
+  await settle();
+  assert.equal(speedChecks - speedPoll,0,"speed does not poll before 300 seconds");
+  reread = speedRead();
+  await page.clock.fastForward(1_000);
+  await reread;
+  await settle();
+  assert.equal(speedChecks - speedPoll,1,"speed polls every 300 seconds");
+  assert.equal(await speed.locator(".alert").count(),0,"a refused speed poll shows no alert");
+  assert.equal(await speed.getByText(slowLine,{exact:true}).count(),1,"the loaded speed section stays after a refused poll");
+  assert.equal(await speed.locator("table").count(),1,"the speed table stays after a refused poll");
+  await page.getByRole("button",{name:"24 hours"}).click();
+  await speed.getByText("The activity store is not running.",{exact:true}).waitFor();
+  speedConflict = false;
+  speedEmpty = true;
+  await page.getByRole("button",{name:"7 days"}).click();
+  await speed.getByText("No completed requests recorded in this period.",{exact:true}).waitFor();
+  assert.equal(await speed.locator(".speed-bar").count(),0,"an empty period draws no bars");
+  speedEmpty = false;
+  await page.getByRole("button",{name:"24 hours"}).click();
+  await speed.getByText(slowLine,{exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the provider table does not widen the page");
   assert.ok(await activity.locator(".provider-scroll").evaluate(e => e.scrollWidth > e.clientWidth),"the provider table scrolls inside its card");
+  assert.ok(await speed.locator(".speed-scroll").evaluate(e => e.scrollWidth > e.clientWidth),"the speed table scrolls inside its card");
   await page.setViewportSize({width:1280,height:900});
   await page.getByRole("button",{name:"account-a.json"}).first().click();
   await page.getByRole("dialog",{name:/account-a.json details/}).waitFor();
