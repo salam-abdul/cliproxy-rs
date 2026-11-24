@@ -399,3 +399,138 @@ fn an_empty_store_reads_empty() {
     );
     assert_eq!(speed["oldestSend"], Value::Null);
 }
+
+/// Writes `rows` in one transaction on a connection of its own, past the writer's queue.
+fn write_all(store: &Store, rows: impl IntoIterator<Item = SendRow>) {
+    let mut conn = rusqlite::Connection::open(&store.path).unwrap();
+    conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let transaction = conn.transaction().unwrap();
+    for row in rows {
+        crate::activity::sends::write_send(&transaction, &row).unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+/// `count` requests on `model` with first response `ttft`, named `{model}-{index}`.
+fn requests(now: i64, model: &str, count: usize, ttft: i64) -> impl Iterator<Item = SendRow> + use<> {
+    let model = model.to_owned();
+    (0..count).map(move |index| SendRow {
+        model: Some(model.clone()),
+        ttft: Some((ttft, TtftKind::Byte)),
+        ..send(now, &format!("{model}-{index}"), 0)
+    })
+}
+
+#[test]
+fn a_slow_model_is_reported_against_the_rest() {
+    let store = Store::new();
+    let now = store.now;
+    store.add(requests(now, "a", 60, 100).chain(requests(now, "b", 30, 400)));
+    let speed = store.speed(None, None);
+    assert_eq!(
+        speed["slow"],
+        json!([{"slice": "model", "value": "b", "provider": "codex", "source": "proxy", "ttftKind": "byte",
+            "requests": 30, "p95": 400, "baseline": 100}])
+    );
+}
+
+#[test]
+fn a_slice_without_30_others_is_not_judged() {
+    let store = Store::new();
+    let now = store.now;
+    store.add(requests(now, "a", 29, 100).chain(requests(now, "b", 30, 400)));
+    let speed = store.speed(None, None);
+    assert_eq!(speed["requests"], 59);
+    assert_eq!(speed["slow"], json!([]));
+}
+
+#[test]
+fn slices_bucket_size_cache_and_hour() {
+    let sizes: Vec<&str> = [9_999, 10_000, 49_999, 50_000, 199_999, 200_000]
+        .map(|input| SIZES[usize::from(size(input))])
+        .to_vec();
+    assert_eq!(sizes, ["<10k", "10k-50k", "10k-50k", "50k-200k", "50k-200k", ">200k"]);
+    let names = Names::default();
+    assert_eq!(Dimension::Cache.value(0, &names), "miss");
+    assert_eq!(Dimension::Cache.value(1, &names), "hit");
+    let half_past_eleven = 1_800_000_000_000 / DAY_MS * DAY_MS + 23 * 3_600_000 + 30 * 60_000;
+    assert_eq!(hour(half_past_eleven, 0), 23);
+    assert_eq!(hour(half_past_eleven, 60), 0);
+    assert_eq!(hour(half_past_eleven, -90), 22);
+
+    // Exact counts: 30 slow requests over 200k tokens with no cache read, 60 fast small
+    // ones that read the cache. 30 fast requests as large but inexact have no size or
+    // cache value and only count among the others.
+    let store = Store::new();
+    let now = store.now;
+    let tokens = |input, cache_read, exact| {
+        Some(Tokens {
+            uncached_input: input,
+            cache_read,
+            cache_write: 0,
+            output: 10,
+            reasoning: 0,
+            exact,
+        })
+    };
+    let with = |rows: Vec<SendRow>, t: Option<Tokens>| rows.into_iter().map(move |row| SendRow { tokens: t, ..row });
+    store.add(
+        with(requests(now, "large", 30, 400).collect(), tokens(250_000, 0, true))
+            .chain(with(
+                requests(now, "small", 60, 100).collect(),
+                tokens(1_000, 500, true),
+            ))
+            .chain(with(
+                requests(now, "inexact", 30, 100).collect(),
+                tokens(250_000, 0, false),
+            )),
+    );
+    let speed = store.speed(None, None);
+    let slow = speed["slow"].as_array().unwrap();
+    let entry = |slice: &str| slow.iter().find(|s| s["slice"] == slice).cloned();
+    assert_eq!(
+        entry("size"),
+        Some(
+            json!({"slice": "size", "value": ">200k", "provider": "codex", "source": "proxy",
+            "ttftKind": "byte", "requests": 30, "p95": 400, "baseline": 100})
+        ),
+        "{speed}"
+    );
+    assert_eq!(
+        entry("cache").map(|e| e["value"].clone()),
+        Some(json!("miss")),
+        "{speed}"
+    );
+    assert_eq!(
+        entry("cache").map(|e| e["requests"].clone()),
+        Some(json!(30)),
+        "{speed}"
+    );
+}
+
+#[test]
+fn at_most_20_slices_sorted_by_ratio() {
+    let store = Store::new();
+    let now = store.now;
+    let rows = (0..22_i64).flat_map(|i| {
+        let provider = format!("provider-{i:02}");
+        requests(now, &format!("fast-{i}"), 30, 100)
+            .chain(requests(now, &format!("slow-{i}"), 30, 200 + 10 * i))
+            .map(move |row| SendRow {
+                provider: provider.clone(),
+                ..row
+            })
+    });
+    write_all(&store, rows);
+    let speed = store.speed(None, None);
+    let slow = speed["slow"].as_array().unwrap();
+    assert_eq!(slow.len(), 20, "{speed}");
+    let ratios: Vec<f64> = slow
+        .iter()
+        .map(|s| s["p95"].as_f64().unwrap() / s["baseline"].as_f64().unwrap())
+        .collect();
+    assert!(ratios.windows(2).all(|w| w[0] >= w[1]), "{ratios:?}");
+    assert_eq!(slow[0]["provider"], "provider-21");
+    assert_eq!(slow[19]["provider"], "provider-02");
+    assert!(slow.iter().all(|s| s["slice"] == "model"), "{speed}");
+}

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -54,82 +55,103 @@ impl Activity {
     }
 }
 
-/// Strings stored once per read, named by index.
+/// A string stored once per read in [`Names`]; non-zero so an absent one costs nothing.
+type Id = NonZeroU32;
+
+/// Strings stored once per read, named by their place from 1.
 #[derive(Default)]
 struct Names {
-    ids: HashMap<Box<str>, u32>,
+    ids: HashMap<Box<str>, Id>,
     names: Vec<Box<str>>,
 }
 
 impl Names {
-    fn id(&mut self, name: &str) -> u32 {
+    fn id(&mut self, name: &str) -> Id {
         if let Some(id) = self.ids.get(name) {
             return *id;
         }
-        let id = u32::try_from(self.names.len()).unwrap_or(u32::MAX);
         self.names.push(name.into());
+        let id = u32::try_from(self.names.len())
+            .ok()
+            .and_then(Id::new)
+            .unwrap_or(Id::MAX);
         self.ids.insert(name.into(), id);
         id
     }
 
-    fn name(&self, id: u32) -> &str {
-        self.names.get(id as usize).map_or("", |name| name)
+    fn name(&self, id: Id) -> &str {
+        self.text(id.get())
+    }
+
+    /// The name of an [`Id`] held as a plain number.
+    fn text(&self, code: u32) -> &str {
+        let index = code.checked_sub(1).map(|index| index as usize);
+        index.and_then(|index| self.names.get(index)).map_or("", |name| name)
     }
 }
 
-/// A request's key: a 128-bit hash of its ID, with its turn. At a million sends this keeps
-/// the map's keys small; two IDs share a hash with odds near 2^-89.
-fn request_key(request: &str, turn: i64) -> (u128, i64) {
-    let half = |salt: u8| {
+/// A request's key: a 128-bit hash of its ID and turn. A million sends make about a
+/// million entries, so the key is kept small rather than the ID stored; two requests share
+/// a hash with odds near 2^-89.
+fn request_key(request: &str, turn: i64) -> [u64; 2] {
+    [0_u8, 1].map(|salt| {
         let mut hasher = DefaultHasher::new();
-        salt.hash(&mut hasher);
-        request.hash(&mut hasher);
+        (salt, request, turn).hash(&mut hasher);
         hasher.finish()
-    };
-    ((u128::from(half(0)) << 64) | u128::from(half(1)), turn)
+    })
 }
 
-/// Token counts from a send with an exact breakdown.
+/// Milliseconds held in 32 bits, saturating past 24 days, to keep [`Send`] small.
+fn ms(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// Token figures from a send with an exact breakdown.
 #[derive(Clone, Copy)]
 struct Exact {
-    /// Uncached input, cache read and cache write.
-    input: i64,
-    cache_read: i64,
-    output: Option<i64>,
+    /// The [`SIZES`] index of its uncached input, cache read and cache write.
+    size: u8,
+    /// A cache read happened.
+    cache: bool,
+    output: Option<u32>,
 }
 
 /// What a request's last send says about it.
 #[derive(Clone, Copy)]
 struct Send {
     /// `at_ms`, then a fallback after every native send of its request, then `send`.
-    order: (i64, bool, i64),
+    order: (i64, bool, i32),
     complete: bool,
-    source: u32,
-    provider: u32,
-    credential: Option<u32>,
-    model: Option<u32>,
+    source: Id,
+    provider: Id,
+    credential: Option<Id>,
+    model: Option<Id>,
     stream: bool,
-    start: i64,
-    latency: Option<i64>,
-    ttft: Option<(i64, TtftKind)>,
+    start: i32,
+    latency: Option<i32>,
+    ttft: Option<(i32, TtftKind)>,
     tokens: Option<Exact>,
 }
 
 impl Send {
-    fn of(row: &Row, order: (i64, bool, i64), latency: Option<i64>, names: &mut Names) -> rusqlite::Result<Self> {
-        let mut name = |index| -> rusqlite::Result<Option<u32>> {
+    fn of(row: &Row, order: (i64, bool, i32), latency: Option<i64>, names: &mut Names) -> rusqlite::Result<Self> {
+        let mut name = |index| -> rusqlite::Result<Option<Id>> {
             Ok(row.get_ref(index)?.as_str_or_null()?.map(|name| names.id(name)))
         };
-        let (source, provider) = (name(7)?.unwrap_or_default(), name(8)?.unwrap_or_default());
+        // Both columns are NOT NULL.
+        let mut known = |index| -> rusqlite::Result<Id> { Ok(name(index)?.unwrap_or(Id::MIN)) };
+        let (source, provider) = (known(7)?, known(8)?);
         let (credential, model) = (name(9)?, name(10)?);
         let ttft_ms: Option<i64> = row.get(13)?;
         let kind = row.get_ref(14)?.as_str_or_null()?.and_then(TtftKind::parse);
         let tokens = if row.get::<_, bool>(15)? {
             let count = |index| row.get::<_, Option<i64>>(index).map(Option::unwrap_or_default);
+            let cache_read = count(17)?;
+            let output: Option<i64> = row.get(19)?;
             Some(Exact {
-                input: count(16)? + count(17)? + count(18)?,
-                cache_read: count(17)?,
-                output: row.get(19)?,
+                size: size(count(16)? + cache_read + count(18)?),
+                cache: cache_read > 0,
+                output: output.map(|n| u32::try_from(n.max(0)).unwrap_or(u32::MAX)),
             })
         } else {
             None
@@ -142,9 +164,9 @@ impl Send {
             credential,
             model,
             stream: row.get(11)?,
-            start: row.get(12)?,
-            latency,
-            ttft: ttft_ms.zip(kind),
+            start: ms(row.get(12)?),
+            latency: latency.map(ms),
+            ttft: ttft_ms.map(ms).zip(kind),
             tokens,
         })
     }
@@ -170,14 +192,15 @@ struct Timed {
 impl Timed {
     fn of(last: &Send, latency: i64, ttft: i64, earlier: i64) -> Self {
         let output = last.tokens.and_then(|tokens| tokens.output);
+        let start = i64::from(last.start);
         let decoding = latency - ttft;
         let byte_or_token = matches!(last.ttft, Some((_, TtftKind::Byte | TtftKind::Token)));
         Self {
-            server: (last.start - earlier).max(0),
+            server: (start - earlier).max(0),
             earlier,
             first: ttft,
             generation: decoding.max(0),
-            total: last.start + latency,
+            total: start + latency,
             tokens_per_second: output
                 .filter(|_| latency > 0)
                 .map(|output| output as f64 * 1000.0 / latency as f64),
@@ -190,8 +213,8 @@ impl Timed {
 
 #[derive(Default)]
 struct RowFigures {
-    first: Vec<i64>,
-    total: Vec<i64>,
+    first: Vec<i32>,
+    total: Vec<i32>,
     tokens_per_second: Vec<f64>,
     decode_speed: Vec<f64>,
 }
@@ -203,6 +226,173 @@ struct PartFigures {
     earlier: f64,
     first: f64,
     generation: f64,
+}
+
+/// A slice dimension judged against the rest of its provider, source and kind.
+#[derive(Clone, Copy)]
+enum Dimension {
+    Model,
+    Credential,
+    Size,
+    Cache,
+    Stream,
+    Hour,
+}
+
+impl Dimension {
+    const ALL: [Self; 6] = [
+        Self::Model,
+        Self::Credential,
+        Self::Size,
+        Self::Cache,
+        Self::Stream,
+        Self::Hour,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Credential => "credential",
+            Self::Size => "size",
+            Self::Cache => "cache",
+            Self::Stream => "stream",
+            Self::Hour => "hour",
+        }
+    }
+
+    /// `item`'s value in this dimension, as a code; none when it has no value here.
+    fn code(self, item: &Item) -> Option<u32> {
+        match self {
+            Self::Model => item.model.map(Id::get),
+            Self::Credential => item.credential.map(Id::get),
+            Self::Size => item.size.map(u32::from),
+            Self::Cache => item.cache.map(u32::from),
+            Self::Stream => Some(u32::from(item.stream)),
+            Self::Hour => Some(u32::from(item.hour)),
+        }
+    }
+
+    fn value(self, code: u32, names: &Names) -> Value {
+        match self {
+            Self::Model | Self::Credential => names.text(code).into(),
+            Self::Size => SIZES.get(code as usize).copied().unwrap_or_default().into(),
+            Self::Cache => if code == 1 { "hit" } else { "miss" }.into(),
+            Self::Stream => (code == 1).into(),
+            Self::Hour => code.into(),
+        }
+    }
+}
+
+const SIZES: [&str; 4] = ["<10k", "10k-50k", "50k-200k", ">200k"];
+
+/// The index in [`SIZES`] of a request with `input` tokens of input, cached or not.
+fn size(input: i64) -> u8 {
+    match input {
+        ..10_000 => 0,
+        ..50_000 => 1,
+        ..200_000 => 2,
+        _ => 3,
+    }
+}
+
+/// The hour of the day, 0 to 23, at `at_ms` for a viewer `offset` minutes east of UTC.
+fn hour(at_ms: i64, offset: i32) -> u8 {
+    let minute = (at_ms.div_euclid(60_000) + i64::from(offset)).rem_euclid(1440);
+    u8::try_from(minute / 60).unwrap_or_default()
+}
+
+/// A timed request's first response and its value in each dimension.
+struct Item {
+    first: i32,
+    model: Option<Id>,
+    credential: Option<Id>,
+    size: Option<u8>,
+    /// A cache read happened.
+    cache: Option<bool>,
+    stream: bool,
+    hour: u8,
+}
+
+impl Item {
+    fn of(last: &Send, first: i32, offset: i32) -> Self {
+        Self {
+            first,
+            model: last.model,
+            credential: last.credential,
+            size: last.tokens.map(|tokens| tokens.size),
+            cache: last.tokens.map(|tokens| tokens.cache),
+            stream: last.stream,
+            hour: hour(last.order.0, offset),
+        }
+    }
+}
+
+/// A value judged within one provider, source and kind needs this many requests, and so
+/// do the others it is judged against.
+const MIN_REQUESTS: usize = 30;
+/// A value is slow when its p95 first response is at least this many times the others'.
+const SLOW_RATIO: f64 = 1.5;
+const MAX_SLOW: usize = 20;
+
+struct Slow {
+    dimension: Dimension,
+    code: u32,
+    group: (Id, Id, TtftKind),
+    requests: usize,
+    p95: i32,
+    baseline: i32,
+}
+
+impl Slow {
+    fn ratio(&self) -> f64 {
+        self.p95 as f64 / self.baseline as f64
+    }
+}
+
+/// The slow values of one provider, source and kind's requests.
+fn slow_in(group: (Id, Id, TtftKind), mut items: Vec<Item>, out: &mut Vec<Slow>) {
+    items.sort_unstable_by_key(|item| item.first);
+    let n = items.len();
+    for dimension in Dimension::ALL {
+        // Each value's first responses, ascending, since `items` is.
+        let mut values: HashMap<u32, Vec<i32>> = HashMap::new();
+        for item in &items {
+            if let Some(code) = dimension.code(item) {
+                values.entry(code).or_default().push(item.first);
+            }
+        }
+        for (code, firsts) in values {
+            let others = n - firsts.len();
+            if firsts.len() < MIN_REQUESTS || others < MIN_REQUESTS {
+                continue;
+            }
+            let Some(p95) = percentile(&firsts, 95) else {
+                continue;
+            };
+            // The others' p95 is their (m - ceil(0.95 m) + 1)th largest: walk down from the
+            // top past this value's own requests rather than sorting the others again.
+            let from_top = others - (95 * others).div_ceil(100) + 1;
+            let Some(baseline) = items
+                .iter()
+                .rev()
+                .filter(|item| dimension.code(item) != Some(code))
+                .nth(from_top - 1)
+                .map(|item| item.first)
+            else {
+                continue;
+            };
+            if p95 > baseline && p95 as f64 >= SLOW_RATIO * baseline as f64 {
+                out.push(Slow {
+                    dimension,
+                    code,
+                    group,
+                    requests: firsts.len(),
+                    p95,
+                    baseline,
+                });
+            }
+        }
+    }
 }
 
 /// Nearest rank: the `p`th percentile of ascending `sorted` is `sorted[ceil(p * n / 100) - 1]`.
@@ -236,7 +426,15 @@ fn read(
         Range::Week | Range::Month => " NOT INDEXED",
     };
     let mut names = Names::default();
-    let mut requests: HashMap<(u128, i64), Request> = HashMap::new();
+    // Sized up front from the first sends: a map that grows leaves its outgrown tables to
+    // the allocator, which can keep them resident.
+    let first_sends: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM sends{scan} WHERE at_ms >= ?1 AND at_ms <= ?2 AND send = 0"),
+        params![from - EARLIER_MS, now],
+        |row| row.get(0),
+    )?;
+    let mut requests: HashMap<[u64; 2], Request> =
+        HashMap::with_capacity(usize::try_from(first_sends).unwrap_or_default());
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM sends{scan} WHERE at_ms >= ?1 AND at_ms <= ?2"
     ))?;
@@ -268,8 +466,9 @@ fn read(
     let (provider_id, credential_id) = (wanted(provider), wanted(credential));
     let mut counted = 0_u64;
     let mut untimed = 0_u64;
-    let mut row_figures: HashMap<(u32, u32, Option<u32>, TtftKind), RowFigures> = HashMap::new();
-    let mut part_figures: HashMap<(u32, u32), PartFigures> = HashMap::new();
+    let mut row_figures: HashMap<(Id, Id, Option<Id>, TtftKind), RowFigures> = HashMap::new();
+    let mut part_figures: HashMap<(Id, Id), PartFigures> = HashMap::new();
+    let mut groups: HashMap<(Id, Id, TtftKind), Vec<Item>> = HashMap::new();
     for request in requests.into_values() {
         let last = request.last;
         let filtered = provider_id.is_some_and(|id| id != Some(last.provider))
@@ -282,12 +481,13 @@ fn read(
             untimed += 1;
             continue;
         };
-        let timed = Timed::of(&last, latency, ttft, request.latency - latency);
+        let latency = i64::from(latency);
+        let timed = Timed::of(&last, latency, i64::from(ttft), request.latency - latency);
         let figures = row_figures
             .entry((last.provider, last.source, last.model, kind))
             .or_default();
-        figures.first.push(timed.first);
-        figures.total.push(timed.total);
+        figures.first.push(ms(timed.first));
+        figures.total.push(ms(timed.total));
         figures.tokens_per_second.extend(timed.tokens_per_second);
         figures.decode_speed.extend(timed.decode_speed);
         let part = part_figures.entry((last.provider, last.source)).or_default();
@@ -296,10 +496,42 @@ fn read(
         part.earlier += timed.earlier as f64;
         part.first += timed.first as f64;
         part.generation += timed.generation as f64;
+        groups
+            .entry((last.provider, last.source, kind))
+            .or_default()
+            .push(Item::of(&last, ms(timed.first), offset));
     }
+    let mut slow = Vec::new();
+    for (group, items) in groups {
+        slow_in(group, items, &mut slow);
+    }
+    let order = |entry: &Slow| {
+        let (provider, source, kind) = entry.group;
+        let value = entry.dimension.value(entry.code, &names).to_string();
+        (
+            names.name(provider),
+            names.name(source),
+            kind.as_str(),
+            entry.dimension.name(),
+            value,
+        )
+    };
+    slow.sort_by(|a, b| b.ratio().total_cmp(&a.ratio()).then_with(|| order(a).cmp(&order(b))));
+    let slow: Vec<Value> = slow
+        .iter()
+        .take(MAX_SLOW)
+        .map(|entry| {
+            let (provider, source, kind) = entry.group;
+            json!({
+                "slice": entry.dimension.name(), "value": entry.dimension.value(entry.code, &names),
+                "provider": names.name(provider), "source": names.name(source), "ttftKind": kind.as_str(),
+                "requests": entry.requests, "p95": entry.p95, "baseline": entry.baseline,
+            })
+        })
+        .collect();
     let mut row_figures: Vec<_> = row_figures.into_iter().collect();
     row_figures.sort_unstable_by(|(a, _), (b, _)| {
-        let key = |(provider, source, model, kind): &(u32, u32, Option<u32>, TtftKind)| {
+        let key = |(provider, source, model, kind): &(Id, Id, Option<Id>, TtftKind)| {
             let model = model.map(|model| names.name(model));
             (names.name(*provider), names.name(*source), model, kind.as_str())
         };
@@ -340,7 +572,7 @@ fn read(
     let coverage_uncertain = meta(&conn, "uncertain_at")?.is_some_and(|at| at >= from && at <= now);
     Ok(json!({
         "range": range.name(), "from": from, "to": now, "offset": offset,
-        "requests": counted, "untimed": untimed, "rows": out_rows, "parts": parts, "slow": [],
+        "requests": counted, "untimed": untimed, "rows": out_rows, "parts": parts, "slow": slow,
         "oldestSend": oldest, "lostEvents": lost, "coverageUncertain": coverage_uncertain,
     }))
 }
