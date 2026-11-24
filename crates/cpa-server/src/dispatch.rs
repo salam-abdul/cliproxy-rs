@@ -928,7 +928,8 @@ async fn run_routed(
 }
 
 /// The stream an attempt held back on a first-event error ([`ExecError::held`]), once
-/// no other account remains: started like any stream, with the response headers.
+/// no other account remains: started like any stream, with the response headers. A
+/// hold with no events answers with the error's status instead.
 fn send_held(error: RunError) -> Result<Done, RunError> {
     let (Failure::Exec(failed) | Failure::Remote { error: failed, .. }) = &error.failure else {
         return Err(error);
@@ -936,11 +937,17 @@ fn send_held(error: RunError) -> Result<Done, RunError> {
     let Some(held) = failed.held.clone() else {
         return Err(error);
     };
-    let headers = (*failed.headers).clone();
     let mut events = held.events.clone().into_iter();
-    let first = events.next();
+    let Some(first) = events.next() else {
+        return Err(error);
+    };
+    let headers = (*failed.headers).clone();
     let rest = futures_util::stream::iter(events.map(Ok).chain([Err(held.end.clone())])).boxed();
-    Ok(Done::Stream { headers, first, rest })
+    Ok(Done::Stream {
+        headers,
+        first: Some(first),
+        rest,
+    })
 }
 
 async fn run_attempts(
@@ -1436,8 +1443,8 @@ async fn run_remote(
         if error.upstream {
             preferred_upstream = Some(error.clone());
         }
-        // The held stream answers now: its account is never picked again, and a round
-        // without another account would answer with the pick failure instead.
+        // A held first-event error answers now: its account is never picked again, and a
+        // round without another account would answer with the pick failure instead.
         if matches!(&error.failure, Failure::Exec(e) if e.held.is_some()) {
             return Err(error.into_run_error());
         }
