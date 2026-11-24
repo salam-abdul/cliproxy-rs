@@ -766,6 +766,73 @@ async fn expired_token_is_used_then_refreshed_once_after_401() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+async fn oauth_first_event_401(State(mock): State<Arc<OAuthMock>>, req: Request) -> Response {
+    let path = req.uri().path().to_owned();
+    mock.calls.lock().unwrap().push(path.clone());
+    if path == "/token" {
+        return axum::Json(serde_json::json!({
+            "access_token": "sk-ant-oat-new-fake", "refresh_token": "fake-rotated", "expires_in": 3600,
+            "account": {"uuid": "acct-fake", "email_address": "a@example.invalid"}}))
+        .into_response();
+    }
+    let error = r#"{"type":"error","error":{"type":"authentication_error","message":"synthetic token rejected"}}"#;
+    (
+        [("content-type", "text/event-stream")],
+        format!("event: error\ndata: {error}\n\n"),
+    )
+        .into_response()
+}
+
+/// A buffered client's Claude stream that opens with an `authentication_error` already
+/// had the upstream accept the request, so the request is not sent to that account
+/// again after a refresh, as it would be for an HTTP 401: the client gets the 401.
+#[tokio::test]
+async fn a_buffered_first_event_401_is_not_resent_after_a_refresh() {
+    let mock = Arc::new(OAuthMock::default());
+    let upstream_url = serve(
+        axum::Router::new()
+            .fallback(oauth_first_event_401)
+            .with_state(mock.clone()),
+    )
+    .await;
+    let dir = std::env::temp_dir().join(format!("cpa-routes-first-401-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude.json");
+    let metadata = serde_json::json!({"type":"claude","access_token":"sk-ant-oat-old-fake","refresh_token":"fake-refresh",
+        "expired":"2999-01-01T00:00:00Z","account_uuid":"acct-fake","email":"a@example.invalid",
+        "claude_device_ids":["b".repeat(64)]});
+    std::fs::write(&path, metadata.to_string()).unwrap();
+    let mut credential = Credential::from_file(&dir, &path, metadata.as_object().unwrap().clone()).unwrap();
+    credential.attributes.insert("base_url".into(), upstream_url.clone());
+    let oauth = cpa_exec::oauth::OAuth::with_endpoints(
+        wreq::Client::new(),
+        &format!("{upstream_url}/token"),
+        &format!("{upstream_url}/profile"),
+        &format!("{upstream_url}/roles"),
+    );
+    let executors = Executors {
+        claude: ClaudeExecutor::new(&upstream_url).unwrap().with_oauth(oauth),
+        codex: Default::default(),
+        devices: Default::default(),
+        openai: Default::default(),
+        google: Default::default(),
+    };
+    let config = cpa_server::testing::config("access:\n  api-keys: [client-key]\n");
+    let rt = Arc::new(cpa_server::testing::runtime(config, vec![credential], executors));
+    let url = serve(router(rt.clone())).await;
+    let (status, _, text) = post(
+        &url,
+        "/v1/chat/completions",
+        &format!(r#"{{"model":"{MODEL}","messages":[{{"role":"user","content":"fixture"}}]}}"#),
+    )
+    .await;
+    assert_eq!(status, 401, "{text}");
+    assert!(text.contains("synthetic token rejected"), "{text}");
+    let calls = mock.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|c| *c == "/v1/messages").count(), 1, "{calls:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 type Reply = Box<dyn Fn() -> Response + Send + Sync>;
 
 /// Replies in order, one per upstream call; the last repeats.

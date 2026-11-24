@@ -2186,10 +2186,13 @@ async fn attempt(
         let mut executed = execute(lease.credential.clone(), req.clone()).await;
         // Go `tryRefreshAfterUnauthorized`: one refresh-and-retry per credential. Home
         // credentials never refresh here (Go home_unauthorized_refresh): the 401 goes to
-        // Home and the round moves on, even when a local credential shares the ID.
+        // Home and the round moves on, even when a local credential shares the ID. A
+        // held first-event error came after the upstream accepted the request, so it is
+        // never sent to the same account again.
         if let Err(error) = &executed
             && !refreshed
             && !lease.is_remote()
+            && error.held.is_none()
             && classify::is_unauthorized(error)
             && let Some(current) = rt.refresh_after_unauthorized(&lease.credential, cfg).await
         {
