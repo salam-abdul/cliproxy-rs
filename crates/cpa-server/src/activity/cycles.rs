@@ -18,22 +18,23 @@ pub(super) struct Cycle {
     pub ended: bool,
 }
 
-/// How long past a stated reset a reading must come to start a new cycle.
+/// How far past the current cycle's stated reset a reading's stated reset must lie to start
+/// a new cycle, so a reset that drifts by minutes stays one cycle.
 const RESET_GRACE_MS: i64 = 600_000;
 /// A fall in use by more than this many points starts a new cycle.
 const FALL: f64 = 5.0;
 
-/// Splits one credential's `points`, in time order, into cycles. A new cycle starts when
-/// the current one's latest stated reset passed more than [`RESET_GRACE_MS`] before a
-/// reading that states a reset, or when use falls by more than [`FALL`] points.
+/// Splits one credential's `points`, in time order, into cycles. A new cycle starts at a
+/// reading that comes after the current cycle's latest stated reset and states a reset more
+/// than [`RESET_GRACE_MS`] beyond it, or when use falls by more than [`FALL`] points.
 pub(super) fn cycles(points: &[Point], now: i64) -> Vec<Cycle> {
     let mut cycles: Vec<Cycle> = Vec::new();
     for point in points {
         let current = cycles.last_mut().filter(|cycle| {
-            let reset_passed = point.reset.is_some()
-                && cycle
-                    .reset
-                    .is_some_and(|reset| point.at > reset.saturating_add(RESET_GRACE_MS));
+            let reset_passed = point
+                .reset
+                .zip(cycle.reset)
+                .is_some_and(|(stated, reset)| point.at > reset && stated > reset.saturating_add(RESET_GRACE_MS));
             !reset_passed && point.used >= cycle.last - FALL
         });
         match current {
