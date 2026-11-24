@@ -27,6 +27,7 @@ Restart the binary to apply native configuration changes.
 | `newSessionMinRemaining` | Default 5, range 0 to 50 percent |
 | `maxAttempts` (accounts tried per request) | Default 3, range 1 to 16 |
 | `quotaFallback` | Default empty: no [quota fallback](#quota-fallback) |
+| `httpProxyHost` | Address of the CONNECT listener on `httpProxyPort`. Default `127.0.0.1`; an IP address only. On loopback it also answers `/health` and `/status`; anywhere else it serves only CONNECT and logs a warning at start. Set `0.0.0.0` only in a container whose port mapping is bound to the host's loopback ([Container](../docs/INSTALL.md#container)). |
 | Admission deadline | 60 seconds |
 | Cooldown on explicit 401, 403 or 429 | Whole account |
 | Token refresh after an explicit 401 | One, in the background; the request moves to another account |

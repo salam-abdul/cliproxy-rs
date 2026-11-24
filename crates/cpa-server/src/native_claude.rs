@@ -54,6 +54,10 @@ pub struct Config {
     port: u16,
     #[serde(default)]
     http_proxy_port: u16,
+    /// The CONNECT listener's address: an IP address only, so a hostname cannot
+    /// resolve somewhere else. See [`Config::connect_serves`].
+    #[serde(default = "loopback")]
+    http_proxy_host: std::net::IpAddr,
     database: PathBuf,
     events: PathBuf,
     proxy_secret: PathBuf,
@@ -79,6 +83,33 @@ pub struct Config {
     fixture_accounts: Option<Vec<Account>>,
     fixture_quota: Option<Value>,
     upstream: Option<Target>,
+}
+impl Config {
+    fn connect_addr(&self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.http_proxy_host, self.http_proxy_port)
+    }
+    /// Diagnostics only on loopback: `/health` needs no secret and reads every
+    /// account's quota, so a listener other hosts reach serves CONNECT alone.
+    fn connect_serves(&self) -> Serve {
+        if self.http_proxy_host.is_loopback() {
+            Serve::Diagnostics
+        } else {
+            Serve::ConnectOnly
+        }
+    }
+}
+/// What a connection answers besides an authenticated CONNECT.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Serve {
+    /// `/health` and `/status`, and 400 for anything else.
+    Diagnostics,
+    /// 400 for everything else.
+    ConnectOnly,
+    /// Proxies requests to Anthropic: TLS inside an authenticated tunnel.
+    Tunnel,
+}
+fn loopback() -> std::net::IpAddr {
+    std::net::Ipv4Addr::LOCALHOST.into()
 }
 fn minimum_remaining() -> f64 {
     5.0
@@ -1162,11 +1193,7 @@ fn constant(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
-fn connection<I>(
-    io: I,
-    s: Arc<State>,
-    diagnostics: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+fn connection<I>(io: I, s: Arc<State>, serve: Serve) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -1175,7 +1202,10 @@ where
             let s = s.clone();
             async move {
                 if req.method() != Method::CONNECT {
-                    return Ok::<_, std::convert::Infallible>(handle(s, req, diagnostics).await);
+                    if serve == Serve::ConnectOnly {
+                        return Ok::<_, std::convert::Infallible>(error(400, "Use CONNECT proxy protocol"));
+                    }
+                    return Ok(handle(s, req, serve == Serve::Diagnostics).await);
                 }
                 let expected = format!(
                     "Basic {}",
@@ -1217,7 +1247,7 @@ where
                                     Ok(Ok(()))
                                 )
                             {
-                                Box::pin(connection(tls, s, false)).await;
+                                Box::pin(connection(tls, s, Serve::Tunnel)).await;
                             }
                         } else if s.config.upstream.is_none()
                             && let Ok(Ok(mut remote)) =
@@ -1321,9 +1351,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
         sessions: Default::default(),
         skipped: Default::default(),
     });
-    let plain = TcpListener::bind(("127.0.0.1", c.http_proxy_port))
-        .await
-        .context("native CONNECT listener")?;
+    let plain = connect_listener(&c).await.context("native CONNECT listener")?;
     let secure = TcpListener::bind(("127.0.0.1", c.port))
         .await
         .context("native diagnostics listener")?;
@@ -1366,6 +1394,13 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             }
         }
     });
+    let connect_addr = plain.local_addr()?;
+    if !c.http_proxy_host.is_loopback() {
+        tracing::warn!(
+            "Native CONNECT listener on {connect_addr} is reachable from other hosts; it serves only CONNECT"
+        );
+    }
+    let serves = c.connect_serves();
     let s1 = s.clone();
     let plain = Arc::new(plain);
     let a = tokio::spawn(accept_loop(
@@ -1374,7 +1409,7 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
             async move { plain.accept().await }
         },
         move |(io, _)| {
-            tokio::spawn(connection(io, s1.clone(), true));
+            tokio::spawn(connection(io, s1.clone(), serves));
         },
     ));
     let secure = Arc::new(secure);
@@ -1393,16 +1428,17 @@ pub async fn start_config(rt: Arc<Runtime>, path: &Path) -> anyhow::Result<Runni
                         Ok(Ok(()))
                     )
                 {
-                    connection(tls, s, true).await;
+                    connection(tls, s, Serve::Diagnostics).await;
                 }
             });
         },
     ));
-    println!(
-        "Native Claude transparent router ready on loopback:{}",
-        c.http_proxy_port
-    );
+    println!("Native Claude transparent router ready on {connect_addr}");
     Ok(Running(vec![a, b, certificate, health], owner))
+}
+
+async fn connect_listener(c: &Config) -> std::io::Result<TcpListener> {
+    TcpListener::bind(c.connect_addr()).await
 }
 
 /// Hands every connection `accept` yields to `handle`. An accept error never ends the
@@ -1538,6 +1574,26 @@ fn new_ssl(s: &State) -> Result<Ssl, btls::error::ErrorStack> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The CONNECT listener binds loopback unless `httpProxyHost` names another
+    /// address, and a hostname is refused when the configuration is read.
+    #[tokio::test]
+    async fn connect_listener_binds_http_proxy_host_and_defaults_to_loopback() {
+        let config = |extra: Value| {
+            let mut v = json!({"port":0,"database":"d","events":"e","proxySecret":"s","key":"k","cert":"c"});
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<Config>(v)
+        };
+        let bound = |c: Config| async move { connect_listener(&c).await.unwrap().local_addr().unwrap().ip() };
+        assert_eq!(
+            bound(config(json!({})).unwrap()).await,
+            std::net::IpAddr::from([127, 0, 0, 1])
+        );
+        assert_eq!(
+            bound(config(json!({"httpProxyHost":"0.0.0.0"})).unwrap()).await,
+            std::net::IpAddr::from([0, 0, 0, 0])
+        );
+        assert!(config(json!({"httpProxyHost":"localhost"})).is_err());
+    }
     #[test]
     fn new_sessions_choose_soonest_weekly_reset_but_existing_pins_win() {
         let at = 2_000_000_000_000;
