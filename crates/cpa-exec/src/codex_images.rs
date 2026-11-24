@@ -228,6 +228,7 @@ impl CodexExecutor {
                 &Default::default(),
                 &wire,
                 crate::codex::ErrorBody::Strict,
+                &req.usage,
             )
             .await?;
         let upstream = events(res.body);

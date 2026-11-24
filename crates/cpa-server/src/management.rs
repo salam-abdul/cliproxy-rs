@@ -474,6 +474,7 @@ pub fn router(state: Arc<Management>) -> Router {
             "observability/activity",
             methods().get(guarded!(s, observability::activity)),
         ),
+        ("observability/speed", methods().get(guarded!(s, observability::speed))),
         (
             "observability/usage/api-keys",
             methods().get(guarded!(s, observability::api_key_usage)),

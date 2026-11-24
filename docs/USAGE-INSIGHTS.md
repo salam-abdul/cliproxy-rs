@@ -1,6 +1,6 @@
 # Usage insights: ideas and design
 
-Status: proposed. Parts 1 and 2 are built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
+Status: proposed. Parts 1 to 3 are built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
 
 Read at fork `8e66c70` and [cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper) `e5e8f1a` (K in [Upstream review](UPSTREAM-REVIEW.md)). File and line references are to that fork commit.
 
@@ -110,36 +110,18 @@ Built. [Configuration](CONFIGURATION.md#activity-store) owns the route's totals 
 
 - Quota cycles cover the weekly window only. The 5-hour window has none.
 - Tokens per percent counts exact sends only: the uncached input, cache write and output tokens of sends whose token counts are exact.
-- The section has no speed columns; part 3 adds them.
+- The section has no speed columns; speed has its own section (part 3).
 
 Deferred to one later change: a provider filter on the history panels, a provider split of top models, and retiring the native history route, which the history panels still read.
 
 ### Part 3: what slows responses
 
-A request's total is its last send's `start_ms + latency_ms`. It splits into four parts that add up to it:
+Built. [Configuration](CONFIGURATION.md#activity-store) owns the speed route, its time parts, percentiles and slow slices, and the [dashboard](../ui/README.md#pages) the Speed section on Overview. Facts of the built part that later parts rely on:
 
-| Part | Computed as |
-| --- | --- |
-| In the server | The last send's `start_ms` minus the summed `latency_ms` of the sends before it: preparation, session wait and quota admission on native routing; routing and translation on the proxy |
-| Earlier sends | Summed `latency_ms` of every send before the last: failovers and retries |
-| Last send until its first response | Its `ttft_ms` |
-| Generation | Its `latency_ms - ttft_ms` |
-
-**Limits that come from `ttft_kind`.**
-
-- Time to first response is compared only between sends of the same kind, and each table names the kind. Until the Codex and Gemini executors report a first-byte mark, their figure is the first translated event, which for a buffered response is the whole response.
-- Tokens per second is `output_tokens * 1000 / latency_ms` for a send with exact tokens and a latency.
-- Decode speed is `output_tokens * 1000 / (latency_ms - ttft_ms)`, for streamed sends of kind `byte` or `token` whose generation part is at least 250 ms.
-
-**Slices.** Provider, model, account, request size (uncached input plus cache tokens: under 10k, 10k to 50k, 50k to 200k, over 200k), cache hit or miss, streamed or not, and hour of day.
-
-**Dashboard.** A Speed section on Overview:
-
-- A table by provider and model: median and 95th percentile time to first response and total time, and tokens per second.
-- One stacked bar per provider showing the four parts.
-- A short list of slow slices: any slice with at least 30 sends whose 95th percentile time to first response is 50 percent above the figure for all sends of the same kind.
-
-SQLite has no percentile function, so each percentile is an ordered query over the rows in range. Its cost at the row cap is unmeasured.
+- The route is `GET /v8/management/observability/speed`, with the activity route's `range`, `provider` and `credential` and an `offset` in minutes east of UTC for the hour slice.
+- Codex sends record the first upstream byte, as Claude's do, so new Codex rows have kind `byte`. Codex sends stored before that mark keep kind `event`, and rows of different kinds are never merged.
+- Gemini and Antigravity still report no first-byte mark: their first response is the first translated event, kind `event`, and the Speed table marks those rows.
+- On the translating proxy a send starts when its attempt starts, so its first response includes the executor's preparation before the upstream request, such as a WebSocket dial or token refresh.
 
 ### Part 4: tools and skills
 
@@ -214,7 +196,7 @@ The server cannot tell whether a result helped. The panel says so.
 
 1. The activity store for every provider. Built.
 2. Providers table, health strip, quota cycles, cache read rate. Built.
-3. Speed section.
+3. Speed section. Built.
 4. Tool and skill indexer, then its tab.
 
 Each is its own change. Tests worth naming now: a WebSocket turn's frames are indexed; a cloaked proxy row adds no tool names; a delete during a running server leaves no fact from a deleted row.
@@ -224,8 +206,8 @@ Each is its own change. Tests worth naming now: a WebSocket turn's frames are in
 | Decision | Proposal |
 | --- | --- |
 | When the native history route goes | In the change that moves the dashboard to the activity route. |
-| Dashboard elements | Speed section, Tools tab. Each must fit the bundle budgets. |
-| First-byte marks in the Codex and Gemini executors | Add them, so their time to first response is comparable. Until then part 3 labels it. |
+| Dashboard elements | Tools tab. It must fit the bundle budgets. |
+| First-byte marks in the Gemini and Antigravity executors | Codex has one. Add them for Gemini and Antigravity, so their time to first response is comparable; until then the Speed table marks their rows as timed by the first event. |
 | The tool index file in the history folder, and the delete command updating it | As described in part 4. No new setting: the indexer runs whenever body history is on. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
 
@@ -239,5 +221,5 @@ Module, table and file names, SQL, the split into Svelte components, and fixture
 - **Codex WebSocket frames.** Which frame carries a finished `function_call` item was not read from a stored turn.
 - **Other body formats.** Gemini and Antigravity tool calls carry no call ID and are not designed. Kimi and xAI are assumed to use the OpenAI Chat shape.
 - **Reversing a tool alias.** Whether the client's name can be recovered from an alias without the client key was not checked.
-- **Costs.** Not measured: indexing a 512 MiB file, the index's size, or percentile queries at the row cap.
+- **Costs.** Not measured: indexing a 512 MiB file or the index's size.
 - **Calls with no later request.** The last call of a session is never resent, so it is not counted.

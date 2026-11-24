@@ -168,6 +168,25 @@ A cycle is one account's weekly readings between two resets. A new cycle starts 
 
 The store keeps the latest quota reading per account, window, 10 minutes and stated reset, so the last reading before a reset survives the first one after it.
 
+`GET /v8/management/observability/speed` reads how long completed requests took. It takes the same `range`, `provider` and `credential` parameters, and `offset`, the viewer's minutes east of UTC: a whole number from -840 to 840, `0` when absent. Any other value answers `400`, and the route answers `409` while the store is not running.
+
+A request is its sends under one request ID and WebSocket turn; a native request's quota fallback counts under the native request. Its last send is the latest to start, a fallback after every native send of the same millisecond. The request counts when its last send completed and started inside the range, and the provider and credential filters match that send. Earlier sends are counted from an hour before the range. A counted request whose last send has no latency or no first-response time is untimed: it appears only in the top-level `untimed` count.
+
+Each provider and source (`proxy` or `native`) gets the mean of four parts, which add up to its `total`:
+
+| Part | Time |
+| --- | --- |
+| In the server | From the request's arrival to the last send's start, less the earlier sends' latency |
+| Earlier sends | The latency of the request's failed or failed-over sends |
+| First response | From the last send's start to its first response |
+| Generation | From the first response to the end of the last send |
+
+On the translating proxy a send starts when its attempt starts, so its first response includes the executor's preparation before the upstream request, such as a WebSocket dial or token refresh. Proxy sends written before a store first ran this version counted their first response from the upstream request instead, so they count as untimed. Codex sends record the first upstream byte, as Claude's do; Gemini and Antigravity report no marks, so their first response is the first translated event, with kind `event`. Each row of the table is one provider, source, model and kind, with nearest-rank p50 and p95 first response and total time: for `n` ascending values, the p-th percentile is value number `ceil(p * n / 100)`. Tokens per second is the median of output tokens over latency for sends with exact token counts; decode speed is the median of output tokens over generation time for exact, streamed sends timed by byte or token whose generation took at least 250 ms.
+
+Slow slices compare one value of a dimension (model, account, input size, cache hit or miss, stream, or hour of day in the viewer's offset) with the other requests of the same provider, source and kind, not of the same model. A value is slow when it has at least 30 timed requests, the others number at least 30, and its p95 first response is at least 1.5 times theirs. Input size and cache come only from sends with exact token counts; sizes are under 10k, 10k to 50k, 50k to 200k and over 200k tokens of uncached input plus cache reads and writes. The route returns at most 20 slow slices, the largest ratio first. The hour uses the viewer's current offset for the whole range, so data across a daylight saving change shifts by an hour.
+
+A Codex steering connection is one send spanning the whole connection, so its latency and generation cover every response on it.
+
 ### History
 
 History keeps one row per upstream send, except in commercial mode, which turns it off: every request the translating proxy sends to a provider, including retries, failovers and each WebSocket turn, and every native Claude `POST /v1/messages`. Count-tokens and model-list calls, Realtime and live calls, and native passthrough of other paths are not recorded.

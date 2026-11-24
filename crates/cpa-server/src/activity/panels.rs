@@ -10,7 +10,9 @@ use super::{Activity, DAY_MS, Range, epoch_ms, meta};
 /// The sends in range with their request (a fallback send counts under the request it
 /// serves), whether they failed or were cancelled (a 429 is neither, so the three counts
 /// are disjoint), and their place from the last send of that request,
-/// then the filtered ones. A send's place is judged among every send in range, so a
+/// then the filtered ones. A fallback numbers its sends from 0, so in the same
+/// millisecond as a native send it follows, it is placed after every native send by
+/// `parent_request` before `send`, as the speed read orders them. A send's place is judged among every send in range, so a
 /// filter never turns a failed-over send into its request's last. `picked` is materialized
 /// so the provider, credential and bucket groups share one pass over `sends`.
 const SENDS: &str = "WITH ranged AS (
@@ -19,7 +21,8 @@ const SENDS: &str = "WITH ranged AS (
             (outcome NOT IN ('complete', 'cancelled') AND status IS NOT 429) AS failed,
             (outcome = 'cancelled' AND status IS NOT 429) AS cancelled,
             ROW_NUMBER() OVER (
-                PARTITION BY COALESCE(parent_request, request_id), turn ORDER BY at_ms DESC, send DESC
+                PARTITION BY COALESCE(parent_request, request_id), turn
+                ORDER BY at_ms DESC, parent_request IS NOT NULL DESC, send DESC
             ) AS from_last
         FROM sends WHERE at_ms >= ?1 AND at_ms <= ?2
     ), picked AS MATERIALIZED (

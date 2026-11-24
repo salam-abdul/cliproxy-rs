@@ -2,6 +2,7 @@ mod cycles;
 mod panels;
 mod quota;
 pub(crate) mod sends;
+mod speed;
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -190,6 +191,13 @@ impl Activity {
             set_meta(&startup, "uncertain_at", epoch_ms())?;
         }
         set_meta(&startup, "dirty", 1)?;
+        // Proxy sends before this time counted their first response from the round trip's
+        // start rather than the attempt's; the speed read leaves those times out. A store
+        // with no sends yet has none of those, so every send counts.
+        if meta(&startup, "ttft_from_attempt")?.is_none() {
+            let any: bool = startup.query_row("SELECT EXISTS (SELECT 1 FROM sends)", [], |row| row.get(0))?;
+            set_meta(&startup, "ttft_from_attempt", if any { epoch_ms() } else { 0 })?;
+        }
         startup.commit()?;
         let (tx, rx) = sync_channel(QUEUE);
         let writer_lost = lost.clone();

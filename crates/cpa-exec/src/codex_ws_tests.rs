@@ -285,6 +285,36 @@ async fn turns_reuse_the_socket_and_close_session_releases_it() {
     panic!("upstream socket still open after close_session");
 }
 
+/// Each turn on a pooled socket reports its own round trip: the start before its frame
+/// goes out and one first byte at its first upstream message, before that message's
+/// payload, on the turn that dials and on the turn that reuses the socket.
+#[tokio::test]
+async fn every_turn_marks_its_round_trip_and_first_byte() {
+    let (up, url) = upstream(vec![
+        Act::Send(vec![CREATED, COMPLETED]),
+        Act::Send(vec![CREATED, COMPLETED]),
+    ])
+    .await;
+    let executor = CodexExecutor::new().unwrap();
+    let (cfg, cred) = (Config::default(), credential(&url));
+    for continuation in [false, true] {
+        let recorded = Arc::new(crate::codex_testkit::Recorded::default());
+        let mut req = request(BODY);
+        req.usage = cpa_core::exec::UsageSink::new(recorded.clone());
+        let response = executor
+            .execute_in_session(&cred, req, &cfg, &session(continuation))
+            .await
+            .unwrap();
+        assert!(collect(response).await.iter().all(Result::is_ok));
+        assert_eq!(
+            recorded.kinds(),
+            ["request", "round_trip_started", "first_byte", "line", "line"],
+            "continuation {continuation}"
+        );
+    }
+    assert_eq!(up.dials.lock().unwrap().len(), 1, "the second turn reused the socket");
+}
+
 /// A Home pick as the pooled socket sees it: records retain/end and keeps the closer.
 #[derive(Default)]
 struct FakePick {

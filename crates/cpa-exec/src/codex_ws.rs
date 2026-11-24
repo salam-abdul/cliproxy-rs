@@ -655,6 +655,8 @@ struct Turn {
     restore: bool,
     /// The attempt's usage record.
     usage: cpa_core::exec::UsageSink,
+    /// The first upstream message of this turn was reported as its first byte.
+    answered: bool,
     /// The upstream model, for per-model quota snapshots.
     model: String,
     replay: Replay,
@@ -711,6 +713,7 @@ impl Turn {
         if payload.is_empty() {
             return Frame::Skip;
         }
+        self.arrived();
         self.observe(payload);
         self.wire.ws_response(payload.as_bytes());
         let raw_len = payload.len();
@@ -778,6 +781,14 @@ impl Turn {
             out: Bytes::from(response::ensure_usage_details(out)),
             bufferable,
             terminal,
+        }
+    }
+
+    /// A non-empty upstream message: the turn's first byte, once.
+    fn arrived(&mut self) {
+        if !self.answered {
+            self.answered = true;
+            self.usage.first_byte();
         }
     }
 
@@ -1067,6 +1078,7 @@ impl CodexExecutor {
         let started = Instant::now();
         let mut rx = conn.activate();
         let mut restore = conn.restores(optimized, conflict);
+        req.usage.round_trip_started();
         if let Err(error) = conn.send(frame.clone()).await {
             wire.ws_exec_error("send", &error);
             // `shouldRetryCodexWebsocketSend`: request-scoped failures (413) never retry.
@@ -1097,6 +1109,7 @@ impl CodexExecutor {
             if let Some(handshake) = &fresh_handshake {
                 wire.ws_handshake(101, handshake);
             }
+            req.usage.round_trip_started();
             if let Err(error) = fresh.send(frame).await {
                 wire.ws_exec_error("send_retry", &error);
                 session.invalidate(&fresh, &error, true);
@@ -1124,6 +1137,7 @@ impl CodexExecutor {
             observed,
             restore,
             usage: req.usage.clone(),
+            answered: false,
             model: model.clone(),
             replay,
             wire,

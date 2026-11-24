@@ -140,6 +140,23 @@ fn a_fallback_send_counts_under_the_request_it_serves() {
     assert_eq!(provider(&panels, "gemini")["failedOver"], 0, "{panels}");
 }
 
+/// A fallback in the same millisecond as the native send it replaces is still its
+/// request's last send, whatever their send numbers.
+#[test]
+fn a_same_millisecond_fallback_is_the_last_send() {
+    let store = Store::new();
+    let mut native = send("n1", 1, "claude", Outcome::Failover, Some(429));
+    native.source = Source::Native;
+    let mut fallback = send("p1", 0, "gemini", Outcome::Complete, None);
+    fallback.parent_request = Some("n1".into());
+    fallback.at_ms = native.at_ms;
+    store.activity.record_send(native);
+    store.activity.record_send(fallback);
+    let panels = store.panels(None, None);
+    assert_eq!(provider(&panels, "claude")["failedOver"], 1, "{panels}");
+    assert_eq!(provider(&panels, "gemini")["failedOver"], 0, "{panels}");
+}
+
 #[test]
 fn inexact_tokens_stay_out_of_the_sums() {
     let store = Store::new();

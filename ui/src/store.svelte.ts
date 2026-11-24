@@ -99,6 +99,9 @@ class Store {
   providerActivity = new Res<Data>(() =>
     api(`/observability/activity?range=${this.historyRange}`),
   );
+  speed = new Res<Data>(() =>
+    api(`/observability/speed?range=${this.historyRange}&offset=${-new Date().getTimezoneOffset()}`),
+  );
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> => {
     const list = await api("/credentials");
@@ -166,6 +169,7 @@ class Store {
       this.activity,
       this.history,
       this.providerActivity,
+      this.speed,
     ]) {
       resource.data = undefined;
       resource.error = null;

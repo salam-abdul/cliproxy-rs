@@ -158,3 +158,48 @@ impl cpa_core::exec::CaptureObserver for Wiretap {
         self.0.lock().unwrap().push(tap);
     }
 }
+
+/// Records what the executor reports to the attempt's usage record. A timing mark has
+/// format Codex and no payload.
+#[derive(Default)]
+pub(crate) struct Recorded(pub std::sync::Mutex<Vec<(&'static str, cpa_core::format::Format, String)>>);
+
+impl Recorded {
+    pub fn kinds(&self) -> Vec<&'static str> {
+        self.0.lock().unwrap().iter().map(|(kind, _, _)| *kind).collect()
+    }
+
+    fn mark(&self, kind: &'static str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((kind, cpa_core::format::Format::Codex, String::new()));
+    }
+}
+
+impl cpa_core::exec::UsageObserver for Recorded {
+    fn response_body(&self, format: cpa_core::format::Format, body: &[u8]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("body", format, String::from_utf8_lossy(body).into_owned()));
+    }
+    fn response_line(&self, format: cpa_core::format::Format, line: &[u8]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("line", format, String::from_utf8_lossy(line).into_owned()));
+    }
+    fn request(&self, format: cpa_core::format::Format, payload: &[u8]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(("request", format, String::from_utf8_lossy(payload).into_owned()));
+    }
+    fn round_trip_started(&self) {
+        self.mark("round_trip_started");
+    }
+    fn first_byte(&self) {
+        self.mark("first_byte");
+    }
+}

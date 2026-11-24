@@ -7,7 +7,7 @@ use crate::request_logging::history::row::{Outcome, Source};
 use crate::usage_record::{Detail, ensure_breakdown, has_tokens};
 
 /// Which measurement a send's time to first response is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TtftKind {
     Byte,
     Token,
@@ -20,6 +20,15 @@ impl TtftKind {
             Self::Byte => "byte",
             Self::Token => "token",
             Self::Event => "event",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "byte" => Some(Self::Byte),
+            "token" => Some(Self::Token),
+            "event" => Some(Self::Event),
+            _ => None,
         }
     }
 }
