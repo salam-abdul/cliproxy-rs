@@ -534,3 +534,36 @@ fn at_most_20_slices_sorted_by_ratio() {
     assert_eq!(slow[19]["provider"], "provider-02");
     assert!(slow.iter().all(|s| s["slice"] == "model"), "{speed}");
 }
+
+/// A send without a provider cannot be filed under one: the read fails rather than
+/// lending it another row's name.
+#[test]
+fn a_send_without_a_provider_fails_the_read() {
+    let dir = std::env::temp_dir().join(format!("activity-speed-null-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("activity.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    // The store's columns without its NOT NULL constraints.
+    conn.execute_batch(
+        "CREATE TABLE history_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+        CREATE TABLE sends (
+            request_id TEXT, turn INTEGER, send INTEGER, parent_request TEXT, at_ms INTEGER, source TEXT,
+            provider TEXT, credential TEXT, model TEXT, outcome TEXT, status INTEGER, stream INTEGER,
+            start_ms INTEGER, latency_ms INTEGER, ttft_ms INTEGER, ttft_kind TEXT,
+            uncached_input_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+            output_tokens INTEGER, reasoning_tokens INTEGER, tokens_exact INTEGER
+        );",
+    )
+    .unwrap();
+    let now = epoch_ms();
+    conn.execute(
+        "INSERT INTO sends (request_id, turn, send, at_ms, source, provider, outcome, stream, start_ms,
+            latency_ms, ttft_ms, ttft_kind) VALUES ('r1', 0, 0, ?1, 'proxy', NULL, 'complete', 1, 0, 100, 10, 'byte')",
+        [now - 60_000],
+    )
+    .unwrap();
+    drop(conn);
+    let read = read(&path, Range::Day, None, None, 0, now, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(read.is_err(), "{read:?}");
+}

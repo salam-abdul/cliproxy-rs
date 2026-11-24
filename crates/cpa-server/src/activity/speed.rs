@@ -135,12 +135,11 @@ struct Send {
 
 impl Send {
     fn of(row: &Row, order: (i64, bool, i32), latency: Option<i64>, names: &mut Names) -> rusqlite::Result<Self> {
+        let source = names.id(row.get_ref(7)?.as_str()?);
+        let provider = names.id(row.get_ref(8)?.as_str()?);
         let mut name = |index| -> rusqlite::Result<Option<Id>> {
             Ok(row.get_ref(index)?.as_str_or_null()?.map(|name| names.id(name)))
         };
-        // Both columns are NOT NULL.
-        let mut known = |index| -> rusqlite::Result<Id> { Ok(name(index)?.unwrap_or(Id::MIN)) };
-        let (source, provider) = (known(7)?, known(8)?);
         let (credential, model) = (name(9)?, name(10)?);
         let ttft_ms: Option<i64> = row.get(13)?;
         let kind = row.get_ref(14)?.as_str_or_null()?.and_then(TtftKind::parse);
