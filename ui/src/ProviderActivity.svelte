@@ -44,7 +44,7 @@
     <h2 id="provider-activity-title">Provider activity</h2>
     <span class="muted small">Upstream sends · selected period</span>
   </div>
-  {#if error}
+  {#if error && !data}
     <p class="alert">
       {error instanceof ApiError && error.status === 409
         ? "The activity store is not running."

@@ -419,6 +419,14 @@ try {
   activityConflict = false;
   await page.getByRole("button",{name:"24 hours"}).click();
   await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  activityConflict = true;
+  const pollBefore = activityChecks;
+  await page.clock.fastForward(60_000);
+  await settle();
+  assert.equal(activityChecks - pollBefore, 1, "provider activity polled while the store refuses");
+  assert.equal(await activity.locator(".alert").count(), 0, "a failed poll does not replace a loaded table");
+  assert.equal(await activity.getByText("0.4 of 1 accounts",{exact:true}).count(), 1, "the loaded table stays after a failed poll");
+  activityConflict = false;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the provider table does not widen the page");
   assert.ok(await activity.locator(".provider-scroll").evaluate(e => e.scrollWidth > e.clientWidth),"the provider table scrolls inside its card");
