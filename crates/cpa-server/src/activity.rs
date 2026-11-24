@@ -2,6 +2,7 @@ mod cycles;
 mod panels;
 mod quota;
 pub(crate) mod sends;
+mod speed;
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
