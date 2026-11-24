@@ -282,18 +282,7 @@ impl CodexExecutor {
         wire.metadata(upstream.status, &upstream.headers);
         self.quota.observe(&view.credential.id, &model, &upstream.headers);
         // Marked here, below every reader: SSE, a whole body, `buffered` and an error body.
-        if usage.enabled() {
-            let (usage, mut marked) = (usage.clone(), false);
-            upstream.body = upstream
-                .body
-                .inspect(move |chunk| {
-                    if !marked && chunk.as_ref().is_ok_and(|c| !c.is_empty()) {
-                        marked = true;
-                        usage.first_byte();
-                    }
-                })
-                .boxed();
-        }
+        upstream.body = crate::kimi_http::track_first_byte(upstream.body, usage, false);
         let status = upstream.status;
         upstream.headers.remove(http::header::CONTENT_ENCODING);
         upstream.headers.remove(http::header::CONTENT_LENGTH);
