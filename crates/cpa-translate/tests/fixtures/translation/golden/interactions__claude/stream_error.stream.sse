@@ -10,6 +10,9 @@ data: {"index":0,"step":{"type":"model_output"},"event_type":"step.start"}
 event: step.delta
 data: {"index":0,"delta":{"text":"Hello","type":"text"},"event_type":"step.delta"}
 
-event: interaction.completed
-data: {"interaction":{"id":"msg_fixture_1","status":"completed","usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":1,"total_output_tokens":1,"total_tokens":13},"created":"<time>","updated":"<time>","service_tier":"standard","object":"interaction","model":"claude-sonnet-4-6"},"event_type":"interaction.completed"}
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: interaction.failed
+data: {"interaction":{"id":"msg_fixture_1","status":"failed","object":"interaction","model":"claude-sonnet-4-6","usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":1,"total_output_tokens":1,"total_tokens":13},"error":{"type":"overloaded_error","message":"Overloaded"}},"event_type":"interaction.failed"}
 

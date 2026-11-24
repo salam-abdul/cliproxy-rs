@@ -771,15 +771,37 @@ impl State {
             "interaction.model",
             first_nonempty(&[&self.model, model]),
         );
-        if self.usage.is_empty() {
-            set_usage(&mut completed, "interaction.usage", &root.get("usage"));
-        } else {
-            set_usage(&mut completed, "interaction.usage", &gj::parse(&self.usage));
-        }
+        self.set_usage(&mut completed, root);
         if cut_off(&root.get("delta.stop_reason")) {
             gj::set_str(&mut completed, "interaction.status", "incomplete");
         }
         out.push(sse_event("interaction.completed", &completed));
+        self.completed = true;
+    }
+
+    /// The usage gathered so far, else the event's own, as `interaction.usage`.
+    fn set_usage(&self, out: &mut Vec<u8>, root: &Res<'_>) {
+        if self.usage.is_empty() {
+            set_usage(out, "interaction.usage", &root.get("usage"));
+        } else {
+            set_usage(out, "interaction.usage", &gj::parse(&self.usage));
+        }
+    }
+
+    /// A failed interaction for a Claude `error` event, with the event's type and message
+    /// under `interaction.error`, where the translators from Interactions read them.
+    fn fail(&mut self, model: &[u8], root: &Res<'_>, out: &mut Vec<Vec<u8>>) {
+        if self.completed {
+            return;
+        }
+        let mut failed = br#"{"interaction":{"id":"","status":"failed","object":"interaction","model":"","usage":{},"error":{"type":"","message":""}},"event_type":"interaction.failed"}"#.to_vec();
+        gj::set_str(&mut failed, "interaction.id", &self.id);
+        gj::set_str(&mut failed, "interaction.model", first_nonempty(&[&self.model, model]));
+        self.set_usage(&mut failed, root);
+        let error = root.get("error");
+        gj::set_str(&mut failed, "interaction.error.type", error.get("type").bytes());
+        gj::set_str(&mut failed, "interaction.error.message", error.get("message").bytes());
+        out.push(sse_event("interaction.failed", &failed));
         self.completed = true;
     }
 }
@@ -878,7 +900,8 @@ impl GoStream for State {
             b"message_stop" => self.complete(&model, &root, &mut out),
             b"error" => {
                 self.create(&model, &mut out);
-                self.complete(&model, &root, &mut out);
+                self.stop_step(&mut out);
+                self.fail(&model, &root, &mut out);
             }
             _ => {}
         }
