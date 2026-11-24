@@ -14,7 +14,7 @@ let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, 
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false;
-let speedChecks = 0, speedConflict = false, speedEmpty = false;
+let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
@@ -90,6 +90,7 @@ await page.route("**/*", async route => {
     const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
     const base = {range,from:now-duration,to:now,offset:Number(params.get("offset")),oldestSend:now-duration/2,lostEvents:0,coverageUncertain:false};
     if (speedEmpty) return send({...base,requests:0,untimed:0,rows:[],parts:[],slow:[]});
+    if (speedUntimed) return send({...base,requests:3,untimed:3,rows:[],parts:[],slow:[]});
     return send({...base,requests:93,untimed:1,
       rows:[{provider:"claude",source:"native",model:"claude-opus-4-6",ttftKind:"byte",requests:2,firstP50:800,firstP95:1200,totalP50:4000,totalP95:9000,tokensPerSecond:40.5,decodeSpeed:60.2},
         {provider:"codex",source:"proxy",model:"gpt-5",ttftKind:"event",requests:90,firstP50:300,firstP95:400,totalP50:2500,totalP95:12345,tokensPerSecond:null,decodeSpeed:null}],
@@ -482,6 +483,12 @@ try {
   await speed.getByText("No completed requests recorded in this period.",{exact:true}).waitFor();
   assert.equal(await speed.locator(".speed-bar").count(),0,"an empty period draws no bars");
   speedEmpty = false;
+  speedUntimed = true;
+  await page.getByRole("button",{name:"30 days"}).click();
+  await speed.getByText("None of the 3 completed requests in this period has timing.",{exact:true}).waitFor();
+  assert.equal(await speed.getByText("No completed requests recorded in this period.",{exact:true}).count(),0,"untimed requests are not called no requests");
+  assert.equal(await speed.locator(".speed-bar").count(),0,"a period with only untimed requests draws no bars");
+  speedUntimed = false;
   await page.getByRole("button",{name:"24 hours"}).click();
   await speed.getByText(slowLine,{exact:true}).waitFor();
   await page.setViewportSize({width:390,height:844});

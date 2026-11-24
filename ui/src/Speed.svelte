@@ -37,7 +37,11 @@
   {:else if !data}
     <p class="muted">Loading speed…</p>
   {:else if !rows.length}
-    <p class="muted">No completed requests recorded in this period.</p>
+    <p class="muted">
+      {#if !data.requests}No completed requests recorded in this period.{:else if data.requests === 1}The 1 completed
+        request in this period has no timing.{:else}None of the {data.requests} completed requests in this period has
+        timing.{/if}
+    </p>
   {:else}
     <div class="speed-legend" aria-hidden="true">
       {#each Object.entries(partNames) as [part, name]}<span><i class="part-{part}"></i>{name}</span>{/each}
