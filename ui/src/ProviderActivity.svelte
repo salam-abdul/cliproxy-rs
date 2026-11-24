@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+  const percent = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 });
+  const hour = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric" });
+</script>
+
 <script lang="ts">
   import { ApiError } from "./api";
   import { store } from "./store.svelte";
@@ -10,15 +16,10 @@
   const exact = $derived(rows.reduce((n, r) => n + r.totals.exactSends, 0));
   const error = $derived(store.providerActivity.error);
   let open = $state<Record<string, boolean>>({});
-  const count = (n: number) =>
-    Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
-  const pct = (n: number | null) =>
-    n === null
-      ? "—"
-      : Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(n);
+  const count = (n: number) => compact.format(n);
+  const pct = (n: number | null) => (n === null ? "—" : percent.format(n));
   const points = (n: number | null) => (n === null ? "—" : `${Math.round(n)}%`);
-  const date = (n: number) =>
-    new Date(n).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" });
+  const date = (n: number) => hour.format(n);
   const blockText = (b: Block) =>
     `${date(b.at)}: ${
       b.state === "rated"
@@ -92,7 +93,7 @@
               <td class="count num"
                 >{row.unusedAccounts === null
                   ? "—"
-                  : `${row.unusedAccounts.toFixed(1)} of ${row.endedAccounts} accounts`}</td
+                  : `${row.unusedAccounts.toFixed(1)} of ${row.endedAccounts} ${row.endedAccounts === 1 ? "account" : "accounts"}`}</td
               >
               <td class="count">—</td>
               <td class="count num">{pct(row.cacheReadRate)}</td>

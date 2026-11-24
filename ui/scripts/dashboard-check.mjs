@@ -367,7 +367,7 @@ try {
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
   assert.ok(historyChecks > 0,"history loads with Overview");
   const activity = page.getByRole("region",{name:"Provider activity"});
-  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  await activity.getByText("0.4 of 1 account",{exact:true}).waitFor();
   assert.deepEqual(await activity.locator("button[aria-expanded]").allInnerTexts(),["Claude","Codex"],"providers sort by unused weekly quota");
   const claudeToggle = activity.getByRole("button",{name:"Claude",exact:true});
   assert.equal(await claudeToggle.getAttribute("aria-expanded"),"false");
@@ -398,7 +398,7 @@ try {
   historyRelease(); historyHold = null;
   await page.getByText("By requests · selected period",{exact:true}).waitFor();
   assert.equal(historyChecks - rangeBefore, 1, "range selection loads durable history once");
-  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  await activity.getByText("0.4 of 1 account",{exact:true}).waitFor();
   assert.equal(activityChecks - activityRange, 1, "range selection loads provider activity once");
   historyFailure = true;
   await page.getByRole("button",{name:"30 days"}).click();
@@ -418,14 +418,14 @@ try {
   assert.equal(activityChecks - conflictBefore, 1, "a refused activity read is not retried before the next poll");
   activityConflict = false;
   await page.getByRole("button",{name:"24 hours"}).click();
-  await activity.getByText("0.4 of 1 accounts",{exact:true}).waitFor();
+  await activity.getByText("0.4 of 1 account",{exact:true}).waitFor();
   activityConflict = true;
   const pollBefore = activityChecks;
   await page.clock.fastForward(60_000);
   await settle();
   assert.equal(activityChecks - pollBefore, 1, "provider activity polled while the store refuses");
   assert.equal(await activity.locator(".alert").count(), 0, "a failed poll does not replace a loaded table");
-  assert.equal(await activity.getByText("0.4 of 1 accounts",{exact:true}).count(), 1, "the loaded table stays after a failed poll");
+  assert.equal(await activity.getByText("0.4 of 1 account",{exact:true}).count(), 1, "the loaded table stays after a failed poll");
   activityConflict = false;
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the provider table does not widen the page");

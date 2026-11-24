@@ -69,8 +69,6 @@ test("shares, failure rate and cache read rate leave cancels and 429s out", () =
   assert.equal(codex.failureRate, 0);
   assert.equal(claude.cacheReadRate, 0.6);
   assert.equal(codex.cacheReadRate, null);
-  assert.equal(claude.inexact, 3);
-  assert.equal(codex.inexact, 0);
 });
 
 test("a provider sums its accounts' unused quota in accounts", () => {

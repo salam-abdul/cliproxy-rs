@@ -20,7 +20,6 @@ type Rates = {
   outputShare: number | null;
   failureRate: number | null;
   cacheReadRate: number | null;
-  inexact: number;
 };
 
 export type AccountRow = Rates & {
@@ -80,7 +79,6 @@ function rates(totals: Totals, sends: number, output: number): Rates {
       totals.cacheReadTokens,
       totals.uncachedInputTokens + totals.cacheReadTokens + totals.cacheWriteTokens,
     ),
-    inexact: totals.sends - totals.exactSends,
   };
 }
 
