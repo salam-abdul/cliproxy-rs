@@ -271,7 +271,7 @@ impl Fixture {
         let router_state = state.clone();
         let router = tokio::spawn(async move {
             while let Ok((io, _)) = listener.accept().await {
-                tokio::spawn(connection(io, router_state.clone(), false));
+                tokio::spawn(connection(io, router_state.clone(), Serve::Tunnel));
             }
         });
         Self {
@@ -1139,4 +1139,61 @@ async fn a_native_start_that_fails_leaves_no_activity_store() {
     assert!(!dir.join("events.sqlite").exists());
     drop(taken);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The CONNECT listener on loopback answers `/health`; on any other address it serves
+/// CONNECT alone, so `/health` (no secret, a quota read per account) and every other
+/// plain request are refused, and a CONNECT still needs the proxy secret.
+#[tokio::test]
+async fn connect_listener_beyond_loopback_serves_only_authenticated_connect() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let answer = |url: String, request: &'static str| async move {
+        let mut io = TcpStream::connect(url).await.unwrap();
+        io.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        io.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response).into_owned();
+        let status = response[..12].to_owned();
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or_default().to_owned();
+        (status, body)
+    };
+    const HEALTH: &str = "GET /health HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n";
+    const CONNECT: &str = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nhost: api.anthropic.com:443\r\n\r\n";
+    for exposed in [false, true] {
+        let native = if exposed {
+            json!({"httpProxyHost": "0.0.0.0"})
+        } else {
+            json!({})
+        };
+        let fixture = Fixture::custom(
+            Reply {
+                status: 200,
+                body: SUCCESS.to_vec(),
+                broken: false,
+            },
+            Setup {
+                native,
+                ..Setup::default()
+            },
+        )
+        .await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = listener.local_addr().unwrap().to_string();
+        let state = fixture.state.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((io, _)) = listener.accept().await {
+                tokio::spawn(connection(io, state.clone(), state.config.connect_serves()));
+            }
+        });
+        let (status, body) = answer(url.clone(), HEALTH).await;
+        if exposed {
+            assert_eq!(status, "HTTP/1.1 400");
+            assert!(body.contains("Use CONNECT proxy protocol"), "{body}");
+        } else {
+            assert_eq!(status, "HTTP/1.1 200");
+            assert!(body.contains("\"ready\":true"), "{body}");
+        }
+        assert_eq!(answer(url, CONNECT).await.0, "HTTP/1.1 407", "exposed: {exposed}");
+        server.abort();
+    }
 }
