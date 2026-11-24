@@ -639,7 +639,8 @@ impl Refusal {
 /// A stream held back because its first event declared an upstream error.
 #[derive(Debug, Clone)]
 pub struct HeldStream {
-    /// The client-format events, none of them empty.
+    /// The client-format events, none of them empty. There are none when the client's
+    /// translator wrote nothing for the error; the error then answers with its status.
     pub events: Vec<Bytes>,
     /// The error that ended the stream after them.
     pub end: ExecError,

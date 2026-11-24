@@ -771,7 +771,7 @@ impl State {
             "interaction.model",
             first_nonempty(&[&self.model, model]),
         );
-        self.set_usage(&mut completed, root);
+        self.write_usage(&mut completed, root);
         if cut_off(&root.get("delta.stop_reason")) {
             gj::set_str(&mut completed, "interaction.status", "incomplete");
         }
@@ -780,7 +780,7 @@ impl State {
     }
 
     /// The usage gathered so far, else the event's own, as `interaction.usage`.
-    fn set_usage(&self, out: &mut Vec<u8>, root: &Res<'_>) {
+    fn write_usage(&self, out: &mut Vec<u8>, root: &Res<'_>) {
         if self.usage.is_empty() {
             set_usage(out, "interaction.usage", &root.get("usage"));
         } else {
@@ -797,7 +797,7 @@ impl State {
         let mut failed = br#"{"interaction":{"id":"","status":"failed","object":"interaction","model":"","usage":{},"error":{"type":"","message":""}},"event_type":"interaction.failed"}"#.to_vec();
         gj::set_str(&mut failed, "interaction.id", &self.id);
         gj::set_str(&mut failed, "interaction.model", first_nonempty(&[&self.model, model]));
-        self.set_usage(&mut failed, root);
+        self.write_usage(&mut failed, root);
         let error = root.get("error");
         gj::set_str(&mut failed, "interaction.error.type", error.get("type").bytes());
         gj::set_str(&mut failed, "interaction.error.message", error.get("message").bytes());

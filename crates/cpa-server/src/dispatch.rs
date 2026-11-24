@@ -928,7 +928,8 @@ async fn run_routed(
 }
 
 /// The stream an attempt held back on a first-event error ([`ExecError::held`]), once
-/// no other account remains: started like any stream, with the response headers.
+/// no other account remains: started like any stream, with the response headers. A
+/// hold with no events answers with the error's status instead.
 fn send_held(error: RunError) -> Result<Done, RunError> {
     let (Failure::Exec(failed) | Failure::Remote { error: failed, .. }) = &error.failure else {
         return Err(error);
@@ -938,9 +939,15 @@ fn send_held(error: RunError) -> Result<Done, RunError> {
     };
     let headers = (*failed.headers).clone();
     let mut events = held.events.clone().into_iter();
-    let first = events.next();
+    let Some(first) = events.next() else {
+        return Err(error);
+    };
     let rest = futures_util::stream::iter(events.map(Ok).chain([Err(held.end.clone())])).boxed();
-    Ok(Done::Stream { headers, first, rest })
+    Ok(Done::Stream {
+        headers,
+        first: Some(first),
+        rest,
+    })
 }
 
 async fn run_attempts(

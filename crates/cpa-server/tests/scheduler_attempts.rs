@@ -886,6 +886,27 @@ async fn a_first_event_error_reaches_a_responses_client_with_its_declared_status
     }
 }
 
+/// With nothing held for a Responses client, the account is still spent: retry rounds
+/// and bootstrap reruns do not send the request to it again, even without cooldowns.
+#[tokio::test]
+async fn a_responses_client_tries_each_account_once_on_a_retryable_first_event_error() {
+    for (kind, want) in [("api_error", 500), ("rate_limit_error", 429)] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError { kind, every: true },
+            serde_json::json!({"disable_cooling": true}),
+        )
+        .await;
+        let (status, body) = fixture
+            .post(
+                "/v1/responses",
+                r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+            )
+            .await;
+        assert_eq!(status, want, "{kind}: {body}");
+        assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b"], "{kind}");
+    }
+}
+
 /// An Interactions client sees a failed interaction, not a completed one, when the
 /// stream's first event is an error.
 #[tokio::test]
@@ -905,9 +926,14 @@ async fn a_first_event_error_fails_the_interaction() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("event: interaction.failed"), "{body}");
     assert!(!body.contains("interaction.completed"), "{body}");
-    assert!(body.contains("synthetic invalid_request_error"), "{body}");
+    let failed = body
+        .split("\n\n")
+        .find(|event| event.starts_with("event: interaction.failed\n"))
+        .unwrap_or_else(|| panic!("no interaction.failed in {body}"));
+    assert!(failed.contains(r#""status":"failed""#), "{failed}");
+    assert!(failed.contains("synthetic invalid_request_error"), "{failed}");
+    assert_eq!(fixture.seen(), ["Bearer fake-a"]);
 }
 
 /// An invalid-request error event is the request's fault: no other account is tried.
