@@ -623,3 +623,68 @@ fn the_others_p95_walk_matches_a_full_sort() {
     }
     assert_eq!(cases, 216);
 }
+
+/// Proxy first responses written before the store counted them from the attempt's start
+/// were timed from the round trip's start, so they are left out; native ones were always
+/// timed from the send's start.
+#[test]
+fn proxy_first_responses_from_before_the_origin_change_are_untimed() {
+    let store = Store::new();
+    let now = store.now;
+    let changed = now - 30_000;
+    let conn = rusqlite::Connection::open(&store.path).unwrap();
+    crate::activity::set_meta(&conn, "ttft_from_attempt", changed).unwrap();
+    drop(conn);
+    store.add([
+        send(now, "proxy-before", 0),
+        SendRow {
+            source: Source::Native,
+            ..send(now, "native-before", 0)
+        },
+        SendRow {
+            at_ms: changed,
+            ..send(now, "proxy-after", 0)
+        },
+    ]);
+    let speed = store.speed(None, None);
+    assert_eq!(
+        (&speed["requests"], &speed["untimed"]),
+        (&json!(3), &json!(1)),
+        "{speed}"
+    );
+    let counts: Vec<(Value, Value)> = rows(&speed)
+        .iter()
+        .map(|r| (r["source"].clone(), r["requests"].clone()))
+        .collect();
+    assert_eq!(counts, [("native".into(), 1.into()), ("proxy".into(), 1.into())]);
+}
+
+/// A store records when it began counting proxy first responses from the attempt's start
+/// once, when that key is missing: 0 with no sends yet, else the time it opened. A later
+/// start keeps it.
+#[test]
+fn reopening_a_store_keeps_its_origin_change_time() {
+    let store = Store::new();
+    store.activity.finish();
+    let first = {
+        let conn = rusqlite::Connection::open(&store.path).unwrap();
+        crate::activity::meta(&conn, "ttft_from_attempt").unwrap()
+    };
+    assert!(first.is_some_and(|at| at <= epoch_ms()), "{first:?}");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let again = Activity::start(store.path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+    again.finish();
+    let conn = rusqlite::Connection::open(&store.path).unwrap();
+    assert_eq!(crate::activity::meta(&conn, "ttft_from_attempt").unwrap(), first);
+    // A store written before the key existed, with sends, gets the time it was opened.
+    conn.execute("DELETE FROM history_meta WHERE key = 'ttft_from_attempt'", [])
+        .unwrap();
+    crate::activity::sends::write_send(&conn, &send(store.now, "old", 0)).unwrap();
+    drop(conn);
+    let opened = epoch_ms();
+    let upgraded = Activity::start(store.path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+    upgraded.finish();
+    let conn = rusqlite::Connection::open(&store.path).unwrap();
+    let at = crate::activity::meta(&conn, "ttft_from_attempt").unwrap();
+    assert!(at.is_some_and(|at| at >= opened && at <= epoch_ms()), "{at:?}");
+}

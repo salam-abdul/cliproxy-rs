@@ -24,7 +24,8 @@ const EARLIER_MS: i64 = 3_600_000;
 
 /// The columns [`Send::of`] reads, from 4 on; 0 to 3 key and order the send.
 const COLUMNS: &str = "COALESCE(parent_request, request_id), turn, at_ms, parent_request IS NOT NULL, send,
-    latency_ms, outcome = 'complete', source, provider, credential, model, stream, start_ms, ttft_ms, ttft_kind,
+    latency_ms, outcome = 'complete', source, provider, credential, model, stream, start_ms,
+    CASE WHEN source = 'proxy' AND at_ms < ?3 THEN NULL ELSE ttft_ms END, ttft_kind,
     tokens_exact IS 1, uncached_input_tokens, cache_read_tokens, cache_write_tokens, output_tokens";
 
 impl Activity {
@@ -441,7 +442,9 @@ fn read(
     let mut statement = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM sends{scan} WHERE at_ms >= ?1 AND at_ms <= ?2"
     ))?;
-    let mut rows = statement.query(params![from - EARLIER_MS, now])?;
+    // Proxy first responses before this were timed from another start; see `Activity::start`.
+    let ttft_from_attempt = meta(&conn, "ttft_from_attempt")?.unwrap_or_default();
+    let mut rows = statement.query(params![from - EARLIER_MS, now, ttft_from_attempt])?;
     while let Some(row) = rows.next()? {
         let key = request_key(row.get_ref(0)?.as_str()?, row.get(1)?);
         let order = (row.get(2)?, row.get(3)?, row.get(4)?);
