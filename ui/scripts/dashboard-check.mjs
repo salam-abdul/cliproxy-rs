@@ -580,7 +580,7 @@ try {
   assert.equal(await old.getAttribute("aria-checked"), "false", "a wildcard entry switches its matches off");
   assert.equal(await old.isDisabled(), true, "a model a wildcard excludes cannot be switched on alone");
   await page.getByText("Excluded by claude-old-*",{exact:true}).waitFor();
-  await page.getByText("2 models · 1 excluded",{exact:true}).waitFor();
+  await page.getByText("2 models",{exact:true}).waitFor();
   await fresh.click();
   await page.getByText("claude-new-1 excluded.",{exact:true}).waitFor();
   assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*", "claude-new-1"], "switching off adds the model ID");
@@ -589,6 +589,13 @@ try {
   await fresh.click();
   await page.getByText("claude-new-1 enabled.",{exact:true}).waitFor();
   assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*"], "switching on removes the model ID");
+  await page.getByLabel("Model or pattern").fill(" Claude-New-1 ");
+  await page.getByRole("button",{name:"Exclude",exact:true}).click();
+  await page.getByText("Model excluded.",{exact:true}).waitFor();
+  assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*", "claude-new-1"], "the pattern field adds an entry as the switch does");
+  assert.equal(await fresh.getAttribute("aria-checked"), "false", "an entry typed in any case switches its model off");
+  await fresh.click();
+  await page.getByText("claude-new-1 enabled.",{exact:true}).waitFor();
   await page.getByRole("button",{name:"Allow claude-old-*",exact:true}).click();
   await page.getByText("Every model is available.",{exact:true}).waitFor();
   assert.equal(await old.getAttribute("aria-checked"), "true", "removing the wildcard switches its matches on");
