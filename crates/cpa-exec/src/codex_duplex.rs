@@ -631,6 +631,7 @@ impl Duplex {
         if payload.is_empty() {
             return;
         }
+        self.turn.arrived();
         let kind = gjson::get(payload, "type").str().to_owned();
         let establishing = self.first_response && kind == "response.created";
         if kind == "response.created" && !self.response_created(payload) {

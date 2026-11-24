@@ -14,7 +14,7 @@ use chrono::Utc;
 use cpa_core::config::Config;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{
-    ExecError, ExecRequest, ExecResponse, ExecSession, ExecStream, FailureScope, Operation, ResponseBody,
+    ExecError, ExecRequest, ExecResponse, ExecSession, ExecStream, FailureScope, Operation, ResponseBody, UsageSink,
 };
 use cpa_core::format::Format;
 use futures_util::StreamExt;
@@ -263,10 +263,12 @@ impl CodexExecutor {
         replay: &crate::codex_replay::Scope,
         wire: &Wire,
         error_body: ErrorBody,
+        usage: &UsageSink,
     ) -> Result<crate::proxy::Upstream, ExecError> {
         // The shaped body names the base model, the key of per-model quota snapshots.
         let model = gjson::get(&body, "model").str().to_owned();
         wire.request(&url, &headers, body.as_bytes());
+        usage.round_trip_started();
         let mut upstream = match self.post(view, &url, &headers, Bytes::from(body)).await {
             Ok(upstream) => upstream,
             Err(error) => {
@@ -279,6 +281,19 @@ impl CodexExecutor {
         };
         wire.metadata(upstream.status, &upstream.headers);
         self.quota.observe(&view.credential.id, &model, &upstream.headers);
+        // Marked here, below every reader: SSE, a whole body, `buffered` and an error body.
+        if usage.enabled() {
+            let (usage, mut marked) = (usage.clone(), false);
+            upstream.body = upstream
+                .body
+                .inspect(move |chunk| {
+                    if !marked && chunk.as_ref().is_ok_and(|c| !c.is_empty()) {
+                        marked = true;
+                        usage.first_byte();
+                    }
+                })
+                .boxed();
+        }
         let status = upstream.status;
         upstream.headers.remove(http::header::CONTENT_ENCODING);
         upstream.headers.remove(http::header::CONTENT_LENGTH);
@@ -315,9 +330,10 @@ impl CodexExecutor {
         replay: &crate::codex_replay::Scope,
         wire: &Wire,
         error_body: ErrorBody,
+        usage: &UsageSink,
     ) -> Result<ExecResponse, ExecError> {
         let upstream = self
-            .open(view, settings, url, headers, body, replay, wire, error_body)
+            .open(view, settings, url, headers, body, replay, wire, error_body, usage)
             .await?;
         let (status, headers) = (upstream.status, upstream.headers);
         let sse = headers
@@ -373,6 +389,7 @@ impl CodexExecutor {
                 &scope,
                 &wire,
                 ErrorBody::Strict,
+                &req.usage,
             )
             .await;
         let res = match sent {
@@ -439,6 +456,7 @@ impl CodexExecutor {
                     &scope,
                     &wire,
                     ErrorBody::Lossy,
+                    &req.usage,
                 )
                 .await?;
             // Go reads the whole body (`io.ReadAll`, whatever its type), records every
@@ -500,6 +518,7 @@ impl CodexExecutor {
                 &Default::default(),
                 &wire,
                 ErrorBody::Lossy,
+                &req.usage,
             )
             .await
             .map_err(compact_error)?;

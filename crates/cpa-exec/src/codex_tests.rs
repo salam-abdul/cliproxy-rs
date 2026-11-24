@@ -3,7 +3,7 @@
 //! request and upstream reply; the upstream request and the client-visible output must match.
 
 use super::*;
-use crate::codex_testkit::{Captured, GO, Mock, Reply, Tap, Wiretap};
+use crate::codex_testkit::{Captured, GO, Mock, Recorded, Reply, Tap, Wiretap};
 use cpa_core::exec::Caller;
 use serde_json::Value;
 use std::path::Path;
@@ -642,31 +642,6 @@ async fn alpha_search_reads_at_most_32_mib_whatever_the_status() {
     }
 }
 
-/// Records what the executor reports to the attempt's usage record.
-#[derive(Default)]
-struct Recorded(std::sync::Mutex<Vec<(&'static str, Format, String)>>);
-
-impl cpa_core::exec::UsageObserver for Recorded {
-    fn response_body(&self, format: Format, body: &[u8]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("body", format, String::from_utf8_lossy(body).into_owned()));
-    }
-    fn response_line(&self, format: Format, line: &[u8]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("line", format, String::from_utf8_lossy(line).into_owned()));
-    }
-    fn request(&self, format: Format, payload: &[u8]) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(("request", format, String::from_utf8_lossy(payload).into_owned()));
-    }
-}
-
 /// Usage records see the upstream side, as Go's reporter does: the translated request
 /// (`SetTranslatedReasoningEffort`, before the prompt-cache key is added) and every
 /// upstream event in Codex format, or the compaction body in OpenAI Responses format,
@@ -710,16 +685,74 @@ async fn usage_records_see_upstream_payloads() {
             "{name}: translated request"
         );
         let upstream = case["upstream_body"].as_str().unwrap();
-        let expected: Vec<(&str, Format, String)> = if compact {
-            vec![("body", Format::OpenAIResponse, upstream.to_owned())]
+        let mut expected: Vec<(&str, Format, String)> = vec![
+            ("round_trip_started", Format::Codex, String::new()),
+            ("first_byte", Format::Codex, String::new()),
+        ];
+        if compact {
+            expected.push(("body", Format::OpenAIResponse, upstream.to_owned()));
         } else {
-            upstream
-                .lines()
-                .filter_map(|l| l.strip_prefix("data:"))
-                .map(|d| ("line", Format::Codex, d.trim().to_owned()))
-                .collect()
-        };
+            expected.extend(
+                upstream
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("data:"))
+                    .map(|d| ("line", Format::Codex, d.trim().to_owned())),
+            );
+        }
         assert_eq!(reports[1..], expected[..], "{name}: upstream payloads");
+    }
+}
+
+/// Every HTTP send reports the start of its round trip, then one first byte when the
+/// first non-empty body chunk arrives, before any payload is parsed: SSE streams, whole
+/// bodies read by the non-stream path, compaction and an error answer's body alike.
+#[tokio::test]
+async fn http_sends_mark_the_round_trip_and_first_byte() {
+    let executor = executor();
+    for name in [
+        "oauth_stream_native",
+        "oauth_nonstream_no_instructions_free_plan",
+        "oauth_compact",
+        "oauth_usage_limit_429",
+    ] {
+        let case = GO["executor"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        assert!(!case["upstream_body"].as_str().unwrap().is_empty(), "{name}");
+        let mock = Mock::start().await;
+        let compact = case["alt"] == "responses/compact";
+        mock.script(
+            if compact { "/responses/compact" } else { "/responses" },
+            vec![reply(case)],
+        );
+        let credential = credential(case, &mock.url);
+        let cfg = Config::parse(case["config"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("{}")).unwrap();
+        let recorded = Arc::new(Recorded::default());
+        let mut req = request(case);
+        req.usage = cpa_core::exec::UsageSink::new(recorded.clone());
+        if let Ok(response) = executor.execute(&credential, req, &cfg).await
+            && let ResponseBody::Stream(mut stream) = response.body
+        {
+            while stream.next().await.is_some() {}
+        }
+        let kinds = recorded.kinds();
+        let at = |kind: &str| kinds.iter().position(|k| *k == kind);
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "round_trip_started").count(),
+            1,
+            "{name}: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "first_byte").count(),
+            1,
+            "{name}: {kinds:?}"
+        );
+        assert!(at("round_trip_started") < at("first_byte"), "{name}: {kinds:?}");
+        let payload = kinds.iter().position(|k| matches!(*k, "line" | "body"));
+        assert!(payload.is_none_or(|p| Some(p) > at("first_byte")), "{name}: {kinds:?}");
     }
 }
 

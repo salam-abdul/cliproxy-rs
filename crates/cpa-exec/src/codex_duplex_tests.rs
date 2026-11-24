@@ -1079,6 +1079,44 @@ async fn capture_records_duplex_frames() {
     assert_eq!(*responses[1], Tap::WsResponse(ACCEPTED.into()));
 }
 
+/// A steering connection reads upstream messages itself, not through a turn: it still
+/// reports one first byte at the first upstream message, after the round trip started.
+#[tokio::test]
+async fn a_steering_connection_marks_its_first_byte() {
+    let up = Scripted::start(|mut c: Peer| async move {
+        c.read().await;
+        c.write(r#"{"type":"response.created","response":{"id":"r1","output":[]}}"#)
+            .await;
+        c.write(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#)
+            .await;
+        c.idle().await;
+    })
+    .await;
+    let client = Client::new("marks-duplex");
+    let recorded = Arc::new(crate::codex_testkit::Recorded::default());
+    let usage = cpa_core::exec::UsageSink::new(recorded.clone());
+    let mut stream = client
+        .start_with(&up.url, r#"{"model":"gpt-6-astra","input":[]}"#, Format::Codex, usage)
+        .await;
+    while let Some(chunk) = next(&mut stream).await {
+        if get(&chunk.unwrap(), "type") == "response.completed" {
+            break;
+        }
+    }
+    drop(stream);
+    up.finish().await;
+    let kinds = recorded.kinds();
+    let marks: Vec<&str> = kinds
+        .iter()
+        .copied()
+        .filter(|k| matches!(*k, "round_trip_started" | "first_byte"))
+        .collect();
+    assert_eq!(marks, ["round_trip_started", "first_byte"], "{kinds:?}");
+    let first_byte = kinds.iter().position(|k| *k == "first_byte");
+    let first_line = kinds.iter().position(|k| *k == "line");
+    assert!(first_line.is_some_and(|l| Some(l) > first_byte), "{kinds:?}");
+}
+
 /// Go mutates the socket's multi-agent v2 state in its serial writer, right before the
 /// create's write (`codex_websockets_duplex.go:210`). A create still queued behind a
 /// blocked write must not change how the running response's events are restored.
