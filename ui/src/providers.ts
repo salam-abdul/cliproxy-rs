@@ -30,6 +30,7 @@ export type AccountRow = Rates & {
   unused: number | null;
   unusedInRange: boolean;
   tokensPerPercent: number | null;
+  tokensPerPercentInRange: boolean;
   tokensPartial: boolean;
 };
 
@@ -114,6 +115,7 @@ export function providerActivity(data: Data, creds: Data[]): ProviderRow[] {
         unused: ended ? num(ended.unused) : null,
         unusedInRange: ended?.inRange !== false,
         tokensPerPercent: perPercent ? num(perPercent.tokensPerPercent) : null,
+        tokensPerPercentInRange: perPercent?.inRange !== false,
         tokensPartial: perPercent?.partial === true,
       };
     });

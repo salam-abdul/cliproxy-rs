@@ -113,6 +113,8 @@
                       ? "—"
                       : count(account.tokensPerPercent)}{#if account.tokensPerPercent !== null && account.tokensPartial}<small
                         >partial</small
+                      >{/if}{#if account.tokensPerPercent !== null && !account.tokensPerPercentInRange}<small
+                        >before this period</small
                       >{/if}</td
                   >
                   <td class="count num">{pct(account.cacheReadRate)}</td>

@@ -159,6 +159,25 @@ test("an unused figure from before the range is flagged", () => {
   assert.equal(account.tokensPartial, true);
 });
 
+test("a tokens per percent figure from before the range is flagged", () => {
+  const accountOf = (cycles: ReturnType<typeof cycle>[]) =>
+    providerActivity(
+      {
+        providers: [{ provider: "claude", ...totals({ sends: 1 }) }],
+        credentials: [{ provider: "claude", credential: "a", ...totals({ sends: 1 }) }],
+        cycles,
+      },
+      [],
+    )[0].accounts[0];
+  const earlier = cycle("a", { start: -500, end: -200, ended: true, unused: 50, inRange: false, tokensPerPercent: 1000 });
+  const before = accountOf([earlier, cycle("a", { start: 0, peak: 3, last: 3 })]);
+  assert.equal(before.tokensPerPercent, 1000);
+  assert.equal(before.tokensPerPercentInRange, false);
+  const within = accountOf([earlier, cycle("a", { start: 0, tokensPerPercent: 400 })]);
+  assert.equal(within.tokensPerPercent, 400);
+  assert.equal(within.tokensPerPercentInRange, true);
+});
+
 test("health blocks mark unknown, idle, rejected and each band", () => {
   const data = {
     from: 0,
