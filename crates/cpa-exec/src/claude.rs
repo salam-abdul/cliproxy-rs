@@ -361,10 +361,15 @@ impl ClaudeExecutor {
                 // (streamUsage.PublishFailure), which the server does for Claude.
                 req.usage.usage_required();
                 stream::validate_buffered(&data).map_err(|end| {
-                    // A first-event error fails as a held stream's does, with nothing held
-                    // since a buffered reply goes out whole: once per account, with its
-                    // declared status.
-                    let e = match stream::buffered_first_error(&data).filter(|_| !fast) {
+                    // A first-event error fails as a held stream with no events does: each
+                    // account once, with the declared status. A fast request keeps its
+                    // own rule.
+                    let first = if fast {
+                        None
+                    } else {
+                        stream::buffered_first_error(&data)
+                    };
+                    let e = match first {
                         Some((status, payload)) => {
                             let declare = |status, data| {
                                 upstream_error(

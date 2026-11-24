@@ -594,9 +594,10 @@ pub struct ExecError {
     pub addon: Option<Box<HeaderMap>>,
     /// Set when the failure came after the upstream accepted the request.
     pub after_accept: Option<AfterAccept>,
-    /// Set when a stream's first event was an error the upstream declared: the attempt
-    /// fails like the same status returned as an HTTP error, and when no other account
-    /// remains the client receives this stream instead, as if it had not been held.
+    /// Set when the first event of a Claude stream was an error and the client has seen
+    /// none of it: the attempt fails like the same status returned as an HTTP error, its
+    /// account is tried once per request, and when no other account remains the client
+    /// receives this stream instead, as if it had not been held.
     pub held: Option<std::sync::Arc<HeldStream>>,
     /// Set when a refresh grant's token endpoint refused the refresh token.
     pub refusal: Option<Refusal>,
@@ -636,11 +637,12 @@ impl Refusal {
     }
 }
 
-/// A stream held back because its first event declared an upstream error.
+/// A stream held back because its first event was an upstream error.
 #[derive(Debug, Clone)]
 pub struct HeldStream {
     /// The client-format events, none of them empty. There are none when the client's
-    /// translator wrote nothing for the error; the error then answers with its status.
+    /// translator wrote nothing for the error or the reply was buffered; the error then
+    /// answers with its status.
     pub events: Vec<Bytes>,
     /// The error that ended the stream after them.
     pub end: ExecError,

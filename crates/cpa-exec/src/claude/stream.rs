@@ -105,9 +105,7 @@ impl FirstError {
 
 /// The failure of an attempt whose stream opened with an error event (`status` as
 /// [`declared_status`] gives it, `data` its payload) and then ended with `end`: the
-/// declared error, or for a type Anthropic does not list, `end` as the request's own
-/// failure, which ends the request on this account as it does for a client that saw the
-/// event.
+/// declared error, or `end` itself for a type Anthropic does not list.
 pub(crate) fn first_event_failure(
     status: Option<u16>,
     data: Bytes,
@@ -116,11 +114,7 @@ pub(crate) fn first_event_failure(
 ) -> ExecError {
     match status {
         Some(status) => declare(status, data),
-        None => {
-            let mut error = end.clone();
-            error.scope = FailureScope::Request;
-            error
-        }
+        None => end.clone(),
     }
 }
 
@@ -350,7 +344,7 @@ impl Relay {
 
 /// Relays decoded upstream bytes as whole native SSE events; `done` is an [`OnComplete`].
 /// Every upstream line is reported to `usage` and `capture` before alias restore, and
-/// `first_error` is set when the first event is a declared error.
+/// `first_error` is set when the first event is an error.
 pub(crate) fn relay(
     body: ExecStream,
     reverse: Arc<Reverse>,
@@ -398,10 +392,10 @@ pub(crate) fn relay(
 /// ([`FirstError`]). When the stream then ends with an error, nothing has reached the
 /// client, so the attempt fails with [`first_event_failure`] instead, carrying the held
 /// events and that ending error as a [`HeldStream`] for dispatch to fail over or send.
-/// A request-scoped failure goes out as it came when it held events; with none, because
-/// the client's translator wrote nothing for the error, it fails like any other, and
-/// the client gets its status. A held stream that ends without an error goes out as it
-/// came.
+/// A request-scoped or unlisted error goes out as it came when it held events; with
+/// none, because the client's translator wrote nothing for the error, it fails like any
+/// other, and the client gets its status. A held stream that ends without an error goes
+/// out as it came.
 pub(crate) fn hold_first_error(
     stream: ExecStream,
     first: FirstError,
@@ -449,7 +443,10 @@ pub(crate) fn hold_first_error(
                     let declared = st.declare.take().zip(st.first.get().cloned());
                     if let Some((declare, (status, data))) = declared {
                         let mut error = first_event_failure(status, data, &end, declare);
-                        if st.held.is_empty() || error.scope != FailureScope::Request {
+                        // Held events of an unlisted type go out as they came, as they did
+                        // before such errors were held, and so do a request-scoped one's.
+                        let as_it_came = status.is_none() || error.scope == FailureScope::Request;
+                        if st.held.is_empty() || !as_it_came {
                             let events = std::mem::take(&mut st.held);
                             error.held = Some(Arc::new(HeldStream { events, end }));
                             return Some((Err(error), st));

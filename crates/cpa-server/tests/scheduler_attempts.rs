@@ -937,16 +937,19 @@ async fn a_first_event_error_fails_the_interaction() {
 }
 
 /// A first-event error of a type Anthropic does not list ends the request on the account
-/// that sent it: native and Chat clients get its stream, and a Responses client, which
-/// has no event for it, gets 502. Cooldowns are off, so only spending the account keeps
-/// retry rounds and bootstrap reruns from sending the request to it again.
+/// that sent it for native and Chat clients, which get its stream. A Responses client
+/// has no event for it, so it fails over like a 502, each account once, and gets 502.
+/// Cooldowns are off, so only spending the account keeps retry rounds and bootstrap
+/// reruns from sending the request to it again.
 #[tokio::test]
-async fn an_unlisted_first_event_error_ends_the_request_on_its_account() {
+async fn an_unlisted_first_event_error_tries_each_account_once() {
     const RESPONSES: (&str, &str) = (
         "/v1/responses",
         r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
     );
-    for ((path, request), want) in [(NATIVE, 200), (TRANSLATED, 200), (RESPONSES, 502)] {
+    let a = &["Bearer fake-a"][..];
+    let both = &["Bearer fake-a", "Bearer fake-b"][..];
+    for ((path, request), want, seen) in [(NATIVE, 200, a), (TRANSLATED, 200, a), (RESPONSES, 502, both)] {
         let fixture = Fixture::retrying(
             Mode::FirstEventError {
                 kind: "mystery_error",
@@ -958,14 +961,42 @@ async fn an_unlisted_first_event_error_ends_the_request_on_its_account() {
         let (status, body) = fixture.post(path, request).await;
         assert_eq!(status, want, "{path}: {body}");
         assert!(body.contains("synthetic mystery_error"), "{path}: {body}");
-        assert_eq!(fixture.seen(), ["Bearer fake-a"], "{path}");
+        assert_eq!(fixture.seen(), seen, "{path}");
+    }
+}
+
+/// An unlisted first-event error cools its account like the 502 it fails as, for a
+/// client that saw nothing of it, streaming or buffered.
+#[tokio::test]
+async fn an_unlisted_first_event_error_cools_the_account() {
+    for (path, request) in [
+        (
+            "/v1/responses",
+            r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"fixture"}]}"#,
+        ),
+    ] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError {
+                kind: "mystery_error",
+                every: false,
+            },
+            serde_json::json!({}),
+        )
+        .await;
+        let (_, body) = fixture.post(path, request).await;
+        assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b"], "{path}: {body}");
+        assert!(!fixture.rt.store().cooldowns("a").is_empty(), "{path}: a did not cool");
     }
 }
 
 /// A buffered translated client's reply is a Claude stream read whole. When its first
 /// event is an error, the client gets the declared status as a streaming Responses
-/// client does, and each account is tried once: an invalid request or an unlisted type
-/// ends on the first account, a retryable error fails over and the last account answers.
+/// client does, and each account is tried once: an invalid request ends on the first
+/// account, and a retryable or unlisted error fails over and the last account answers.
 #[tokio::test]
 async fn a_buffered_first_event_error_answers_with_its_declared_status_once_per_account() {
     let requests = [
@@ -980,7 +1011,7 @@ async fn a_buffered_first_event_error_answers_with_its_declared_status_once_per_
     for (path, request) in requests {
         for (kind, every, want, seen) in [
             ("invalid_request_error", false, 400, a),
-            ("mystery_error", true, 502, a),
+            ("mystery_error", true, 502, both),
             ("api_error", true, 500, both),
             ("overloaded_error", true, 529, both),
         ] {
