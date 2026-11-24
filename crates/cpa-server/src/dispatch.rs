@@ -937,11 +937,11 @@ fn send_held(error: RunError) -> Result<Done, RunError> {
     let Some(held) = failed.held.clone() else {
         return Err(error);
     };
-    let headers = (*failed.headers).clone();
     let mut events = held.events.clone().into_iter();
     let Some(first) = events.next() else {
         return Err(error);
     };
+    let headers = (*failed.headers).clone();
     let rest = futures_util::stream::iter(events.map(Ok).chain([Err(held.end.clone())])).boxed();
     Ok(Done::Stream {
         headers,
@@ -1443,8 +1443,8 @@ async fn run_remote(
         if error.upstream {
             preferred_upstream = Some(error.clone());
         }
-        // The held stream answers now: its account is never picked again, and a round
-        // without another account would answer with the pick failure instead.
+        // A held first-event error answers now: its account is never picked again, and a
+        // round without another account would answer with the pick failure instead.
         if matches!(&error.failure, Failure::Exec(e) if e.held.is_some()) {
             return Err(error.into_run_error());
         }
