@@ -376,3 +376,22 @@ fn tokens_per_percent_has_no_figure_without_exact_sends_or_for_a_small_rise() {
     assert_eq!(tokens_per_percent(30.0, false), Value::Null);
     assert_eq!(tokens_per_percent(14.0, true), Value::Null);
 }
+
+#[test]
+fn a_cancelled_429_counts_as_rate_limited_and_not_as_cancelled() {
+    let store = Store::new();
+    store
+        .activity
+        .record_send(send("r1", 0, "codex", Outcome::Cancelled, Some(429)));
+    let panels = store.panels(None, None);
+    let counts = |row: &Value| {
+        [
+            row["sends"].clone(),
+            row["rateLimited"].clone(),
+            row["cancelled"].clone(),
+        ]
+    };
+    assert_eq!(counts(provider(&panels, "codex")), [1, 1, 0], "{panels}");
+    assert_eq!(counts(&panels["credentials"][0]), [1, 1, 0], "{panels}");
+    assert_eq!(counts(&panels["buckets"][0]), [1, 1, 0], "{panels}");
+}

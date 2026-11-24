@@ -8,7 +8,8 @@ use super::cycles::{Point, cycles};
 use super::{Activity, DAY_MS, Range, epoch_ms, meta};
 
 /// The sends in range with their request (a fallback send counts under the request it
-/// serves), whether they failed, and their place from the last send of that request,
+/// serves), whether they failed or were cancelled (a 429 is neither, so the three counts
+/// are disjoint), and their place from the last send of that request,
 /// then the filtered ones. A send's place is judged among every send in range, so a
 /// filter never turns a failed-over send into its request's last. `picked` is materialized
 /// so the provider, credential and bucket groups share one pass over `sends`.
@@ -16,6 +17,7 @@ const SENDS: &str = "WITH ranged AS (
         SELECT at_ms, provider, credential, outcome, status, turn, tokens_exact, uncached_input_tokens,
             cache_read_tokens, cache_write_tokens, output_tokens, COALESCE(parent_request, request_id) AS request,
             (outcome NOT IN ('complete', 'cancelled') AND status IS NOT 429) AS failed,
+            (outcome = 'cancelled' AND status IS NOT 429) AS cancelled,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(parent_request, request_id), turn ORDER BY at_ms DESC, send DESC
             ) AS from_last
@@ -31,7 +33,7 @@ const TOTALS: &str = "COUNT(DISTINCT json_array(request, turn)), COUNT(*), SUM(f
     SUM(CASE WHEN tokens_exact = 1 THEN COALESCE(cache_read_tokens, 0) ELSE 0 END),
     SUM(CASE WHEN tokens_exact = 1 THEN COALESCE(cache_write_tokens, 0) ELSE 0 END),
     SUM(CASE WHEN tokens_exact = 1 THEN COALESCE(output_tokens, 0) ELSE 0 END),
-    SUM(outcome = 'cancelled'), SUM(tokens_exact IS 1)";
+    SUM(cancelled), SUM(tokens_exact IS 1)";
 
 fn totals(row: &Row, first: usize, mut object: serde_json::Map<String, Value>) -> rusqlite::Result<Value> {
     let names = [
@@ -99,7 +101,7 @@ fn read(
         UNION ALL SELECT 1, NULL, provider, credential, {TOTALS} FROM picked WHERE credential IS NOT NULL
             GROUP BY provider, credential
         UNION ALL SELECT 2, (at_ms / ?5) * ?5, provider, NULL, 0, COUNT(*), SUM(failed), SUM(status IS 429),
-            0, 0, 0, 0, 0, SUM(outcome = 'cancelled'), 0 FROM picked GROUP BY 2, provider
+            0, 0, 0, 0, 0, SUM(cancelled), 0 FROM picked GROUP BY 2, provider
         ORDER BY 1, 2, 3, 4"
     ))?;
     let mut rows = statement.query(params![from, now, provider, credential, bucket_ms])?;
