@@ -103,6 +103,13 @@ await page.route("**/*", async route => {
     if (request.method() === "PUT") config["api-keys"]["openai-compatibility"] = request.postDataJSON();
     return send(request.method() === "PUT" ? {} : config["api-keys"]["openai-compatibility"]);
   }
+  if (path === "/v8/management/routing/model-definitions/claude")
+    return send({channel:"claude",models:[{id:"claude-new-1",display_name:"New"},{id:"claude-old-1",display_name:"Old"}]});
+  if (path === "/v8/management/config/oauth/excluded-models/claude") {
+    const oauth = config.oauth ??= {}, lists = oauth["excluded-models"] ??= {};
+    if (request.method() === "PUT") { lists.claude = request.postDataJSON(); return send({}); }
+    return lists.claude ? send(lists.claude) : route.fulfill({status:404,json:{error:"not found",code:"not_found"}});
+  }
   if (path === "/v8/management/observability/usage/api-keys") return send({});
   if (path === "/v8/management/requests/api-call") {
     apiCalls.push(request.postDataJSON());
@@ -564,6 +571,35 @@ try {
   await page.getByText("1 model added.",{exact:true}).waitFor();
   assert.deepEqual(config["api-keys"]["openai-compatibility"][0].models, [{name:"m-b"},{name:"m-a"}]);
   await page.getByText("2 offered").waitFor({state:"hidden"});
+  config = {oauth:{"excluded-models":{claude:["claude-old-*"]}}};
+  await page.goto("http://dashboard.test/management.html#models");
+  await page.reload();
+  const fresh = page.getByRole("switch",{name:"claude-new-1 enabled",exact:true}), old = page.getByRole("switch",{name:"claude-old-1 enabled",exact:true});
+  await fresh.waitFor();
+  assert.equal(await fresh.getAttribute("aria-checked"), "true");
+  assert.equal(await old.getAttribute("aria-checked"), "false", "a wildcard entry switches its matches off");
+  assert.equal(await old.isDisabled(), true, "a model a wildcard excludes cannot be switched on alone");
+  await page.getByText("Excluded by claude-old-*",{exact:true}).waitFor();
+  await page.getByText("2 models",{exact:true}).waitFor();
+  await fresh.click();
+  await page.getByText("claude-new-1 excluded.",{exact:true}).waitFor();
+  assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*", "claude-new-1"], "switching off adds the model ID");
+  assert.equal(await fresh.getAttribute("aria-checked"), "false");
+  await page.getByRole("button",{name:"Allow claude-new-1",exact:true}).waitFor();
+  await fresh.click();
+  await page.getByText("claude-new-1 enabled.",{exact:true}).waitFor();
+  assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*"], "switching on removes the model ID");
+  await page.getByLabel("Model or pattern").fill(" Claude-New-1 ");
+  await page.getByRole("button",{name:"Exclude",exact:true}).click();
+  await page.getByText("Model excluded.",{exact:true}).waitFor();
+  assert.deepEqual(config.oauth["excluded-models"].claude, ["claude-old-*", "claude-new-1"], "the pattern field adds an entry as the switch does");
+  assert.equal(await fresh.getAttribute("aria-checked"), "false", "an entry typed in any case switches its model off");
+  await fresh.click();
+  await page.getByText("claude-new-1 enabled.",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"Allow claude-old-*",exact:true}).click();
+  await page.getByText("Every model is available.",{exact:true}).waitFor();
+  assert.equal(await old.getAttribute("aria-checked"), "true", "removing the wildcard switches its matches on");
+  assert.equal(await old.isDisabled(), false);
   config = {};
   await page.goto("http://dashboard.test/management.html#logs");
   const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
@@ -606,5 +642,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, model switches, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }
