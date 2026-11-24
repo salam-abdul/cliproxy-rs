@@ -55,6 +55,7 @@ Out of scope: the plugin host, the Copilot provider, the WebSocket data tunnel, 
 - The Go `POST /v0/management/quota/reset` plugin hook is not served. `GET` and `POST /v8/management/quota/resets` list and spend the Claude grants and Codex credits that the providers expose, with no plugin layer.
 - Translator fixes with no upstream counterpart, found by the translation goldens: Gemini `systemInstruction` and Claude input tokens between Gemini clients and Claude; finish reasons for Gemini clients of Codex, Claude and Interactions; reasoning in buffered Codex replies to Gemini clients; typed text and thought items and output-limit status in replies to Interactions clients; the incomplete status for Gemini and Antigravity replies to Responses clients; one step per OpenAI chat stream item and one copy of Codex tool arguments for Interactions clients; and the output limit on Interactions requests to Responses.
 - A Claude error event reaches Interactions clients as `interaction.failed` with the error's type and message, where Go reports the interaction completed.
+- A non-streaming translated client of Claude whose buffered stream opens with an error event gets the status that event declares, and the account is tried once, as for a streaming client. Go's `validateClaudeStreamingResponse` answers 502 for any error event.
 
 ## Next review
 

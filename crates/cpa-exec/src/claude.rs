@@ -51,7 +51,7 @@ use bytes::{Bytes, BytesMut};
 use cpa_core::config::Config;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{
-    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, FailureScope, Operation, ResponseBody,
+    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, FailureScope, HeldStream, Operation, ResponseBody,
     UpstreamRequest,
 };
 use cpa_core::format::Format;
@@ -360,7 +360,27 @@ impl ClaudeExecutor {
                 // seen, no record. A restore failure below keeps the usage seen so far
                 // (streamUsage.PublishFailure), which the server does for Claude.
                 req.usage.usage_required();
-                stream::validate_buffered(&data).map_err(|e| {
+                stream::validate_buffered(&data).map_err(|end| {
+                    // A first-event error fails as a held stream's does, with nothing held
+                    // since a buffered reply goes out whole: once per account, with its
+                    // declared status.
+                    let e = match stream::buffered_first_error(&data).filter(|_| !fast) {
+                        Some((status, payload)) => {
+                            let declare = |status, data| {
+                                upstream_error(
+                                    status,
+                                    response.headers.clone(),
+                                    data,
+                                    false,
+                                    ctx.settings.model_level_cooling,
+                                )
+                            };
+                            let mut error = stream::first_event_failure(status, payload, &end, declare);
+                            error.held = Some(Arc::new(HeldStream { events: vec![], end }));
+                            error
+                        }
+                        None => end,
+                    };
                     capture_error(capture, &e);
                     wrap(e)
                 })?;

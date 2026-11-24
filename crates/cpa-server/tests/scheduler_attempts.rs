@@ -936,6 +936,67 @@ async fn a_first_event_error_fails_the_interaction() {
     assert_eq!(fixture.seen(), ["Bearer fake-a"]);
 }
 
+/// A first-event error of a type Anthropic does not list ends the request on the account
+/// that sent it: native and Chat clients get its stream, and a Responses client, which
+/// has no event for it, gets 502. Cooldowns are off, so only spending the account keeps
+/// retry rounds and bootstrap reruns from sending the request to it again.
+#[tokio::test]
+async fn an_unlisted_first_event_error_ends_the_request_on_its_account() {
+    const RESPONSES: (&str, &str) = (
+        "/v1/responses",
+        r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+    );
+    for ((path, request), want) in [(NATIVE, 200), (TRANSLATED, 200), (RESPONSES, 502)] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError {
+                kind: "mystery_error",
+                every: true,
+            },
+            serde_json::json!({"disable_cooling": true}),
+        )
+        .await;
+        let (status, body) = fixture.post(path, request).await;
+        assert_eq!(status, want, "{path}: {body}");
+        assert!(body.contains("synthetic mystery_error"), "{path}: {body}");
+        assert_eq!(fixture.seen(), ["Bearer fake-a"], "{path}");
+    }
+}
+
+/// A buffered translated client's reply is a Claude stream read whole. When its first
+/// event is an error, the client gets the declared status as a streaming Responses
+/// client does, and each account is tried once: an invalid request or an unlisted type
+/// ends on the first account, a retryable error fails over and the last account answers.
+#[tokio::test]
+async fn a_buffered_first_event_error_answers_with_its_declared_status_once_per_account() {
+    let requests = [
+        (
+            "/v1/chat/completions",
+            r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"fixture"}]}"#,
+        ),
+        ("/v1/responses", r#"{"model":"claude-sonnet-5","input":"fixture"}"#),
+    ];
+    let a = &["Bearer fake-a"][..];
+    let both = &["Bearer fake-a", "Bearer fake-b"][..];
+    for (path, request) in requests {
+        for (kind, every, want, seen) in [
+            ("invalid_request_error", false, 400, a),
+            ("mystery_error", true, 502, a),
+            ("api_error", true, 500, both),
+            ("overloaded_error", true, 529, both),
+        ] {
+            let fixture = Fixture::retrying(
+                Mode::FirstEventError { kind, every },
+                serde_json::json!({"disable_cooling": true}),
+            )
+            .await;
+            let (status, body) = fixture.post(path, request).await;
+            assert_eq!(status, want, "{path} {kind}: {body}");
+            assert!(body.contains(&format!("synthetic {kind}")), "{path} {kind}: {body}");
+            assert_eq!(fixture.seen(), seen, "{path} {kind}");
+        }
+    }
+}
+
 /// An invalid-request error event is the request's fault: no other account is tried.
 #[tokio::test]
 async fn a_first_event_invalid_request_is_terminal() {
