@@ -92,16 +92,39 @@ fn declared_status(payload: &[u8]) -> Option<u16> {
     })
 }
 
-/// Set by the relay when the first event it relays is an error with a
-/// [`declared_status`]: the status and the event's data. Never set once another event
-/// went first.
+/// Set by the relay when the first event it relays is an error: its
+/// [`declared_status`] and the event's data. Never set once another event went first.
 #[derive(Clone, Default)]
-pub(crate) struct FirstError(Arc<std::sync::OnceLock<(u16, Bytes)>>);
+pub(crate) struct FirstError(Arc<std::sync::OnceLock<(Option<u16>, Bytes)>>);
 
 impl FirstError {
-    pub(crate) fn get(&self) -> Option<&(u16, Bytes)> {
+    pub(crate) fn get(&self) -> Option<&(Option<u16>, Bytes)> {
         self.0.get()
     }
+}
+
+/// The failure of an attempt whose stream opened with an error event (`status` as
+/// [`declared_status`] gives it, `data` its payload): the declared error, or for a type
+/// Anthropic does not list, a 502 with the event's data, so its code and type still
+/// classify it.
+pub(crate) fn first_event_failure(
+    status: Option<u16>,
+    data: Bytes,
+    declare: impl FnOnce(u16, Bytes) -> ExecError,
+) -> ExecError {
+    declare(status.unwrap_or(502), data)
+}
+
+/// The first event of a buffered Claude stream when it is an error: its
+/// [`declared_status`] and data.
+pub(crate) fn buffered_first_error(data: &[u8]) -> Option<(Option<u16>, Bytes)> {
+    let payload = data.split(|b| *b == b'\n').find_map(|line| {
+        let payload = line.trim_ascii().strip_prefix(b"data:")?.trim_ascii();
+        (!payload.is_empty() && payload != b"[DONE]").then_some(payload)
+    })?;
+    let text = std::str::from_utf8(payload).ok()?;
+    (gjson::valid(text) && rawjson::get(text, "type").str() == "error")
+        .then(|| (declared_status(payload), Bytes::copy_from_slice(payload)))
 }
 
 /// `reverseRemapOAuthToolNamesFromStreamLine` on one raw line; borrowed when no name
@@ -186,9 +209,11 @@ impl Relay {
             );
             if !self.relayed
                 && let Some(error) = &self.upstream_error
-                && let Some(status) = declared_status(&error.body)
             {
-                let _ = self.first_error.0.set((status, error.body.clone()));
+                let _ = self
+                    .first_error
+                    .0
+                    .set((declared_status(&error.body), error.body.clone()));
             }
             self.flush();
             if self.completed {
@@ -316,7 +341,7 @@ impl Relay {
 
 /// Relays decoded upstream bytes as whole native SSE events; `done` is an [`OnComplete`].
 /// Every upstream line is reported to `usage` and `capture` before alias restore, and
-/// `first_error` is set when the first event is a declared error.
+/// `first_error` is set when the first event is an error.
 pub(crate) fn relay(
     body: ExecStream,
     reverse: Arc<Reverse>,
@@ -360,14 +385,14 @@ pub(crate) fn relay(
     .boxed()
 }
 
-/// Holds a client stream back while its first event is a declared upstream error
+/// Holds a client stream back while its first event is an upstream error
 /// ([`FirstError`]). When the stream then ends with an error, nothing has reached the
-/// client, so the attempt fails with `declare(status, data)` instead, carrying the held
+/// client, so the attempt fails with [`first_event_failure`] instead, carrying the held
 /// events and that ending error as a [`HeldStream`] for dispatch to fail over or send.
-/// A request-scoped declaration goes out as it came when it held events; with none,
-/// because the client's translator wrote nothing for the error, it fails like any
-/// other, and the client gets the declared status. A held stream that ends without an
-/// error goes out as it came.
+/// A request-scoped or unlisted error goes out as it came when it held events; with
+/// none, because the client's translator wrote nothing for the error, it fails like any
+/// other, and the client gets its status. A held stream that ends without an error goes
+/// out as it came.
 pub(crate) fn hold_first_error(
     stream: ExecStream,
     first: FirstError,
@@ -414,8 +439,11 @@ pub(crate) fn hold_first_error(
                     st.done = true;
                     let declared = st.declare.take().zip(st.first.get().cloned());
                     if let Some((declare, (status, data))) = declared {
-                        let mut error = declare(status, data);
-                        if st.held.is_empty() || error.scope != FailureScope::Request {
+                        let mut error = first_event_failure(status, data, declare);
+                        // A client shown an unlisted or request-scoped error has the
+                        // events it would have had without the hold.
+                        let as_it_came = status.is_none() || error.scope == FailureScope::Request;
+                        if st.held.is_empty() || !as_it_came {
                             let events = std::mem::take(&mut st.held);
                             error.held = Some(Arc::new(HeldStream { events, end }));
                             return Some((Err(error), st));

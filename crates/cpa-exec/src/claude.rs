@@ -51,7 +51,7 @@ use bytes::{Bytes, BytesMut};
 use cpa_core::config::Config;
 use cpa_core::credential::{Credential, MetadataPatch};
 use cpa_core::exec::{
-    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, FailureScope, Operation, ResponseBody,
+    CaptureEvent, CaptureSink, ExecError, ExecRequest, ExecResponse, FailureScope, HeldStream, Operation, ResponseBody,
     UpstreamRequest,
 };
 use cpa_core::format::Format;
@@ -360,7 +360,32 @@ impl ClaudeExecutor {
                 // seen, no record. A restore failure below keeps the usage seen so far
                 // (streamUsage.PublishFailure), which the server does for Claude.
                 req.usage.usage_required();
-                stream::validate_buffered(&data).map_err(|e| {
+                stream::validate_buffered(&data).map_err(|end| {
+                    // A first-event error fails as a held stream with no events does: each
+                    // account once, with its declared status or 502. A fast request keeps
+                    // its own rule.
+                    let first = if fast {
+                        None
+                    } else {
+                        stream::buffered_first_error(&data)
+                    };
+                    let e = match first {
+                        Some((status, payload)) => {
+                            let declare = |status, data| {
+                                upstream_error(
+                                    status,
+                                    response.headers.clone(),
+                                    data,
+                                    false,
+                                    ctx.settings.model_level_cooling,
+                                )
+                            };
+                            let mut error = stream::first_event_failure(status, payload, declare);
+                            error.held = Some(Arc::new(HeldStream { events: vec![], end }));
+                            error
+                        }
+                        None => end,
+                    };
                     capture_error(capture, &e);
                     wrap(e)
                 })?;
