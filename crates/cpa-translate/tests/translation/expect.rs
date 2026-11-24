@@ -1,0 +1,294 @@
+//! What each scenario's outputs must still say after translation, and the known cases
+//! where a pair cannot say it.
+
+use serde_json::Value;
+
+use crate::facts::{Facts, Kind, Stop};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fact {
+    Text,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    ToolDef,
+    Reasoning,
+    MaxOutput,
+    Image,
+    Usage,
+    Stop,
+}
+
+#[derive(Default)]
+pub struct Expected {
+    pub text: Vec<&'static str>,
+    pub thinking: Vec<&'static str>,
+    pub tool_calls: Vec<(&'static str, Value)>,
+    pub tool_results: Vec<&'static str>,
+    pub tool_defs: Vec<&'static str>,
+    pub reasoning: bool,
+    pub max_output: Option<i64>,
+    pub images: usize,
+    pub usage: Option<(i64, i64)>,
+    pub stop: Option<Stop>,
+}
+
+/// The scenario's facts for an output of `kind`.
+pub fn expected(scenario: &str, kind: Kind) -> Expected {
+    let reply = |text: Vec<&'static str>, stop| Expected {
+        text,
+        usage: Some((12, 3)),
+        stop: Some(stop),
+        ..Expected::default()
+    };
+    match (scenario, kind) {
+        ("text", Kind::Request) => Expected {
+            text: vec!["You are terse.", "Say hello."],
+            ..Expected::default()
+        },
+        ("text", _) => reply(vec!["Hello there."], Stop::End),
+        ("tool_call", Kind::Request) => Expected {
+            text: vec!["Weather in Paris?"],
+            tool_defs: vec!["get_weather"],
+            ..Expected::default()
+        },
+        ("tool_call", _) => Expected {
+            tool_calls: vec![("get_weather", serde_json::json!({"city": "Paris"}))],
+            ..reply(vec![], Stop::ToolUse)
+        },
+        ("tool_result", Kind::Request) => Expected {
+            text: vec!["Weather in Paris?"],
+            tool_calls: vec![("get_weather", serde_json::json!({"city": "Paris"}))],
+            tool_results: vec!["Sunny, 21 C"],
+            tool_defs: vec!["get_weather"],
+            ..Expected::default()
+        },
+        ("tool_result", _) => reply(vec!["It is sunny."], Stop::End),
+        ("thinking", Kind::Request) => Expected {
+            text: vec!["Is 17 prime?"],
+            reasoning: true,
+            ..Expected::default()
+        },
+        ("thinking", _) => Expected {
+            thinking: vec!["Check divisors up to 4."],
+            ..reply(vec!["Yes, 17 is prime."], Stop::End)
+        },
+        ("image", Kind::Request) => Expected {
+            text: vec!["What is in this image?"],
+            images: 1,
+            ..Expected::default()
+        },
+        ("image", _) => reply(vec!["A red dot."], Stop::End),
+        ("multi_turn", Kind::Request) => Expected {
+            text: vec!["My name is Ada.", "Hello Ada.", "What is my name?"],
+            ..Expected::default()
+        },
+        ("multi_turn", _) => reply(vec!["Your name is Ada."], Stop::End),
+        ("max_tokens", Kind::Request) => Expected {
+            text: vec!["Write a long story."],
+            max_output: Some(5),
+            ..Expected::default()
+        },
+        ("max_tokens", _) => reply(vec!["Once upon a"], Stop::Length),
+        // A failed reply's text so far, then the error. Buffered replies of a stream that
+        // failed have no defined shape, so only the stream is checked.
+        ("stream_error", Kind::Request) => Expected {
+            text: vec!["Say hello."],
+            ..Expected::default()
+        },
+        ("stream_error", Kind::Stream) => Expected {
+            text: vec!["Hello"],
+            stop: Some(Stop::Error),
+            ..Expected::default()
+        },
+        _ => panic!("no expectations for scenario {scenario}"),
+    }
+}
+
+/// Codex requests drop the output limit until subscription accounts are confirmed to
+/// accept it (`docs/UPSTREAM-REVIEW.md`, Codex output budgets).
+const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pending decision";
+
+/// No translator to Interactions writes a failure event, so its shape waits for a
+/// decision; until then the Claude translator reports a failed stream as completed and the
+/// Responses one stops without a terminal event.
+const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event shape yet: a decision";
+
+/// A fact a pair's output does not carry, and why: (pair directory, scenario, output
+/// kind, fact, reason). A reason starting `executor` means the executor, not the
+/// translator, supplies the fact or ends the stream. An entry whose fact the output does
+/// carry fails, so this list cannot go stale.
+pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
+    (
+        "openai-response__claude",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        "executor: the Claude executor ends the stream with an error and the server writes the terminal frame",
+    ),
+    (
+        "interactions__claude",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        NO_INTERACTIONS_FAILURE,
+    ),
+    (
+        "interactions__openai-response",
+        "stream_error",
+        Kind::Stream,
+        Fact::Stop,
+        NO_INTERACTIONS_FAILURE,
+    ),
+    (
+        "claude__gemini",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        "Claude max_tokens is not sent as maxOutputTokens, while OpenAI requests to Gemini send it; \
+         Claude Code's large default could exceed a smaller Gemini model's limit, so it waits for a decision",
+    ),
+    (
+        "claude__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "gemini__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "openai__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "openai-response__codex",
+        "max_tokens",
+        Kind::Request,
+        Fact::MaxOutput,
+        CODEX_OUTPUT_BUDGET,
+    ),
+    (
+        "gemini__interactions",
+        "tool_call",
+        Kind::Stream,
+        Fact::ToolCall,
+        "each arguments_delta becomes its own functionCall, and a piece that is not whole JSON is dropped; \
+     the fix also changes a recorded Devin executor fixture in cpa-exec, so it waits for a decision",
+    ),
+    (
+        "claude__gemini",
+        "thinking",
+        Kind::Response,
+        Fact::Text,
+        "an answer part that carries a thoughtSignature becomes thinking, so the signature can return \
+         to Gemini on the next turn; treating it as text, as portable output does, waits for a decision",
+    ),
+    (
+        "claude__gemini",
+        "thinking",
+        Kind::Stream,
+        Fact::Text,
+        "an answer part that carries a thoughtSignature becomes thinking, so the signature can return \
+         to Gemini on the next turn; treating it as text, as portable output does, waits for a decision",
+    ),
+];
+
+/// Each fact `expected` names that `actual` lacks, with a description.
+pub fn missing(expected: &Expected, actual: &Facts) -> Vec<(Fact, String)> {
+    let mut out = vec![];
+    // Texts appear in the order the conversation had them.
+    let mut from = 0;
+    for t in &expected.text {
+        match actual.text[from..].find(t) {
+            Some(at) => from += at + t.len(),
+            None => out.push((Fact::Text, format!("text {t:?} not in order in {:?}", actual.text))),
+        }
+    }
+    for t in &expected.thinking {
+        if !actual.thinking.contains(t) {
+            out.push((Fact::Thinking, format!("thinking {t:?} not in {:?}", actual.thinking)));
+        }
+    }
+    for (name, args) in &expected.tool_calls {
+        if !actual.tool_calls.iter().any(|(n, a)| n == name && a == args) {
+            out.push((
+                Fact::ToolCall,
+                format!("tool call {name} {args} not in {:?}", actual.tool_calls),
+            ));
+        }
+    }
+    for t in &expected.tool_results {
+        if !actual.tool_results.iter().any(|r| r.contains(t)) {
+            out.push((
+                Fact::ToolResult,
+                format!("tool result {t:?} not in {:?}", actual.tool_results),
+            ));
+        }
+    }
+    for t in &expected.tool_defs {
+        if !actual.tool_defs.iter().any(|d| d == t) {
+            out.push((
+                Fact::ToolDef,
+                format!("tool {t:?} not declared in {:?}", actual.tool_defs),
+            ));
+        }
+    }
+    if expected.reasoning && !actual.reasoning {
+        out.push((Fact::Reasoning, "no reasoning setting".to_string()));
+    }
+    if expected.max_output.is_some() && actual.max_output != expected.max_output {
+        out.push((
+            Fact::MaxOutput,
+            format!("output limit {:?}, want {:?}", actual.max_output, expected.max_output),
+        ));
+    }
+    if actual.images < expected.images {
+        out.push((
+            Fact::Image,
+            format!("{} images, want {}", actual.images, expected.images),
+        ));
+    }
+    if expected.usage.is_some() && actual.usage != expected.usage {
+        out.push((
+            Fact::Usage,
+            format!("usage {:?}, want {:?}", actual.usage, expected.usage),
+        ));
+    }
+    if expected.stop.is_some() && actual.stop != expected.stop {
+        out.push((Fact::Stop, format!("stop {:?}, want {:?}", actual.stop, expected.stop)));
+    }
+    out
+}
+
+/// Content-check failures for one output: missing facts not in [`LOSSY`], and
+/// [`LOSSY`] entries for facts that are present.
+pub fn check(dir: &str, scenario: &str, kind: Kind, actual: &Facts) -> Vec<String> {
+    let missing = missing(&expected(scenario, kind), actual);
+    let lossy: Vec<_> = LOSSY
+        .iter()
+        .filter(|(d, s, k, _, _)| *d == dir && *s == scenario && *k == kind)
+        .collect();
+    let mut out = vec![];
+    for (fact, why) in &missing {
+        if !lossy.iter().any(|(_, _, _, f, _)| f == fact) {
+            out.push(format!("{dir}/{scenario} {kind:?}: {why}"));
+        }
+    }
+    for (_, _, _, fact, reason) in lossy {
+        if !missing.iter().any(|(f, _)| f == fact) {
+            out.push(format!(
+                "{dir}/{scenario} {kind:?}: LOSSY lists {fact:?} ({reason}), but the output carries it"
+            ));
+        }
+    }
+    out
+}

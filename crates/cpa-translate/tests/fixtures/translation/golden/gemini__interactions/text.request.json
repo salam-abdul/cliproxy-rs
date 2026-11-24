@@ -1,0 +1,1 @@
+{"model":"gemini-2.5-pro","input":[{"type":"user_input","content":[{"type":"text","text":"Say hello."}]}],"system_instruction":"You are terse.","stream":false}

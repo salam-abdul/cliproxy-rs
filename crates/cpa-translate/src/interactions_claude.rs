@@ -551,7 +551,7 @@ fn signature(step: &Res<'_>) -> Vec<u8> {
 }
 
 /// Whether an interaction ended on its token limit.
-fn hit_limit(interaction: &Res<'_>, root: &Res<'_>) -> bool {
+pub(crate) fn hit_limit(interaction: &Res<'_>, root: &Res<'_>) -> bool {
     let status = first_nonblank(&[&interaction.get("status").bytes(), &root.get("status").bytes()]);
     let reason = first_nonblank(&[
         &interaction.get("finish_reason").bytes(),

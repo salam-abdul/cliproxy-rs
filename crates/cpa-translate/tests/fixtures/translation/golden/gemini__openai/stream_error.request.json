@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","messages":[{"role":"system","content":[{"type":"text","text":"You are terse."}]},{"role":"user","content":"Say hello."}],"stream":false}

@@ -20,6 +20,7 @@ use crate::common::{
     go_runes, now_nanos, now_unix, parse_rfc3339_unix, request_model_name, restore_sanitized_tool_name,
     sanitized_tool_name_map, sse_event,
 };
+use crate::gemini_interactions_response::hit_output_limit;
 use crate::gemini_responses::{
     ANY, BYPASS_SIGNATURE, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, cache_text_signatures, encode_carrier,
 };
@@ -1337,6 +1338,18 @@ impl State {
         }
 
         let mut completed = br#"{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}"#.to_vec();
+        // A reply cut off at its output limit ends incomplete, as the Claude translator to
+        // Responses reports it.
+        let limited = hit_output_limit(root);
+        if limited {
+            gj::set_str(&mut completed, "type", "response.incomplete");
+            gj::set_str(&mut completed, "response.status", "incomplete");
+            gj::set_raw(
+                &mut completed,
+                "response.incomplete_details",
+                br#"{"reason":"max_output_tokens"}"#,
+            );
+        }
         let seq = self.next_seq();
         gj::set_int(&mut completed, "sequence_number", seq);
         gj::set_str(&mut completed, "response.id", &self.response_id);
@@ -1397,7 +1410,14 @@ impl State {
         if usage.exists() {
             set_usage(&mut completed, "response.usage.", &usage, true);
         }
-        out.push(event("response.completed", &completed));
+        out.push(event(
+            if limited {
+                "response.incomplete"
+            } else {
+                "response.completed"
+            },
+            &completed,
+        ));
         self.completed = true;
     }
 }
@@ -1551,6 +1571,10 @@ pub fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> 
     let mut resp =
         br#"{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}"#
             .to_vec();
+    if hit_output_limit(&root) {
+        gj::set_str(&mut resp, "status", "incomplete");
+        gj::set_raw(&mut resp, "incomplete_details", br#"{"reason":"max_output_tokens"}"#);
+    }
     let mut id = root.get("responseId").bytes().into_owned();
     if id.is_empty() {
         id = format!(

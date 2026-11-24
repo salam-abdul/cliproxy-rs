@@ -1,0 +1,21 @@
+event: interaction.created
+data: {"interaction":{"id":"msg_fixture_1","status":"in_progress","object":"interaction","model":"claude-sonnet-4-6"},"event_type":"interaction.created"}
+
+event: interaction.status_update
+data: {"interaction_id":"msg_fixture_1","status":"in_progress","event_type":"interaction.status_update"}
+
+event: step.start
+data: {"index":0,"step":{"type":"function_call","name":"get_weather","id":"toolu_fixture_1","call_id":"toolu_fixture_1","arguments":{}},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"arguments":"{\"city\":","type":"arguments_delta"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":0,"delta":{"arguments":"\"Paris\"}","type":"arguments_delta"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: interaction.completed
+data: {"interaction":{"id":"msg_fixture_1","status":"completed","usage":{"input_tokens":12,"total_input_tokens":12,"output_tokens":3,"total_output_tokens":3,"total_tokens":15},"created":"<time>","updated":"<time>","service_tier":"standard","object":"interaction","model":"claude-sonnet-4-6"},"event_type":"interaction.completed"}
+

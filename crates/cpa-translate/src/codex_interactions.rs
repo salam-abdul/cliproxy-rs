@@ -648,6 +648,9 @@ struct State {
     model: Vec<u8>,
     created_at: i64,
     has_output_text: bool,
+    /// The open function call's arguments already arrived as deltas, so its
+    /// `output_item.done` must not send them again.
+    streamed_arguments: bool,
     call_name: Vec<u8>,
     call_id: Vec<u8>,
 }
@@ -928,12 +931,14 @@ impl State {
             }
             b"function_call" | b"tool_call" => {
                 self.ensure_step("function_call", item, out);
-                out.push(delta_event(
-                    ARGUMENTS_DELTA,
-                    self.step_index,
-                    "delta.arguments",
-                    &item.get("arguments").bytes(),
-                ));
+                if !std::mem::take(&mut self.streamed_arguments) {
+                    out.push(delta_event(
+                        ARGUMENTS_DELTA,
+                        self.step_index,
+                        "delta.arguments",
+                        &item.get("arguments").bytes(),
+                    ));
+                }
             }
             b"image_generation_call" => {
                 let result = item.get("result").bytes().into_owned();
@@ -1016,6 +1021,7 @@ impl GoStream for State {
             b"response.function_call_arguments.delta" => {
                 self.created(&response, &mut out);
                 self.ensure_step("function_call", &root.get("item"), &mut out);
+                self.streamed_arguments = true;
                 out.push(delta_event(
                     ARGUMENTS_DELTA,
                     self.step_index,

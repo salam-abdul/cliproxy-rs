@@ -1,0 +1,1 @@
+{"instructions":"","stream":false,"reasoning":{"effort":"high","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Is 17 prime?"}]}],"store":false}

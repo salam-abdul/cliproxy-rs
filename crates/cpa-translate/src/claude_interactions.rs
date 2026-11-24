@@ -776,6 +776,9 @@ impl State {
         } else {
             set_usage(&mut completed, "interaction.usage", &gj::parse(&self.usage));
         }
+        if cut_off(&root.get("delta.stop_reason")) {
+            gj::set_str(&mut completed, "interaction.status", "incomplete");
+        }
         out.push(sse_event("interaction.completed", &completed));
         self.completed = true;
     }
@@ -883,6 +886,12 @@ impl GoStream for State {
     }
 }
 
+/// Whether a Claude stop reason says the reply hit a token limit, which Interactions
+/// reports as an incomplete interaction, as the Codex translator to Interactions does.
+fn cut_off(stop_reason: &Res<'_>) -> bool {
+    crate::claude_responses_response::incomplete(&stop_reason.bytes())
+}
+
 /// ConvertClaudeResponseToInteractionsNonStream: a Claude message, or a buffered stream.
 fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     let root = gj::parse(body);
@@ -909,6 +918,9 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
             gj::set_raw(&mut out, "steps", gj::join(&steps));
         }
         set_usage(&mut out, "usage", &root.get("usage"));
+        if cut_off(&root.get("stop_reason")) {
+            gj::set_str(&mut out, "status", "incomplete");
+        }
         return Ok(out);
     }
     gj::set_str(&mut out, "id", &fallback);
@@ -977,7 +989,12 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
                 st.forget(index);
                 steps.push(step);
             }
-            b"message_delta" => st.merge_usage(&event.get("usage")),
+            b"message_delta" => {
+                st.merge_usage(&event.get("usage"));
+                if cut_off(&event.get("delta.stop_reason")) {
+                    gj::set_str(&mut out, "status", "incomplete");
+                }
+            }
             _ => {}
         }
     }

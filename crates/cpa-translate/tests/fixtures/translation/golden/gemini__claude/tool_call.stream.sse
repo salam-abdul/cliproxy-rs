@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"},"id":"toolu_fixture_1"}}]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT","promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}
+

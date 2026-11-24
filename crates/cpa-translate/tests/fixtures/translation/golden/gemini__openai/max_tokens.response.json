@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"parts":[{"text":"Once upon a"}],"role":"model"},"index":0,"finishReason":"MAX_TOKENS"}],"model":"kimi-k2.5","usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15}}

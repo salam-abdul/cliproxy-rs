@@ -585,6 +585,17 @@ pub(crate) fn interactions_to_responses(model: &str, raw: &[u8], stream: bool) -
     if summary.kind == Kind::String {
         gj::set_str(&mut out, "reasoning.summary", summary.bytes());
     }
+    // The output limit, which the Responses-to-Interactions direction maps the other way.
+    let max = first_existing(
+        &root,
+        &[
+            "generation_config.max_output_tokens",
+            "generation_config.maxOutputTokens",
+        ],
+    );
+    if max.kind == Kind::Number {
+        gj::set_int(&mut out, "max_output_tokens", max.int());
+    }
     let modalities = root.get("response_modalities");
     if modalities.exists() {
         gj::set_raw(&mut out, "modalities", &modalities.raw);

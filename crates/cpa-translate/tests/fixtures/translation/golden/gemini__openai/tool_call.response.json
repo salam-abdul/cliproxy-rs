@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_fixture_1","name":"get_weather","args":{"city":"Paris"}}}],"role":"model"},"index":0,"finishReason":"STOP"}],"model":"kimi-k2.5","usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15}}

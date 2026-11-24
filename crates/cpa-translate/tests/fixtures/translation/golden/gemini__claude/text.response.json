@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello there."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15,"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"claude-sonnet-4-6","createTime":"<time>","responseId":"msg_fixture_1"}

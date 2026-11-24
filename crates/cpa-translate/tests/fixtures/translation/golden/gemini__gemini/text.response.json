@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello there."}]},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-2.5-pro","responseId":"resp-fixture-1"}

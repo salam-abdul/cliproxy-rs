@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"parts":[{"text":"It is sunny."}],"role":"model"},"index":0,"finishReason":"STOP"}],"modelVersion":"gemini-2.5-pro","responseId":"interaction_fixture_1","usageMetadata":{"promptTokenCount":12,"promptTokensDetails":[{"modality":"TEXT","tokenCount":12}],"candidatesTokenCount":3,"totalTokenCount":15}}

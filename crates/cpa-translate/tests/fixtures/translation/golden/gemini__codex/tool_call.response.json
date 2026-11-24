@@ -1,0 +1,1 @@
+{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"args":{"city":"Paris"},"name":"get_weather","id":"call_fixture_1"}}]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT","promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gpt-5.5","createTime":"2023-11-14T22:13:20Z","responseId":"resp_fixture_1"}

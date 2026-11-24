@@ -44,7 +44,7 @@ fn thought_step(signature: &[u8], text: &[u8]) -> Vec<u8> {
         gj::set_str(&mut step, "signature", signature);
     }
     if !text.is_empty() {
-        let mut item = br#"{"text":""}"#.to_vec();
+        let mut item = br#"{"type":"text","text":""}"#.to_vec();
         gj::set_str(&mut item, "text", text);
         gj::set_items(&mut step, "content", &[item]);
     }
@@ -112,7 +112,7 @@ pub(crate) fn part_to_steps(part: &Res<'_>) -> Vec<Vec<u8>> {
                 vec![thought_step(&signature, b"")]
             };
         }
-        let mut item = br#"{"text":""}"#.to_vec();
+        let mut item = br#"{"type":"text","text":""}"#.to_vec();
         gj::set_str(&mut item, "text", text.bytes());
         return output_steps(item, &signature);
     }
@@ -239,6 +239,8 @@ struct ToInteractions {
     step_type: &'static str,
     step_index: i64,
     next_step: i64,
+    /// The response stopped at its output limit.
+    limited: bool,
 }
 
 pub(crate) fn gemini_to_interactions_stream(ctx: &ResponseCtx<'_>) -> Box<dyn GoStream> {
@@ -253,6 +255,7 @@ pub(crate) fn gemini_to_interactions_stream(ctx: &ResponseCtx<'_>) -> Box<dyn Go
         step_type: "",
         step_index: 0,
         next_step: 0,
+        limited: false,
     })
 }
 
@@ -277,6 +280,9 @@ impl ToInteractions {
         gj::set_str(&mut completed, "interaction.model", &self.model);
         if let Some(root) = root.filter(|r| r.exists()) {
             set_stream_usage(&mut completed, "interaction.usage", root);
+        }
+        if self.limited {
+            gj::set_str(&mut completed, "interaction.status", "incomplete");
         }
         out.push(sse_event("interaction.completed", &completed));
         self.completed = true;
@@ -407,6 +413,7 @@ impl GoStream for ToInteractions {
             true
         });
         if root.get("candidates.0.finishReason").exists() && !self.finished {
+            self.limited = hit_output_limit(&root);
             self.stop_step(&mut out);
             self.finished = true;
         }
@@ -415,6 +422,12 @@ impl GoStream for ToInteractions {
         }
         Ok(out)
     }
+}
+
+/// Whether a Gemini response stopped at its output limit, which Interactions and Responses
+/// clients see as incomplete.
+pub(crate) fn hit_output_limit(root: &Res<'_>) -> bool {
+    root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
 }
 
 /// ConvertGeminiResponseToInteractionsNonStream.
@@ -434,6 +447,9 @@ pub(crate) fn gemini_to_interactions_non_stream(ctx: &ResponseCtx<'_>, body: &[u
     });
     gj::set_items(&mut out, "steps", &steps);
     set_usage(&mut out, "usage", &root);
+    if hit_output_limit(&root) {
+        gj::set_str(&mut out, "status", "incomplete");
+    }
     Ok(out)
 }
 
@@ -687,7 +703,8 @@ impl GoStream for ToGemini {
             b"step.delta" => return Ok(self.step_delta(&root).into_iter().collect()),
             b"interaction.completed" | b"finish" => {
                 self.adopt(&root.get("interaction"), true);
-                return Ok(vec![self.chunk(vec![], "STOP", &interactions_usage(&root), true)]);
+                let finish = gemini_finish(&root.get("interaction"), &root);
+                return Ok(vec![self.chunk(vec![], finish, &interactions_usage(&root), true)]);
             }
             b"response.failed" | b"interaction.failed" => {
                 let mut error = root.get("error");
@@ -848,7 +865,22 @@ pub(crate) fn interactions_to_gemini_non_stream(ctx: &ResponseCtx<'_>, body: &[u
         parts.extend(step_to_parts(&step));
         true
     });
-    Ok(state.chunk(parts, "STOP", &interactions_usage(&root), true))
+    Ok(state.chunk(
+        parts,
+        gemini_finish(&interaction, &root),
+        &interactions_usage(&root),
+        true,
+    ))
+}
+
+/// Gemini's finish reason for an interaction: `MAX_TOKENS` when it ended on its token
+/// limit, else `STOP`.
+fn gemini_finish(interaction: &Res<'_>, root: &Res<'_>) -> &'static str {
+    if crate::interactions_claude::hit_limit(interaction, root) {
+        "MAX_TOKENS"
+    } else {
+        "STOP"
+    }
 }
 
 #[cfg(test)]

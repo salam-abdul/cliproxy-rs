@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Your name"}]},"index":0}],"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" is Ada."}]},"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3-flash","responseId":"resp-fixture-1"}
+

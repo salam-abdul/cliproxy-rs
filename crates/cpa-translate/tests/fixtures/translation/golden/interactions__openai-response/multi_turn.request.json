@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"My name is Ada."}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello Ada."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"What is my name?"}]}]}

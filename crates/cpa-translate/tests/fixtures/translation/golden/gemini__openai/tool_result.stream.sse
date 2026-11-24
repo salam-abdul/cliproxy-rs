@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"parts":[{"text":"It is"}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[{"text":" sunny."}],"role":"model"},"index":0}],"model":"kimi-k2.5"}
+
+data: {"candidates":[{"content":{"parts":[],"role":"model"},"index":0,"finishReason":"STOP"}],"model":"kimi-k2.5"}
+
+data: {"candidates":[],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"model":"kimi-k2.5"}
+

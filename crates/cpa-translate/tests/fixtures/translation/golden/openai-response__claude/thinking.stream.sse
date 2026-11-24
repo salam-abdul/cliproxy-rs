@@ -1,0 +1,51 @@
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"msg_fixture_1","object":"response","created_at":"<time>","status":"in_progress","background":false,"error":null,"output":[],"model":"client-model"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":2,"response":{"id":"msg_fixture_1","object":"response","created_at":"<time>","status":"in_progress","output":[],"model":"client-model"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"id":"rs_msg_fixture_1_0","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","sequence_number":4,"item_id":"rs_msg_fixture_1_0","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":5,"item_id":"rs_msg_fixture_1_0","output_index":0,"summary_index":0,"delta":"Check divisors"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","sequence_number":6,"item_id":"rs_msg_fixture_1_0","output_index":0,"summary_index":0,"delta":" up to 4."}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","sequence_number":7,"item_id":"rs_msg_fixture_1_0","output_index":0,"summary_index":0,"text":"Check divisors up to 4."}
+
+event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","sequence_number":8,"item_id":"rs_msg_fixture_1_0","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Check divisors up to 4."}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"id":"rs_msg_fixture_1_0","type":"reasoning","status":"completed","encrypted_content":"c3ludGhldGljLXNpZ25hdHVyZS1mb3ItdHJhbnNsYXRpb24tdGVzdHMtb25seS0wMTIzNDU2Nzg5","summary":[{"type":"summary_text","text":"Check divisors up to 4."}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":10,"output_index":1,"item":{"id":"msg_msg_fixture_1_0","type":"message","status":"in_progress","content":[],"role":"assistant"}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":11,"item_id":"msg_msg_fixture_1_0","output_index":1,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":12,"item_id":"msg_msg_fixture_1_0","output_index":1,"content_index":0,"delta":"Yes, 17","logprobs":[]}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":13,"item_id":"msg_msg_fixture_1_0","output_index":1,"content_index":0,"delta":" is prime.","logprobs":[]}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":14,"item_id":"msg_msg_fixture_1_0","output_index":1,"content_index":0,"text":"Yes, 17 is prime.","logprobs":[]}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":15,"item_id":"msg_msg_fixture_1_0","output_index":1,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Yes, 17 is prime."}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":16,"output_index":1,"item":{"id":"msg_msg_fixture_1_0","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Yes, 17 is prime."}],"role":"assistant"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":17,"response":{"id":"msg_fixture_1","object":"response","created_at":"<time>","status":"completed","background":false,"error":null,"model":"client-model","reasoning":{"effort":"high","summary":"auto"},"output":[{"id":"rs_msg_fixture_1_0","type":"reasoning","status":"completed","encrypted_content":"c3ludGhldGljLXNpZ25hdHVyZS1mb3ItdHJhbnNsYXRpb24tdGVzdHMtb25seS0wMTIzNDU2Nzg5","summary":[{"type":"summary_text","text":"Check divisors up to 4."}]},{"id":"msg_msg_fixture_1_0","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Yes, 17 is prime."}],"role":"assistant"}],"usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":5},"total_tokens":15}}}
+

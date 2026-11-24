@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","messages":[{"role":"user","content":[{"type":"text","text":"My name is Ada."}]},{"role":"assistant","content":[{"type":"text","text":"Hello Ada."}]},{"role":"user","content":[{"type":"text","text":"What is my name?"}]}],"stream":true}

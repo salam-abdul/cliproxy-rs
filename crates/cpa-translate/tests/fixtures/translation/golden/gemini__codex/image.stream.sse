@@ -1,0 +1,8 @@
+data: {"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gpt-5.5","createTime":"2023-11-14T22:13:20Z","responseId":"resp_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"A red"}]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gpt-5.5","createTime":"2025-08-15T02:52:03.884209Z","responseId":"resp_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":" dot."}]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gpt-5.5","createTime":"2025-08-15T02:52:03.884209Z","responseId":"resp_fixture_1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT","promptTokenCount":12,"candidatesTokenCount":3,"totalTokenCount":15},"modelVersion":"gpt-5.5","createTime":"2023-11-14T22:13:20Z","responseId":"resp_fixture_1"}
+

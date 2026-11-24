@@ -1,0 +1,1 @@
+{"model":"gemini-2.5-pro","contents":[{"role":"user","parts":[{"text":"Weather in Paris?"}]}],"tools":[{"functionDeclarations":[{"description":"Current weather for a city.","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}]}

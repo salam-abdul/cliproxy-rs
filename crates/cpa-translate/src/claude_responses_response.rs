@@ -199,7 +199,8 @@ impl Usage {
     }
 }
 
-fn incomplete(stop: &[u8]) -> bool {
+/// Whether a Claude stop reason means the reply hit a token limit.
+pub(crate) fn incomplete(stop: &[u8]) -> bool {
     let stop = go_trim_space(stop);
     stop.eq_ignore_ascii_case(b"max_tokens") || stop.eq_ignore_ascii_case(b"model_context_window_exceeded")
 }

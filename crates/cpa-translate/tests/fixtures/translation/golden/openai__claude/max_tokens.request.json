@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-6","max_tokens":5,"messages":[{"role":"user","content":[{"type":"text","text":"Write a long story."}]}],"metadata":{"user_id":"22022311ea4790abdef1389acc2c7538793c46162c3972138edc2539184c4c21"},"stream":false}

@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","messages":[{"role":"user","content":"Is 17 prime?"}],"max_tokens":8192,"stream":true,"reasoning_effort":"medium"}

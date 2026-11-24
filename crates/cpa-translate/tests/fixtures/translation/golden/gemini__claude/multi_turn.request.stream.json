@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-6","max_tokens":32000,"messages":[{"role":"user","content":[{"type":"text","text":"My name is Ada."}]},{"role":"assistant","content":[{"type":"text","text":"Hello Ada."}]},{"role":"user","content":[{"type":"text","text":"What is my name?"}]}],"metadata":{"user_id":"7340ef9a53273a5ef99af983f77235697b023b57020f77e195d5835e1182602d"},"stream":true}

@@ -597,6 +597,9 @@ fn non_stream(ctx: &ResponseCtx<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
     });
     gj::set_items(&mut out, "steps", &steps);
     set_usage(&mut out, "usage", &root);
+    if crate::gemini_interactions_response::hit_output_limit(&root) {
+        gj::set_str(&mut out, "status", "incomplete");
+    }
     Ok(out)
 }
 
@@ -623,6 +626,8 @@ struct Stream {
     step_type: &'static str,
     step_index: i64,
     next_step: i64,
+    /// The response stopped at its output limit.
+    limited: bool,
 }
 
 const TEXT_DELTA: &[u8] = br#"{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}"#;
@@ -646,6 +651,9 @@ impl Stream {
         gj::set_str(&mut completed, "interaction.model", &self.model);
         if let Some(root) = root.filter(|r| r.exists()) {
             set_stream_usage(&mut completed, "interaction.usage", root);
+        }
+        if self.limited {
+            gj::set_str(&mut completed, "interaction.status", "incomplete");
         }
         out.push(sse_event("interaction.completed", &completed));
         self.completed = true;
@@ -776,6 +784,7 @@ impl Stream {
             true
         });
         if root.get("candidates.0.finishReason").exists() && !self.finished {
+            self.limited = crate::gemini_interactions_response::hit_output_limit(&root);
             self.stop_step(out);
             self.finished = true;
         }

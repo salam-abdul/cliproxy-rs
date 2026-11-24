@@ -1,0 +1,1 @@
+{"id":"resp-fixture-1","type":"message","role":"assistant","model":"gemini-3-flash","content":[{"type":"thinking","thinking":"Check divisors up to 4.","signature":"c3ludGhldGljLXNpZ25hdHVyZS1mb3ItdHJhbnNsYXRpb24tdGVzdHMtb25seS0wMTIzNDU2Nzg5"},{"type":"text","text":"Yes, 17 is prime."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":3}}

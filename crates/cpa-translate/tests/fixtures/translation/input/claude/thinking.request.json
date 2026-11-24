@@ -1,0 +1,1 @@
+{"model":"client-model","max_tokens":8192,"thinking":{"type":"enabled","budget_tokens":4096},"messages":[{"role":"user","content":"Is 17 prime?"}]}

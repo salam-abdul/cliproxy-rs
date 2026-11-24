@@ -1,0 +1,1 @@
+{"model":"kimi-k2.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Is 17 prime?"}]}],"reasoning":{"effort":"high","summary":"auto"}}

@@ -21,6 +21,7 @@
 - The Codex Live media relay tests run only with the feature on: `cargo nextest run -p cpa-server --features media-relay --lib`.
 - Code behind `cfg(windows)` is checked only by the Windows clippy job.
 - `vendor/gjson` is outside the workspace, so `--workspace` commands skip it.
+- `crates/cpa-translate/tests/translation.rs` runs every registered translator pair over synthetic scenarios and compares the outputs with `tests/fixtures/translation/golden`. `UPDATE_GOLDEN=1` rewrites them. Change a golden only in the commit that changes that behavior, and say why. A new pair or scenario fails until its inputs and goldens exist.
 - `ui/dist` is checked in. CI rebuilds it and fails on any difference, so commit the rebuilt assets with the source.
 - `python3 native/test.py` runs `target/debug/cliproxy` and the `native_router_fixture` example. Rebuild both first or it tests stale code.
 - Before merging a prompt-cache change, qualify warm, changed-context and idle continuations with `tools/claude-cache-live.sh` and read the returned cache-read and cache-write usage.
