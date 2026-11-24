@@ -865,6 +865,77 @@ async fn a_retryable_first_event_error_tries_each_account_once() {
 /// before first-event errors were held: the translated event, then the proxy's error.
 const TRANSLATED_OVERLOAD: &str = "data: {\"error\":{\"message\":\"synthetic overloaded_error\",\"type\":\"overloaded_error\"}}\n\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"synthetic overloaded_error\"}}\n\n";
 
+/// A Responses client's translator writes nothing for a Claude error event, so with
+/// nothing held the attempt answers with the status the event declares, as an HTTP
+/// error would: 400 for an invalid request, 529 once every account is overloaded.
+#[tokio::test]
+async fn a_first_event_error_reaches_a_responses_client_with_its_declared_status() {
+    const RESPONSES: (&str, &str) = (
+        "/v1/responses",
+        r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+    );
+    for (kind, every, want, seen) in [
+        ("invalid_request_error", false, 400, &["Bearer fake-a"][..]),
+        ("overloaded_error", true, 529, &["Bearer fake-a", "Bearer fake-b"][..]),
+    ] {
+        let fixture = Fixture::retrying(Mode::FirstEventError { kind, every }, serde_json::json!({})).await;
+        let (status, body) = fixture.post(RESPONSES.0, RESPONSES.1).await;
+        assert_eq!(status, want, "{kind}: {body}");
+        assert!(body.contains(&format!("synthetic {kind}")), "{kind}: {body}");
+        assert_eq!(fixture.seen(), seen, "{kind}");
+    }
+}
+
+/// With nothing held for a Responses client, the account is still spent: retry rounds
+/// and bootstrap reruns do not send the request to it again, even without cooldowns.
+#[tokio::test]
+async fn a_responses_client_tries_each_account_once_on_a_retryable_first_event_error() {
+    for (kind, want) in [("api_error", 500), ("rate_limit_error", 429)] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError { kind, every: true },
+            serde_json::json!({"disable_cooling": true}),
+        )
+        .await;
+        let (status, body) = fixture
+            .post(
+                "/v1/responses",
+                r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+            )
+            .await;
+        assert_eq!(status, want, "{kind}: {body}");
+        assert_eq!(fixture.seen(), ["Bearer fake-a", "Bearer fake-b"], "{kind}");
+    }
+}
+
+/// An Interactions client sees a failed interaction, not a completed one, when the
+/// stream's first event is an error.
+#[tokio::test]
+async fn a_first_event_error_fails_the_interaction() {
+    let fixture = Fixture::retrying(
+        Mode::FirstEventError {
+            kind: "invalid_request_error",
+            every: false,
+        },
+        serde_json::json!({}),
+    )
+    .await;
+    let (status, body) = fixture
+        .post(
+            "/v1beta/interactions",
+            r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("interaction.completed"), "{body}");
+    let failed = body
+        .split("\n\n")
+        .find(|event| event.starts_with("event: interaction.failed\n"))
+        .unwrap_or_else(|| panic!("no interaction.failed in {body}"));
+    assert!(failed.contains(r#""status":"failed""#), "{failed}");
+    assert!(failed.contains("synthetic invalid_request_error"), "{failed}");
+    assert_eq!(fixture.seen(), ["Bearer fake-a"]);
+}
+
 /// An invalid-request error event is the request's fault: no other account is tried.
 #[tokio::test]
 async fn a_first_event_invalid_request_is_terminal() {

@@ -109,10 +109,10 @@ pub fn expected(scenario: &str, kind: Kind) -> Expected {
 /// accept it (`docs/UPSTREAM-REVIEW.md`, Codex output budgets).
 const CODEX_OUTPUT_BUDGET: &str = "Codex requests drop max_output_tokens: a pending decision";
 
-/// No translator to Interactions writes a failure event, so its shape waits for a
-/// decision; until then the Claude translator reports a failed stream as completed and the
-/// Responses one stops without a terminal event.
-const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event shape yet: a decision";
+/// The Responses translator to Interactions stops a failed stream without a terminal
+/// event; whether it should write `interaction.failed` as the Claude one does waits for a
+/// decision.
+const NO_INTERACTIONS_FAILURE: &str = "no Interactions failure event from Responses upstreams yet: a decision";
 
 /// A fact a pair's output does not carry, and why: (pair directory, scenario, output
 /// kind, fact, reason). A reason starting `executor` means the executor, not the
@@ -125,13 +125,6 @@ pub const LOSSY: &[(&str, &str, Kind, Fact, &str)] = &[
         Kind::Stream,
         Fact::Stop,
         "executor: the Claude executor ends the stream with an error and the server writes the terminal frame",
-    ),
-    (
-        "interactions__claude",
-        "stream_error",
-        Kind::Stream,
-        Fact::Stop,
-        NO_INTERACTIONS_FAILURE,
     ),
     (
         "interactions__openai-response",
