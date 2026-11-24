@@ -1728,6 +1728,8 @@ struct Ttft {
     /// The executor reports marks; the server's own approximation is not used.
     tracked: bool,
     start: Option<std::time::Instant>,
+    /// The first round trip's start, kept after `start` is taken.
+    origin: Option<std::time::Instant>,
     ttft: Option<std::time::Duration>,
     first_packet: Option<std::time::Duration>,
     /// `ttft` is a token event's time, not the first body byte's.
@@ -1738,7 +1740,9 @@ impl Ttft {
     fn start(&mut self) {
         self.tracked = true;
         if self.ttft.is_none() && self.start.is_none() {
-            self.start = Some(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.start = Some(now);
+            self.origin.get_or_insert(now);
         }
     }
 
@@ -1784,6 +1788,14 @@ impl Ttft {
     fn get(&self) -> std::time::Duration {
         self.ttft.or(self.first_packet).unwrap_or_default()
     }
+
+    /// From `started` to the round trip's start: what [`Self::get`] leaves out of a time
+    /// counted from `started`.
+    fn lead(&self, started: std::time::Instant) -> std::time::Duration {
+        self.origin.map_or(std::time::Duration::ZERO, |origin| {
+            origin.saturating_duration_since(started)
+        })
+    }
 }
 
 /// An attempt outcome the executor published itself (Go `Publish`/`PublishFailure`),
@@ -1796,6 +1808,8 @@ struct Outcome {
     model: String,
     latency: std::time::Duration,
     ttft: std::time::Duration,
+    /// From the attempt's start to the round trip's start.
+    ttft_lead: std::time::Duration,
     ttft_kind: Option<crate::activity::sends::TtftKind>,
 }
 
@@ -1906,6 +1920,7 @@ impl Observer {
             model: r.model.get().to_owned(),
             latency: self.started.elapsed(),
             ttft: r.ttft.get(),
+            ttft_lead: r.ttft.lead(self.started),
             ttft_kind: r.ttft.kind(),
         });
     }
@@ -2221,14 +2236,15 @@ impl Tracker {
         // Keep the returned TTL buckets as observations, not inferred accounting.
         let returned_cache = reported.usage().map(|d| (d.cache_creation_5m, d.cache_creation_1h));
         let mut record = std::mem::take(&mut self.record);
-        let (latency, ttft, ttft_kind);
+        let (latency, ttft, ttft_lead, ttft_kind);
         if let Some(outcome) = reported.outcome {
             record.failed = outcome.failed;
             record.fail_status = outcome.status;
             record.fail_body = outcome.body;
             record.detail = outcome.detail;
             record.response_model = outcome.model;
-            (latency, ttft, ttft_kind) = (outcome.latency, outcome.ttft, outcome.ttft_kind);
+            (latency, ttft, ttft_lead, ttft_kind) =
+                (outcome.latency, outcome.ttft, outcome.ttft_lead, outcome.ttft_kind);
         } else {
             let usage = if reported.seen {
                 reported.usage()
@@ -2267,11 +2283,15 @@ impl Tracker {
                 self.model.get().to_owned()
             };
             latency = self.started.elapsed();
-            (ttft, ttft_kind) = if reported.ttft.tracked {
-                (reported.ttft.get(), reported.ttft.kind())
+            (ttft, ttft_lead, ttft_kind) = if reported.ttft.tracked {
+                (
+                    reported.ttft.get(),
+                    reported.ttft.lead(self.started),
+                    reported.ttft.kind(),
+                )
             } else {
                 let event = self.first.map(|_| crate::activity::sends::TtftKind::Event);
-                (self.first.unwrap_or_default(), event)
+                (self.first.unwrap_or_default(), Default::default(), event)
             };
         }
         record.latency_ms = latency.as_millis() as i64;
@@ -2313,8 +2333,11 @@ impl Tracker {
             enqueue,
             cancelled,
             upstream_model: reported.upstream_model,
-            // A zero time is no time: nothing was measured.
-            ttft_kind: ttft_kind.filter(|_| !ttft.is_zero()),
+            // A zero time is no time: nothing was measured. The activity row counts from
+            // the attempt's start, as its latency does; the usage record keeps Go's origin.
+            activity_ttft: ttft_kind
+                .filter(|_| !ttft.is_zero())
+                .map(|kind| (i64::try_from((ttft + ttft_lead).as_millis()).unwrap_or(i64::MAX), kind)),
         }
     }
 }
@@ -2327,8 +2350,9 @@ struct Settled {
     /// The client went away before the attempt ended.
     cancelled: bool,
     upstream_model: String,
-    /// What `record.ttft_ms` measures; none when nothing was measured.
-    ttft_kind: Option<crate::activity::sends::TtftKind>,
+    /// The activity row's first response from the attempt's start, and what it measures;
+    /// none when nothing was measured.
+    activity_ttft: Option<(i64, crate::activity::sends::TtftKind)>,
 }
 
 impl Settled {
@@ -2387,7 +2411,7 @@ impl Tracker {
             stream: record.stream,
             start_ms: i64::try_from(start.as_millis()).unwrap_or(i64::MAX),
             latency_ms: Some(record.latency_ms),
-            ttft: settled.ttft_kind.map(|kind| (record.ttft_ms, kind)),
+            ttft: settled.activity_ttft,
             tokens: crate::activity::sends::Tokens::of(&record.detail, &record.provider, &record.executor_type),
         }
     }
@@ -3103,6 +3127,43 @@ mod tests {
         for send in sends.iter().filter(|send| !send["ttft_kind"].is_null()) {
             assert!(send["ttft_ms"].as_i64().is_some_and(|ms| ms >= 2), "{send}");
         }
+    }
+
+    /// An activity row's first response counts from the attempt's start, the origin of its
+    /// latency, so the executor's work before the round trip is inside it. The usage
+    /// record keeps Go's time from the round trip's start. Without marks both are the
+    /// server's own time from the attempt's start.
+    #[test]
+    fn an_activity_first_response_counts_from_the_attempt_start() {
+        let store = ActivityRuntime::new();
+        let cfg = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
+        store.rt.usage_queue().configure(true, &cfg);
+        let pause = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let tracked = Tracker::start(&store.rt, &activity_facts("tracked"), &credential_for("claude"), "m");
+        pause(60);
+        tracked.sink().round_trip_started();
+        pause(40);
+        tracked.sink().first_byte();
+        tracked.succeed();
+        let queued: Value = serde_json::from_slice(&store.rt.usage_queue().pop_oldest(10)[0]).unwrap();
+        let mut untracked = Tracker::start(&store.rt, &activity_facts("untracked"), &credential_for("claude"), "m");
+        pause(30);
+        untracked.arrived(&axum::http::HeaderMap::new());
+        untracked.succeed();
+        let untracked_queued: Value = serde_json::from_slice(&store.rt.usage_queue().pop_oldest(10)[0]).unwrap();
+        let sends = store.sends();
+        let row = |id: &str| sends.iter().find(|s| s["request_id"] == id).unwrap().clone();
+        let (tracked_row, untracked_row) = (row("tracked"), row("untracked"));
+        let activity = tracked_row["ttft_ms"].as_i64().unwrap();
+        let record = queued["ttft_ms"].as_i64().unwrap();
+        assert!(activity >= 100, "activity {activity}");
+        assert!(activity - record >= 50, "activity {activity}, record {record}");
+        assert_eq!(tracked_row["ttft_kind"], "byte");
+        assert_eq!(untracked_row["ttft_ms"], untracked_queued["ttft_ms"]);
+        assert!(
+            untracked_row["ttft_ms"].as_i64().is_some_and(|ms| ms >= 30),
+            "{untracked_row}"
+        );
     }
 
     /// The fields Go's reporter goldens compare, from one queued record.
