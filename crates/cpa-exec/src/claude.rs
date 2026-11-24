@@ -362,8 +362,8 @@ impl ClaudeExecutor {
                 req.usage.usage_required();
                 stream::validate_buffered(&data).map_err(|end| {
                     // A first-event error fails as a held stream with no events does: each
-                    // account once, with the declared status. A fast request keeps its
-                    // own rule.
+                    // account once, with its declared status or 502. A fast request keeps
+                    // its own rule.
                     let first = if fast {
                         None
                     } else {
@@ -380,7 +380,7 @@ impl ClaudeExecutor {
                                     ctx.settings.model_level_cooling,
                                 )
                             };
-                            let mut error = stream::first_event_failure(status, payload, &end, declare);
+                            let mut error = stream::first_event_failure(status, payload, declare);
                             error.held = Some(Arc::new(HeldStream { events: vec![], end }));
                             error
                         }

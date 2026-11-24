@@ -104,18 +104,15 @@ impl FirstError {
 }
 
 /// The failure of an attempt whose stream opened with an error event (`status` as
-/// [`declared_status`] gives it, `data` its payload) and then ended with `end`: the
-/// declared error, or `end` itself for a type Anthropic does not list.
+/// [`declared_status`] gives it, `data` its payload): the declared error, or for a type
+/// Anthropic does not list, a 502 with the event's data, so its code and type still
+/// classify it.
 pub(crate) fn first_event_failure(
     status: Option<u16>,
     data: Bytes,
-    end: &ExecError,
     declare: impl FnOnce(u16, Bytes) -> ExecError,
 ) -> ExecError {
-    match status {
-        Some(status) => declare(status, data),
-        None => end.clone(),
-    }
+    declare(status.unwrap_or(502), data)
 }
 
 /// The first event of a buffered Claude stream when it is an error: its
@@ -442,9 +439,9 @@ pub(crate) fn hold_first_error(
                     st.done = true;
                     let declared = st.declare.take().zip(st.first.get().cloned());
                     if let Some((declare, (status, data))) = declared {
-                        let mut error = first_event_failure(status, data, &end, declare);
-                        // Held events of an unlisted type go out as they came, as they did
-                        // before such errors were held, and so do a request-scoped one's.
+                        let mut error = first_event_failure(status, data, declare);
+                        // A client shown an unlisted or request-scoped error has the
+                        // events it would have had without the hold.
                         let as_it_came = status.is_none() || error.scope == FailureScope::Request;
                         if st.held.is_empty() || !as_it_came {
                             let events = std::mem::take(&mut st.held);

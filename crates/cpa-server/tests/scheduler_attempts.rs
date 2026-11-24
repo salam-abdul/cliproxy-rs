@@ -993,6 +993,36 @@ async fn an_unlisted_first_event_error_cools_the_account() {
     }
 }
 
+/// An unlisted first-event error that names a request fault, such as the
+/// `bad_request_error` type, is the request's own: for a client that saw none of the
+/// stream, streaming or buffered, it ends on the account that sent it and cools none.
+#[tokio::test]
+async fn an_unlisted_request_fault_first_event_ends_on_its_account() {
+    for (path, request) in [
+        (
+            "/v1/responses",
+            r#"{"model":"claude-sonnet-5","stream":true,"input":"fixture"}"#,
+        ),
+        (
+            "/v1/chat/completions",
+            r#"{"model":"claude-sonnet-5","messages":[{"role":"user","content":"fixture"}]}"#,
+        ),
+    ] {
+        let fixture = Fixture::retrying(
+            Mode::FirstEventError {
+                kind: "bad_request_error",
+                every: true,
+            },
+            serde_json::json!({}),
+        )
+        .await;
+        let (_, body) = fixture.post(path, request).await;
+        assert!(body.contains("synthetic bad_request_error"), "{path}: {body}");
+        assert_eq!(fixture.seen(), ["Bearer fake-a"], "{path}");
+        assert!(fixture.rt.store().cooldowns("a").is_empty(), "{path}: a cooled");
+    }
+}
+
 /// A buffered translated client's reply is a Claude stream read whole. When its first
 /// event is an error, the client gets the declared status as a streaming Responses
 /// client does, and each account is tried once: an invalid request ends on the first

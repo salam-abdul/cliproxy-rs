@@ -785,9 +785,10 @@ async fn oauth_first_event_401(State(mock): State<Arc<OAuthMock>>, req: Request)
 
 /// A buffered client's Claude stream that opens with an `authentication_error` already
 /// had the upstream accept the request, so the request is not sent to that account
-/// again after a refresh, as it would be for an HTTP 401: the client gets the 401.
+/// again, as it would be after refreshing for an HTTP 401: the client gets the 401, and
+/// the token is refreshed in the background for the next request.
 #[tokio::test]
-async fn a_buffered_first_event_401_is_not_resent_after_a_refresh() {
+async fn a_buffered_first_event_401_refreshes_without_resending() {
     let mock = Arc::new(OAuthMock::default());
     let upstream_url = serve(
         axum::Router::new()
@@ -828,6 +829,14 @@ async fn a_buffered_first_event_401_is_not_resent_after_a_refresh() {
     .await;
     assert_eq!(status, 401, "{text}");
     assert!(text.contains("synthetic token rejected"), "{text}");
+    let refreshed = async {
+        while !mock.calls.lock().unwrap().iter().any(|c| c == "/token") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), refreshed)
+        .await
+        .expect("no background refresh");
     let calls = mock.calls.lock().unwrap().clone();
     assert_eq!(calls.iter().filter(|c| *c == "/v1/messages").count(), 1, "{calls:?}");
     std::fs::remove_dir_all(&dir).unwrap();
