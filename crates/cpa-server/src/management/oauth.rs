@@ -328,7 +328,7 @@ pub(crate) async fn import(RawQuery(raw): RawQuery) -> Response {
     }
 }
 
-/// How a login ended, for the session (Go's `SetOAuthSessionError` texts).
+/// How a login ended, for the session.
 enum Outcome {
     Saved,
     /// The session stopped being pending: nothing is saved or reported.
@@ -499,9 +499,9 @@ async fn start_codex(state: Arc<Management>, webui: bool) -> Response {
     started(url, sid)
 }
 
-/// Google sign-in for Antigravity, finished as `-antigravity-login` does: the code
-/// exchange, the account email and the Cloud Code project (onboarding when there is
-/// none), saved as `antigravity-<email>.json`.
+/// Google sign-in for Antigravity: the code exchange, the account email and the Cloud
+/// Code project (onboarding when there is none), saved as `antigravity-<email>.json`
+/// like `-antigravity-login` saves it.
 async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
     use cpa_exec::antigravity_auth::{OAuth, auth_url, complete, redirect_uri, save_login};
     let Some(sid) = random_state() else {
@@ -526,22 +526,24 @@ async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
             if let Some(base) = &worker.login_base {
                 oauth = oauth.with_base(base);
             }
-            // Onboarding a new account can poll for minutes: a cancelled session stops it.
-            let completed = tokio::select! {
-                r = async {
-                    if code.trim().is_empty() {
-                        return Err("Missing authorization code".to_owned());
+            // Google's token, userinfo and project calls have no timeout of their own, and
+            // onboarding a new account polls for minutes: a deadline or a cancel stops them.
+            let completed = if code.is_empty() {
+                Err(Outcome::Failed("Missing authorization code".into()))
+            } else {
+                tokio::select! {
+                    r = complete(&oauth, &code, &redirect, chrono::Utc::now()) => {
+                        r.map_err(|e| Outcome::Failed(antigravity_failure(&e)))
                     }
-                    complete(&oauth, &code, &redirect, chrono::Utc::now())
-                        .await
-                        .map_err(|e| antigravity_failure(&e))
-                } => Some(r),
-                () = cancelled(&worker, &flow, "antigravity") => None,
+                    () = tokio::time::sleep(CALLBACK_WAIT) => {
+                        Err(Outcome::Failed("antigravity: sign-in timed out".into()))
+                    }
+                    () = cancelled(&worker, &flow, "antigravity") => Err(Outcome::Cancelled),
+                }
             };
             let outcome = match completed {
-                None => Outcome::Cancelled,
-                Some(Err(message)) => Outcome::Failed(message),
-                Some(Ok((file_name, metadata))) => {
+                Err(outcome) => outcome,
+                Ok((file_name, metadata)) => {
                     let write = move |dir: PathBuf, metadata| save_login(&dir, &file_name, &metadata);
                     save_if_pending(
                         &worker,
@@ -561,17 +563,12 @@ async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
     started(url, sid)
 }
 
-/// The failed step of an Antigravity login and its status, without the upstream text
-/// that follows: [`cpa_exec::antigravity_auth::complete`] names the step before its
-/// second `": "` ("antigravity: token exchange failed: <cause>").
-fn antigravity_failure(e: &cpa_exec::antigravity_auth::AuthError) -> String {
-    let step = match e.message.match_indices(": ").nth(1) {
-        Some((i, _)) => &e.message[..i],
-        None => e.message.as_str(),
-    };
-    match e.status {
-        Some(status) => format!("{step} (HTTP {status})"),
-        None => step.to_owned(),
+/// A failed Antigravity step and its status for the session, which anyone holding the
+/// state can read: the cause's message is left out because it can quote Google's body.
+fn antigravity_failure(e: &cpa_exec::antigravity_auth::LoginError) -> String {
+    match e.cause.as_ref().and_then(|c| c.status) {
+        Some(status) => format!("{} (HTTP {status})", e.step),
+        None => e.step.to_owned(),
     }
 }
 

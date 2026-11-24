@@ -1882,26 +1882,43 @@ async fn antigravity_login_saves_the_account_and_its_project() {
     fake_server.abort();
 }
 
-/// Antigravity: a failed step reaches the key-less session status as the step and its
-/// status only, never the upstream body.
-#[tokio::test]
-async fn antigravity_login_failure_hides_the_upstream_body() {
-    let app = axum::Router::new()
-        .route(
-            "/token",
-            axum::routing::post(|| async {
-                axum::Json(json!({"access_token": "fake-ag-at", "refresh_token": "fake-ag-rt", "expires_in": 3600}))
-            }),
-        )
-        .route(
-            "/oauth2/v2/userinfo",
-            axum::routing::get(|| async { (axum::http::StatusCode::FORBIDDEN, "upstream-secret-body") }),
-        );
+/// Google's sign-in endpoints for an Antigravity login: the token endpoint succeeds,
+/// and userinfo, `loadCodeAssist` and `onboardUser` answer with the given status and
+/// body. Records the paths it receives.
+async fn antigravity_google(
+    userinfo: (u16, &'static str),
+    load: (u16, &'static str),
+    onboard: (u16, &'static str),
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let record = seen.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        let record = record.clone();
+        async move {
+            record.lock().unwrap().push(uri.path().to_owned());
+            let (status, body) = match uri.path() {
+                "/token" => (
+                    200,
+                    r#"{"access_token":"fake-ag-at","refresh_token":"fake-ag-rt","expires_in":3600}"#,
+                ),
+                "/oauth2/v2/userinfo" => userinfo,
+                "/v1internal:loadCodeAssist" => load,
+                "/v1internal:onboardUser" => onboard,
+                _ => (404, ""),
+            };
+            (axum::http::StatusCode::from_u16(status).unwrap(), body)
+        }
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let fake = format!("http://{}", listener.local_addr().unwrap());
-    let fake_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let f = Fixture::new("antigravityfail");
-    let (base, _state, server) = login_server(&f, &fake).await;
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, seen, handle)
+}
+
+/// Starts an Antigravity login against `fake` and delivers its callback; returns the
+/// management base, the login state and the server.
+async fn antigravity_signin(f: &Fixture, fake: &str) -> (String, String, tokio::task::JoinHandle<()>) {
+    let (base, _state, server) = login_server(f, fake).await;
     let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
     let state = started["state"].as_str().unwrap().to_owned();
     assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
@@ -1910,11 +1927,105 @@ async fn antigravity_login_failure_hides_the_upstream_body() {
         code: "fake-code".into(),
         error: String::new(),
     }));
-    assert_eq!(
-        final_status(&base, &state, 10).await,
-        json!({"status": "error", "error": "antigravity: fetch user info failed (HTTP 403)"})
+    (base, state, server)
+}
+
+const GOOGLE_USER: (u16, &str) = (200, r#"{"email":"g@example.invalid"}"#);
+const SECRET: &str = "upstream-secret-body";
+
+/// Antigravity: a failed step reaches the key-less session status as the step and its
+/// status only, never the upstream body.
+#[tokio::test]
+async fn antigravity_login_failure_hides_the_upstream_body() {
+    let cases = [
+        (
+            (403, SECRET),
+            (200, "{}"),
+            (200, "{}"),
+            "antigravity: fetch user info failed (HTTP 403)",
+        ),
+        (
+            GOOGLE_USER,
+            (500, SECRET),
+            (200, "{}"),
+            "antigravity: failed to fetch project ID (HTTP 500)",
+        ),
+        (
+            GOOGLE_USER,
+            (200, "{}"),
+            (503, SECRET),
+            "antigravity: failed to fetch project ID (HTTP 503)",
+        ),
+    ];
+    for (i, (userinfo, load, onboard, error)) in cases.into_iter().enumerate() {
+        let (fake, _seen, fake_server) = antigravity_google(userinfo, load, onboard).await;
+        let f = Fixture::new(&format!("antigravityfail{i}"));
+        let (base, state, server) = antigravity_signin(&f, &fake).await;
+        assert_eq!(
+            final_status(&base, &state, 10).await,
+            json!({"status": "error", "error": error}),
+            "case {i}"
+        );
+        assert!(f.rt.store().snapshot().iter().all(|c| c.provider != "antigravity"));
+        server.abort();
+        fake_server.abort();
+    }
+}
+
+/// Antigravity: an account with no Cloud Code project is onboarded on the daily
+/// endpoint, and the project onboarding returns is saved.
+#[tokio::test]
+async fn antigravity_login_onboards_an_account_without_a_project() {
+    let onboarded = (
+        200,
+        r#"{"done":true,"response":{"cloudaicompanionProject":{"id":"onboarded-project"}}}"#,
     );
-    assert!(f.rt.store().snapshot().iter().all(|c| c.provider != "antigravity"));
+    let (fake, seen, fake_server) = antigravity_google(GOOGLE_USER, (200, "{}"), onboarded).await;
+    let f = Fixture::new("antigravityonboard");
+    let (base, state, server) = antigravity_signin(&f, &fake).await;
+    assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
+    assert!(seen.lock().unwrap().iter().any(|p| p == "/v1internal:onboardUser"));
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.dir.join("auth/antigravity-g@example.invalid.json")).unwrap()).unwrap();
+    assert_eq!(saved["project_id"], "onboarded-project");
+    server.abort();
+    fake_server.abort();
+}
+
+/// Antigravity: cancelling the login stops onboarding polls, and nothing is saved.
+#[tokio::test]
+async fn antigravity_login_cancel_stops_onboarding() {
+    let (fake, seen, fake_server) = antigravity_google(GOOGLE_USER, (200, "{}"), (200, r#"{"done":false}"#)).await;
+    let f = Fixture::new("antigravitycancel");
+    let (base, state, server) = antigravity_signin(&f, &fake).await;
+    let onboard_polls = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/v1internal:onboardUser")
+            .count()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while onboard_polls() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(onboard_polls(), 1, "onboarding started");
+    let r: Value = wreq::Client::new()
+        .delete(format!("{base}/v8/management/oauth/session?state={state}"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r, json!({"status": "ok", "cancelled": true}));
+    // The cancel watch notices within two seconds; onboarding polls every two.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let after_cancel = onboard_polls();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert_eq!(onboard_polls(), after_cancel, "onboarding stopped");
+    assert!(!f.dir.join("auth/antigravity-g@example.invalid.json").exists());
     server.abort();
     fake_server.abort();
 }

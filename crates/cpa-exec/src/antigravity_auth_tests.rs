@@ -287,7 +287,7 @@ async fn auth_matches_go() {
                 )
                 .await;
                 match go_error(case) {
-                    Some(error) => assert_eq!(got.map(|_| ()).map_err(|e| e.message), Err(error), "{name}"),
+                    Some(error) => assert_eq!(got.map(|_| ()).map_err(|e| e.to_string()), Err(error), "{name}"),
                     None => {
                         let (file, metadata) = got.unwrap_or_else(|e| panic!("{name}: {e}"));
                         assert_eq!(file, case["file_name"].as_str().unwrap(), "{name}: file");
