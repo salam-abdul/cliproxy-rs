@@ -1568,6 +1568,11 @@ async fn fake_logins() -> (
                 // which the login tolerates).
                 "/auth/cli/token" => json!({"token": "fake-devin-session"}),
                 "/v3/self" => json!({"user_name": "dev-user", "user_id": "u-1", "org_id": "o-1"}),
+                // Antigravity: Google's token and userinfo endpoints and Cloud Code's project lookup.
+                "/token" => json!({"access_token": "fake-ag-at", "refresh_token": "fake-ag-rt",
+                    "token_type": "Bearer", "expires_in": 3600}),
+                "/oauth2/v2/userinfo" => json!({"email": "g@example.invalid"}),
+                "/v1internal:loadCodeAssist" => json!({"cloudaicompanionProject": "fake-project"}),
                 _ => json!({}),
             };
             axum::Json(v)
@@ -1821,6 +1826,95 @@ async fn codex_login_completes_through_the_main_listener_callback() {
         code: "again".into(),
         error: String::new(),
     }));
+    server.abort();
+    fake_server.abort();
+}
+
+/// Antigravity: the callback's code is exchanged with Go's redirect URI, and the account's
+/// email and Cloud Code project are saved as `antigravity-<email>.json`.
+#[tokio::test]
+async fn antigravity_login_saves_the_account_and_its_project() {
+    let (fake, seen, fake_server) = fake_logins().await;
+    let f = Fixture::new("antigravitylogin");
+    let (base, _state, server) = login_server(&f, &fake).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    assert_eq!(started["status"], "ok", "{started}");
+    let state = started["state"].as_str().unwrap().to_owned();
+    let url = started["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"),
+        "{url}"
+    );
+    assert!(url.contains(&format!("state={state}")), "{url}");
+    assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+        provider: "antigravity",
+        state: state.clone(),
+        code: "fake-code".into(),
+        error: String::new(),
+    }));
+    assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
+    let token_request = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(p, _)| p == "/token")
+        .unwrap()
+        .1
+        .clone();
+    assert!(token_request.contains("code=fake-code"), "{token_request}");
+    assert!(
+        token_request.contains("redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback"),
+        "{token_request}"
+    );
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.dir.join("auth/antigravity-g@example.invalid.json")).unwrap()).unwrap();
+    assert_eq!(saved["type"], "antigravity");
+    assert_eq!(saved["email"], "g@example.invalid");
+    assert_eq!(saved["project_id"], "fake-project");
+    assert_eq!(saved["refresh_token"], "fake-ag-rt");
+    let creds = f.rt.store().snapshot();
+    let account = creds
+        .iter()
+        .find(|c| c.provider == "antigravity")
+        .expect("saved and published");
+    assert_eq!(account.str("email"), Some("g@example.invalid"));
+    server.abort();
+    fake_server.abort();
+}
+
+/// Antigravity: a failed step reaches the key-less session status as the step and its
+/// status only, never the upstream body.
+#[tokio::test]
+async fn antigravity_login_failure_hides_the_upstream_body() {
+    let app = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(json!({"access_token": "fake-ag-at", "refresh_token": "fake-ag-rt", "expires_in": 3600}))
+            }),
+        )
+        .route(
+            "/oauth2/v2/userinfo",
+            axum::routing::get(|| async { (axum::http::StatusCode::FORBIDDEN, "upstream-secret-body") }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = format!("http://{}", listener.local_addr().unwrap());
+    let fake_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let f = Fixture::new("antigravityfail");
+    let (base, _state, server) = login_server(&f, &fake).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    let state = started["state"].as_str().unwrap().to_owned();
+    assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+        provider: "antigravity",
+        state: state.clone(),
+        code: "fake-code".into(),
+        error: String::new(),
+    }));
+    assert_eq!(
+        final_status(&base, &state, 10).await,
+        json!({"status": "error", "error": "antigravity: fetch user info failed (HTTP 403)"})
+    );
+    assert!(f.rt.store().snapshot().iter().all(|c| c.provider != "antigravity"));
     server.abort();
     fake_server.abort();
 }
