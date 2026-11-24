@@ -424,8 +424,8 @@ impl GoStream for ToInteractions {
     }
 }
 
-/// Whether a Gemini response stopped at its output limit, which Interactions reports as an
-/// incomplete interaction, as the Codex and Responses translators do.
+/// Whether a Gemini response stopped at its output limit, which Interactions and Responses
+/// clients see as incomplete.
 pub(crate) fn hit_output_limit(root: &Res<'_>) -> bool {
     root.get("candidates.0.finishReason").bytes().as_ref() == b"MAX_TOKENS"
 }

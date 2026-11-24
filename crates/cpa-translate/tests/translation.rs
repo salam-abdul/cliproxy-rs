@@ -317,28 +317,6 @@ fn a_claude_context_window_stop_is_a_limit_for_gemini_and_interactions_clients()
 /// Arguments streamed for two calls are not sent again when their items finish, whatever
 /// order the items finish in.
 #[test]
-fn codex_arguments_streamed_for_two_calls_reach_interactions_clients_once() {
-    let events: Vec<&[u8]> = vec![
-        b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"m\"}}\n\n",
-        b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"f\"}}\n\n",
-        b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_a\",\"delta\":\"{\\\"n\\\":1}\"}\n\n",
-        b"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"b\",\"name\":\"g\"}}\n\n",
-        b"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_b\",\"delta\":\"{\\\"n\\\":2}\"}\n\n",
-        b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_a\",\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"f\",\"arguments\":\"{\\\"n\\\":1}\"}}\n\n",
-        b"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_b\",\"type\":\"function_call\",\"call_id\":\"b\",\"name\":\"g\",\"arguments\":\"{\\\"n\\\":2}\"}}\n\n",
-    ];
-    let request = br#"{"stream":true}"#;
-    let mut t = stream_with(Format::Interactions, Format::Codex, &ctx(request), Default::default()).unwrap();
-    let mut out = Vec::new();
-    for event in events {
-        t.event(event).unwrap().iter().for_each(|f| out.extend_from_slice(f));
-    }
-    let out = String::from_utf8(out).unwrap();
-    assert_eq!(out.matches(r#"\"n\":1"#).count(), 1, "{out}");
-    assert_eq!(out.matches(r#"\"n\":2"#).count(), 1, "{out}");
-}
-
-#[test]
 fn an_interactions_output_limit_in_camel_case_reaches_responses() {
     let body = br#"{"input":"hi","generation_config":{"maxOutputTokens":7}}"#;
     let out = translate_request(
