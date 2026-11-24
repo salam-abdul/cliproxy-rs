@@ -3,6 +3,7 @@
   import { api } from "../api";
   import { readPath, label, type Data } from "../core";
   import Load from "../Load.svelte";
+  import { exclusion, switchModel } from "../models";
 
   const channels = ["claude", "codex", "antigravity", "kimi", "xai", "meta", "vertex", "aistudio"];
   let channel = $state("claude");
@@ -25,6 +26,12 @@
     store
       .act(() => store.replace(`oauth/model-alias/${channel}`, aliases, [...aliases, next]), "Alias added.")
       .then((ok) => ok && (alias = { name: "", alias: "", fork: false }));
+  }
+  function setModel(id: string, enabled: boolean) {
+    store.act(
+      () => store.replace(`oauth/excluded-models/${channel}`, excluded, switchModel(id, excluded, enabled)),
+      `${id} ${enabled ? "enabled" : "excluded"}.`,
+    );
   }
   function exclude(e: SubmitEvent) {
     e.preventDefault();
@@ -88,16 +95,33 @@
 </Load>
 
 <section class="section">
-  <div class="section-head"><h2>Catalog</h2>{#if catalog?.data}<span class="legend">{catalog.data.length} {catalog.data.length === 1 ? "model" : "models"}</span>{/if}</div>
+  <div class="section-head">
+    <h2>Catalog</h2>{#if catalog?.data}<span class="legend"
+        >{catalog.data.length} {catalog.data.length === 1 ? "model" : "models"} · {catalog.data.filter((m) => exclusion(m.id, excluded).excluded).length} excluded</span
+      >{/if}
+  </div>
   {#if catalog}<Load res={catalog} what="The model catalog">
     {#snippet children(list)}
       {#if list.length}
         <table class="table">
-          <thead><tr><th>Model</th><th>Name</th><th class="count">Context</th><th class="count">Output</th></tr></thead>
+          <thead><tr><th>Model</th><th>Name</th><th class="count">Context</th><th class="count">Output</th><th>Enabled</th></tr></thead>
           <tbody>
-            {#each list as m (m.id)}<tr>
+            {#each list as m (m.id)}
+              {@const state = exclusion(m.id, excluded)}
+              <tr>
                 <td><code>{m.id}</code></td><td>{m.display_name || ""}</td>
                 <td class="num count">{k(m.context_length)}</td><td class="num count">{k(m.max_completion_tokens)}</td>
+                <td>
+                  <button
+                    class="key quiet"
+                    role="switch"
+                    aria-checked={!state.excluded}
+                    aria-label={`${m.id} enabled`}
+                    disabled={store.busy || !store.config.data || state.locked.length > 0}
+                    onclick={() => setModel(m.id, state.excluded)}
+                    ><span class="switch-track" aria-hidden="true"><span></span></span></button
+                  >{#if state.locked.length}<span class="legend">Excluded by <code>{state.locked.join(", ")}</code></span>{/if}
+                </td>
               </tr>{/each}
           </tbody>
         </table>
