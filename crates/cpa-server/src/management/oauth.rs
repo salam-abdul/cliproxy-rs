@@ -7,9 +7,8 @@
 //! files in auth-dir; cliproxy-rs keeps the callback with the pending session in
 //! memory, so nothing extra appears in the watched directory.
 //!
-//! ponytail: the antigravity login and Vertex import answer `provider_not_found`
-//! although the CLI already logs in and imports through `antigravity_auth` and
-//! `vertex_auth`; wire those here if the dashboard needs them.
+//! ponytail: the Vertex import answers `provider_not_found` although the CLI already
+//! imports through `vertex_auth`; wire it here if the dashboard needs it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,6 +31,7 @@ const COMPLETED_TTL: Duration = Duration::from_secs(60);
 const CALLBACK_WAIT: Duration = Duration::from_secs(5 * 60);
 const ANTHROPIC_CALLBACK_PORT: u16 = 54545;
 const CODEX_CALLBACK_PORT: u16 = 1455;
+const ANTIGRAVITY_CALLBACK_PORT: u16 = cpa_exec::antigravity_auth::DEFAULT_CALLBACK_PORT;
 
 #[derive(Clone)]
 struct Session {
@@ -301,6 +301,7 @@ pub(crate) async fn auth_url(State(state): State<Arc<Management>>, RawQuery(raw)
         "" => fail(StatusCode::BAD_REQUEST, "provider is required"),
         "claude" => start_claude(state, webui).await,
         "codex" => start_codex(state, webui).await,
+        "antigravity" => start_antigravity(state, webui).await,
         "kimi" => {
             // Go `RequestKimiToken`: `domain`, else `channel`, else kimi.com.
             let domain = [q.first("domain"), q.first("channel")]
@@ -327,7 +328,7 @@ pub(crate) async fn import(RawQuery(raw): RawQuery) -> Response {
     }
 }
 
-/// How a login ended, for the session (Go's `SetOAuthSessionError` texts).
+/// How a login ended, for the session.
 enum Outcome {
     Saved,
     /// The session stopped being pending: nothing is saved or reported.
@@ -496,6 +497,79 @@ async fn start_codex(state: Arc<Management>, webui: bool) -> Response {
         stop_forwarder(&worker, CODEX_CALLBACK_PORT, forwarder);
     });
     started(url, sid)
+}
+
+/// Google sign-in for Antigravity: the code exchange, the account email and the Cloud
+/// Code project (onboarding when there is none), saved as `antigravity-<email>.json`
+/// like `-antigravity-login` saves it.
+async fn start_antigravity(state: Arc<Management>, webui: bool) -> Response {
+    use cpa_exec::antigravity_auth::{OAuth, auth_url, complete, redirect_uri, save_login};
+    let Some(sid) = random_state() else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "failed to generate state parameter");
+    };
+    let redirect = redirect_uri(ANTIGRAVITY_CALLBACK_PORT);
+    let url = auth_url(&sid, &redirect);
+    state.oauth.register(&sid, "antigravity");
+    let forwarder = if webui {
+        match start_forwarder(&state, ANTIGRAVITY_CALLBACK_PORT, "/antigravity/callback").await {
+            Ok(id) => Some(id),
+            Err(message) => return fail(StatusCode::INTERNAL_SERVER_ERROR, message),
+        }
+    } else {
+        None
+    };
+    let worker = state.clone();
+    let flow = sid.clone();
+    tokio::spawn(async move {
+        if let Some(code) = wait_for_callback(&worker, &flow, "antigravity", "Bad request").await {
+            let mut oauth = OAuth::new(login_client(&worker));
+            if let Some(base) = &worker.login_base {
+                oauth = oauth.with_base(base);
+            }
+            // Google's token, userinfo and project calls have no timeout of their own, and
+            // onboarding a new account polls for minutes: a deadline or a cancel stops them.
+            let completed = if code.is_empty() {
+                Err(Outcome::Failed("Missing authorization code".into()))
+            } else {
+                tokio::select! {
+                    r = complete(&oauth, &code, &redirect, chrono::Utc::now()) => {
+                        r.map_err(|e| Outcome::Failed(antigravity_failure(&e)))
+                    }
+                    () = tokio::time::sleep(CALLBACK_WAIT) => {
+                        Err(Outcome::Failed("antigravity: sign-in timed out".into()))
+                    }
+                    () = cancelled(&worker, &flow, "antigravity") => Err(Outcome::Cancelled),
+                }
+            };
+            let outcome = match completed {
+                Err(outcome) => outcome,
+                Ok((file_name, metadata)) => {
+                    let write = move |dir: PathBuf, metadata| save_login(&dir, &file_name, &metadata);
+                    save_if_pending(
+                        &worker,
+                        &flow,
+                        "antigravity",
+                        metadata,
+                        write,
+                        "Failed to save authentication tokens",
+                    )
+                    .await
+                }
+            };
+            settle(&worker, &flow, outcome);
+        }
+        stop_forwarder(&worker, ANTIGRAVITY_CALLBACK_PORT, forwarder);
+    });
+    started(url, sid)
+}
+
+/// A failed Antigravity step and its status for the session, which anyone holding the
+/// state can read: the cause's message is left out because it can quote Google's body.
+fn antigravity_failure(e: &cpa_exec::antigravity_auth::LoginError) -> String {
+    match e.cause.as_ref().and_then(|c| c.status) {
+        Some(status) => format!("{} (HTTP {status})", e.step),
+        None => e.step.to_owned(),
+    }
 }
 
 /// Go's callback wait: every 500 ms for up to five minutes, until the callback

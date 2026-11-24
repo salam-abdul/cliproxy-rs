@@ -77,19 +77,38 @@ impl AuthError {
             retry_after: None,
         }
     }
-
-    /// Go's `fmt.Errorf("%s: %w", prefix, err)`: the status survives wrapping.
-    fn wrap(self, prefix: &str) -> Self {
-        Self {
-            message: format!("{prefix}: {}", self.message),
-            ..self
-        }
-    }
 }
 
 impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
+    }
+}
+
+/// A failed [`complete`]: the step that failed, which is fixed text, and the error
+/// behind it, whose message can quote upstream bodies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoginError {
+    pub step: &'static str,
+    pub cause: Option<AuthError>,
+}
+
+impl LoginError {
+    fn at(step: &'static str) -> impl FnOnce(AuthError) -> Self {
+        move |cause| Self {
+            step,
+            cause: Some(cause),
+        }
+    }
+}
+
+/// Go's text: `fmt.Errorf("%s: %w", step, err)`.
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            Some(cause) => write!(f, "{}: {}", self.step, cause.message),
+            None => f.write_str(self.step),
+        }
     }
 }
 
@@ -250,6 +269,10 @@ pub struct OAuth {
     client: wreq::Client,
     /// Pause between onboarding polls (two seconds; tests shorten it).
     poll_delay: Duration,
+    token_endpoint: String,
+    userinfo_endpoint: String,
+    api_endpoint: String,
+    daily_api_endpoint: String,
 }
 
 impl OAuth {
@@ -257,7 +280,22 @@ impl OAuth {
         Self {
             client,
             poll_delay: Duration::from_secs(2),
+            token_endpoint: TOKEN_ENDPOINT.to_owned(),
+            userinfo_endpoint: USERINFO_ENDPOINT.to_owned(),
+            api_endpoint: API_ENDPOINT.to_owned(),
+            daily_api_endpoint: DAILY_API_ENDPOINT.to_owned(),
         }
+    }
+
+    /// Sends every Google request to `base` instead (tests): `/token`,
+    /// `/oauth2/v2/userinfo` and the Cloud Code methods.
+    pub fn with_base(mut self, base: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        self.token_endpoint = format!("{base}/token");
+        self.userinfo_endpoint = format!("{base}/oauth2/v2/userinfo?alt=json");
+        self.api_endpoint = base.to_owned();
+        self.daily_api_endpoint = base.to_owned();
+        self
     }
 
     #[cfg(test)]
@@ -297,7 +335,7 @@ impl OAuth {
         let mut headers = GoHeaders::new();
         headers.set("Content-Type", "application/x-www-form-urlencoded");
         let upstream = self
-            .post(TOKEN_ENDPOINT, headers, form.into_bytes(), None)
+            .post(&self.token_endpoint, headers, form.into_bytes(), None)
             .await
             .map_err(|e| AuthError::plain(format!("{STEP}: execute request: {}", transport_text(&e))))?;
         let status = upstream.status;
@@ -327,9 +365,16 @@ impl OAuth {
         let mut headers = GoHeaders::new();
         headers.set("Authorization", format!("Bearer {access_token}"));
         headers.set("User-Agent", version::request_user_agent(""));
-        let upstream = proxy::request(&self.client, wreq::Method::GET, USERINFO_ENDPOINT, headers, None, None)
-            .await
-            .map_err(|e| AuthError::plain(format!("{STEP}: execute request: {}", transport_text(&e))))?;
+        let upstream = proxy::request(
+            &self.client,
+            wreq::Method::GET,
+            &self.userinfo_endpoint,
+            headers,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| AuthError::plain(format!("{STEP}: execute request: {}", transport_text(&e))))?;
         let status = upstream.status;
         if !(200..300).contains(&status) {
             let body = proxy::read_all(upstream.body, 8 << 10, false)
@@ -360,7 +405,7 @@ impl OAuth {
         headers.set("Accept", "*/*");
         headers.set("Content-Type", "application/json");
         headers.set("User-Agent", version::request_user_agent(""));
-        let url = format!("{API_ENDPOINT}/{API_VERSION}:loadCodeAssist");
+        let url = format!("{}/{API_VERSION}:loadCodeAssist", self.api_endpoint);
         let upstream = self
             .post(&url, headers, body, None)
             .await
@@ -410,7 +455,7 @@ impl OAuth {
             ("metadata".to_owned(), GoValue::Object(metadata)),
         ]))
         .marshal();
-        let url = format!("{DAILY_API_ENDPOINT}/{API_VERSION}:onboardUser");
+        let url = format!("{}/{API_VERSION}:onboardUser", self.daily_api_endpoint);
         for attempt in 1..=ONBOARD_ATTEMPTS {
             tracing::debug!("Polling attempt {attempt}/{ONBOARD_ATTEMPTS}");
             let mut headers = GoHeaders::new();
@@ -477,7 +522,9 @@ impl OAuth {
         headers.set("Host", "oauth2.googleapis.com");
         headers.set("Content-Type", "application/x-www-form-urlencoded");
         headers.set("User-Agent", "Go-http-client/2.0");
-        let upstream = self.post(TOKEN_ENDPOINT, headers, form.into_bytes(), None).await?;
+        let upstream = self
+            .post(&self.token_endpoint, headers, form.into_bytes(), None)
+            .await?;
         let status = upstream.status;
         let data = proxy::read_all(upstream.body, usize::MAX, false).await?;
         if !(200..300).contains(&status) {
@@ -771,30 +818,27 @@ pub async fn complete(
     code: &str,
     redirect_uri: &str,
     now: DateTime<Utc>,
-) -> Result<(String, Map<String, Value>), AuthError> {
+) -> Result<(String, Map<String, Value>), LoginError> {
+    let fixed = |step| LoginError { step, cause: None };
     let tokens = oauth
         .exchange_code(code, redirect_uri)
         .await
-        .map_err(|e| e.wrap("antigravity: token exchange failed"))?;
+        .map_err(LoginError::at("antigravity: token exchange failed"))?;
     let access = tokens.access_token.trim();
     if access.is_empty() {
-        return Err(AuthError::plain(
-            "antigravity: token exchange returned empty access token",
-        ));
+        return Err(fixed("antigravity: token exchange returned empty access token"));
     }
     let email = oauth
         .user_info(access)
         .await
-        .map_err(|e| e.wrap("antigravity: fetch user info failed"))?;
+        .map_err(LoginError::at("antigravity: fetch user info failed"))?;
     let project = oauth
         .project_id(access)
         .await
-        .map_err(|e| e.wrap("antigravity: failed to fetch project ID"))?;
+        .map_err(LoginError::at("antigravity: failed to fetch project ID"))?;
     let project = project.trim();
     if project.is_empty() {
-        return Err(AuthError::plain(
-            "antigravity: project ID discovery returned empty project",
-        ));
+        return Err(fixed("antigravity: project ID discovery returned empty project"));
     }
     Ok(build_auth(&tokens, &email, project, now))
 }
@@ -813,6 +857,12 @@ pub fn build_auth(tokens: &Tokens, email: &str, project: &str, now: DateTime<Utc
         metadata.insert("project_id".into(), Value::String(project.into()));
     }
     (credential_file_name(email), metadata)
+}
+
+/// Saves a login from [`complete`] the way `-antigravity-login` does: merged with an
+/// existing file's settings. Returns the path.
+pub fn save_login(auth_dir: &Path, file_name: &str, metadata: &Map<String, Value>) -> Result<PathBuf, String> {
+    crate::devin_auth::save_metadata_file(auth_dir, file_name, metadata, PROVIDER)
 }
 
 /// One OAuth callback (`callbackResult`).
@@ -955,7 +1005,7 @@ pub async fn login(auth_dir: &Path, cfg: &Config, options: &LoginOptions) -> Res
         let oauth = OAuth::new(GoClients::new(Default::default()).get(&proxy));
         let (file_name, metadata) = complete(&oauth, &callback.code, &redirect, Utc::now())
             .await
-            .map_err(|e| e.message)?;
+            .map_err(|e| e.to_string())?;
         if let Some(project) = metadata.get("project_id").and_then(Value::as_str) {
             tracing::info!("antigravity: obtained project ID {}", hide(project));
             println!("Antigravity authentication successful");
@@ -966,7 +1016,7 @@ pub async fn login(auth_dir: &Path, cfg: &Config, options: &LoginOptions) -> Res
             .and_then(Value::as_str)
             .unwrap_or("antigravity")
             .to_owned();
-        let path = crate::devin_auth::save_metadata_file(auth_dir, &file_name, &metadata, PROVIDER)?;
+        let path = save_login(auth_dir, &file_name, &metadata)?;
         Ok((path, label))
     }
     .await;

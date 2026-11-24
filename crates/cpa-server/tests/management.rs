@@ -1628,6 +1628,11 @@ async fn fake_logins() -> (
                 // which the login tolerates).
                 "/auth/cli/token" => json!({"token": "fake-devin-session"}),
                 "/v3/self" => json!({"user_name": "dev-user", "user_id": "u-1", "org_id": "o-1"}),
+                // Antigravity: Google's token and userinfo endpoints and Cloud Code's project lookup.
+                "/token" => json!({"access_token": "fake-ag-at", "refresh_token": "fake-ag-rt",
+                    "token_type": "Bearer", "expires_in": 3600}),
+                "/oauth2/v2/userinfo" => json!({"email": "g@example.invalid"}),
+                "/v1internal:loadCodeAssist" => json!({"cloudaicompanionProject": "fake-project"}),
                 _ => json!({}),
             };
             axum::Json(v)
@@ -1881,6 +1886,206 @@ async fn codex_login_completes_through_the_main_listener_callback() {
         code: "again".into(),
         error: String::new(),
     }));
+    server.abort();
+    fake_server.abort();
+}
+
+/// Antigravity: the callback's code is exchanged with Go's redirect URI, and the account's
+/// email and Cloud Code project are saved as `antigravity-<email>.json`.
+#[tokio::test]
+async fn antigravity_login_saves_the_account_and_its_project() {
+    let (fake, seen, fake_server) = fake_logins().await;
+    let f = Fixture::new("antigravitylogin");
+    let (base, _state, server) = login_server(&f, &fake).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    assert_eq!(started["status"], "ok", "{started}");
+    let state = started["state"].as_str().unwrap().to_owned();
+    let url = started["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"),
+        "{url}"
+    );
+    assert!(url.contains(&format!("state={state}")), "{url}");
+    assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+        provider: "antigravity",
+        state: state.clone(),
+        code: "fake-code".into(),
+        error: String::new(),
+    }));
+    assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
+    let token_request = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(p, _)| p == "/token")
+        .unwrap()
+        .1
+        .clone();
+    assert!(token_request.contains("code=fake-code"), "{token_request}");
+    assert!(
+        token_request.contains("redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback"),
+        "{token_request}"
+    );
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.dir.join("auth/antigravity-g@example.invalid.json")).unwrap()).unwrap();
+    assert_eq!(saved["type"], "antigravity");
+    assert_eq!(saved["email"], "g@example.invalid");
+    assert_eq!(saved["project_id"], "fake-project");
+    assert_eq!(saved["refresh_token"], "fake-ag-rt");
+    let creds = f.rt.store().snapshot();
+    let account = creds
+        .iter()
+        .find(|c| c.provider == "antigravity")
+        .expect("saved and published");
+    assert_eq!(account.str("email"), Some("g@example.invalid"));
+    server.abort();
+    fake_server.abort();
+}
+
+/// Google's sign-in endpoints for an Antigravity login: the token endpoint succeeds,
+/// and userinfo, `loadCodeAssist` and `onboardUser` answer with the given status and
+/// body. Records the paths it receives.
+async fn antigravity_google(
+    userinfo: (u16, &'static str),
+    load: (u16, &'static str),
+    onboard: (u16, &'static str),
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let record = seen.clone();
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        let record = record.clone();
+        async move {
+            record.lock().unwrap().push(uri.path().to_owned());
+            let (status, body) = match uri.path() {
+                "/token" => (
+                    200,
+                    r#"{"access_token":"fake-ag-at","refresh_token":"fake-ag-rt","expires_in":3600}"#,
+                ),
+                "/oauth2/v2/userinfo" => userinfo,
+                "/v1internal:loadCodeAssist" => load,
+                "/v1internal:onboardUser" => onboard,
+                _ => (404, ""),
+            };
+            (axum::http::StatusCode::from_u16(status).unwrap(), body)
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, seen, handle)
+}
+
+/// Starts an Antigravity login against `fake` and delivers its callback; returns the
+/// management base, the login state and the server.
+async fn antigravity_signin(f: &Fixture, fake: &str) -> (String, String, tokio::task::JoinHandle<()>) {
+    let (base, _state, server) = login_server(f, fake).await;
+    let started = oauth_get(&base, "/oauth/auth-url?provider=antigravity").await;
+    let state = started["state"].as_str().unwrap().to_owned();
+    assert!(f.rt.deliver_oauth_callback(&cpa_server::runtime::OAuthCallback {
+        provider: "antigravity",
+        state: state.clone(),
+        code: "fake-code".into(),
+        error: String::new(),
+    }));
+    (base, state, server)
+}
+
+const GOOGLE_USER: (u16, &str) = (200, r#"{"email":"g@example.invalid"}"#);
+const SECRET: &str = "upstream-secret-body";
+
+/// Antigravity: a failed step reaches the key-less session status as the step and its
+/// status only, never the upstream body.
+#[tokio::test]
+async fn antigravity_login_failure_hides_the_upstream_body() {
+    let cases = [
+        (
+            (403, SECRET),
+            (200, "{}"),
+            (200, "{}"),
+            "antigravity: fetch user info failed (HTTP 403)",
+        ),
+        (
+            GOOGLE_USER,
+            (500, SECRET),
+            (200, "{}"),
+            "antigravity: failed to fetch project ID (HTTP 500)",
+        ),
+        (
+            GOOGLE_USER,
+            (200, "{}"),
+            (503, SECRET),
+            "antigravity: failed to fetch project ID (HTTP 503)",
+        ),
+    ];
+    for (i, (userinfo, load, onboard, error)) in cases.into_iter().enumerate() {
+        let (fake, _seen, fake_server) = antigravity_google(userinfo, load, onboard).await;
+        let f = Fixture::new(&format!("antigravityfail{i}"));
+        let (base, state, server) = antigravity_signin(&f, &fake).await;
+        assert_eq!(
+            final_status(&base, &state, 10).await,
+            json!({"status": "error", "error": error}),
+            "case {i}"
+        );
+        assert!(f.rt.store().snapshot().iter().all(|c| c.provider != "antigravity"));
+        server.abort();
+        fake_server.abort();
+    }
+}
+
+/// Antigravity: an account with no Cloud Code project is onboarded on the daily
+/// endpoint, and the project onboarding returns is saved.
+#[tokio::test]
+async fn antigravity_login_onboards_an_account_without_a_project() {
+    let onboarded = (
+        200,
+        r#"{"done":true,"response":{"cloudaicompanionProject":{"id":"onboarded-project"}}}"#,
+    );
+    let (fake, seen, fake_server) = antigravity_google(GOOGLE_USER, (200, "{}"), onboarded).await;
+    let f = Fixture::new("antigravityonboard");
+    let (base, state, server) = antigravity_signin(&f, &fake).await;
+    assert_eq!(final_status(&base, &state, 10).await, json!({"status": "ok"}));
+    assert!(seen.lock().unwrap().iter().any(|p| p == "/v1internal:onboardUser"));
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.dir.join("auth/antigravity-g@example.invalid.json")).unwrap()).unwrap();
+    assert_eq!(saved["project_id"], "onboarded-project");
+    server.abort();
+    fake_server.abort();
+}
+
+/// Antigravity: cancelling the login stops onboarding polls, and nothing is saved.
+#[tokio::test]
+async fn antigravity_login_cancel_stops_onboarding() {
+    let (fake, seen, fake_server) = antigravity_google(GOOGLE_USER, (200, "{}"), (200, r#"{"done":false}"#)).await;
+    let f = Fixture::new("antigravitycancel");
+    let (base, state, server) = antigravity_signin(&f, &fake).await;
+    let onboard_polls = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "/v1internal:onboardUser")
+            .count()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while onboard_polls() == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(onboard_polls(), 1, "onboarding started");
+    let r: Value = wreq::Client::new()
+        .delete(format!("{base}/v8/management/oauth/session?state={state}"))
+        .bearer_auth("fake-management-only")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r, json!({"status": "ok", "cancelled": true}));
+    // The cancel watch notices within two seconds; onboarding polls every two.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let after_cancel = onboard_polls();
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert_eq!(onboard_polls(), after_cancel, "onboarding stopped");
+    assert!(!f.dir.join("auth/antigravity-g@example.invalid.json").exists());
     server.abort();
     fake_server.abort();
 }
