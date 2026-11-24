@@ -234,9 +234,66 @@ pub(crate) async fn activity(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct SpeedParams {
+    #[serde(default = "default_history_range")]
+    range: String,
+    provider: Option<String>,
+    credential: Option<String>,
+    /// Taken as text so a value that is not a whole number gets this route's own refusal.
+    offset: Option<String>,
+}
+
+/// The viewer's minutes east of UTC: absent is 0, else a whole number from -840 to 840.
+fn offset(value: Option<&str>) -> Result<i32, &'static str> {
+    match value {
+        None => Ok(0),
+        Some(value) => value
+            .parse::<i32>()
+            .ok()
+            .filter(|minutes| (-840..=840).contains(minutes))
+            .ok_or("Offset must be whole minutes between -840 and 840"),
+    }
+}
+
+pub(crate) async fn speed(State(state): State<Arc<Management>>, AxumQuery(params): AxumQuery<SpeedParams>) -> Response {
+    let Some(range) = crate::activity::Range::parse(&params.range) else {
+        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
+    };
+    if let Err(message) = check(params.provider.as_deref()).and(check(params.credential.as_deref())) {
+        return fail(StatusCode::BAD_REQUEST, message);
+    }
+    let offset = match offset(params.offset.as_deref()) {
+        Ok(offset) => offset,
+        Err(message) => return fail(StatusCode::BAD_REQUEST, message),
+    };
+    let Some(activity) = state.rt.activity() else {
+        return fail(StatusCode::CONFLICT, "Activity store is not running on this server");
+    };
+    match activity.speed(range, params.provider, params.credential, offset).await {
+        Ok(result) => super::json_ordered(StatusCode::OK, &result),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Speed could not be read"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offset_is_whole_minutes_within_fourteen_hours() {
+        assert_eq!(offset(None), Ok(0));
+        for (value, minutes) in [("-840", -840), ("0", 0), ("840", 840)] {
+            assert_eq!(offset(Some(value)), Ok(minutes), "{value}");
+        }
+        for value in ["-841", "841", "1.5", "x", ""] {
+            assert_eq!(
+                offset(Some(value)),
+                Err("Offset must be whole minutes between -840 and 840"),
+                "{value}"
+            );
+        }
+    }
 
     #[test]
     fn activity_filters_must_be_non_empty_and_bounded() {
