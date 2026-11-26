@@ -462,3 +462,113 @@ fn a_pending_delete_reaches_a_file_whatever_its_timestamp() {
     writer.flush();
     assert_eq!(left_ids(&dir.0), ["b"]);
 }
+
+/// Files with tool facts in the index: one all of session `s1`, one of `s1` and `s2`.
+fn indexed_pair(dir: &Path) -> (PathBuf, PathBuf) {
+    use crate::request_logging::history::test_support::claude_row;
+    let whole = write_file(
+        dir,
+        "2026-11-09T08:00:00Z",
+        0,
+        &[claude_row(
+            "a",
+            "s1",
+            at("2026-11-09T08:00:00Z").timestamp_micros(),
+            "Read",
+            "toolu_a0",
+        )],
+    );
+    let part = write_file(
+        dir,
+        "2026-11-09T09:00:00Z",
+        1,
+        &[
+            claude_row(
+                "b",
+                "s1",
+                at("2026-11-09T09:00:00Z").timestamp_micros(),
+                "Read",
+                "toolu_a1",
+            ),
+            claude_row(
+                "c",
+                "s2",
+                at("2026-11-09T09:00:01Z").timestamp_micros(),
+                "Bash",
+                "toolu_b0",
+            ),
+        ],
+    );
+    (whole, part)
+}
+
+#[test]
+fn cli_delete_forgets_removed_and_rewritten_files() {
+    use crate::request_logging::history::test_support::indexed_calls;
+    use crate::request_logging::history::tools::indexer::Indexer;
+    let dir = TempDir::new();
+    indexed_pair(&dir.0);
+    let indexer = Indexer::new(std::sync::Arc::new(Utc::now));
+    let settings = crate::request_logging::history::Settings {
+        dir: dir.0.clone(),
+        max_total_bytes: None,
+        alias_prefixes: std::sync::Arc::from([]),
+    };
+    indexer.nudge(&settings);
+    indexer.sync();
+    indexer.shutdown(std::time::Duration::from_secs(5));
+    assert_eq!(indexed_calls(&dir.0).len(), 3);
+    // The server is stopped: only the delete itself can update the index.
+    let report = delete(&dir.0, &session("s1"), false).unwrap();
+    assert_eq!((report.files_deleted, report.files_rewritten), (1, 1));
+    assert!(indexed_calls(&dir.0).is_empty());
+}
+
+#[test]
+fn cli_delete_finishes_when_a_forget_fails() {
+    let dir = TempDir::new();
+    let (whole, part) = indexed_pair(&dir.0);
+    // An index that cannot be opened.
+    std::fs::create_dir(dir.0.join(crate::request_logging::history::tools::store::INDEX_FILE)).unwrap();
+    let error = delete(&dir.0, &session("s1"), false).unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("2 history file(s)"), "{text}");
+    assert!(!text.contains(&*dir.0.to_string_lossy()), "{text}");
+    assert!(!whole.exists());
+    assert_eq!(ids(&part), ["c"]);
+}
+
+#[test]
+fn server_applied_delete_forgets_the_file() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits {
+        group_rows: 1,
+        ..Limits::default()
+    });
+    let cfg = on(&dir.0);
+    let started = |s: &str| at(s).timestamp_micros();
+    let a = claude_row("a", "s1", started("2026-11-09T08:00:00Z"), "Read", "toolu_a0");
+    let b = claude_row("b", "s2", started("2026-11-09T08:00:01Z"), "Bash", "toolu_b0");
+    writer.submit(&cfg, http(a, writer.budget()));
+    writer.submit(&cfg, http(b, writer.budget()));
+    writer.tick();
+    // Both rows are in the open file; the delete leaves a tombstone for the writer.
+    delete(&dir.0, &session("s1"), false).unwrap();
+    let held = crate::request_logging::history::lock::DirLock::try_acquire(&dir.0)
+        .unwrap()
+        .unwrap();
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0).len(), 2, "indexed before the delete applies");
+    let (reached, release) = writer.indexer().pause_before_commit();
+    drop(held);
+    writer.tick();
+    reached.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    // The pass forgot the rewritten file before reading it again.
+    assert!(indexed_calls(&dir.0).is_empty());
+    drop(release);
+    writer.indexer().sync();
+    assert_eq!(left_ids(&dir.0), ["b"]);
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_b0".to_owned(), "Bash".to_owned())]);
+}

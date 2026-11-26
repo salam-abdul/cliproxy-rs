@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::dir::HistoryDir;
 use super::file::{read_keys, rewrite_without};
 use super::row::Row;
+use super::tools::store::forget_in;
 
 /// Which rows to delete: every given condition must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -127,6 +128,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         history.write_tombstone(selector, cutoff)?;
         report.pending_for_writer = true;
     }
+    let mut unforgotten = 0usize;
     for file in history.files()? {
         // A row lands in the partition of the file's first row, never an earlier one.
         if let (Some(from), Some(date)) = (selector.from, partition_date(&file.partition))
@@ -155,9 +157,19 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
                 report.bytes_freed += file.len.saturating_sub(std::fs::metadata(&file.path)?.len());
             }
         }
+        // The tool index may hold facts from the deleted rows. A server indexing this
+        // file waits for this, or finds the file changed and does not commit it.
+        if !dry_run && forget_in(dir, &file.path).is_err() {
+            unforgotten += 1;
+        }
     }
     if !dry_run {
         history.remove_empty_partitions();
+    }
+    if unforgotten > 0 {
+        bail!(
+            "{report}, but {unforgotten} history file(s) could not be removed from the tool index; a running server removes them at its next index pass"
+        );
     }
     Ok(report)
 }
@@ -167,13 +179,13 @@ fn partition_date(name: &str) -> Option<NaiveDate> {
 }
 
 /// Removes the rows `stones` match from the finished file at `path`, reading only the
-/// match columns unless a row matches.
-pub(crate) fn apply_tombstones(path: &Path, stones: &[&Tombstone]) -> io::Result<()> {
+/// match columns unless a row matches. Returns whether the file was rewritten or removed.
+pub(crate) fn apply_tombstones(path: &Path, stones: &[&Tombstone]) -> io::Result<bool> {
     let matches = |row: &Row| stones.iter().any(|stone| stone.matches(row));
     if read_keys(path)?.iter().any(matches) {
-        rewrite_without(path, matches)?;
+        return Ok(rewrite_without(path, matches)? > 0);
     }
-    Ok(())
+    Ok(false)
 }
 
 const TOMBSTONES: &str = ".deletes";

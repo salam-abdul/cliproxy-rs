@@ -98,6 +98,9 @@ const TABLES: [&str; 6] = ["sends", "messages", "defs", "calls", "results", "fil
 /// The open index.
 pub(crate) struct Index {
     conn: Connection,
+    /// Run inside the next commit's transaction, after the file was checked.
+    #[cfg(test)]
+    hold: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Index {
@@ -110,7 +113,11 @@ impl Index {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Index { conn })
+        Ok(Index {
+            conn,
+            #[cfg(test)]
+            hold: None,
+        })
     }
 
     /// Every indexed file by its path relative to the history folder, with the
@@ -146,6 +153,10 @@ impl Index {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if Fingerprint::from_path(abs).ok().as_ref() != Some(read_as) {
             return Ok(false);
+        }
+        #[cfg(test)]
+        if let Some(hold) = self.hold.take() {
+            hold();
         }
         for table in TABLES {
             tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
@@ -241,6 +252,13 @@ impl Index {
             self.forget(&rel)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Index {
+    pub(crate) fn set_hold(&mut self, hold: Option<Box<dyn FnOnce() + Send>>) {
+        self.hold = hold;
     }
 }
 

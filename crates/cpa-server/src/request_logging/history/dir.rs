@@ -72,26 +72,33 @@ impl<'a> HistoryDir<'a> {
     }
 
     /// [`Self::enforce_cap`] under the lock; skipped this round while a delete holds it.
-    pub(crate) fn apply_cap(self, cap: u64) {
+    /// Returns the files it removed.
+    pub(crate) fn apply_cap(self, cap: u64) -> Vec<PathBuf> {
         match self.lock() {
-            Ok(Some(_lock)) => {
-                if let Err(error) = self.enforce_cap(cap) {
+            Ok(Some(_lock)) => match self.enforce_cap(cap) {
+                Ok((_, removed)) => removed,
+                Err(error) => {
                     tracing::warn!("history: cannot apply max-total-size-mb: {error}");
+                    Vec::new()
                 }
-            }
+            },
             // Locked by a delete, or no folder yet: nothing to remove.
-            Ok(None) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!("history: cannot lock {}: {error}", self.0.display()),
+            Ok(None) => Vec::new(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                tracing::warn!("history: cannot lock {}: {error}", self.0.display());
+                Vec::new()
+            }
         }
     }
 
     /// Deletes the oldest history files, by partition date then name, until the files
-    /// total at most `cap` bytes. Returns the bytes freed.
-    pub(crate) fn enforce_cap(self, cap: u64) -> io::Result<u64> {
+    /// total at most `cap` bytes. Returns the bytes freed and the files removed.
+    pub(crate) fn enforce_cap(self, cap: u64) -> io::Result<(u64, Vec<PathBuf>)> {
         let files = self.files()?;
         let mut total: u64 = files.iter().map(|f| f.len).sum();
         let mut freed = 0;
+        let mut removed = Vec::new();
         for file in files {
             if total <= cap {
                 break;
@@ -99,10 +106,11 @@ impl<'a> HistoryDir<'a> {
             if std::fs::remove_file(&file.path).is_ok() {
                 total -= file.len;
                 freed += file.len;
+                removed.push(file.path);
             }
         }
         self.remove_empty_partitions();
-        Ok(freed)
+        Ok((freed, removed))
     }
 
     /// Removes in-progress files no writer holds, except `open`, this writer's own:

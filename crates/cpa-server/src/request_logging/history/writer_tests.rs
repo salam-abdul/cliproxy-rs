@@ -338,3 +338,31 @@ fn a_body_cut_inside_a_character_stays_text() {
         Some((BODY_CAP - 1) as usize)
     );
 }
+
+#[test]
+fn writer_rotation_indexes_the_finished_file() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:15:30Z");
+    let writer = Writer::with_limits(clock.limits());
+    let row = claude_row("a", "s1", 1, "Read", "toolu_a0");
+    let mut pending = http(
+        Row {
+            request_body: None,
+            response_body: None,
+            ..row.clone()
+        },
+        writer.budget(),
+    );
+    let bodies = http_bodies(&mut pending);
+    bodies
+        .request
+        .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+    bodies
+        .response
+        .push_line(row.response_body.as_deref().unwrap().as_bytes());
+    writer.submit(&on(&dir.0), pending);
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+}

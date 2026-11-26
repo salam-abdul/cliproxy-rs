@@ -19,6 +19,8 @@ use super::delete::{Tombstone, apply_tombstones};
 use super::dir::HistoryDir;
 use super::file::ParquetFile;
 use super::row::{Row, Transport, body_columns};
+use super::tools::indexer::Indexer;
+use super::tools::store::rel_path;
 
 pub(crate) const CHANNEL: usize = 256;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
@@ -79,15 +81,18 @@ pub struct Writer {
     stop_reported: AtomicBool,
     limits: Limits,
     budget: Budget,
+    indexer: Arc<Indexer>,
 }
 
 impl Default for Writer {
     fn default() -> Self {
+        let limits = Limits::default();
         Self {
             state: Mutex::new(State::Idle),
             lost: Arc::default(),
             stop_reported: AtomicBool::new(false),
-            limits: Limits::default(),
+            indexer: Arc::new(Indexer::new(limits.now.clone())),
+            limits,
             budget: Budget::global().clone(),
         }
     }
@@ -97,6 +102,7 @@ impl Writer {
     #[cfg(test)]
     pub(crate) fn with_limits(limits: Limits) -> Self {
         Self {
+            indexer: Arc::new(Indexer::new(limits.now.clone())),
             limits,
             budget: Budget::new(super::body::IN_FLIGHT_CAP),
             ..Self::default()
@@ -105,6 +111,15 @@ impl Writer {
 
     pub(crate) fn budget(&self) -> &Budget {
         &self.budget
+    }
+
+    /// The tool indexer of this writer's history.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests read it until the tools route nudges it")
+    )]
+    pub(crate) fn indexer(&self) -> &Arc<Indexer> {
+        &self.indexer
     }
 
     /// Rows dropped or not written since start.
@@ -141,7 +156,7 @@ impl Writer {
             State::Closed => None,
             State::Idle => {
                 let (tx, rx) = sync_channel(CHANNEL);
-                let worker = Worker::new(rx, self.limits.clone(), self.lost.clone());
+                let worker = Worker::new(rx, self.limits.clone(), self.lost.clone(), Arc::clone(&self.indexer));
                 match std::thread::Builder::new()
                     .name("history-writer".into())
                     .spawn(move || worker.run())
@@ -159,15 +174,21 @@ impl Writer {
         }
     }
 
-    /// Writes buffered rows and closes the open file, waiting at most `wait`. Later
-    /// rows are ignored.
+    /// Writes buffered rows and closes the open file, then stops the tool indexer,
+    /// waiting at most `wait` in all. Later rows are ignored.
     pub fn shutdown(&self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        self.stop_worker(deadline);
+        self.indexer
+            .shutdown(deadline.saturating_duration_since(Instant::now()));
+    }
+
+    fn stop_worker(&self, deadline: Instant) {
         let state = std::mem::replace(
             &mut *self.state.lock().unwrap_or_else(PoisonError::into_inner),
             State::Closed,
         );
         let State::Running(tx) = state else { return };
-        let deadline = Instant::now() + wait;
         let (ack, done) = sync_channel(1);
         let mut command = Command::Shutdown(ack);
         loop {
@@ -260,10 +281,13 @@ struct Worker {
     delete_failed: bool,
     /// The tombstones applied to each finished file, by path.
     applied: HashMap<PathBuf, HashSet<PathBuf>>,
+    indexer: Arc<Indexer>,
+    /// The writer is stopping: its last rotation starts no index pass.
+    closing: bool,
 }
 
 impl Worker {
-    fn new(rx: Receiver<Command>, limits: Limits, lost: Arc<AtomicU64>) -> Self {
+    fn new(rx: Receiver<Command>, limits: Limits, lost: Arc<AtomicU64>, indexer: Arc<Indexer>) -> Self {
         Self {
             rx,
             limits,
@@ -278,6 +302,8 @@ impl Worker {
             retry_deletes: None,
             delete_failed: false,
             applied: HashMap::new(),
+            indexer,
+            closing: false,
         }
     }
 
@@ -286,6 +312,7 @@ impl Worker {
             match self.rx.recv_timeout(self.next_deadline()) {
                 Ok(Command::Row(row, settings)) => self.row(*row, &settings),
                 Ok(Command::Shutdown(ack)) => {
+                    self.closing = true;
                     self.rotate();
                     let _ = ack.send(());
                     return;
@@ -315,6 +342,7 @@ impl Worker {
                 }
                 Err(RecvTimeoutError::Timeout) => self.timers(),
                 Err(RecvTimeoutError::Disconnected) => {
+                    self.closing = true;
                     self.rotate();
                     return;
                 }
@@ -412,7 +440,11 @@ impl Worker {
             #[cfg(test)]
             self.limits.delete_scans.fetch_add(1, Ordering::Relaxed);
             match apply_tombstones(&file.path, &todo) {
-                Ok(()) => {}
+                Ok(changed) => {
+                    if changed && let Some(rel) = rel_path(&dir, &file.path) {
+                        self.indexer.forget(rel);
+                    }
+                }
                 // Retention removed it meanwhile.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -581,10 +613,12 @@ impl Worker {
                 }
             }
             if let Some(cap) = self.settings.as_ref().and_then(|s| s.max_total_bytes) {
-                HistoryDir::new(&window.dir).apply_cap(cap);
+                let removed = HistoryDir::new(&window.dir).apply_cap(cap);
+                self.capped(&window.dir, removed);
             }
         }
         self.apply_deletes();
+        self.nudge_indexer();
         let lost = self.lost.load(Ordering::Relaxed);
         if lost > self.reported {
             tracing::warn!("history: {} row(s) were not written", lost - self.reported);
@@ -609,7 +643,27 @@ impl Worker {
         self.apply_deletes();
         history.expire_tombstones(Utc::now());
         if let Some(cap) = cap {
-            history.apply_cap(cap);
+            let removed = history.apply_cap(cap);
+            self.capped(&dir, removed);
+        }
+        self.nudge_indexer();
+    }
+
+    /// Hands files the size cap removed to the indexer, which keeps their facts.
+    fn capped(&self, dir: &std::path::Path, removed: Vec<PathBuf>) {
+        for path in removed {
+            if let Some(rel) = rel_path(dir, &path) {
+                self.indexer.capped(rel);
+            }
+        }
+    }
+
+    /// Asks the indexer to index the files finished so far, unless the writer stops.
+    fn nudge_indexer(&self) {
+        if !self.closing
+            && let Some(settings) = &self.settings
+        {
+            self.indexer.nudge(settings);
         }
     }
 }

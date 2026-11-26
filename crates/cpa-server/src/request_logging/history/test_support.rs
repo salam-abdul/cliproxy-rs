@@ -85,3 +85,47 @@ impl Logs {
         String::from_utf8_lossy(&self.text.lock().unwrap()).into_owned()
     }
 }
+
+/// A Claude send whose request carries a thread start with the tool `tool` defined and
+/// whose buffered response calls it as `call`.
+pub(crate) fn claude_row(id: &str, session: &str, started_us: i64, tool: &str, call: &str) -> Row {
+    Row {
+        exchange_id: id.into(),
+        session_id: Some(session.into()),
+        started_at_us: started_us,
+        provider: Some("claude".into()),
+        request_body: Some(format!(
+            r#"{{"tools":[{{"name":"{tool}"}}],"messages":[{{"role":"user","content":"start {id}"}}]}}"#
+        )),
+        response_body: Some(format!(
+            r#"{{"id":"msg_{id}","content":[{{"type":"tool_use","id":"{call}","name":"{tool}","input":{{}}}}]}}"#
+        )),
+        ..Row::default()
+    }
+}
+
+/// The tool calls in the tool index under `dir`, as (call ID, tool), sorted; none
+/// without an index.
+pub(crate) fn indexed_calls(dir: &Path) -> Vec<(String, String)> {
+    let path = dir.join(super::tools::store::INDEX_FILE);
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut stmt = conn.prepare("SELECT id, tool FROM calls").unwrap();
+    let mut named: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((call_name(r.get(0)?), r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    named.sort();
+    named
+}
+
+/// The call ID among the synthetic ones the history tests use whose hash is `id`.
+fn call_name(id: i64) -> String {
+    (0..100)
+        .flat_map(|n| ["a", "b", "c", "d"].map(|p| format!("toolu_{p}{n}")))
+        .find(|name| super::tools::hash(name.as_bytes()) == id)
+        .unwrap_or_else(|| format!("#{id}"))
+}
