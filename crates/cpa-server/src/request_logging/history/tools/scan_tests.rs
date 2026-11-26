@@ -86,13 +86,22 @@ fn first_message_cache_control_keeps_the_key() {
 
 #[test]
 fn continuation_points_at_its_parent() {
-    let request = r#"{"thread":{"previous_message_id":"msg_parent"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"text","text":"<system-reminder>x</system-reminder>"}]},{"role":"system","content":"note"}]}"#;
+    let request = r#"{"thread":{"type":"continue","previous_message_id":"msg_parent"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"text","text":"<system-reminder>x</system-reminder>"}]},{"role":"system","content":"note"}]}"#;
     let continued = facts(request, DONE);
     assert_eq!(continued.conv, Conv::Continue(hash(b"msg_parent")));
     assert_eq!(continued.results.len(), 1);
     assert_eq!(continued.results[0].id, hash(b"toolu_1"));
     assert!(continued.defs.is_empty());
 
+    // A thread that does not continue, or names no parent, starts by its first message.
+    for thread in [
+        r#"{"previous_message_id":"msg_parent"}"#,
+        r#"{"type":"new","previous_message_id":"msg_parent"}"#,
+        r#"{"type":"continue","previous_message_id":""}"#,
+    ] {
+        let body = format!(r#"{{"thread":{thread},"messages":[{{"role":"user","content":"go"}}]}}"#);
+        assert!(matches!(facts(&body, DONE).conv, Conv::Start(_)), "{thread}");
+    }
     assert_eq!(facts(r#"{"model":"m"}"#, DONE).conv, Conv::None);
     assert_eq!(facts(r#"{"messages":[]}"#, DONE).conv, Conv::None);
 }
@@ -173,7 +182,7 @@ fn results_carry_error_flag_and_size() {
 }
 
 #[test]
-fn text_after_a_result_is_loaded_bytes() {
+fn the_text_block_after_a_result_is_its_loaded_bytes() {
     let a = r#"{"type":"text","text":"Base directory for this skill: /synthetic"}"#;
     let b = r#"{"type":"text","text":"Skill body"}"#;
     let c = r#"{"type":"text","text":"after the second"}"#;
@@ -181,7 +190,11 @@ fn text_after_a_result_is_loaded_bytes() {
         r#"{{"messages":[{{"role":"user","content":[{{"type":"text","text":"before"}},{{"type":"tool_result","tool_use_id":"s1","content":"Launching skill: review"}},{a},{b},{{"type":"tool_result","tool_use_id":"s2","content":"ok"}},{c}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"s3","content":"ok"}}]}}]}}"#
     );
     let loaded: Vec<i64> = facts(&request, DONE).results.iter().map(|r| r.loaded).collect();
-    assert_eq!(loaded, vec![(a.len() + b.len()) as i64, c.len() as i64, 0]);
+    // Only the text block right after a result is what it loaded; a reminder block
+    // after the skill text is not.
+    assert_eq!(loaded, vec![a.len() as i64, c.len() as i64, 0]);
+    let request = r#"{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"s4","content":"ok"},{"type":"image","source":{}},{"type":"text","text":"later"}]}]}"#;
+    assert_eq!(facts(request, DONE).results[0].loaded, 0);
 }
 
 #[test]

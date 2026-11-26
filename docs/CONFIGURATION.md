@@ -247,11 +247,11 @@ While history is on, the server keeps `<history.dir>/tool-index.sqlite` (`0600` 
 - each send's time, provider and conversation, and whether it was skipped by format or had a cut body (truncated, not text, or not valid JSON or SSE);
 - per conversation, each tool its requests defined and the size in bytes of its largest definition;
 - each tool call, by a hash of its ID, with its tool and, for a `Skill` call, the skill name;
-- each tool result, by the hash of its call ID, with its error flag, its content size and the size of the text blocks that follow it in the same message (the skill text after a `Skill` result).
+- each tool result, by the hash of its call ID, with its error flag, its content size and the size of the text block right after it in the same message (the skill text after a `Skill` result).
 
 It holds no prompts, outputs, tool inputs or results: a `Skill` call's `skill` is the one input value read. Tool, server and skill names go only into this file, never into the activity store or the logs.
 
-A request without `thread.previous_message_id` starts or resends a conversation, keyed by a hash of its session and the exact bytes of its first message's members, leaving out any `cache_control`. A request with one joins the conversation of the indexed send whose response had that message ID; when no such send is indexed, its calls and results count but it adds no conversation. A call or result repeated by a retry, failover or full resend counts once, from its first copy; a call belongs to the conversation of its earliest copy that has one.
+A request that does not continue a thread (`thread.type` is `continue` with a `previous_message_id`) starts or resends a conversation, keyed by a hash of its session and the exact bytes of its first message's members, leaving out any `cache_control`. A continuation joins the conversation of the indexed send whose response had that message ID; when no such send is indexed, its calls and results count but it adds no conversation. A call or result repeated by a retry, failover or full resend counts once, from its first copy; a call belongs to the conversation of its earliest copy that has one.
 
 A tool is named by its `name`, server and versioned tools included, and by its `type` only when it has no name. `server_tool_use` blocks count as calls, and an assistant block whose type ends in `_tool_result` counts as their result, an error when its content's type ends in `_error`. A name `mcp__<server>__<tool>` belongs to MCP server `<server>`. A tool the Claude executor renamed to cloak a request is read back under the client's name when its prefix matches a configured client key or the default caller; an alias from a key no longer configured stays under an unknown MCP server, and a name that had other characters or was cut at 64 bytes comes back altered.
 
@@ -285,7 +285,7 @@ Record into one history folder from one server. With two, a continuation can be 
 | Failing | 10 or more calls, and errors are 20 percent or more of results |
 | Bloating | p95 result of 102,400 bytes or more |
 
-Each MCP server sums its tools' calls and errors and counts the conversations that defined any of them. Each skill gets its calls, the conversations they were made in, errors, and the mean and p95 size of the text loaded after its results. Percentiles are nearest-rank, as in the speed route.
+Each MCP server sums its tools' calls and errors and counts the conversations that defined any of them. Each skill gets its calls, the conversations they were made in, errors, and the mean and p95 size of the text block right after its results. Percentiles are nearest-rank, as in the speed route.
 
 The server cannot tell whether a result helped. The last call of a session has no later request, so it shows no result; a delete that removes the request carrying a result leaves its call without one; and compaction rewrites the first message, so it starts a new conversation.
 

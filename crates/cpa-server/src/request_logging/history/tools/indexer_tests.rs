@@ -51,7 +51,7 @@ fn continuation(id: &str, parent: &str, started: &str, call: &str) -> Row {
         started_at_us: us(started),
         provider: Some("claude".into()),
         request_body: Some(format!(
-            r#"{{"thread":{{"previous_message_id":"msg_{parent}"}},"messages":[{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_a0","content":"ok"}}]}}]}}"#
+            r#"{{"thread":{{"type":"continue","previous_message_id":"msg_{parent}"}},"messages":[{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_a0","content":"ok"}}]}}]}}"#
         )),
         response_body: Some(format!(
             r#"{{"id":"msg_{id}","content":[{{"type":"tool_use","id":"{call}","name":"Bash","input":{{}}}}]}}"#

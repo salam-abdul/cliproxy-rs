@@ -153,8 +153,11 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
     } else {
         Vec::new()
     };
+    // A continuation as the Claude executor reads one: `thread.type` is `continue` and
+    // the parent is named.
     let parent = gj::get(body, "thread.previous_message_id");
-    facts.conv = if parent.kind == Kind::String && !parent.str().is_empty() {
+    let continues = gj::get(body, "thread.type").str() == "continue";
+    facts.conv = if continues && parent.kind == Kind::String && !parent.str().is_empty() {
         Conv::Continue(hash(&parent.bytes()))
     } else if let Some(first) = messages.first() {
         Conv::Start(conversation_key(session, first.raw()))
@@ -167,10 +170,11 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
             continue;
         }
         let assistant = message.get("role").str() == "assistant";
-        // Text blocks after a result, up to the next result, are what a Skill result
-        // loaded into the conversation.
+        // The text block right after a result is what a Skill result loaded into the
+        // conversation; later blocks, such as reminders, are not.
         let mut after_result = false;
         for block in content.array() {
+            let just_after = std::mem::take(&mut after_result);
             match block.get("type").str().as_ref() {
                 "tool_use" | "server_tool_use" if assistant => facts.calls.extend(names.call(&block)),
                 kind if assistant && kind.ends_with("_tool_result") => {
@@ -188,9 +192,9 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
                         });
                     }
                 }
-                "text" if after_result => {
+                "text" if just_after => {
                     if let Some(result) = facts.results.last_mut() {
-                        result.loaded += len(block.raw());
+                        result.loaded = len(block.raw());
                     }
                 }
                 _ => {}
