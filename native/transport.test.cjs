@@ -286,7 +286,13 @@ test("lost response before headers never silently repeats accepted request", asy
   const r = await curl("?lost");
   assert.equal(seen.length, n + 1);
   assert.ok(r.body.toString().includes("not replayed"));
-  const e = fs.readFileSync(dir + "/events.jsonl", "utf8").trim().split("\n").map(JSON.parse).at(-1);
+  // The router appends events on a background thread, so the 422 can reach curl before
+  // its event is in the file. Only the lost request in this file produces this event type.
+  let e;
+  for (let i = 0; i < 200 && e?.type !== "transport-failure"; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 10));
+    e = fs.readFileSync(dir + "/events.jsonl", "utf8").trim().split("\n").map(JSON.parse).at(-1);
+  }
   assert.equal(e.type, "transport-failure");
   assert.ok(["timeout", "connect", "connection-reset", "transport"].includes(e.failureKind));
   assert.ok(Number.isFinite(e.elapsedMs));

@@ -17,9 +17,10 @@
 
 - Nextest skips doc tests. CI's Linux test job runs `cargo test --workspace --doc` after it.
 - The heap gate (`crates/cpa-server/tests/alloc_budget.rs`, budgets in `tests/fixtures/allocation_limits.txt`) and the tests that bound wall-clock time run alone only when `.config/nextest.toml` lists them. Add a new timing test there.
-- The heap budgets are measured on Linux with the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes. macOS counts fewer allocations, so its CI job skips the heap gate; never set budgets from a macOS run.
+- The heap budgets are measured on Linux with the toolchain pinned in `rust-toolchain.toml`. Re-measure them when it changes. macOS counts fewer allocations; never set budgets from a macOS run.
 - The Codex Live media relay tests run only with the feature on: `cargo nextest run -p cpa-server --features media-relay --lib`.
 - Code behind `cfg(windows)` is checked only by the Windows clippy job.
+- No CI job tests or lints code behind `cfg(target_os = "macos")`; the Binaries workflow only builds it after a merge to `main`. Run the tests of a crate you change there on macOS before merging.
 - `vendor/gjson` is outside the workspace, so `--workspace` commands skip it.
 - `crates/cpa-translate/tests/translation.rs` runs every registered translator pair over synthetic scenarios and compares the outputs with `tests/fixtures/translation/golden`. `UPDATE_GOLDEN=1` rewrites them. Change a golden only in the commit that changes that behavior, and say why. A new pair or scenario fails until its inputs and goldens exist.
 - `ui/dist` is checked in. CI rebuilds it and fails on any difference, so commit the rebuilt assets with the source.
