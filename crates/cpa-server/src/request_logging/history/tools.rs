@@ -5,6 +5,7 @@
 use sha2::{Digest, Sha256};
 
 pub(crate) mod scan;
+pub(crate) mod store;
 
 /// The first 8 bytes of the SHA-256 of `bytes`, read as a big-endian `i64`: stable
 /// across processes and Rust versions, so stored keys match on the next start.

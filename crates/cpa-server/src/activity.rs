@@ -476,7 +476,7 @@ fn epoch_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn secure_file(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn secure_file(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => anyhow::ensure!(meta.file_type().is_file(), "History path is not a regular file"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
