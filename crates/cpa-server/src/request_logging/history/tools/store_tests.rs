@@ -238,16 +238,18 @@ fn unreadable_file_is_recorded() {
 }
 
 #[test]
-fn forget_in_drops_a_file_and_does_nothing_without_an_index() {
+fn open_existing_creates_no_index_and_lists_capped_files() {
     let dir = TempDir::new();
     let (a, a_path) = file(&dir.0, "080000-1-0000.parquet");
-    forget_in(&dir.0, &a_path).unwrap();
+    let (b, b_path) = file(&dir.0, "090000-1-0000.parquet");
+    assert!(open_existing(&dir.0).unwrap().is_none());
     assert!(!dir.0.join(INDEX_FILE).exists());
     let mut index = Index::open_or_create(&dir.0);
     assert!(commit(&mut index, &a, &a_path, &[send(1, Conv::Start(1), None)]));
-    forget_in(&dir.0, &a_path).unwrap();
-    assert_eq!(count(&index, "sends", &a), 0);
-    assert_eq!(count(&index, "files", &a), 0);
+    assert!(commit(&mut index, &b, &b_path, &[send(2, Conv::Start(2), None)]));
+    index.capped(&a, 5).unwrap();
+    let existing = open_existing(&dir.0).unwrap().unwrap();
+    assert_eq!(existing.capped_files().unwrap(), vec![a]);
 }
 
 #[cfg(unix)]

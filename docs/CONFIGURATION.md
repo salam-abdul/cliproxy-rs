@@ -259,11 +259,11 @@ One background thread keeps the index. It runs a pass when the writer finishes a
 
 | History file | Its facts |
 | --- | --- |
-| Removed by the size cap | Kept for 31 days after the removal |
+| Removed by the size cap | Kept for 31 days after the removal, or until `cliproxy history delete` runs, since they may hold rows it covers |
 | Rewritten or removed by a delete | Dropped before anything else is indexed: by `cliproxy history delete` in the same run, by the server at the start of its next pass. A rewritten file is indexed again. |
 | Removed any other way | Dropped at the second pass that finds it missing, so a cap removal that reaches the index a pass late still keeps the facts |
 
-`cliproxy history delete` updates the index in the same run, also with the server stopped. When it cannot, it exits with an error naming how many files it could not update, and a running server drops their facts at its next pass.
+`cliproxy history delete` updates the index in the same run, also with the server stopped. When it cannot, the delete still succeeds, its report says how many files the index still holds, and a running server drops their facts at its next pass.
 
 Record into one history folder from one server. With two, a continuation can be indexed before the other server finishes the file holding its parent, and then it has no conversation.
 

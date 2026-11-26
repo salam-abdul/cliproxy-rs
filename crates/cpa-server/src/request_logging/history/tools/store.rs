@@ -226,6 +226,12 @@ impl Index {
         tx.commit()
     }
 
+    /// Every indexed file the size cap removed.
+    pub(crate) fn capped_files(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT rel FROM files WHERE capped_ms IS NOT NULL")?;
+        stmt.query_map([], |r| r.get(0))?.collect()
+    }
+
     /// Marks the file `rel` as removed by the size cap at `now_ms`: its facts stay for
     /// [`RETAIN_CAPPED_MS`].
     pub(crate) fn capped(&mut self, rel: &str, now_ms: i64) -> rusqlite::Result<()> {
@@ -286,16 +292,14 @@ pub(crate) fn rel_path(dir: &Path, file: &Path) -> Option<String> {
     Some(parts?.join("/"))
 }
 
-/// Forgets the history file `file` in the index of the history folder `dir`, for
-/// `cliproxy history delete`, which runs while the server may be stopped. Nothing
-/// happens when there is no index yet.
-pub(crate) fn forget_in(dir: &Path, file: &Path) -> anyhow::Result<()> {
+/// The tool index of the history folder `dir` for `cliproxy history delete`, which runs
+/// while the server may be stopped; `None` when there is no index yet, so nothing is
+/// created.
+pub(crate) fn open_existing(dir: &Path) -> anyhow::Result<Option<Index>> {
     if !dir.join(INDEX_FILE).exists() {
-        return Ok(());
+        return Ok(None);
     }
-    let rel = rel_path(dir, file).ok_or_else(|| anyhow::anyhow!("History file is outside the history folder"))?;
-    Index::open(dir)?.forget(&rel)?;
-    Ok(())
+    Ok(Some(Index::open(dir)?))
 }
 
 fn epoch_ms() -> i64 {

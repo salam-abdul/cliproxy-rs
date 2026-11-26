@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::dir::HistoryDir;
 use super::file::{read_keys, rewrite_without};
 use super::row::Row;
-use super::tools::store::forget_in;
+use super::tools::store::{Index, open_existing, rel_path};
 
 /// Which rows to delete: every given condition must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -70,6 +70,9 @@ pub struct Report {
     /// A tombstone was left, so a running server drops matching rows it has not
     /// written yet.
     pub pending_for_writer: bool,
+    /// History files whose facts the tool index still holds because it could not be
+    /// updated; a running server drops them at its next index pass.
+    pub index_files_kept: usize,
 }
 
 impl std::fmt::Display for Report {
@@ -81,6 +84,13 @@ impl std::fmt::Display for Report {
         )?;
         if self.pending_for_writer {
             write!(f, "; a running server drops matching rows it has not written yet")?;
+        }
+        if self.index_files_kept > 0 {
+            write!(
+                f,
+                "; {} history file(s) could not be removed from the tool index, and a running server drops their facts at its next index pass",
+                self.index_files_kept
+            )?;
         }
         Ok(())
     }
@@ -128,7 +138,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         history.write_tombstone(selector, cutoff)?;
         report.pending_for_writer = true;
     }
-    let mut unforgotten = 0usize;
+    let mut tools = Tools::Unopened;
     for file in history.files()? {
         // A row lands in the partition of the file's first row, never an earlier one.
         if let (Some(from), Some(date)) = (selector.from, partition_date(&file.partition))
@@ -159,19 +169,60 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         }
         // The tool index may hold facts from the deleted rows. A server indexing this
         // file waits for this, or finds the file changed and does not commit it.
-        if !dry_run && forget_in(dir, &file.path).is_err() {
-            unforgotten += 1;
+        if !dry_run && !tools.forget(dir, &file.path) {
+            report.index_files_kept += 1;
         }
     }
     if !dry_run {
         history.remove_empty_partitions();
-    }
-    if unforgotten > 0 {
-        bail!(
-            "{report}, but {unforgotten} history file(s) could not be removed from the tool index; a running server removes them at its next index pass"
-        );
+        // Facts kept from files the size cap removed may hold rows this delete covers.
+        report.index_files_kept += tools.forget_capped(dir);
     }
     Ok(report)
+}
+
+/// The tool index for one delete: opened at most once, at the first file that needs it.
+enum Tools {
+    Unopened,
+    Absent,
+    Open(Index),
+    Failed,
+}
+
+impl Tools {
+    fn index(&mut self, dir: &Path) -> Result<Option<&mut Index>, ()> {
+        if matches!(self, Tools::Unopened) {
+            *self = match open_existing(dir) {
+                Ok(Some(index)) => Tools::Open(index),
+                Ok(None) => Tools::Absent,
+                Err(_) => Tools::Failed,
+            };
+        }
+        match self {
+            Tools::Open(index) => Ok(Some(index)),
+            Tools::Unopened | Tools::Absent => Ok(None),
+            Tools::Failed => Err(()),
+        }
+    }
+
+    /// Drops the facts of the history file `file`; false when the index still holds them.
+    fn forget(&mut self, dir: &Path, file: &Path) -> bool {
+        match self.index(dir) {
+            Ok(None) => true,
+            Ok(Some(index)) => rel_path(dir, file).is_some_and(|rel| index.forget(&rel).is_ok()),
+            Err(()) => false,
+        }
+    }
+
+    /// Drops the facts of every file the size cap removed; returns how many it could not.
+    fn forget_capped(&mut self, dir: &Path) -> usize {
+        let Ok(Some(index)) = self.index(dir) else { return 0 };
+        match index.capped_files() {
+            Ok(capped) => capped.iter().filter(|rel| index.forget(rel).is_err()).count(),
+            // How many is unknown; one is enough for the report to say so.
+            Err(_) => 1,
+        }
+    }
 }
 
 fn partition_date(name: &str) -> Option<NaiveDate> {

@@ -530,9 +530,12 @@ fn cli_delete_finishes_when_a_forget_fails() {
     let (whole, part) = indexed_pair(&dir.0);
     // An index that cannot be opened.
     std::fs::create_dir(dir.0.join(crate::request_logging::history::tools::store::INDEX_FILE)).unwrap();
-    let error = delete(&dir.0, &session("s1"), false).unwrap_err();
-    let text = format!("{error:#}");
+    // The rows are gone, so the delete succeeds and says what the index still holds.
+    let report = delete(&dir.0, &session("s1"), false).unwrap();
+    assert_eq!(report.index_files_kept, 2);
+    let text = report.to_string();
     assert!(text.contains("2 history file(s)"), "{text}");
+    assert!(text.contains("next index pass"), "{text}");
     assert!(!text.contains(&*dir.0.to_string_lossy()), "{text}");
     assert!(!whole.exists());
     assert_eq!(ids(&part), ["c"]);
@@ -571,4 +574,33 @@ fn server_applied_delete_forgets_the_file() {
     writer.indexer().sync();
     assert_eq!(left_ids(&dir.0), ["b"]);
     assert_eq!(indexed_calls(&dir.0), vec![("toolu_b0".to_owned(), "Bash".to_owned())]);
+}
+
+#[test]
+fn cli_delete_forgets_the_facts_of_capped_files() {
+    use crate::request_logging::history::test_support::indexed_calls;
+    use crate::request_logging::history::tools::indexer::Indexer;
+    use crate::request_logging::history::tools::store::rel_path;
+    let dir = TempDir::new();
+    let (whole, _) = indexed_pair(&dir.0);
+    let indexer = Indexer::new(std::sync::Arc::new(Utc::now));
+    let settings = crate::request_logging::history::Settings {
+        dir: dir.0.clone(),
+        max_total_bytes: None,
+        alias_prefixes: std::sync::Arc::from([]),
+    };
+    indexer.nudge(&settings);
+    indexer.sync();
+    // The size cap removed the first file; its facts stay in the index.
+    std::fs::remove_file(&whole).unwrap();
+    indexer.capped(&dir.0, rel_path(&dir.0, &whole).unwrap(), true);
+    indexer.sync();
+    indexer.shutdown(std::time::Duration::from_secs(5));
+    assert_eq!(indexed_calls(&dir.0).len(), 3);
+    // A dry run changes nothing; a delete may cover rows of the removed file, so it
+    // drops the facts kept from it.
+    delete(&dir.0, &session("s2"), true).unwrap();
+    assert_eq!(indexed_calls(&dir.0).len(), 3);
+    delete(&dir.0, &session("s2"), false).unwrap();
+    assert!(!indexed_calls(&dir.0).iter().any(|(call, _)| call == "toolu_a0"));
 }
