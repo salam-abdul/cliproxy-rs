@@ -57,7 +57,7 @@ The dashboard's Overview shows 24-hour, 7-day and 30-day native history: request
 | Quota efficiency | Per Codex quota cycle: usage between observed drops in remaining percent | Adopt for Claude and Codex, in tokens. Part 2. |
 | Cache read rate | `cache_read / input` over time, by model and account | Adopt with one definition for every provider. Part 2. |
 | Model speed | `output * 1000 / latency` tokens per second, and decode speed `output * 1000 / (latency - ttft)` | Adopt both, with the limits in part 3. |
-| Latency scatter | One point per request, time to first token against total, with 95th percentile lines | Adopt the percentiles, not the chart. It needs raw points and a chart library, and the dashboard's script budget is 56,800 bytes gzip (`ui/scripts/size.mjs:6`). Part 3. |
+| Latency scatter | One point per request, time to first token against total, with 95th percentile lines | Adopt the percentiles, not the chart. It needs raw points and a chart library, and the dashboard's script budget is 62,500 bytes gzip (`ui/scripts/size.mjs:6`). Part 3. |
 | Service health grid | Time blocks colored by success rate, with steps at 50, 65 and 80 percent | Adopt per provider. Part 2. |
 | Request table | Per-request time to first token, latency, speed and cache rate | Later. Activity already lists attempts; add columns once the store has them. |
 | Token share ribbons | Share of tokens by model and account | Extend the existing top-models panel with a provider split. Part 2. |
