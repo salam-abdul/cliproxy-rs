@@ -36,14 +36,26 @@ enum Msg {
 /// Work from the history writer, applied at the start of the next pass under the same
 /// history folder; a pass under another folder drops it.
 enum Queued {
-    Forget { dir: PathBuf, rel: String },
-    Capped { dir: PathBuf, rel: String, at: i64 },
+    Forget {
+        dir: PathBuf,
+        rel: String,
+    },
+    Capped {
+        dir: PathBuf,
+        rel: String,
+        at: i64,
+    },
+    /// The alias prefix of a key an attempt used.
+    Prefix {
+        dir: PathBuf,
+        prefix: String,
+    },
 }
 
 impl Queued {
     fn dir(&self) -> &Path {
         match self {
-            Queued::Forget { dir, .. } | Queued::Capped { dir, .. } => dir,
+            Queued::Forget { dir, .. } | Queued::Capped { dir, .. } | Queued::Prefix { dir, .. } => dir,
         }
     }
 }
@@ -65,6 +77,8 @@ struct Shared {
     /// The history folder of the last sweep, and the indexed files it found missing and
     /// not capped: the next sweep forgets those still missing.
     missing: Mutex<(PathBuf, HashSet<String>)>,
+    /// Alias prefixes handed over by [`Indexer::remember`], by history folder.
+    remembered: Mutex<HashSet<(PathBuf, String)>>,
     stop: AtomicBool,
     now: Clock,
     /// How long after a refused commit the next pass starts.
@@ -97,6 +111,7 @@ impl Indexer {
                 latest: Mutex::new(None),
                 queue: Mutex::new(VecDeque::new()),
                 missing: Mutex::new((PathBuf::new(), HashSet::new())),
+                remembered: Mutex::new(HashSet::new()),
                 stop: AtomicBool::new(false),
                 now,
                 retry,
@@ -131,6 +146,24 @@ impl Indexer {
         let at = (self.shared.now)().timestamp_millis();
         let dir = dir.to_path_buf();
         self.enqueue(Queued::Capped { dir, rel, at }, wake);
+    }
+
+    /// Remembers the alias prefix `prefix` of a key a translating-proxy attempt used,
+    /// for the next pass under the history folder `dir`. Never blocks and never wakes the
+    /// thread; a prefix already handed over is not queued again.
+    pub(crate) fn remember(&self, dir: &Path, prefix: String) {
+        let key = (dir.to_path_buf(), prefix);
+        if !self
+            .shared
+            .remembered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone())
+        {
+            return;
+        }
+        let (dir, prefix) = key;
+        self.enqueue(Queued::Prefix { dir, prefix }, false);
     }
 
     fn enqueue(&self, work: Queued, wake: bool) {
@@ -234,11 +267,19 @@ fn pass(shared: &Shared) -> End {
         return End::Done;
     };
     // Work for another history folder belongs to an index this pass does not open.
-    let mut pending: VecDeque<Queued> =
+    let (mut pending, other): (VecDeque<Queued>, VecDeque<Queued>) =
         std::mem::take(&mut *shared.queue.lock().unwrap_or_else(PoisonError::into_inner))
             .into_iter()
-            .filter(|work| work.dir() == settings.dir)
-            .collect();
+            .partition(|work| work.dir() == settings.dir);
+    {
+        // A dropped prefix may be handed over again for its own folder.
+        let mut remembered = shared.remembered.lock().unwrap_or_else(PoisonError::into_inner);
+        for work in other {
+            if let Queued::Prefix { dir, prefix } = work {
+                remembered.remove(&(dir, prefix));
+            }
+        }
+    }
     if !settings.dir.is_dir() {
         // Nothing was written yet, so nothing was indexed.
         return End::Done;
@@ -249,9 +290,16 @@ fn pass(shared: &Shared) -> End {
             match work {
                 Queued::Forget { rel, .. } => index.forget(rel)?,
                 Queued::Capped { rel, at, .. } => index.capped(rel, *at)?,
+                Queued::Prefix { prefix, .. } => {
+                    index.remember(std::slice::from_ref(prefix), (shared.now)().timestamp_millis())?;
+                }
             }
             pending.pop_front();
         }
+        // Every prefix ever seen reads back, so aliases of a key removed from the
+        // config, or of a Home user key, keep their names.
+        index.remember(&settings.alias_prefixes, (shared.now)().timestamp_millis())?;
+        let prefixes = index.prefixes()?;
         let history = HistoryDir::new(&settings.dir);
         let files = history.files()?;
         let on_disk: HashSet<String> = files
@@ -289,7 +337,7 @@ fn pass(shared: &Shared) -> End {
                 if shared.stop.load(Ordering::Relaxed) {
                     return Err(std::io::Error::other("stopping"));
                 }
-                sends.extend(rows.iter().map(|row| scan(row, &settings.alias_prefixes)));
+                sends.extend(rows.iter().map(|row| scan(row, &prefixes)));
                 Ok(())
             });
             drop(handle);
@@ -363,6 +411,17 @@ impl Indexer {
                 let _ = done.recv();
             }
         }
+    }
+
+    pub(crate) fn queued_prefixes(&self) -> Vec<String> {
+        let queue = self.shared.queue.lock().unwrap();
+        queue
+            .iter()
+            .filter_map(|work| match work {
+                Queued::Prefix { prefix, .. } => Some(prefix.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn queued(&self) -> usize {

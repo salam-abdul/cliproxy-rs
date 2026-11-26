@@ -62,7 +62,7 @@ impl Fingerprint {
 
 /// The version of the facts' rules and tables. An index written under another version
 /// is emptied and every file indexed again.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS files (
@@ -99,6 +99,7 @@ const SCHEMA: &str = "
         PRIMARY KEY(rel, id)
     );
     CREATE INDEX IF NOT EXISTS results_by_id ON results(id);
+    CREATE TABLE IF NOT EXISTS prefixes (prefix TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL);
 ";
 
 /// Every table that holds a file's facts, `files` last.
@@ -123,7 +124,7 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if version(&tx)? != VERSION {
-            for table in TABLES {
+            for table in TABLES.iter().chain(&["prefixes"]) {
                 tx.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
             }
             tx.pragma_update(None, "user_version", VERSION)?;
@@ -223,6 +224,28 @@ impl Index {
             tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
         }
         tx.commit()
+    }
+
+    /// Remembers the alias prefixes `prefixes` as seen at `now_ms`. Only derived
+    /// prefixes (`mcp__<word>_<word>__`) are stored, never a key.
+    pub(crate) fn remember(&mut self, prefixes: &[String], now_ms: i64) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO prefixes VALUES (?1, ?2)
+                 ON CONFLICT(prefix) DO UPDATE SET seen_ms = max(seen_ms, excluded.seen_ms)",
+            )?;
+            for prefix in prefixes {
+                insert.execute(params![prefix, now_ms])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Every remembered alias prefix, sorted.
+    pub(crate) fn prefixes(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT prefix FROM prefixes ORDER BY prefix")?;
+        stmt.query_map([], |r| r.get(0))?.collect()
     }
 
     /// Every indexed file the size cap removed.

@@ -2150,6 +2150,7 @@ async fn attempt(
                 }
                 let capture = match &facts.history {
                     Some(exchange) => {
+                        remember_alias_prefix(rt, cfg, credential, req);
                         let sends = crate::request_logging::history::capture::Sends::new(
                             exchange,
                             &facts.client.request_id,
@@ -2663,6 +2664,23 @@ fn rewrite_lines(payload: &Bytes, target: &str) -> Bytes {
         }
     }
     if changed { Bytes::from(out) } else { payload.clone() }
+}
+
+/// Hands the indexer the alias prefix of the key a Claude attempt cloaks its tools
+/// under, as the executor picks it (the caller's principal, else the default secret),
+/// so the tool index reads the aliases back. The key itself stays here.
+fn remember_alias_prefix(rt: &Runtime, cfg: &Config, credential: &cpa_core::credential::Credential, req: &ExecRequest) {
+    if credential.provider != "claude" {
+        return;
+    }
+    let settings = crate::request_logging::history::settings(cfg);
+    let Some(settings) = settings.as_ref() else { return };
+    let secret = Some(req.caller.principal.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(cpa_exec::claude::DEFAULT_ALIAS_SECRET);
+    rt.history()
+        .indexer()
+        .remember(&settings.dir, cpa_exec::claude::alias_prefix(secret));
 }
 
 #[cfg(test)]

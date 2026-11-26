@@ -4,7 +4,7 @@
 
 use cpa_common::json::{self as gj, Kind};
 
-use super::super::row::{Row, Source};
+use super::super::row::Row;
 use super::{Hasher, hash, len_i64};
 
 /// The history columns [`scan`] reads.
@@ -90,10 +90,7 @@ pub(crate) fn scan(row: &Row, prefixes: &[String]) -> SendFacts {
         facts.skipped_format = true;
         return facts;
     }
-    let names = Names {
-        prefixes,
-        proxy: row.source == Source::Proxy,
-    };
+    let names = Names(prefixes);
     let request = row
         .request_body
         .as_deref()
@@ -111,25 +108,19 @@ pub(crate) fn scan(row: &Row, prefixes: &[String]) -> SendFacts {
     facts
 }
 
-/// Reads aliased tool names back. First the alias prefixes of the configured client
-/// keys: a name under one is the text after the first `_` that follows the prefix (the
-/// alias's tool word ends there). Then, on translating-proxy rows only, any name made of
-/// alias words, which covers keys outside the config such as a Home user key; native
-/// rows are never aliased. Every other name, including real MCP names shaped like an
-/// alias, is kept.
-struct Names<'a> {
-    prefixes: &'a [String],
-    proxy: bool,
-}
+/// The alias prefixes the index remembers: of every configured client key, of the
+/// default caller, and of every key a translating-proxy attempt used. A name under one
+/// is the text after the first `_` that follows the prefix (the alias's tool word ends
+/// there); every other name, including real MCP names shaped like an alias, is kept.
+struct Names<'a>(&'a [String]);
 
 impl Names<'_> {
     fn read(&self, name: &str) -> String {
-        self.prefixes
+        self.0
             .iter()
             .filter_map(|prefix| name.strip_prefix(prefix.as_str()))
             .filter_map(|rest| rest.split_once('_').map(|(_, original)| original))
             .find(|original| !original.is_empty())
-            .or_else(|| self.proxy.then(|| cpa_exec::claude::alias_original(name)).flatten())
             .unwrap_or(name)
             .to_owned()
     }

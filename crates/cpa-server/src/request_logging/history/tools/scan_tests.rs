@@ -359,20 +359,16 @@ fn other_providers_are_skipped() {
 }
 
 #[test]
-fn proxy_aliases_read_back_without_their_key_and_native_names_stay() {
-    // An alias under a key not in the config, such as a Home user key.
-    let alias = format!("{}abandon_Read", cpa_exec::claude::alias_prefix("home-user-key"));
-    let real = "mcp__ccd_session__mark_chapter";
+fn real_mcp_names_on_proxy_rows_keep_their_names() {
+    let names = ["mcp__file_system__write_file", "mcp__brave_search__brave_web_search"];
     let request = format!(
-        r#"{{"tools":[{{"name":"{alias}"}},{{"name":"{real}"}}],"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":[{{"type":"tool_use","id":"u1","name":"{alias}","input":{{}}}}]}}]}}"#
+        r#"{{"tools":[{{"name":"{}"}},{{"name":"{}"}}],"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":[{{"type":"tool_use","id":"u1","name":"{}","input":{{}}}}]}}]}}"#,
+        names[0], names[1], names[0]
     );
     let mut proxy = row(Some(&request), Some(DONE));
     proxy.source = Source::Proxy;
-    let found = scan(&proxy, &[]);
+    let found = scan(&proxy, &[cpa_exec::claude::alias_prefix("k1")]);
     let defined: Vec<&str> = found.defs.iter().map(|d| d.tool.as_str()).collect();
-    assert_eq!(defined, vec!["Read", real]);
-    assert_eq!(found.calls, vec![call("u1", "Read", None)]);
-    let native = scan(&row(Some(&request), Some(DONE)), &[]);
-    assert_eq!(native.defs[0].tool, alias);
-    assert_eq!(native.calls, vec![call("u1", &alias, None)]);
+    assert_eq!(defined, names);
+    assert_eq!(found.calls, vec![call("u1", names[0], None)]);
 }

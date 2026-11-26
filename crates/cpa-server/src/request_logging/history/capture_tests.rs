@@ -319,6 +319,22 @@ async fn no_key_reaches_the_file() {
 }
 
 #[tokio::test]
+async fn a_claude_attempt_hands_its_alias_prefix_to_the_indexer() {
+    let _registry = REGISTRY.lock().await;
+    let dir = TempDir::new();
+    let proxy = proxy(Some(&dir.0), &["sk-synthetic-123"], 1).await;
+    // A stopped indexer runs no pass, so what the attempt queued stays queued.
+    proxy.rt.history().indexer().shutdown(Duration::from_secs(1));
+    let (status, _) = post(&proxy.url, BUFFERED).await;
+    assert_eq!(status, 200);
+    rows(&proxy, &dir.0, 1).await;
+    let prefixes = proxy.rt.history().indexer().queued_prefixes();
+    assert_eq!(prefixes, vec![cpa_exec::claude::alias_prefix("client-key-1")]);
+    let text = format!("{prefixes:?}");
+    assert!(!text.contains("client-key-1"), "a key reached the indexer");
+}
+
+#[tokio::test]
 async fn history_off_writes_nothing() {
     let _registry = REGISTRY.lock().await;
     let dir = TempDir::new();

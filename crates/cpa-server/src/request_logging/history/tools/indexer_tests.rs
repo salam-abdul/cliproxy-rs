@@ -478,3 +478,35 @@ fn pass_error_log_has_no_body_text() {
     assert!(!text.contains("SYNTHETIC-SECRET"), "{text}");
     assert!(!text.contains(&*dir.0.to_string_lossy()), "{text}");
 }
+
+#[test]
+fn a_prefix_remembered_from_a_key_outside_the_config_reads_back() {
+    let dir = TempDir::new();
+    let alias = format!("{}abandon_Grep", cpa_exec::claude::alias_prefix("home-user-key"));
+    write(
+        &dir.0,
+        "2026-11-24T08:00:00Z",
+        &[claude_row("p", "s1", us("2026-11-24T08:00:00Z"), &alias, "toolu_a0")],
+    );
+    let indexer = indexer();
+    indexer.remember(&dir.0, cpa_exec::claude::alias_prefix("home-user-key"));
+    run(&indexer, &settings(&dir.0, &[]));
+    assert_eq!(indexed_calls(&dir.0), calls(&[("toolu_a0", "Grep")]));
+}
+
+#[test]
+fn a_prefix_from_an_earlier_config_still_reads_back() {
+    let dir = TempDir::new();
+    let indexer = indexer();
+    std::fs::create_dir_all(&dir.0).unwrap();
+    run(&indexer, &settings(&dir.0, &["k1"]));
+    let alias = format!("{}abandon_Grep", cpa_exec::claude::alias_prefix("k1"));
+    write(
+        &dir.0,
+        "2026-11-24T08:00:00Z",
+        &[claude_row("p", "s1", us("2026-11-24T08:00:00Z"), &alias, "toolu_a0")],
+    );
+    // The key left the config, but its prefix stays in the index.
+    run(&indexer, &settings(&dir.0, &[]));
+    assert_eq!(indexed_calls(&dir.0), calls(&[("toolu_a0", "Grep")]));
+}
