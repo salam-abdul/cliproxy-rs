@@ -12,15 +12,22 @@ pub(crate) mod store;
 /// The first 8 bytes of the SHA-256 of `bytes`, read as a big-endian `i64`: stable
 /// across processes and Rust versions, so stored keys match on the next start.
 pub(crate) fn hash(bytes: &[u8]) -> i64 {
-    hash_parts(&[bytes])
+    let mut hasher = Hasher::default();
+    hasher.update(bytes);
+    hasher.finish()
 }
 
-/// [`hash`] of the concatenation of `parts`.
-pub(crate) fn hash_parts(parts: &[&[u8]]) -> i64 {
-    let mut sha = Sha256::new();
-    for part in parts {
-        sha.update(part);
+/// [`hash`] fed in pieces, for bytes that are not contiguous.
+#[derive(Default)]
+pub(crate) struct Hasher(Sha256);
+
+impl Hasher {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
     }
-    let digest = sha.finalize();
-    digest.first_chunk::<8>().map_or(0, |head| i64::from_be_bytes(*head))
+
+    pub(crate) fn finish(self) -> i64 {
+        let digest = self.0.finalize();
+        digest.first_chunk::<8>().map_or(0, |head| i64::from_be_bytes(*head))
+    }
 }

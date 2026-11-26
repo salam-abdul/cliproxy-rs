@@ -1,6 +1,6 @@
 use super::*;
 use crate::request_logging::history::row::Source;
-use crate::request_logging::history::tools::{hash, hash_parts};
+use crate::request_logging::history::tools::hash;
 
 const SESSION: &str = "00000000-0000-4000-8000-000000000001";
 
@@ -21,10 +21,6 @@ fn facts(request: &str, response: &str) -> SendFacts {
 }
 
 const DONE: &str = r#"{"id":"msg_done","type":"message","content":[]}"#;
-
-fn key(session: &str, first: &str) -> Conv {
-    Conv::Start(hash_parts(&[session.as_bytes(), &[0], first.as_bytes()]))
-}
 
 fn def(tool: &str, raw: &str) -> Def {
     Def {
@@ -49,7 +45,7 @@ fn thread_start_defines_tools_and_keys_by_session_and_first_message() {
     let request = format!(r#"{{"model":"m","tools":[{read}, {bash}],"messages":[{first}]}}"#);
     let start = facts(&request, DONE);
     assert_eq!(start.defs, vec![def("Read", read), def("Bash", bash)]);
-    assert_eq!(start.conv, key(SESSION, first));
+    assert!(matches!(start.conv, Conv::Start(_)));
     assert_eq!(start.message, Some(hash(b"msg_done")));
     assert_eq!(start.at_ms, 1_762_000_000_123);
     assert!(!start.cut && !start.skipped_format);
@@ -67,16 +63,25 @@ fn thread_start_defines_tools_and_keys_by_session_and_first_message() {
 
     let mut no_session = row(Some(&request), Some(DONE));
     no_session.session_id = None;
-    assert_eq!(scan(&no_session, &[]).conv, key("", first));
+    let no_session = scan(&no_session, &[]).conv;
+    assert!(matches!(no_session, Conv::Start(_)));
+    assert_ne!(no_session, start.conv);
 }
 
 #[test]
-fn first_message_cache_control_changes_the_key() {
+fn first_message_cache_control_keeps_the_key() {
     let plain = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}"#;
-    let cached = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}"#;
+    let cached = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral"}}]}"#;
+    let other = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hellp"}]}]}"#;
+    let split = r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hel","x":"lo"}]}]}"#;
     let (plain, cached) = (facts(plain, DONE).conv, facts(cached, DONE).conv);
-    assert!(matches!(plain, Conv::Start(_)) && matches!(cached, Conv::Start(_)));
-    assert_ne!(plain, cached);
+    assert!(matches!(plain, Conv::Start(_)));
+    assert_eq!(plain, cached);
+    assert_ne!(facts(other, DONE).conv, plain);
+    assert_ne!(facts(split, DONE).conv, plain);
+    let text = r#"{"messages":[{"role":"user","content":"hello"}]}"#;
+    let text_other = r#"{"messages":[{"role":"user","content":"hellp"}]}"#;
+    assert_ne!(facts(text, DONE).conv, facts(text_other, DONE).conv);
 }
 
 #[test]
@@ -208,10 +213,8 @@ fn server_tool_calls_and_results_count() {
     let request = format!(
         r#"{{"tools":[{{"type":"web_search_20250305","name":"web_search"}}],"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":[{{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{{"query":"q"}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":{failed}}},{{"type":"server_tool_use","id":"srvtoolu_2","name":"web_search","input":{{}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_2","content":{found}}}]}}]}}"#
     );
-    let buffered = format!(
-        r#"{{"id":"msg_s","content":[{{"type":"server_tool_use","id":"srvtoolu_3","name":"web_search","input":{{}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_3","is_error":true,"content":[]}}]}}"#
-    );
-    let read = facts(&request, &buffered);
+    let buffered = r#"{"id":"msg_s","content":[{"type":"server_tool_use","id":"srvtoolu_3","name":"web_search","input":{}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_3","is_error":true,"content":[]}]}"#;
+    let read = facts(&request, buffered);
     assert_eq!(
         read.calls,
         vec![

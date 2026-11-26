@@ -5,7 +5,7 @@
 use cpa_common::json::{self as gj, Kind};
 
 use super::super::row::Row;
-use super::{hash, hash_parts};
+use super::{Hasher, hash};
 
 /// Which conversation a send belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +157,7 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
     facts.conv = if parent.kind == Kind::String && !parent.str().is_empty() {
         Conv::Continue(hash(&parent.bytes()))
     } else if let Some(first) = messages.first() {
-        Conv::Start(hash_parts(&[session.as_bytes(), &[0], first.raw()]))
+        Conv::Start(conversation_key(session, first.raw()))
     } else {
         Conv::None
     };
@@ -197,6 +197,48 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
             }
         }
     }
+}
+
+/// The key of a conversation: its session and its first message, member by member
+/// without any `cache_control`, which a client adds to the first send and moves later.
+/// Raw spans are hashed in order with a separator byte after each, so nothing is
+/// re-serialized and spans split differently cannot collide.
+fn conversation_key(session: &str, first: &[u8]) -> i64 {
+    let mut hasher = Hasher::default();
+    hasher.update(session.as_bytes());
+    hasher.update(&[0]);
+    gj::object_members(first, |key, _, value| {
+        if key == b"cache_control" {
+            return true;
+        }
+        hasher.update(key);
+        hasher.update(&[0]);
+        if key == b"content" && value.first() == Some(&b'[') {
+            for block in gj::parse(value).array() {
+                hasher.update(&[1]);
+                if block.is_object() {
+                    gj::object_members(block.raw(), |key, _, value| {
+                        if key != b"cache_control" {
+                            hasher.update(key);
+                            hasher.update(&[0]);
+                            hasher.update(value);
+                            hasher.update(&[0]);
+                        }
+                        true
+                    });
+                } else {
+                    hasher.update(block.raw());
+                    hasher.update(&[0]);
+                }
+            }
+            hasher.update(&[2]);
+        } else {
+            hasher.update(value);
+            hasher.update(&[0]);
+        }
+        true
+    });
+    hasher.finish()
 }
 
 /// Reads a buffered JSON or SSE response. False when the body is neither.
