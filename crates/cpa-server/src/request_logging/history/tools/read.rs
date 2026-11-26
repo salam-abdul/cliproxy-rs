@@ -9,8 +9,9 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
+use super::super::dir::HistoryDir;
 use super::len_i64;
-use super::store::{INDEX_FILE, is_current};
+use super::store::{Fingerprint, INDEX_FILE, indexed, is_current, rel_path};
 use crate::activity::Range;
 use crate::activity::speed::percentile;
 
@@ -25,10 +26,20 @@ const BLOATING_BYTES: i64 = 102_400;
 
 /// The measures of the history folder `dir`'s tool index over `range` ending at
 /// `now_ms`, for sends of `provider` when one is given. No index file is the empty answer.
-pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64) -> rusqlite::Result<Value> {
+pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64) -> anyhow::Result<Value> {
     let path = dir.join(INDEX_FILE);
+    let finished = if dir.is_dir() {
+        HistoryDir::new(dir).files()?
+    } else {
+        Vec::new()
+    };
+    // Until the index holds anything, every finished file waits for the indexer.
+    let mut answer = Answer {
+        pending_files: len_i64(finished.len()),
+        ..Answer::default()
+    };
     if !path.is_file() {
-        return Ok(Answer::default().json(range));
+        return Ok(answer.json(range));
     }
     // Read-write without create, then query-only: the index is in WAL mode, and once
     // the indexer's connection closes its side files are gone, which a read-only
@@ -41,10 +52,19 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     db.pragma_update(None, "query_only", true)?;
     let tx = db.transaction()?;
     if !is_current(&tx)? {
-        return Ok(Answer::default().json(range));
+        return Ok(answer.json(range));
     }
+    let indexed = indexed(&tx)?;
+    answer.pending_files = len_i64(
+        finished
+            .iter()
+            .filter(|file| {
+                let seen = rel_path(dir, &file.path).and_then(|rel| indexed.get(&rel).map(|(seen, _)| *seen));
+                seen.is_none() || seen != Fingerprint::from_path(&file.path).ok()
+            })
+            .count(),
+    );
     let from = now_ms.saturating_sub(range.duration());
-    let mut answer = Answer::default();
     tx.query_row(
         "SELECT COUNT(*), COALESCE(SUM(skipped_format), 0), COALESCE(SUM(cut), 0), MIN(at_ms), MAX(at_ms)
          FROM sends WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR provider = ?3)",
@@ -189,6 +209,8 @@ struct Answer {
     skipped_format: i64,
     skipped_cut: i64,
     unreadable_files: i64,
+    /// Finished history files the index lacks or holds as they were before a change.
+    pending_files: i64,
     tools: BTreeMap<String, Tool>,
     skills: BTreeMap<String, Skill>,
 }
@@ -278,6 +300,7 @@ impl Answer {
             "covered": self.covered.map(|(from, to)| json!({"fromMs": from, "toMs": to})),
             "conversations": conversations, "sends": self.sends, "skippedFormat": self.skipped_format,
             "skippedCut": self.skipped_cut, "unreadableFiles": self.unreadable_files,
+            "pendingFiles": self.pending_files,
             "tools": tool_rows, "servers": servers, "skills": skills,
         })
     }

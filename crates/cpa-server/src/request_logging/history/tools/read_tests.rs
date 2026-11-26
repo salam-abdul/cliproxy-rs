@@ -438,7 +438,7 @@ fn no_index_file_is_the_empty_answer_and_creates_nothing() {
         answer,
         json!({
             "range": "30d", "covered": null, "conversations": 0, "sends": 0, "skippedFormat": 0,
-            "skippedCut": 0, "unreadableFiles": 0, "tools": [], "servers": [], "skills": []
+            "skippedCut": 0, "unreadableFiles": 0, "pendingFiles": 0, "tools": [], "servers": [], "skills": []
         })
     );
     assert!(!dir.0.join(INDEX_FILE).exists());
@@ -541,4 +541,29 @@ fn server_and_versioned_tools_are_carried_and_used() {
         assert!(!labels(&answer, name).contains(&"dead".to_owned()), "{name}");
     }
     assert_eq!(tool(&answer, "web_search")["errors"], 1);
+}
+
+#[test]
+fn pending_files_count_history_files_not_indexed_as_they_are() {
+    let dir = TempDir::new();
+    let partition = dir.0.join("date=2025-11-24");
+    std::fs::create_dir_all(&partition).unwrap();
+    let new = partition.join("080000-1-0000.parquet");
+    std::fs::write(&new, b"synthetic").unwrap();
+    // Before any index, every finished file is pending; an unfinished one is not.
+    std::fs::write(partition.join("090000-1-0001.partial"), b"open").unwrap();
+    assert_eq!(read(&dir.0, Range::Day, None, NOW).unwrap()["pendingFiles"], 1);
+
+    let mut index = Index::open(&dir.0).unwrap();
+    let read_as = Fingerprint::from_path(&new).unwrap();
+    assert!(
+        index
+            .commit("date=2025-11-24/080000-1-0000.parquet", &read_as, &new, &[], false)
+            .unwrap()
+    );
+    assert_eq!(read(&dir.0, Range::Day, None, NOW).unwrap()["pendingFiles"], 0);
+    // A second file, and the first one rewritten.
+    std::fs::write(partition.join("100000-1-0002.parquet"), b"synthetic").unwrap();
+    std::fs::write(&new, b"rewritten, longer").unwrap();
+    assert_eq!(read(&dir.0, Range::Day, None, NOW).unwrap()["pendingFiles"], 2);
 }

@@ -140,18 +140,7 @@ impl Index {
     /// Every indexed file by its path relative to the history folder, with the
     /// fingerprint it was read with and when the size cap removed it.
     pub(crate) fn indexed(&self) -> rusqlite::Result<HashMap<String, (Fingerprint, Option<i64>)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT rel, len, modified_ns, ino, capped_ms FROM files")?;
-        stmt.query_map([], |r| {
-            let fingerprint = Fingerprint {
-                len: r.get(1)?,
-                modified_ns: r.get(2)?,
-                ino: r.get(3)?,
-            };
-            Ok((r.get(0)?, (fingerprint, r.get(4)?)))
-        })?
-        .collect()
+        indexed(&self.conn)
     }
 
     /// Replaces the facts of the file `rel` at `abs` with `sends`, in file order. Writes
@@ -310,6 +299,20 @@ pub(crate) fn open_existing(dir: &Path) -> anyhow::Result<Option<Index>> {
         return Ok(None);
     }
     Ok(Some(Index::open(dir)?))
+}
+
+/// Every indexed file of the open index `conn`, as [`Index::indexed`] gives them.
+pub(crate) fn indexed(conn: &Connection) -> rusqlite::Result<HashMap<String, (Fingerprint, Option<i64>)>> {
+    let mut stmt = conn.prepare("SELECT rel, len, modified_ns, ino, capped_ms FROM files")?;
+    stmt.query_map([], |r| {
+        let fingerprint = Fingerprint {
+            len: r.get(1)?,
+            modified_ns: r.get(2)?,
+            ino: r.get(3)?,
+        };
+        Ok((r.get(0)?, (fingerprint, r.get(4)?)))
+    })?
+    .collect()
 }
 
 /// The `user_version` of an open index: [`VERSION`] once its tables are made.

@@ -14,6 +14,12 @@
       store.tools.load();
     });
   });
+  // While finished files wait for the indexer, reload every 5 s until none do.
+  $effect(() => {
+    if (!(data?.pendingFiles > 0)) return;
+    const timer = setTimeout(() => store.tools.load(true), 5000);
+    return () => clearTimeout(timer);
+  });
   const data = $derived(store.tools.data?.range === store.historyRange ? store.tools.data : undefined);
   const error = $derived(store.tools.error);
   const groups = $derived(data ? toolGroups(data) : []);
@@ -25,7 +31,7 @@
       ? [
           data.skippedFormat > 0 && `${data.skippedFormat} skipped as not Claude Messages`,
           data.skippedCut > 0 && `${data.skippedCut} with a cut body`,
-          data.unreadableFiles > 0 && plural(data.unreadableFiles, "unreadable file"),
+          data.unreadableFiles > 0 && `${plural(data.unreadableFiles, "unreadable history file")} (all dates)`,
         ].filter(Boolean)
       : [],
   );
@@ -48,6 +54,7 @@
 {:else if !data}
   <p class="muted">Loading tools…</p>
 {:else}
+  {#if data.pendingFiles > 0}<p class="note">Indexing history: {plural(data.pendingFiles, "file")} left.</p>{/if}
   <p class="muted small">
     {data.covered ? `Covered ${at(data.covered.fromMs)} to ${at(data.covered.toMs)}` : "No sends indexed in this period"}
     · {plural(data.sends, "send")} · {plural(data.conversations, "conversation")} with tools

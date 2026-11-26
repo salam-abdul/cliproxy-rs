@@ -267,7 +267,7 @@ One background thread keeps the index. It runs a pass when the writer finishes a
 
 Record into one history folder from one server. With two, a continuation can be indexed before the other server finishes the file holding its parent, and then it has no conversation.
 
-`GET /v8/management/observability/tools?range=24h|7d|30d` reads the index, narrowed by the optional `provider` parameter. Another range answers `400`. It answers `409` while history is off, `500` when the index cannot be read, and zero counts with `covered: null` before anything was indexed. A conversation is in the range when one of its sends started in it, and `conversations` counts those that defined a tool. `covered` is the first and last send in the range. Each tool that was carried or called in the range gets a row, most carried first:
+`GET /v8/management/observability/tools?range=24h|7d|30d` reads the index, narrowed by the optional `provider` parameter. Another range answers `400`. It answers `409` while history is off, `500` when the index cannot be read, and zero counts with `covered: null` before anything was indexed. A conversation is in the range when one of its sends started in it, and `conversations` counts those that defined a tool. `covered` is the first and last send in the range. `unreadableFiles` counts every unreadable history file, over all dates and providers, and `pendingFiles` the finished history files the index lacks or holds from before they changed. Each tool that was carried or called in the range gets a row, most carried first:
 
 | Measure | Definition |
 | --- | --- |

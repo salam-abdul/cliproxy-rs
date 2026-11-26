@@ -1504,7 +1504,7 @@ async fn tools_route_needs_history_and_answers_empty_before_any_index() {
         body,
         json!({
             "range": "7d", "covered": null, "conversations": 0, "sends": 0, "skippedFormat": 0,
-            "skippedCut": 0, "unreadableFiles": 0, "tools": [], "servers": [], "skills": []
+            "skippedCut": 0, "unreadableFiles": 0, "pendingFiles": 0, "tools": [], "servers": [], "skills": []
         })
     );
     server.abort();

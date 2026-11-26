@@ -15,7 +15,7 @@ let requireKey = false, quotaStarted, expired = false, availability = "included"
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
-let toolsChecks = 0, toolsConflict = false, toolsFailure = false;
+let toolsChecks = 0, toolsConflict = false, toolsFailure = false, toolsPending = [];
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
@@ -105,7 +105,8 @@ await page.route("**/*", async route => {
     if (toolsFailure) return route.fulfill({status:500,json:{error:"Tools could not be read"}});
     const range = new URL(request.url()).searchParams.get("range") || "24h";
     const measures = {used:0,weight:2048,calls:0,callsPerConversation:0,results:0,errors:0,failureRate:null,resultMean:null,resultP95:null,resultTotal:0};
-    return send({range,covered:{fromMs:Date.UTC(2030,0,1),toMs:Date.UTC(2030,0,2)},conversations:10,sends:40,skippedFormat:3,skippedCut:2,unreadableFiles:1,
+    const pendingFiles = toolsPending.length ? toolsPending.shift() : 0;
+    return send({range,covered:{fromMs:Date.UTC(2030,0,1),toMs:Date.UTC(2030,0,2)},conversations:10,sends:40,skippedFormat:3,skippedCut:2,unreadableFiles:1,pendingFiles,
       tools:[{name:"Read",server:null,carried:10,carriedShare:1,...measures,used:9,calls:30,callsPerConversation:3,results:30,errors:1,failureRate:1/30,resultMean:3000,resultP95:150000,resultTotal:90000,labels:["heavy","bloating"]},
         {name:"mcp__docs__search",server:"docs",carried:4,carriedShare:0.4,...measures,labels:["dead"]}],
       servers:[{name:"docs",tools:1,carried:4,calls:0,errors:0}],
@@ -626,7 +627,8 @@ try {
   await page.getByRole("table",{name:"Skills",exact:true}).getByRole("row",{name:/^pdf/}).getByText("4.0 KB",{exact:true}).waitFor();
   await page.getByText("The server cannot tell whether a tool's result helped.",{exact:true}).waitFor();
   await page.getByText(/40 sends · 10 conversations with tools/).waitFor();
-  await page.getByText(/3 skipped as not Claude Messages · 2 with a cut body · 1 unreadable file/).waitFor();
+  await page.getByText(/3 skipped as not Claude Messages · 2 with a cut body · 1 unreadable history file \(all dates\)/).waitFor();
+  assert.equal(await page.getByText(/Indexing history/).count(),0,"nothing pending shows no indexing line");
   const toolsRange = toolsChecks;
   await page.getByRole("group",{name:"History range"}).getByRole("button",{name:"7 days",exact:true}).click();
   await dead.getByText("Dead weight",{exact:true}).waitFor();
@@ -636,6 +638,18 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the tools tables scroll inside their cards");
   await page.setViewportSize({width:1280,height:720});
+  // While files wait for the indexer, the page says how many and reloads every 5 s.
+  toolsPending = [2, 1];
+  await page.reload();
+  await page.getByText("Indexing history: 2 files left.",{exact:true}).waitFor();
+  const pendingStart = toolsChecks;
+  await page.clock.fastForward(5_000);
+  await page.getByText("Indexing history: 1 file left.",{exact:true}).waitFor();
+  await page.clock.fastForward(5_000);
+  await page.getByText(/Indexing history/).waitFor({state:"hidden"});
+  assert.equal(toolsChecks - pendingStart,2,"pending files reload every 5 seconds");
+  await page.clock.fastForward(60_000);
+  assert.equal(toolsChecks - pendingStart,2,"reloads stop once nothing is pending");
   toolsConflict = true;
   await page.reload();
   await page.getByText("Body history is off. Turn on observability.history to see tools.",{exact:true}).waitFor();
