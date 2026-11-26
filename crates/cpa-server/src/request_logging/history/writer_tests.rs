@@ -491,3 +491,40 @@ fn the_final_rotation_queues_index_work_without_starting_a_pass() {
     assert_eq!(files(&dir.0).len(), 0);
     assert_eq!(writer.indexer().queued(), 2, "the final rotation started an index pass");
 }
+
+#[test]
+fn a_slow_writer_shutdown_leaves_the_indexer_time_to_stop() {
+    use crate::request_logging::history::test_support::claude_row;
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    let cfg = on(&dir.0);
+    writer.submit(
+        &cfg,
+        http(claude_row("a", "s1", 1, "Read", "toolu_a0"), writer.budget()),
+    );
+    writer.flush();
+    writer.indexer().sync();
+    // The indexer holds a file between its read and its commit until asked to stop.
+    let (reached, release) = writer.indexer().pause_before_commit();
+    writer.submit(
+        &cfg,
+        http(claude_row("b", "s2", 2, "Bash", "toolu_b0"), writer.budget()),
+    );
+    writer.flush();
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+    let indexer = Arc::clone(writer.indexer());
+    let releaser = std::thread::spawn(move || {
+        while !indexer.stopping() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(release);
+    });
+    // The worker is busy past the whole shutdown budget.
+    let hold = writer.pause();
+    let logs = Logs::capture();
+    writer.shutdown(Duration::from_millis(200));
+    let text = logs.text();
+    drop(hold);
+    releaser.join().unwrap();
+    assert!(!text.contains("the tool indexer did not stop in time"), "{text}");
+}

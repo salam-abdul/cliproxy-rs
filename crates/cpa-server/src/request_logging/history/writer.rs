@@ -174,9 +174,15 @@ impl Writer {
     /// waiting at most `wait` in all. Later rows are ignored.
     pub fn shutdown(&self, wait: Duration) {
         let deadline = Instant::now() + wait;
+        // The indexer stops while the worker finishes, so a slow worker cannot use up
+        // its time; what the final rotation queues for it is not indexed.
+        self.indexer.request_stop();
         self.stop_worker(deadline);
-        self.indexer
-            .shutdown(deadline.saturating_duration_since(Instant::now()));
+        self.indexer.shutdown(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_secs(1)),
+        );
     }
 
     fn stop_worker(&self, deadline: Instant) {

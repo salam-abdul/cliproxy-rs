@@ -222,10 +222,15 @@ impl Indexer {
         }
     }
 
-    /// Stops the thread after the file it is reading, without committing that file,
-    /// waiting at most `wait`. Later nudges do nothing.
-    pub(crate) fn shutdown(&self, wait: Duration) {
+    /// Asks the thread to stop after the file it is reading, without committing that
+    /// file. Later nudges do nothing.
+    pub(crate) fn request_stop(&self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops the thread as [`Indexer::request_stop`] does, waiting at most `wait`.
+    pub(crate) fn shutdown(&self, wait: Duration) {
+        self.request_stop();
         let state = std::mem::replace(
             &mut *self.state.lock().unwrap_or_else(PoisonError::into_inner),
             State::Closed,
