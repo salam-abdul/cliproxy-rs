@@ -489,3 +489,32 @@ fn the_index_reads_after_the_indexer_closed_it() {
     assert_eq!(tool(&answer, "Read")["calls"], 1);
     assert_eq!(listing(), before, "the read leaves no file behind");
 }
+
+#[test]
+fn a_repeated_call_counts_under_the_conversation_a_later_copy_holds() {
+    let t = NOW - 3_600_000;
+    let mut store = Store::new();
+    store
+        .file(&[send(t, Conv::Continue(999)).call(1, "Read")])
+        .file(&[send(t + 1, Conv::Start(1)).def("Read", 10).call(1, "Read")]);
+    let answer = store.read(Range::Day, None);
+    let read = tool(&answer, "Read");
+    assert_eq!(read["calls"], 1);
+    assert_eq!(read["used"], 1);
+    assert_eq!(read["callsPerConversation"], 1.0);
+    assert!(!labels(&answer, "Read").contains(&"dead".to_owned()));
+}
+
+#[test]
+fn a_tool_called_only_outside_known_conversations_is_not_dead_weight() {
+    let mut store = Store::new();
+    store.file(&[
+        send(NOW - 2000, Conv::Start(1)).def("Read", 10),
+        send(NOW - 1000, Conv::Continue(999)).call(1, "Read"),
+    ]);
+    let answer = store.read(Range::Day, None);
+    let read = tool(&answer, "Read");
+    assert_eq!(read["calls"], 1);
+    assert_eq!(read["used"], 0);
+    assert!(!labels(&answer, "Read").contains(&"dead".to_owned()));
+}

@@ -16,7 +16,8 @@ use crate::activity::Range;
 /// still creating the file and nothing was indexed.
 const TABLES: [&str; 6] = ["files", "sends", "messages", "defs", "calls", "results"];
 
-/// Dead weight: carried by this share of conversations with tools, and never called.
+/// Dead weight: carried by this share of conversations with tools, with no call of
+/// the tool in the range.
 const DEAD_SHARE_PERCENT: i64 = 20;
 /// Failing: at least this many calls and this share of results in error.
 const FAILING_CALLS: i64 = 10;
@@ -93,11 +94,15 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     answer.conversations = i64::try_from(with_tools.len()).unwrap_or(i64::MAX);
 
     // Calls by the first copy of their ID, with the first copy of their result: a retry,
-    // failover or resend repeats both.
+    // failover or resend repeats both. A call's conversation is that of its earliest copy
+    // with one, since history that starts mid-conversation leaves early copies unlinked.
     let mut stmt = tx.prepare(
         "WITH firsts AS (
-             SELECT id, at_ms, conv, tool, skill,
-                    ROW_NUMBER() OVER (PARTITION BY id ORDER BY at_ms, rel) AS n
+             SELECT id, at_ms, tool, skill,
+                    ROW_NUMBER() OVER (PARTITION BY id ORDER BY at_ms, rel) AS n,
+                    FIRST_VALUE(conv) OVER (
+                        PARTITION BY id ORDER BY conv IS NULL, at_ms, rel
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS conv
              FROM calls WHERE (?3 IS NULL OR provider = ?3)),
          outcomes AS (
              SELECT id, is_error, bytes, loaded,
@@ -215,7 +220,7 @@ impl Answer {
             let results = count(sizes.len());
             let p95 = nearest_rank(&sizes, 95);
             let mut labels = Vec::new();
-            if carried > 0 && used == 0 && carried.saturating_mul(100) >= DEAD_SHARE_PERCENT * conversations {
+            if carried > 0 && tool.calls == 0 && carried.saturating_mul(100) >= DEAD_SHARE_PERCENT * conversations {
                 labels.push("dead");
             }
             if heavy.contains(name.as_str()) {

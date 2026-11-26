@@ -251,7 +251,7 @@ While history is on, the server keeps `<history.dir>/tool-index.sqlite` (`0600` 
 
 It holds no prompts, outputs, tool inputs or results: a `Skill` call's `skill` is the one input value read. Tool, server and skill names go only into this file, never into the activity store or the logs.
 
-A request without `thread.previous_message_id` starts or resends a conversation, keyed by a hash of its session and the exact bytes of its first message. A request with one joins the conversation of the indexed send whose response had that message ID; when no such send is indexed, its calls and results count but it adds no conversation. A call or result repeated by a retry, failover or full resend counts once, from its first copy.
+A request without `thread.previous_message_id` starts or resends a conversation, keyed by a hash of its session and the exact bytes of its first message. A request with one joins the conversation of the indexed send whose response had that message ID; when no such send is indexed, its calls and results count but it adds no conversation. A call or result repeated by a retry, failover or full resend counts once, from its first copy; a call belongs to the conversation of its earliest copy that has one.
 
 A `tools[]` element with a `type` other than `custom` is a server tool and counts under its type. A name `mcp__<server>__<tool>` belongs to MCP server `<server>`. A tool the Claude executor renamed to cloak a request is read back under the client's name when its prefix matches a configured client key or the default caller; an alias from a key no longer configured stays under an unknown MCP server, and a name that had other characters or was cut at 64 bytes comes back altered.
 
@@ -280,7 +280,7 @@ Record into one history folder from one server. With two, a continuation can be 
 
 | Label | Rule |
 | --- | --- |
-| Dead weight | Carried by 20 percent or more of conversations, used by none |
+| Dead weight | Carried by 20 percent or more of conversations, with no call of the tool in the range |
 | Heavy | In the top tenth, rounded up, of carried tools by weight times carried; ties go by name |
 | Failing | 10 or more calls, and errors are 20 percent or more of results |
 | Bloating | p95 result of 102,400 bytes or more |
