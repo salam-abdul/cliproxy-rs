@@ -311,6 +311,103 @@ pub(crate) async fn tools(State(state): State<Arc<Management>>, AxumQuery(params
 mod tests {
     use super::*;
 
+    /// A management router over a runtime with body history on in `dir/history`.
+    fn history_router(dir: &std::path::Path) -> axum::Router {
+        let hash = bcrypt::hash("synthetic-management", 4).unwrap();
+        let cfg = cpa_core::config::Config::parse(&format!(
+            "oauth:\n  auth-dir: {}\nmanagement:\n  secret-key: '{hash}'\nobservability:\n  history:\n    enable: true\n    dir: {}\n",
+            dir.join("auth").display(),
+            dir.join("history").display()
+        ))
+        .unwrap();
+        let rt = crate::testing::runtime(
+            cfg,
+            vec![],
+            cpa_exec::Executors {
+                claude: cpa_exec::claude::ClaudeExecutor::new("http://127.0.0.1:1").unwrap(),
+                codex: Default::default(),
+                devices: Default::default(),
+                openai: Default::default(),
+                google: Default::default(),
+            },
+        );
+        super::super::router(Management::new(Arc::new(rt), dir.join("config.yaml")))
+    }
+
+    async fn get_tools(router: axum::Router) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .uri("/v8/management/observability/tools?range=24h")
+            .header("authorization", "Bearer synthetic-management")
+            .extension(axum::extract::ConnectInfo(
+                "127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn tools_route_reads_a_populated_index() {
+        use crate::request_logging::history::tools::scan::{Call, Conv, Def, SendFacts};
+        use crate::request_logging::history::tools::store::{Fingerprint, Index};
+        let dir = std::env::temp_dir().join(format!("cpa-tools-route-{}", uuid::Uuid::new_v4()));
+        let partition = dir.join("history/date=2026-11-24");
+        std::fs::create_dir_all(&partition).unwrap();
+        let file = partition.join("080000-1-0000.parquet");
+        std::fs::write(&file, b"synthetic").unwrap();
+        let mut index = Index::open(&dir.join("history")).unwrap();
+        let send = SendFacts {
+            at_ms: chrono::Utc::now().timestamp_millis() - 60_000,
+            provider: Some("claude".into()),
+            conv: Conv::Start(1),
+            message: None,
+            defs: vec![Def {
+                tool: "Read".into(),
+                bytes: 40,
+            }],
+            calls: vec![Call {
+                id: 1,
+                tool: "Read".into(),
+                skill: None,
+            }],
+            results: Vec::new(),
+            skipped_format: false,
+            cut: false,
+        };
+        let read_as = Fingerprint::from_path(&file).unwrap();
+        assert!(
+            index
+                .commit("date=2026-11-24/080000-1-0000.parquet", &read_as, &file, &[send], false)
+                .unwrap()
+        );
+        drop(index);
+        let (status, body) = get_tools(history_router(&dir)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["sends"], 1);
+        assert_eq!(body["conversations"], 1);
+        assert_eq!(body["pendingFiles"], 0);
+        assert_eq!(body["tools"][0]["name"], "Read");
+        assert_eq!(body["tools"][0]["used"], 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tools_route_answers_500_when_the_index_cannot_be_read() {
+        let dir = std::env::temp_dir().join(format!("cpa-tools-route-{}", uuid::Uuid::new_v4()));
+        let index = dir
+            .join("history")
+            .join(crate::request_logging::history::tools::store::INDEX_FILE);
+        std::fs::create_dir_all(&index).unwrap();
+        let (status, body) = get_tools(history_router(&dir)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "Tools could not be read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn offset_is_whole_minutes_within_fourteen_hours() {
         assert_eq!(offset(None), Ok(0));

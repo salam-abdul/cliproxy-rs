@@ -38,7 +38,8 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
         pending_files: len_i64(finished.len()),
         ..Answer::default()
     };
-    if !path.is_file() {
+    // Nothing there is the empty answer; anything that is not an index fails the read.
+    if !path.exists() {
         return Ok(answer.json(range));
     }
     // Read-write without create, then query-only: the index is in WAL mode, and once
