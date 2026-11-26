@@ -327,27 +327,35 @@ fn pass(shared: &Shared) -> End {
             if indexed.get(&rel).is_some_and(|(seen, _)| *seen == current) {
                 continue;
             }
-            // Gone or not openable now: the next pass sees it again or sweeps it.
-            let Ok(handle) = File::open(&file.path) else { continue };
-            let Ok(read_as) = Fingerprint::from_file(&handle) else {
-                continue;
-            };
-            let mut sends = Vec::new();
-            let read = for_each_group(&handle, SCAN_COLUMNS, |rows| {
-                if shared.stop.load(Ordering::Relaxed) {
-                    return Err(std::io::Error::other("stopping"));
+            // A file that is gone is skipped: the sweep drops it. One that is there but
+            // cannot be opened is unreadable as it is now, so it is not pending forever;
+            // a change to it indexes it again.
+            let (read_as, sends, unreadable) = match File::open(&file.path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => (current, Vec::new(), true),
+                Ok(handle) => {
+                    let Ok(read_as) = Fingerprint::from_file(&handle) else {
+                        continue;
+                    };
+                    let mut sends = Vec::new();
+                    let read = for_each_group(&handle, SCAN_COLUMNS, |rows| {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            return Err(std::io::Error::other("stopping"));
+                        }
+                        sends.extend(rows.iter().map(|row| scan(row, &prefixes)));
+                        Ok(())
+                    });
+                    drop(handle);
+                    if shared.stop.load(Ordering::Relaxed) {
+                        return Ok(End::Stopped);
+                    }
+                    let unreadable = read.is_err();
+                    if unreadable {
+                        sends.clear();
+                    }
+                    (read_as, sends, unreadable)
                 }
-                sends.extend(rows.iter().map(|row| scan(row, &prefixes)));
-                Ok(())
-            });
-            drop(handle);
-            if shared.stop.load(Ordering::Relaxed) {
-                return Ok(End::Stopped);
-            }
-            let unreadable = read.is_err();
-            if unreadable {
-                sends.clear();
-            }
+            };
             #[cfg(test)]
             shared.hooks.before_commit(&rel);
             if shared.stop.load(Ordering::Relaxed) {

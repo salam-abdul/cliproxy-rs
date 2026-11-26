@@ -59,8 +59,10 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     answer.pending_files = len_i64(
         finished
             .iter()
-            .filter(|file| {
-                let seen = rel_path(dir, &file.path).and_then(|rel| indexed.get(&rel).map(|(seen, _)| *seen));
+            // Keyed as the indexer keys them: a file it cannot key is never indexed.
+            .filter_map(|file| rel_path(dir, &file.path).map(|rel| (rel, file)))
+            .filter(|(rel, file)| {
+                let seen = indexed.get(rel).map(|(seen, _)| *seen);
                 seen.is_none() || seen != Fingerprint::from_path(&file.path).ok()
             })
             .count(),

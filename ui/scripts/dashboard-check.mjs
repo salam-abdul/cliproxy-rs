@@ -650,6 +650,22 @@ try {
   assert.equal(toolsChecks - pendingStart,2,"pending files reload every 5 seconds");
   await page.clock.fastForward(60_000);
   assert.equal(toolsChecks - pendingStart,2,"reloads stop once nothing is pending");
+  // A count that does not fall stops the reloads and stays on the page.
+  toolsPending = [3, 3];
+  await page.reload();
+  await page.getByText("Indexing history: 3 files left.",{exact:true}).waitFor();
+  const stalledStart = toolsChecks;
+  const stalledRead = page.waitForResponse(r => new URL(r.url()).pathname === "/v8/management/observability/tools");
+  await page.clock.fastForward(5_000);
+  await stalledRead;
+  await settle();
+  await page.clock.fastForward(5_000);
+  await settle();
+  await page.clock.fastForward(60_000);
+  await settle();
+  assert.equal(toolsChecks - stalledStart,1,"a count that did not fall stops the reloads");
+  await page.getByText("Indexing history: 3 files left.",{exact:true}).waitFor();
+  toolsPending = [];
   toolsConflict = true;
   await page.reload();
   await page.getByText("Body history is off. Turn on observability.history to see tools.",{exact:true}).waitFor();

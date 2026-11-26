@@ -5,7 +5,7 @@
   import { plural, type Data } from "../core";
   import { bytes, labelText, share, toolGroups } from "../tools";
 
-  // Loads on open and on a range change; the index changes slowly, so nothing polls.
+  // Loads on open and on a range change.
   $effect(() => {
     store.historyRange;
     untrack(() => {
@@ -15,8 +15,18 @@
     });
   });
   // While finished files wait for the indexer, reload every 5 s until none do.
+  // The pending count of the previous load, so reloads stop when it no longer falls:
+  // a file the indexer keeps failing on would otherwise reload the page for good.
+  let before: number | undefined;
   $effect(() => {
-    if (!(data?.pendingFiles > 0)) return;
+    if (!data) {
+      before = undefined;
+      return;
+    }
+    const pending: number = data.pendingFiles ?? 0;
+    const stalled = before !== undefined && pending >= before;
+    before = pending;
+    if (pending <= 0 || stalled) return;
     const timer = setTimeout(() => store.tools.load(true), 5000);
     return () => clearTimeout(timer);
   });

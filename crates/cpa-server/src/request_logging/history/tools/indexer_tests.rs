@@ -5,6 +5,7 @@ use crate::request_logging::history::file::{ParquetFile, rewrite_without};
 use crate::request_logging::history::row::Row;
 use crate::request_logging::history::test_support::{Logs, TempDir, claude_row, indexed_calls};
 use crate::request_logging::history::tools::store::INDEX_FILE;
+use rusqlite::OptionalExtension;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -509,4 +510,39 @@ fn a_prefix_from_an_earlier_config_still_reads_back() {
     // The key left the config, but its prefix stays in the index.
     run(&indexer, &settings(&dir.0, &[]));
     assert_eq!(indexed_calls(&dir.0), calls(&[("toolu_a0", "Grep")]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_the_pass_cannot_open_is_unreadable_and_not_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let path = write(
+        &dir.0,
+        "2026-11-24T08:00:00Z",
+        &[claude_row("p", "s1", us("2026-11-24T08:00:00Z"), "Read", "toolu_a0")],
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    run(&indexer(), &settings(&dir.0, &[]));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let conn = rusqlite::Connection::open(dir.0.join(INDEX_FILE)).unwrap();
+    let unreadable: Option<bool> = conn
+        .query_row(
+            "SELECT unreadable FROM files WHERE rel = ?1",
+            [rel(&dir.0, &path)],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(unreadable, Some(true));
+    // Restoring the mode changes no fingerprint field the index keys on, so the file
+    // is not pending.
+    let answer = crate::request_logging::history::tools::read::read(
+        &dir.0,
+        crate::activity::Range::Month,
+        None,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .unwrap();
+    assert_eq!(answer["pendingFiles"], 0);
 }
