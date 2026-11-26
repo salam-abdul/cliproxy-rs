@@ -4,6 +4,7 @@ mod quota;
 pub(crate) mod sends;
 pub(crate) mod speed;
 
+use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -140,7 +141,7 @@ struct Ending {
 
 impl Activity {
     pub(crate) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
-        cpa_core::private_fs::secure_file(&path)?;
+        cpa_core::private_fs::secure_file(&path).context("Could not create the private activity store file")?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -680,6 +681,18 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_store_path_that_is_not_a_file_names_the_activity_store() {
+        let dir = std::env::temp_dir().join(format!("cpa-activity-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = format!(
+            "{:#}",
+            super::Activity::start(dir.clone(), Default::default()).err().unwrap()
+        );
+        assert!(error.contains("activity store"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     #[test]

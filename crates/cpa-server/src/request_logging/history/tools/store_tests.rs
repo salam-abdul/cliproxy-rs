@@ -268,6 +268,14 @@ fn an_index_from_another_version_is_emptied() {
     assert_eq!(total(&index, "sends"), 0);
 }
 
+#[test]
+fn an_index_path_that_is_not_a_file_names_history() {
+    let dir = TempDir::new();
+    std::fs::create_dir_all(dir.0.join(INDEX_FILE)).unwrap();
+    let error = format!("{:#}", Index::open(&dir.0).err().unwrap());
+    assert!(error.contains("history tool index"), "{error}");
+}
+
 #[cfg(unix)]
 #[test]
 fn index_file_is_private() {

@@ -7,6 +7,7 @@ use std::fs::File;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::scan::{Conv, SendFacts};
@@ -118,7 +119,7 @@ impl Index {
     /// when it does not exist. The folder must exist.
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Index> {
         let path = dir.join(INDEX_FILE);
-        cpa_core::private_fs::secure_file(&path)?;
+        cpa_core::private_fs::secure_file(&path).context("Could not create the private history tool index file")?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
