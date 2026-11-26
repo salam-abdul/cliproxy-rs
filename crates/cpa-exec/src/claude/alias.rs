@@ -20,6 +20,21 @@ fn words() -> &'static [&'static str] {
     WORDS.get_or_init(|| include_str!("bip39_words.txt").split_whitespace().collect())
 }
 
+fn is_word(word: &str) -> bool {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| words().iter().copied().collect()).contains(word)
+}
+
+/// The client's name inside an alias [`remap`] gave under any secret: the text after
+/// `mcp__<word>_<word>__<word>_` when all three are alias words. `None` for every other
+/// name, including real MCP names such as `mcp__ccd_session__mark_chapter`.
+pub fn alias_original(name: &str) -> Option<&str> {
+    let (server, rest) = name.strip_prefix("mcp__")?.split_once("__")?;
+    let (first, second) = server.split_once('_')?;
+    let (tool, original) = rest.split_once('_')?;
+    (is_word(first) && is_word(second) && is_word(tool) && !original.is_empty()).then_some(original)
+}
+
 /// The alias secret of a request whose caller has no client key.
 pub const DEFAULT_SECRET: &str = "cpa-claude-mcp-default-caller";
 
@@ -671,6 +686,25 @@ pub(crate) fn restore_event_payload(payload: &str, reverse: &Reverse) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alias_original_reads_any_key_and_keeps_real_mcp_names() {
+        let body =
+            r#"{"tools":[{"name":"Read","input_schema":{"type":"object"}},{"name":"my tool!","input_schema":{}}]}"#;
+        for key in ["k1", "some-home-user-key"] {
+            let (out, _) = remap(body, key);
+            assert_eq!(alias_original(&rawjson::string(&out, "tools.0.name")), Some("Read"));
+            assert_eq!(alias_original(&rawjson::string(&out, "tools.1.name")), Some("my_tool"));
+        }
+        for name in [
+            "mcp__ccd_session__mark_chapter",
+            "Read",
+            "mcp__abandon_ability__",
+            "mcp__abandon__able_x",
+        ] {
+            assert_eq!(alias_original(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn alias_prefix_matches_remap() {
