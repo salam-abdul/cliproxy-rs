@@ -366,3 +366,69 @@ fn writer_rotation_indexes_the_finished_file() {
     writer.indexer().sync();
     assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
 }
+
+#[test]
+fn files_the_size_cap_removed_keep_their_facts() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    use sha2::{Digest, Sha256};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:00:00Z");
+    let writer = Writer::with_limits(clock.limits());
+    let cfg = crate::testing::config(&format!(
+        "observability: {{history: {{enable: true, dir: '{}', max-total-size-mb: 1}}}}",
+        dir.0.display()
+    ));
+    let send = |row: Row| {
+        let mut pending = http(
+            Row {
+                request_body: None,
+                response_body: None,
+                ..row.clone()
+            },
+            writer.budget(),
+        );
+        let bodies = http_bodies(&mut pending);
+        bodies
+            .request
+            .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+        if let Some(response) = row.response_body.as_deref() {
+            bodies.response.push_line(response.as_bytes());
+        }
+        writer.submit(&cfg, pending);
+        writer.flush();
+        writer.indexer().sync();
+    };
+    send(claude_row("a", "s1", 1, "Read", "toolu_a0"));
+    let capped = files(&dir.0);
+    assert_eq!(capped.len(), 1);
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+
+    // A second file of 3 MB of hex, which compresses to about half: past the 1 MiB cap
+    // on its own, so the rotation that finishes it removes both files.
+    clock.set("2026-11-09T08:01:00Z");
+    let mut filler = String::new();
+    let mut block = Sha256::digest(b"synthetic filler");
+    while filler.len() < 3 << 20 {
+        block = Sha256::digest(block);
+        filler.extend(block.iter().map(|b| format!("{b:02x}")));
+    }
+    send(Row {
+        provider: Some("codex".into()),
+        request_body: Some(filler),
+        response_body: None,
+        ..row("big")
+    });
+    assert!(!capped[0].exists(), "the cap did not remove the oldest file");
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+
+    // A file removed by hand loses its facts at the next pass.
+    clock.set("2026-11-09T08:02:00Z");
+    send(claude_row("b", "s2", 2, "Bash", "toolu_b0"));
+    let by_hand = files(&dir.0);
+    assert_eq!(by_hand.len(), 1);
+    assert_eq!(indexed_calls(&dir.0).len(), 2);
+    std::fs::remove_file(&by_hand[0]).unwrap();
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+}
