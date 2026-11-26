@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::dir::HistoryDir;
 use super::file::{read_keys, rewrite_without};
 use super::row::Row;
+use super::tools::store::{Index, open_existing, rel_path};
 
 /// Which rows to delete: every given condition must hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -69,6 +70,13 @@ pub struct Report {
     /// A tombstone was left, so a running server drops matching rows it has not
     /// written yet.
     pub pending_for_writer: bool,
+    /// History files whose facts the tool index still holds because it could not be
+    /// updated: a running server indexes a rewritten one again at its next pass and
+    /// drops a removed one's at the second pass that finds it missing.
+    pub index_files_kept: usize,
+    /// The tool index may still hold facts kept from files the size cap removed, which
+    /// stay up to 31 days after each removal.
+    pub capped_facts_kept: bool,
 }
 
 impl std::fmt::Display for Report {
@@ -80,6 +88,19 @@ impl std::fmt::Display for Report {
         )?;
         if self.pending_for_writer {
             write!(f, "; a running server drops matching rows it has not written yet")?;
+        }
+        if self.index_files_kept > 0 {
+            write!(
+                f,
+                "; {} history file(s) could not be removed from the tool index: a rewritten file is indexed again at the next index pass, and a removed file's facts go at the second index pass that finds it missing",
+                self.index_files_kept
+            )?;
+        }
+        if self.capped_facts_kept {
+            write!(
+                f,
+                "; the tool index could not be updated, so facts kept from files the size cap removed stay up to 31 days after each removal"
+            )?;
         }
         Ok(())
     }
@@ -127,6 +148,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
         history.write_tombstone(selector, cutoff)?;
         report.pending_for_writer = true;
     }
+    let mut tools = Tools::Unopened;
     for file in history.files()? {
         // A row lands in the partition of the file's first row, never an earlier one.
         if let (Some(from), Some(date)) = (selector.from, partition_date(&file.partition))
@@ -155,11 +177,63 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
                 report.bytes_freed += file.len.saturating_sub(std::fs::metadata(&file.path)?.len());
             }
         }
+        // The tool index may hold facts from the deleted rows. A server indexing this
+        // file waits for this, or finds the file changed and does not commit it.
+        if !dry_run && !tools.forget(dir, &file.path) {
+            report.index_files_kept += 1;
+        }
     }
     if !dry_run {
         history.remove_empty_partitions();
+        // Facts kept from files the size cap removed may hold rows this delete covers.
+        report.capped_facts_kept = !tools.forget_capped(dir);
     }
     Ok(report)
+}
+
+/// The tool index for one delete: opened at most once, at the first file that needs it.
+enum Tools {
+    Unopened,
+    Absent,
+    Open(Index),
+    Failed,
+}
+
+impl Tools {
+    fn index(&mut self, dir: &Path) -> Result<Option<&mut Index>, ()> {
+        if matches!(self, Tools::Unopened) {
+            *self = match open_existing(dir) {
+                Ok(Some(index)) => Tools::Open(index),
+                Ok(None) => Tools::Absent,
+                Err(_) => Tools::Failed,
+            };
+        }
+        match self {
+            Tools::Open(index) => Ok(Some(index)),
+            Tools::Unopened | Tools::Absent => Ok(None),
+            Tools::Failed => Err(()),
+        }
+    }
+
+    /// Drops the facts of the history file `file`; false when the index still holds them.
+    fn forget(&mut self, dir: &Path, file: &Path) -> bool {
+        match self.index(dir) {
+            Ok(None) => true,
+            Ok(Some(index)) => rel_path(dir, file).is_some_and(|rel| index.forget(&rel).is_ok()),
+            Err(()) => false,
+        }
+    }
+
+    /// Drops the facts of every file the size cap removed; false when some may remain.
+    fn forget_capped(&mut self, dir: &Path) -> bool {
+        match self.index(dir) {
+            Ok(None) => true,
+            Ok(Some(index)) => index
+                .capped_files()
+                .is_ok_and(|capped| capped.iter().filter(|rel| index.forget(rel).is_err()).count() == 0),
+            Err(()) => false,
+        }
+    }
 }
 
 fn partition_date(name: &str) -> Option<NaiveDate> {
@@ -167,13 +241,13 @@ fn partition_date(name: &str) -> Option<NaiveDate> {
 }
 
 /// Removes the rows `stones` match from the finished file at `path`, reading only the
-/// match columns unless a row matches.
-pub(crate) fn apply_tombstones(path: &Path, stones: &[&Tombstone]) -> io::Result<()> {
+/// match columns unless a row matches. Returns whether the file was rewritten or removed.
+pub(crate) fn apply_tombstones(path: &Path, stones: &[&Tombstone]) -> io::Result<bool> {
     let matches = |row: &Row| stones.iter().any(|stone| stone.matches(row));
     if read_keys(path)?.iter().any(matches) {
-        rewrite_without(path, matches)?;
+        return Ok(rewrite_without(path, matches)? > 0);
     }
-    Ok(())
+    Ok(false)
 }
 
 const TOMBSTONES: &str = ".deletes";

@@ -47,6 +47,19 @@ pub fn restrict(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Makes `path` a private regular file: creates it `0o600` when missing, refuses a
+/// path that is anything else (a symlink included), and restricts an existing file.
+/// Creating with `O_EXCL` never follows a symlink.
+pub fn secure_file(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => {}
+        Ok(_) => return Err(io::Error::other("path is not a regular file")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => drop(create_new(path)?),
+        Err(e) => return Err(e),
+    }
+    restrict(path)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -63,6 +76,35 @@ mod tests {
         }
         let error = super::create_new(&path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn secure_file_makes_a_private_regular_file_and_refuses_anything_else() {
+        let dir = std::env::temp_dir().join(format!("cpa-secure-file-{}", std::process::id()));
+        super::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        let _ = std::fs::remove_file(&path);
+        super::secure_file(&path).unwrap();
+        std::fs::write(&path, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        super::secure_file(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"x", "an existing file is kept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            let link = dir.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(dir.join("missing"), &link).unwrap();
+            assert!(super::secure_file(&link).is_err());
+            assert!(!dir.join("missing").exists(), "a symlink was followed");
+        }
+        assert!(super::secure_file(&dir).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

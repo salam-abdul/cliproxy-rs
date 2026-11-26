@@ -1,6 +1,7 @@
 use super::*;
 use crate::request_logging::history::row::body_columns;
 use crate::request_logging::history::test_support::TempDir;
+use crate::request_logging::history::tools::scan::SCAN_COLUMNS;
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)
@@ -196,4 +197,40 @@ fn write_dir_target(dir: &Path) -> PathBuf {
     let target = dir.join("date=2026-11-09").join("080000-1-0000.parquet");
     std::fs::create_dir_all(target.join("occupied")).unwrap();
     target
+}
+
+#[test]
+fn for_each_group_reads_projected_groups() {
+    let dir = TempDir::new();
+    let mut file = ParquetFile::create(&dir.0, at("2026-11-09T08:15:30Z"), 0).unwrap();
+    let bodies = ["{\"n\":1}", "{\"n\":2}", "{\"n\":3}"];
+    for (i, body) in bodies.iter().enumerate() {
+        let mut row = full_row();
+        row.exchange_id = format!("ex-{i}");
+        row.request_body = Some((*body).into());
+        row.response_body_raw = Some(vec![1, 2]);
+        file.write_group(vec![row]).unwrap();
+    }
+    let path = file.finish().unwrap();
+    let handle = File::open(&path).unwrap();
+    let mut groups = Vec::new();
+    for_each_group(&handle, SCAN_COLUMNS, |rows| {
+        groups.push(rows);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(groups.len(), 3);
+    for (group, body) in groups.iter().zip(bodies) {
+        assert_eq!(group.len(), 1);
+        let row = &group[0];
+        assert_eq!(row.request_body.as_deref(), Some(body));
+        assert_eq!(row.started_at_us, full_row().started_at_us);
+        assert_eq!(row.provider.as_deref(), Some("claude"));
+        assert!(row.response_truncated);
+        assert_eq!(row.account, None);
+        assert_eq!(row.response_body_raw, None);
+        assert_eq!(row.exchange_id, "");
+    }
+    let error = for_each_group(&handle, &["request_body", "no_such_column"], |_| Ok(())).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }

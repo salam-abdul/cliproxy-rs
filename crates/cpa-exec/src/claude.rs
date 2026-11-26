@@ -71,6 +71,7 @@ use rules::{
 use settings::Settings;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+pub use alias::{DEFAULT_SECRET as DEFAULT_ALIAS_SECRET, alias_parts, alias_prefix};
 /// The message of the executor's own 404 for a thread continuation whose state is gone.
 pub use thread::NOT_FOUND as THREAD_NOT_FOUND;
 /// The `Anthropic-Version` the executor sends when the caller sent none.

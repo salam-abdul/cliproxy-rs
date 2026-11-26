@@ -2,7 +2,7 @@ mod cycles;
 mod panels;
 mod quota;
 pub(crate) mod sends;
-mod speed;
+pub(crate) mod speed;
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -42,7 +42,7 @@ impl Range {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Day => "24h",
             Self::Week => "7d",
@@ -50,7 +50,7 @@ impl Range {
         }
     }
 
-    fn duration(self) -> i64 {
+    pub(crate) fn duration(self) -> i64 {
         match self {
             Self::Day => DAY_MS,
             Self::Week => 7 * DAY_MS,
@@ -141,7 +141,7 @@ struct Ending {
 
 impl Activity {
     pub(crate) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
-        secure_file(&path)?;
+        cpa_core::private_fs::secure_file(&path).context("Could not create the private activity store file")?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -476,31 +476,6 @@ fn epoch_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn secure_file(path: &Path) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => anyhow::ensure!(meta.file_type().is_file(), "History path is not a regular file"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-            options
-                .open(path)
-                .with_context(|| "Could not create private history file")?;
-        }
-        Err(e) => return Err(e.into()),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
 fn write_request(conn: &Connection, row: &RequestRow) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO requests VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -739,6 +714,18 @@ mod tests {
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_path_that_is_not_a_file_names_the_activity_store() {
+        let dir = std::env::temp_dir().join(format!("cpa-activity-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = format!(
+            "{:#}",
+            Activity::start(dir.clone(), Arc::new(AtomicU64::new(0))).err().unwrap()
+        );
+        assert!(error.contains("activity store"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn inference(id: &str) -> Value {

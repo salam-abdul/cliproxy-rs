@@ -35,3 +35,14 @@ fn a_relative_history_dir_keeps_history_off() {
     assert!(settings("observability: {history: {enable: true, dir: history}}").is_none());
     assert!(configured_dir(&crate::testing::config("observability: {history: {dir: history}}")).is_none());
 }
+
+#[test]
+fn settings_carry_alias_prefixes() {
+    let on = settings("api-keys: [\" k1 \", k2]\nobservability: {history: {enable: true, dir: /tmp/h}}").unwrap();
+    let mut expected: Vec<String> = ["k1", "k2", cpa_exec::claude::DEFAULT_ALIAS_SECRET]
+        .into_iter()
+        .map(cpa_exec::claude::alias_prefix)
+        .collect();
+    expected.sort();
+    assert_eq!(on.alias_prefixes.to_vec(), expected);
+}

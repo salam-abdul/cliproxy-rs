@@ -35,24 +35,33 @@ impl<'a> HistoryDir<'a> {
     /// The finished history files, oldest first by partition date and name.
     pub(crate) fn files(self) -> io::Result<Vec<HistoryFile>> {
         let mut out = Vec::new();
+        // Readers list without the folder lock, so a cap, delete or empty-partition
+        // removal can take a partition or file away mid-listing: it is skipped.
         for partition in std::fs::read_dir(self.0)? {
-            let partition = partition?;
+            let Some(partition) = present(partition)? else { continue };
             let partition_name = partition.file_name().to_string_lossy().into_owned();
-            if !partition_name.starts_with("date=") || !partition.file_type()?.is_dir() {
+            if !partition_name.starts_with("date=") || !present(partition.file_type())?.is_some_and(|t| t.is_dir()) {
                 continue;
             }
-            for file in std::fs::read_dir(partition.path())? {
-                let file = file?;
+            before_read(&partition.path());
+            let Some(files) = present(std::fs::read_dir(partition.path()))? else {
+                continue;
+            };
+            for file in files {
+                let Some(file) = present(file)? else { continue };
                 let name = file.file_name().to_string_lossy().into_owned();
                 if !is_history_file(&name) {
                     continue;
                 }
-                let len = file.metadata()?.len();
+                before_read(&file.path());
+                let Some(meta) = present(file.metadata())? else {
+                    continue;
+                };
                 out.push(HistoryFile {
                     partition: partition_name.clone(),
                     name,
                     path: file.path(),
-                    len,
+                    len: meta.len(),
                 });
             }
         }
@@ -72,26 +81,33 @@ impl<'a> HistoryDir<'a> {
     }
 
     /// [`Self::enforce_cap`] under the lock; skipped this round while a delete holds it.
-    pub(crate) fn apply_cap(self, cap: u64) {
+    /// Returns the files it removed.
+    pub(crate) fn apply_cap(self, cap: u64) -> Vec<PathBuf> {
         match self.lock() {
-            Ok(Some(_lock)) => {
-                if let Err(error) = self.enforce_cap(cap) {
+            Ok(Some(_lock)) => match self.enforce_cap(cap) {
+                Ok((_, removed)) => removed,
+                Err(error) => {
                     tracing::warn!("history: cannot apply max-total-size-mb: {error}");
+                    Vec::new()
                 }
-            }
+            },
             // Locked by a delete, or no folder yet: nothing to remove.
-            Ok(None) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!("history: cannot lock {}: {error}", self.0.display()),
+            Ok(None) => Vec::new(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                tracing::warn!("history: cannot lock {}: {error}", self.0.display());
+                Vec::new()
+            }
         }
     }
 
     /// Deletes the oldest history files, by partition date then name, until the files
-    /// total at most `cap` bytes. Returns the bytes freed.
-    pub(crate) fn enforce_cap(self, cap: u64) -> io::Result<u64> {
+    /// total at most `cap` bytes. Returns the bytes freed and the files removed.
+    pub(crate) fn enforce_cap(self, cap: u64) -> io::Result<(u64, Vec<PathBuf>)> {
         let files = self.files()?;
         let mut total: u64 = files.iter().map(|f| f.len).sum();
         let mut freed = 0;
+        let mut removed = Vec::new();
         for file in files {
             if total <= cap {
                 break;
@@ -99,10 +115,11 @@ impl<'a> HistoryDir<'a> {
             if std::fs::remove_file(&file.path).is_ok() {
                 total -= file.len;
                 freed += file.len;
+                removed.push(file.path);
             }
         }
         self.remove_empty_partitions();
-        Ok(freed)
+        Ok((freed, removed))
     }
 
     /// Removes in-progress files no writer holds, except `open`, this writer's own:
@@ -158,6 +175,38 @@ fn is_stem(stem: &str) -> bool {
             .iter()
             .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
         && parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `None` for a read of something that is gone; every other error stays.
+fn present<T>(read: io::Result<T>) -> io::Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+type ReadHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs before `files` reads a partition or a file, so a test can remove it then.
+    static BEFORE_READ: std::cell::RefCell<Option<ReadHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_read(hook: Option<ReadHook>) {
+    BEFORE_READ.with(|slot| *slot.borrow_mut() = hook);
+}
+
+fn before_read(_path: &Path) {
+    #[cfg(test)]
+    BEFORE_READ.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(_path);
+        }
+    });
 }
 
 #[cfg(test)]

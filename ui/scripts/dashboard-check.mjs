@@ -15,6 +15,7 @@ let requireKey = false, quotaStarted, expired = false, availability = "included"
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
+let toolsChecks = 0, toolsConflict = false, toolsFailure = false, toolsPending = [];
 const statusCalls = [], deleteBodies = [], apiCalls = [];
 let config = {};
 let resetReads = 0;
@@ -97,6 +98,19 @@ await page.route("**/*", async route => {
       parts:[{provider:"codex",source:"proxy",requests:90,server:12.5,earlier:150,first:150,generation:600,total:912.5},
         {provider:"claude",source:"native",requests:2,server:50,earlier:400,first:50,generation:550,total:1050}],
       slow:[{slice:"model",value:"b",provider:"codex",source:"proxy",ttftKind:"byte",requests:30,p95:400,baseline:100}]});
+  }
+  if (path === "/v8/management/observability/tools") {
+    toolsChecks++;
+    if (toolsConflict) return route.fulfill({status:409,json:{error:"Body history is off"}});
+    if (toolsFailure) return route.fulfill({status:500,json:{error:"Tools could not be read"}});
+    const range = new URL(request.url()).searchParams.get("range") || "24h";
+    const measures = {used:0,weight:2048,calls:0,callsPerConversation:0,results:0,errors:0,failureRate:null,resultMean:null,resultP95:null,resultTotal:0};
+    const pendingFiles = toolsPending.length ? toolsPending.shift() : 0;
+    return send({range,covered:{fromMs:Date.UTC(2030,0,1),toMs:Date.UTC(2030,0,2)},conversations:10,sends:40,skippedFormat:3,skippedCut:2,unreadableFiles:1,pendingFiles,
+      tools:[{name:"Read",server:null,carried:10,carriedShare:1,...measures,used:9,calls:30,callsPerConversation:3,results:30,errors:1,failureRate:1/30,resultMean:3000,resultP95:150000,resultTotal:90000,labels:["heavy","bloating"]},
+        {name:"mcp__docs__search",server:"docs",carried:4,carriedShare:0.4,...measures,labels:["dead"]}],
+      servers:[{name:"docs",tools:1,carried:4,calls:0,errors:0}],
+      skills:[{name:"pdf",calls:2,conversations:1,errors:0,loadedMean:4096,loadedP95:5000}]});
   }
   if (path === "/v8/management/config") return requireKey && !request.headers().authorization ? route.fulfill({status:401,json:{error:"management key required"}}) : send(config);
   if (path === "/v8/management/config/api-keys/openai-compatibility") {
@@ -600,6 +614,76 @@ try {
   await page.getByText("Every model is available.",{exact:true}).waitFor();
   assert.equal(await old.getAttribute("aria-checked"), "true", "removing the wildcard switches its matches on");
   assert.equal(await old.isDisabled(), false);
+  await page.goto("http://dashboard.test/management.html#tools");
+  await page.locator('.section-tabs a[aria-current]').filter({hasText:"Tools"}).waitFor();
+  const toolsTable = page.getByRole("table",{name:"Tools",exact:true});
+  const dead = toolsTable.getByRole("row",{name:/^search/});
+  await dead.getByText("Dead weight",{exact:true}).waitFor();
+  assert.equal(await dead.getByText("40%",{exact:true}).count(),1,"carried share reads as a percent");
+  assert.deepEqual(await toolsTable.locator("tbody th[colspan]").allInnerTexts(),["Built in","docs · 1 tool · carried by 4 · 0 calls · 0 errors"],"built-in tools first, then each MCP server");
+  const read = toolsTable.getByRole("row",{name:/^Read/});
+  assert.deepEqual(await read.locator(".chip").allInnerTexts(),["Heavy","Bloating"]);
+  assert.equal(await read.getByText("146.5 KB",{exact:true}).count(),1,"p95 result size in KB");
+  await page.getByRole("table",{name:"Skills",exact:true}).getByRole("row",{name:/^pdf/}).getByText("4.0 KB",{exact:true}).waitFor();
+  await page.getByText("The server cannot tell whether a tool's result helped.",{exact:true}).waitFor();
+  await page.getByText(/40 sends · 10 conversations with tools/).waitFor();
+  await page.getByText(/3 skipped as not Claude Messages · 2 with a cut body · 1 unreadable history file \(all dates\)/).waitFor();
+  assert.equal(await page.getByText(/Indexing history/).count(),0,"nothing pending shows no indexing line");
+  const toolsRange = toolsChecks;
+  await page.getByRole("group",{name:"History range"}).getByRole("button",{name:"7 days",exact:true}).click();
+  await dead.getByText("Dead weight",{exact:true}).waitFor();
+  assert.equal(toolsChecks - toolsRange,1,"range selection loads tools once");
+  await page.clock.fastForward(600_000);
+  assert.equal(toolsChecks - toolsRange,1,"tools do not poll");
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false,"the tools tables scroll inside their cards");
+  await page.setViewportSize({width:1280,height:720});
+  // While files wait for the indexer, the page says how many and reloads every 5 s.
+  toolsPending = [2, 1];
+  await page.reload();
+  await page.getByText("Indexing history: 2 files left.",{exact:true}).waitFor();
+  const pendingStart = toolsChecks;
+  await page.clock.fastForward(5_000);
+  await page.getByText("Indexing history: 1 file left.",{exact:true}).waitFor();
+  await page.clock.fastForward(5_000);
+  await page.getByText(/Indexing history/).waitFor({state:"hidden"});
+  assert.equal(toolsChecks - pendingStart,2,"pending files reload every 5 seconds");
+  await page.clock.fastForward(60_000);
+  assert.equal(toolsChecks - pendingStart,2,"reloads stop once nothing is pending");
+  // Reloads go on while the count falls at least once in 12 reloads, and stop after
+  // 12 in a row that do not fall; the count stays on the page. The page's real 5 s
+  // timer runs on the installed fake clock, so this takes no wall time.
+  toolsPending = [5, ...Array(11).fill(5), 4, ...Array(12).fill(4), ...Array(5).fill(4)];
+  await page.reload();
+  await page.getByText("Indexing history: 5 files left.",{exact:true}).waitFor();
+  const stalledStart = toolsChecks;
+  const reloadOnce = async () => {
+    const read = page.waitForResponse(r => new URL(r.url()).pathname === "/v8/management/observability/tools");
+    await page.clock.fastForward(5_000);
+    await read;
+    await settle();
+  };
+  for (let n = 0; n < 12; n++) await reloadOnce();
+  await page.getByText("Indexing history: 4 files left.",{exact:true}).waitFor();
+  assert.equal(toolsChecks - stalledStart,12,"11 reloads without a fall do not stop the reloads");
+  for (let n = 0; n < 12; n++) await reloadOnce();
+  assert.equal(toolsChecks - stalledStart,24);
+  await page.clock.fastForward(5_000);
+  await settle();
+  await page.clock.fastForward(60_000);
+  await settle();
+  assert.equal(toolsChecks - stalledStart,24,"12 reloads in a row without a fall stop the reloads");
+  await page.getByText("Indexing history: 4 files left.",{exact:true}).waitFor();
+  toolsPending = [];
+  toolsConflict = true;
+  await page.reload();
+  await page.getByText("Body history is off. Turn on observability.history to see tools.",{exact:true}).waitFor();
+  assert.equal(await page.getByRole("table").count(),0,"history off shows no tables");
+  toolsConflict = false;
+  toolsFailure = true;
+  await page.reload();
+  await page.getByText("Tools could not be loaded.",{exact:true}).waitFor();
+  toolsFailure = false;
   config = {};
   await page.goto("http://dashboard.test/management.html#logs");
   const status = page.getByRole("group",{name:"Status"}), lines = page.locator(".log > div");
@@ -642,5 +726,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),false);
   assert.deepEqual(errors, []);
-  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, model switches, mobile and four destinations");
+  console.log("PASS accounts, history, truthful status, distinct pages, draft guard, outcomes, manual quota checks, policy errors, log filters and copy, error log viewer, server clock skew, account batches, model import, model switches, tools and skills, mobile and four destinations");
 } catch(error) { console.log(await page.locator("body").innerText(), errors); await page.screenshot({path:join(tmpdir(),"cliproxy-dashboard-failure.png"),fullPage:true}); throw error; } finally { await browser.close(); }

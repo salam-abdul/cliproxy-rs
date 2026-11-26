@@ -1461,6 +1461,55 @@ async fn speed_route_reads_the_running_store() {
     server.abort();
 }
 
+/// `GET /observability/tools` answers 409 while body history is off, refuses a bad range
+/// or provider, and answers the empty figures while no index file exists yet.
+#[tokio::test]
+async fn tools_route_needs_history_and_answers_empty_before_any_index() {
+    let get = |base: String, query: &'static str| async move {
+        wreq::Client::new()
+            .get(format!("{base}/v8/management/observability/tools{query}"))
+            .bearer_auth("fake-management-only")
+            .send()
+            .await
+            .unwrap()
+    };
+    let off = Fixture::new("tools-route-off");
+    let (base, server) = off.server().await;
+    let response = get(base.clone(), "").await;
+    assert_eq!(response.status().as_u16(), 409);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "Body history is off");
+    server.abort();
+
+    let on = Fixture::from_yaml("tools-route-on", |auth, hash| {
+        // A history folder that does not exist yet: nothing was recorded or indexed.
+        let history = auth.parent().unwrap().join("history");
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\nobservability:\n  history:\n    enable: true\n    dir: {}\n",
+            auth.display(),
+            history.display()
+        )
+    });
+    let (base, server) = on.server().await;
+    for query in ["?range=1h", "?provider="] {
+        let response = get(base.clone(), query).await;
+        assert_eq!(response.status().as_u16(), 400, "{query}");
+    }
+    let refused: Value = get(base.clone(), "?range=1h").await.json().await.unwrap();
+    assert_eq!(refused["error"], "Range must be 24h, 7d, or 30d");
+    let response = get(base.clone(), "?range=7d&provider=claude").await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "range": "7d", "covered": null, "conversations": 0, "sends": 0, "skippedFormat": 0,
+            "skippedCut": 0, "unreadableFiles": 0, "pendingFiles": 0, "tools": [], "servers": [], "skills": []
+        })
+    );
+    server.abort();
+}
+
 /// api-call HEAD: Go's transport never asks for gzip on HEAD, so the upstream sees no
 /// Accept-Encoding and a gzip Content-Encoding on the answer is relayed untouched.
 #[tokio::test]

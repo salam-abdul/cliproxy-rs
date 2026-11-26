@@ -338,3 +338,193 @@ fn a_body_cut_inside_a_character_stays_text() {
         Some((BODY_CAP - 1) as usize)
     );
 }
+
+#[test]
+fn writer_rotation_indexes_the_finished_file() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:15:30Z");
+    let writer = Writer::with_limits(clock.limits());
+    let row = claude_row("a", "s1", 1, "Read", "toolu_a0");
+    let mut pending = http(
+        Row {
+            request_body: None,
+            response_body: None,
+            ..row.clone()
+        },
+        writer.budget(),
+    );
+    let bodies = http_bodies(&mut pending);
+    bodies
+        .request
+        .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+    bodies
+        .response
+        .push_line(row.response_body.as_deref().unwrap().as_bytes());
+    writer.submit(&on(&dir.0), pending);
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+}
+
+#[test]
+fn files_the_size_cap_removed_keep_their_facts() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    use sha2::{Digest, Sha256};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:00:00Z");
+    let writer = Writer::with_limits(clock.limits());
+    let cfg = crate::testing::config(&format!(
+        "observability: {{history: {{enable: true, dir: '{}', max-total-size-mb: 1}}}}",
+        dir.0.display()
+    ));
+    let send = |row: Row| {
+        let mut pending = http(
+            Row {
+                request_body: None,
+                response_body: None,
+                ..row.clone()
+            },
+            writer.budget(),
+        );
+        let bodies = http_bodies(&mut pending);
+        bodies
+            .request
+            .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+        if let Some(response) = row.response_body.as_deref() {
+            bodies.response.push_line(response.as_bytes());
+        }
+        writer.submit(&cfg, pending);
+        writer.flush();
+        writer.indexer().sync();
+    };
+    send(claude_row("a", "s1", 1, "Read", "toolu_a0"));
+    let capped = files(&dir.0);
+    assert_eq!(capped.len(), 1);
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+
+    // A second file of 3 MB of hex, which compresses to about half: past the 1 MiB cap
+    // on its own, so the rotation that finishes it removes both files.
+    clock.set("2026-11-09T08:01:00Z");
+    let mut filler = String::new();
+    let mut block = Sha256::digest(b"synthetic filler");
+    while filler.len() < 3 << 20 {
+        block = Sha256::digest(block);
+        filler.extend(block.iter().map(|b| format!("{b:02x}")));
+    }
+    send(Row {
+        provider: Some("codex".into()),
+        request_body: Some(filler),
+        response_body: None,
+        ..row("big")
+    });
+    assert!(!capped[0].exists(), "the cap did not remove the oldest file");
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+
+    // A file removed by hand keeps its facts for one pass, in case its cap removal is
+    // still on its way, and loses them at the second.
+    clock.set("2026-11-09T08:02:00Z");
+    send(claude_row("b", "s2", 2, "Bash", "toolu_b0"));
+    let by_hand = files(&dir.0);
+    assert_eq!(by_hand.len(), 1);
+    assert_eq!(indexed_calls(&dir.0).len(), 2);
+    std::fs::remove_file(&by_hand[0]).unwrap();
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0).len(), 2);
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+}
+
+#[test]
+fn the_final_rotation_queues_index_work_without_starting_a_pass() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    use sha2::{Digest, Sha256};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:00:00Z");
+    let writer = Writer::with_limits(clock.limits());
+    let cfg = crate::testing::config(&format!(
+        "observability: {{history: {{enable: true, dir: '{}', max-total-size-mb: 1}}}}",
+        dir.0.display()
+    ));
+    let submit = |row: Row| {
+        let mut pending = http(
+            Row {
+                request_body: None,
+                response_body: None,
+                ..row.clone()
+            },
+            writer.budget(),
+        );
+        let bodies = http_bodies(&mut pending);
+        bodies
+            .request
+            .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+        if let Some(response) = row.response_body.as_deref() {
+            bodies.response.push_line(response.as_bytes());
+        }
+        writer.submit(&cfg, pending);
+    };
+    submit(claude_row("a", "s1", 1, "Read", "toolu_a0"));
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0).len(), 1);
+    // Rows the shutdown's final rotation writes: past the cap, so it removes both files
+    // and hands the removals to the indexer.
+    clock.set("2026-11-09T08:01:00Z");
+    let mut filler = String::new();
+    let mut block = Sha256::digest(b"synthetic filler");
+    while filler.len() < 3 << 20 {
+        block = Sha256::digest(block);
+        filler.extend(block.iter().map(|b| format!("{b:02x}")));
+    }
+    submit(Row {
+        provider: Some("codex".into()),
+        request_body: Some(filler),
+        response_body: None,
+        ..row("big")
+    });
+    writer.sync();
+    writer.shutdown(Duration::from_secs(10));
+    // The cap removed both files; neither removal was applied.
+    assert_eq!(files(&dir.0).len(), 0);
+    assert_eq!(writer.indexer().queued(), 2, "the final rotation started an index pass");
+}
+
+#[test]
+fn a_slow_writer_shutdown_leaves_the_indexer_time_to_stop() {
+    use crate::request_logging::history::test_support::claude_row;
+    let dir = TempDir::new();
+    let writer = Writer::with_limits(Limits::default());
+    let cfg = on(&dir.0);
+    writer.submit(
+        &cfg,
+        http(claude_row("a", "s1", 1, "Read", "toolu_a0"), writer.budget()),
+    );
+    writer.flush();
+    writer.indexer().sync();
+    // The indexer holds a file between its read and its commit until asked to stop.
+    let (reached, release) = writer.indexer().pause_before_commit();
+    writer.submit(
+        &cfg,
+        http(claude_row("b", "s2", 2, "Bash", "toolu_b0"), writer.budget()),
+    );
+    writer.flush();
+    reached.recv_timeout(Duration::from_secs(10)).unwrap();
+    let indexer = Arc::clone(writer.indexer());
+    let releaser = std::thread::spawn(move || {
+        while !indexer.stopping() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(release);
+    });
+    // The worker is busy past the whole shutdown budget.
+    let hold = writer.pause();
+    let logs = Logs::capture();
+    writer.shutdown(Duration::from_millis(200));
+    let text = logs.text();
+    drop(hold);
+    releaser.join().unwrap();
+    assert!(!text.contains("the tool indexer did not stop in time"), "{text}");
+}
