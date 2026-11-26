@@ -1,0 +1,115 @@
+name: Binaries
+
+# Publishes release builds of cliproxy for Linux (x86_64, arm64) and macOS (arm64) to the
+# `latest` prerelease after CI passes on a push to main, or by hand from main. Each target
+# builds on its own native runner; the publish job then moves the `latest` tag and replaces
+# the release's files.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The commit CI tested, or the dispatched one.
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    # A newer publish cancels an older one. The group is on the job, not the workflow,
+    # so a skipped run (CI failed) cancels nothing.
+    concurrency:
+      group: binaries-build-${{ matrix.target }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - uses: ./.github/actions/rust
+      - name: Build
+        # The rolling release keeps no per-commit files, so `cliproxy --version` and the
+        # startup banner are how a downloaded binary names its commit.
+        run: |
+          export CPA_COMMIT="$SOURCE_SHA" CPA_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo build --release --locked -p cliproxy
+          target/release/cliproxy --version
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          # Keeps macOS tar from adding ._cliproxy metadata entries.
+          COPYFILE_DISABLE: "1"
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          archive="cliproxy-$TARGET.tar.gz"
+          tar -czf "$RUNNER_TEMP/dist/$archive" -C target/release cliproxy
+          cd "$RUNNER_TEMP/dist"
+          shasum -a 256 "$archive" > "$archive.sha256"
+          cat "$archive.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish latest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: binaries-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/dist
+          pattern: binary-*
+          merge-multiple: true
+      - name: Move the latest release
+        working-directory: ${{ runner.temp }}/dist
+        # `latest` moves only to main's current tip, so a late run for an older commit
+        # does not move it backwards. The files go up before the tag and notes move, so the
+        # tag never names a commit whose files failed to upload.
+        # --clobber replaces files of the same name, one target's archive and checksum each.
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$tip" != "$SOURCE_SHA" ]; then
+            echo "main is at $tip, not $SOURCE_SHA; leaving latest alone"
+            exit 0
+          fi
+          notes="Built from $SOURCE_SHA on main, after CI passed or by a manual run of the workflow."
+          if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload latest --repo "$GITHUB_REPOSITORY" --clobber ./*
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/latest" -f sha="$SOURCE_SHA" -F force=true > /dev/null
+            gh release edit latest --repo "$GITHUB_REPOSITORY" --notes "$notes"
+          else
+            gh release create latest --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --target "$SOURCE_SHA" --title "latest" --notes "$notes" ./*
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,6 +1,6 @@
 # cliproxy-rs
 
-A personal Rust fork of [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs), itself based on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Build it from source or run the container image CI publishes to GHCR ([installation](docs/INSTALL.md#container)); this fork publishes no binaries or packages.
+A personal Rust fork of [cliproxy-rs](https://github.com/vayungodara/cliproxy-rs), itself based on [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Build it from source, download the binaries CI publishes to the `latest` prerelease ([installation](docs/INSTALL.md#prebuilt-binaries)), or run the container image CI publishes to GHCR ([installation](docs/INSTALL.md#container)).
 
 ## What it does
 

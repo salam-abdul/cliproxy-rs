@@ -1,6 +1,6 @@
 # Local installation
 
-Build this checkout. Upstream releases do not contain this fork's native routing.
+Build this checkout, or download a [prebuilt binary](#prebuilt-binaries). Upstream releases do not contain this fork's native routing.
 
 ## Prerequisites
 
@@ -36,6 +36,16 @@ Updates are manual. Build and qualify the candidate, then stop the installed ser
 4. Open `http://127.0.0.1:8317/management.html` (with your configured port) and sign in with the management key. With `management.local-dashboard: true` and a loopback `server.host` (`127.0.0.1` or `::1`), the dashboard opens without the key.
 
 Client keys go in client settings; never share either key. For access from another machine, bind to a private interface, require client keys and list trusted proxies explicitly. `--local-model` turns off model catalog downloads.
+
+## Prebuilt binaries
+
+CI publishes release builds to the `latest` prerelease after the tests pass on `main` (`.github/workflows/binaries.yml`), for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and `aarch64-apple-darwin`. You can also run the workflow by hand from `main`, which publishes without waiting for CI. Like the container's `latest` tag, it moves only to a commit that is still the tip of `main`, and its notes name that commit. Each publish replaces the previous files, so keep your own copy for rollback; `cliproxy --version` prints the commit a binary was built from. Each archive holds the `cliproxy` binary and has a `.sha256` file beside it. The Linux builds link glibc and libstdc++ from Ubuntu 24.04 and need those versions or newer. The macOS build is not signed; after downloading it with a browser, run `xattr -d com.apple.quarantine cliproxy`.
+
+```sh
+gh release download latest --repo salam-abdul/cliproxy-rs --pattern 'cliproxy-aarch64-apple-darwin.tar.gz*'
+shasum -a 256 -c cliproxy-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf cliproxy-aarch64-apple-darwin.tar.gz
+```
 
 ## Container
 
