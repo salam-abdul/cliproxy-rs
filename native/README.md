@@ -117,7 +117,7 @@ cargo build --release --locked -p cliproxy
 python3 native/install.py target/release/cliproxy
 ```
 
-The installer prints the pinned binary and its configuration path. Start that binary with the printed `--config` argument and `--local-model`, or use it as your login service's executable. The installer does not change shell or Zed defaults.
+The installer prints the pinned binary and its configuration path. Start that binary with the printed `--config` argument, or use it as your login service's executable. The installer does not change shell or Zed defaults.
 
 Sign into Claude Code normally (Remote Control uses that login), then sign the inference accounts into the proxy:
 
@@ -200,7 +200,7 @@ Updates are manual and pinned. Stop the login service, then run:
 python3 native/install.py target/release/cliproxy --upgrade
 ```
 
-This keeps credentials and settings, migrates the predecessor's SQLite pins and cooldowns to atomic JSON, and prints the new executable. The binary refuses an unmigrated SQLite configuration. It takes the exclusive refresh-owner lock before automatic refresh starts; never run another refresh owner against the same auth directory.
+This keeps credentials and settings, migrates the predecessor's SQLite pins and cooldowns to atomic JSON, and prints the new executable. It does not edit the login service: if the service passes `--local-model`, it serves only the model catalog embedded in the binary, so remove the flag unless the proxy must not download model catalogs. The binary refuses an unmigrated SQLite configuration. It takes the exclusive refresh-owner lock before automatic refresh starts; never run another refresh owner against the same auth directory.
 
 ## Qualification
 

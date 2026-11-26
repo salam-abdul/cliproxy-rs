@@ -56,5 +56,5 @@ if link.exists() or link.is_symlink():
  temp=link.with_name('cliproxy-native.tmp');temp.unlink(missing_ok=True);temp.symlink_to(release/'cliproxy-native');os.replace(temp,link)
 else:link.symlink_to(release/'cliproxy-native')
 print('Pinned Rust installation:',release)
-print('Start:',str(release/'cliproxy'),'--config',str(manager),'--local-model')
+print('Start:',str(release/'cliproxy'),'--config',str(manager))
 print('Credentials and existing affinity preserved; Claude/Zed launcher pointers unchanged.')
