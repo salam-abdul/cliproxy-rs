@@ -240,6 +240,55 @@ sends.filter(pl.col("outcome") == "complete").select("started_at", "model", "req
 
 A file whose rows all match is deleted; a file with some matching rows is rewritten without them. Each delete also leaves a tombstone in `<dir>/.deletes` for a day: a running server drops matching rows that started before the delete and that it had not written yet, including sends still in flight, and rewrites a file that was open during the delete. Rows that start after the delete are kept. The command, size retention and those rewrites share a lock file, `<dir>/.lock`; while another process holds it, the command stops and asks to retry.
 
+### Tool index
+
+While history is on, the server keeps `<history.dir>/tool-index.sqlite` (`0600` on Unix) with the tool, MCP server and skill names and sizes it read from stored bodies. It has no setting. Only Claude Messages sends are read, those with provider `claude` from native routing and the translating proxy; every other send counts as skipped by format. For each history file it holds:
+
+- each send's time, provider and conversation, and whether it was skipped by format or had a cut body (truncated, not text, or not valid JSON or SSE);
+- per conversation, each tool its requests defined and the size in bytes of its largest definition;
+- each tool call, by a hash of its ID, with its tool and, for a `Skill` call, the skill name;
+- each tool result, by the hash of its call ID, with its error flag, its content size and the size of the text blocks that follow it in the same message (the skill text after a `Skill` result).
+
+It holds no prompts, outputs, tool inputs or results: a `Skill` call's `skill` is the one input value read. Tool, server and skill names go only into this file, never into the activity store or the logs.
+
+A request without `thread.previous_message_id` starts or resends a conversation, keyed by a hash of its session and the exact bytes of its first message. A request with one joins the conversation of the indexed send whose response had that message ID; when no such send is indexed, its calls and results count but it adds no conversation. A call or result repeated by a retry, failover or full resend counts once, from its first copy.
+
+A `tools[]` element with a `type` other than `custom` is a server tool and counts under its type. A name `mcp__<server>__<tool>` belongs to MCP server `<server>`. A tool the Claude executor renamed to cloak a request is read back under the client's name when its prefix matches a configured client key or the default caller; an alias from a key no longer configured stays under an unknown MCP server, and a name that had other characters or was cut at 64 bytes comes back altered.
+
+One background thread keeps the index. It runs a pass when the writer finishes a file or runs its periodic cleanup, and when the route is read. A pass indexes every finished file that is new or changed since it was indexed, oldest first, one row group at a time. A file it cannot read counts as unreadable and adds no facts.
+
+| History file | Its facts |
+| --- | --- |
+| Removed by the size cap | Kept for 31 days after the removal |
+| Rewritten or removed by a delete | Dropped before anything else is indexed: by `cliproxy history delete` in the same run, by the server at the start of its next pass. A rewritten file is indexed again. |
+| Removed any other way | Dropped at the next pass |
+
+`cliproxy history delete` updates the index in the same run, also with the server stopped. When it cannot, it exits with an error naming how many files it could not update, and a running server drops their facts at its next pass.
+
+Record into one history folder from one server. With two, a continuation can be indexed before the other server finishes the file holding its parent, and then it has no conversation.
+
+`GET /v8/management/observability/tools?range=24h|7d|30d` reads the index, narrowed by the optional `provider` parameter. Another range answers `400`. It answers `409` while history is off, `500` when the index cannot be read, and zero counts with `covered: null` before anything was indexed. A conversation is in the range when one of its sends started in it, and `conversations` counts those that defined a tool. `covered` is the first and last send in the range. Each tool that was carried or called in the range gets a row, most carried first:
+
+| Measure | Definition |
+| --- | --- |
+| Carried | Conversations in the range that defined the tool, on any date, and their share of conversations |
+| Used | Carrying conversations with a call of the tool in the range |
+| Weight | Mean over carrying conversations of the largest definition, in bytes |
+| Calls | Calls in the range, by their first copy, and calls in carrying conversations per carrying conversation |
+| Failure | Error results over calls with a result |
+| Result size | Mean, p95 and total bytes of the results of those calls |
+
+| Label | Rule |
+| --- | --- |
+| Dead weight | Carried by 20 percent or more of conversations, used by none |
+| Heavy | In the top tenth, rounded up, of carried tools by weight times carried; ties go by name |
+| Failing | 10 or more calls, and errors are 20 percent or more of results |
+| Bloating | p95 result of 102,400 bytes or more |
+
+Each MCP server sums its tools' calls and errors and counts the conversations that defined any of them. Each skill gets its calls, the conversations they were made in, errors, and the mean and p95 size of the text loaded after its results. Percentiles are nearest-rank, as in the speed route.
+
+The server cannot tell whether a result helped. The last call of a session has no later request, so it shows no result; a delete that removes the request carrying a result leaves its call without one; and compaction rewrites the first message, so it starts a new conversation.
+
 ## worker-threads
 
 `worker-threads: 4` at the top level sets how many threads serve requests. Without it, the server uses the smaller of the CPU count and two. Each extra thread can keep its own pool of freed memory, so more threads mean a larger resident size. The `TOKIO_WORKER_THREADS` environment variable overrides it.

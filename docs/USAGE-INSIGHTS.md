@@ -1,6 +1,6 @@
 # Usage insights: ideas and design
 
-Status: proposed. Parts 1 to 3 are built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
+Status: proposed. Parts 1 to 4 are built; nothing else here is. Every route, dashboard element, stored column and file location below needs approval before it is built. When a part is built, its text moves to the page that owns the behavior and leaves this file.
 
 Read at fork `8e66c70` and [cpa-usage-keeper](https://github.com/Willxup/cpa-usage-keeper) `e5e8f1a` (K in [Upstream review](UPSTREAM-REVIEW.md)). File and line references are to that fork commit.
 
@@ -57,7 +57,7 @@ The dashboard's Overview shows 24-hour, 7-day and 30-day native history: request
 | Quota efficiency | Per Codex quota cycle: usage between observed drops in remaining percent | Adopt for Claude and Codex, in tokens. Part 2. |
 | Cache read rate | `cache_read / input` over time, by model and account | Adopt with one definition for every provider. Part 2. |
 | Model speed | `output * 1000 / latency` tokens per second, and decode speed `output * 1000 / (latency - ttft)` | Adopt both, with the limits in part 3. |
-| Latency scatter | One point per request, time to first token against total, with 95th percentile lines | Adopt the percentiles, not the chart. It needs raw points and a chart library, and the dashboard's script budget is 62,500 bytes gzip (`ui/scripts/size.mjs:6`). Part 3. |
+| Latency scatter | One point per request, time to first token against total, with 95th percentile lines | Adopt the percentiles, not the chart. It needs raw points and a chart library, and the dashboard's script budget is 64,000 bytes gzip (`ui/scripts/size.mjs:6`). Part 3. |
 | Service health grid | Time blocks colored by success rate, with steps at 50, 65 and 80 percent | Adopt per provider. Part 2. |
 | Request table | Per-request time to first token, latency, speed and cache rate | Later. Activity already lists attempts; add columns once the store has them. |
 | Token share ribbons | Share of tokens by model and account | Extend the existing top-models panel with a provider split. Part 2. |
@@ -125,90 +125,28 @@ Built. [Configuration](CONFIGURATION.md#activity-store) owns the speed route, it
 
 ### Part 4: tools and skills
 
-Facts come from stored body history only. With `observability.history.enable` off the panel says so and shows nothing. With it on, the panel names the dates it covers.
+Built. [Configuration](CONFIGURATION.md#tool-index) owns the tool index, its retention and the tools route, and the [dashboard](../ui/README.md#pages) the Tools page under Activity. Facts of the built part that later parts rely on:
 
-**Only request bodies are read.** A client resends the conversation, so a request holds the tool definitions, the calls of the assistant turn before it, and their results. Responses, streamed or not, are never parsed. A request row's response columns are not loaded.
-
-| Format | Definitions | Calls | Results |
-| --- | --- | --- | --- |
-| Claude Messages | `tools[]`: name and the element's size in bytes | `tool_use` blocks in the last assistant message: ID and name | `tool_result` blocks after it: ID, `is_error`, content size |
-| OpenAI Chat | `tools[].function` | `tool_calls[]` of the last assistant message | `tool` messages after it: ID, content size. No error flag. |
-| OpenAI Responses (Codex), HTTP | `tools[]` function entries | `function_call` items in `input` | `function_call_output` items: call ID, output size. No error flag. |
-| OpenAI Responses, WebSocket | From the turn's request frames | Not resent by the client, so read from the `function_call` items of the turn's response frames | From request frames |
-
-Reading only the turn before the request's end sees each call and result once. A retry or failover repeats the body, so calls and results are still counted once by a hash of their ID.
-
-**Whose names.** Rows fall into three groups:
-
-- Native Claude rows hold the client's own tool names. They are indexed in full.
-- Codex rows hold the client's names unless one is over 64 bytes. They are indexed in full.
-- Translating-proxy Claude rows that were cloaked hold aliases. They are counted as one group, "aliased", with no per-tool rows, until reversing the alias is designed.
-
-A skill is a call to the `Skill` tool, counted by the skill name in its input. That name is the one tool argument the indexer reads. Names of the form `mcp__<server>__<tool>` roll up by server.
-
-**Where the facts live.** In an index file inside the history folder, beside the bodies they were read from and under the same folder permissions. Tool, MCP server and skill names can name a project, so they stay out of the activity store. Each fact is keyed by the history file it was read from:
-
-- One row per call: provider, tool, call ID hash.
-- One row per result: call ID hash, error flag, size. Calls and results are joined when the page asks.
-- Per file, provider and tool: the number of sends that carried the definition and their summed size.
-- Per file: the sends indexed, the sends skipped as aliased, and the sends skipped because a body was cut at the 32 MiB cap or was not text.
-
-**The indexer.**
-
-- Runs on its own thread with its own connection to the index, never on the request path or an async worker. It shares no queue with the activity store.
-- Is given a file after the history writer has finished it and applied pending deletes to it (`crates/cpa-server/src/request_logging/history/writer.rs:571-587`). At start it catches up on files not yet indexed, newest first, one at a time.
-- Reads one row group at a time with only the request columns, as `rewrite_without` walks a file (`request_logging/history/file.rs:638`). A row group is at most 64 MiB plus one row. One WebSocket turn can hold many frames of up to 32 MiB each, so a single row can be larger; the real bound is unmeasured.
-- Walks each body once.
-
-**Deletes and retention.** A fact lives as long as its file, with one exception.
-
-- When a delete rewrites a file, by the command or by the running server, that file's facts are dropped and the file is indexed again.
-- When a delete removes a file, its facts are dropped.
-- `cliproxy history delete` does both to the index itself, in the same run, so the rule holds whether or not the server is running.
-- A file the server removes under the size cap keeps its facts for 31 days. This is the exception, and the reason the facts outlive the cap.
-
-One gap remains: if a delete removes the request that first showed a result, a later request that repeats the result is not read again, so that call shows no result.
-
-**Measures per tool**, over the range:
-
-| Measure | Definition |
-| --- | --- |
-| Carried | Sends whose request defined the tool, and their share of all indexed sends |
-| Weight | Mean definition size in bytes |
-| Use | Calls, and calls per 100 sends that carried it |
-| Failure | Error results over calls with a result. Claude format only. |
-| Result size | Mean and 95th percentile result bytes, and the total |
-
-**Labels, not a score.** A tool gets a label when a rule holds:
-
-| Label | Rule |
-| --- | --- |
-| Dead weight | Carried by at least 20 percent of sends, with no call in the range |
-| Heavy | In the top tenth by definition size times sends carrying it |
-| Failing | At least 10 calls, with 20 percent or more ending in an error |
-| Bloating | 95th percentile result of 100 KB or more |
-
-The server cannot tell whether a result helped. The panel says so.
-
-**Dashboard.** A Tools tab under Activity: one row per tool with the measures and labels, grouped by MCP server, filtered by provider, with skills in their own table and the aliased and skipped counts shown.
+- Only Claude Messages bodies (provider `claude`, native and proxy) are read. Codex, OpenAI Chat, Gemini and Antigravity sends count as skipped by format.
+- Measures count conversations, not sends. A thread continuation joins its parent's conversation through the response message ID, so the index reads response bodies as well as requests.
+- Tool, MCP server and skill names stay in `tool-index.sqlite` in the history folder, never in the activity store or the logs.
+- Cloaked aliases are read back through the prefixes of the configured client keys and the default caller.
 
 ## Build order
 
 1. The activity store for every provider. Built.
 2. Providers table, health strip, quota cycles, cache read rate. Built.
 3. Speed section. Built.
-4. Tool and skill indexer, then its tab.
+4. Tool and skill index and the Tools page. Built.
 
-Each is its own change. Tests worth naming now: a WebSocket turn's frames are indexed; a cloaked proxy row adds no tool names; a delete during a running server leaves no fact from a deleted row.
+Each is its own change.
 
 ## Decisions that need approval
 
 | Decision | Proposal |
 | --- | --- |
 | When the native history route goes | In the change that moves the dashboard to the activity route. |
-| Dashboard elements | Tools tab. It must fit the bundle budgets. |
 | First-byte marks in the Gemini and Antigravity executors | Codex has one. Add them for Gemini and Antigravity, so their time to first response is comparable; until then the Speed table marks their rows as timed by the first event. |
-| The tool index file in the history folder, and the delete command updating it | As described in part 4. No new setting: the indexer runs whenever body history is on. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
 
 ## Left to the builder
@@ -217,9 +155,6 @@ Module, table and file names, SQL, the split into Svelte components, and fixture
 
 ## Not verified
 
-- **Skills on the wire.** That a skill appears as a `Skill` tool call with its name in `input.skill` is assumed, not read from a stored request. What a skill loads into the conversation is not measured: its tool result may be a short launch line with the skill text sent separately.
 - **Codex WebSocket frames.** Which frame carries a finished `function_call` item was not read from a stored turn.
 - **Other body formats.** Gemini and Antigravity tool calls carry no call ID and are not designed. Kimi and xAI are assumed to use the OpenAI Chat shape.
-- **Reversing a tool alias.** Whether the client's name can be recovered from an alias without the client key was not checked.
 - **Costs.** Not measured: indexing a 512 MiB file or the index's size.
-- **Calls with no later request.** The last call of a session is never resent, so it is not counted.
