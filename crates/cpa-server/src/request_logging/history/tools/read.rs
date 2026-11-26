@@ -96,18 +96,22 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     // Calls by the first copy of their ID, with the first copy of their result: a retry,
     // failover or resend repeats both. A call's conversation is that of its earliest copy
     // with one, since history that starts mid-conversation leaves early copies unlinked.
+    // Only IDs with a copy in the range can have their first copy there.
     let mut stmt = tx.prepare(
-        "WITH firsts AS (
+        "WITH ids AS (
+             SELECT DISTINCT id FROM calls
+             WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR provider = ?3)),
+         firsts AS (
              SELECT id, at_ms, tool, skill,
                     ROW_NUMBER() OVER (PARTITION BY id ORDER BY at_ms, rel) AS n,
                     FIRST_VALUE(conv) OVER (
                         PARTITION BY id ORDER BY conv IS NULL, at_ms, rel
                         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS conv
-             FROM calls WHERE (?3 IS NULL OR provider = ?3)),
+             FROM calls WHERE id IN ids AND (?3 IS NULL OR provider = ?3)),
          outcomes AS (
              SELECT id, is_error, bytes, loaded,
                     ROW_NUMBER() OVER (PARTITION BY id ORDER BY at_ms, rel) AS n
-             FROM results)
+             FROM results WHERE id IN ids)
          SELECT f.conv, f.tool, f.skill, o.is_error, o.bytes, o.loaded
          FROM firsts f LEFT JOIN outcomes o ON o.id = f.id AND o.n = 1
          WHERE f.n = 1 AND f.at_ms >= ?1 AND f.at_ms <= ?2",
