@@ -615,6 +615,47 @@ pub(crate) fn read_keys(path: &Path) -> io::Result<Vec<Row>> {
         .collect()
 }
 
+/// The columns a scan of Claude tool traffic reads.
+pub(crate) const SCAN_COLUMNS: &[&str] = &[
+    "started_at",
+    "source",
+    "provider",
+    "session_id",
+    "request_body",
+    "response_body",
+    "request_truncated",
+    "response_truncated",
+];
+
+/// Calls `each` with the rows of every row group of the open history file `file`, in
+/// order, one group at a time. Only the named columns are read; every other field keeps
+/// its `Row::default()` value. A name that is not a history column is `InvalidData`.
+pub(crate) fn for_each_group(
+    file: &File,
+    columns: &[&str],
+    mut each: impl FnMut(Vec<Row>) -> io::Result<()>,
+) -> io::Result<()> {
+    if let Some(unknown) = columns.iter().find(|name| !COLUMNS.iter().any(|c| c.name == **name)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unknown history column {unknown}"),
+        ));
+    }
+    let projection = schema_of(COLUMNS.iter().filter(|c| columns.contains(&c.name))).map_err(io_error)?;
+    let reader = SerializedFileReader::new(file.try_clone()?).map_err(io_error)?;
+    for group in 0..reader.num_row_groups() {
+        let rows = reader
+            .get_row_group(group)
+            .map_err(io_error)?
+            .get_row_iter(Some((*projection).clone()))
+            .map_err(io_error)?
+            .map(|record| to_row(record.map_err(io_error)?))
+            .collect::<io::Result<Vec<Row>>>()?;
+        each(rows)?;
+    }
+    Ok(())
+}
+
 fn to_row(record: parquet::record::Row) -> io::Result<Row> {
     let mut row = Row::default();
     for (name, field) in record.into_columns() {
