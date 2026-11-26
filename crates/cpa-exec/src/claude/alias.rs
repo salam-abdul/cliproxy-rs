@@ -403,7 +403,7 @@ struct Parts {
 }
 
 /// `parseClaudeMCPAlias`: (server, tool ID, semantic suffix).
-pub(super) fn alias_parts(name: &str) -> Option<(&str, &str, &str)> {
+pub fn alias_parts(name: &str) -> Option<(&str, &str, &str)> {
     if !is_mcp_name(name) {
         return None;
     }

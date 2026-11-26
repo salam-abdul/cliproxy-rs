@@ -166,9 +166,7 @@ impl Index {
         if let Some(hold) = self.hold.take() {
             hold();
         }
-        for table in TABLES {
-            tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
-        }
+        delete_facts(&tx, rel)?;
         tx.execute(
             "INSERT INTO files VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
             params![rel, read_as.len, read_as.modified_ns, read_as.ino, unreadable],
@@ -221,9 +219,7 @@ impl Index {
     /// Drops every fact of the file `rel`.
     pub(crate) fn forget(&mut self, rel: &str) -> rusqlite::Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for table in TABLES {
-            tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
-        }
+        delete_facts(&tx, rel)?;
         tx.commit()
     }
 
@@ -323,6 +319,14 @@ pub(crate) fn open_existing(dir: &Path) -> anyhow::Result<Option<Index>> {
         return Ok(None);
     }
     Ok(Some(Index::open(dir)?))
+}
+
+/// Deletes every fact of the file `rel`, inside the caller's transaction.
+fn delete_facts(tx: &rusqlite::Transaction<'_>, rel: &str) -> rusqlite::Result<()> {
+    for table in TABLES {
+        tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
+    }
+    Ok(())
 }
 
 /// Every indexed file of the open index `conn`, as [`Index::indexed`] gives them.

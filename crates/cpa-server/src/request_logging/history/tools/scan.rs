@@ -110,18 +110,19 @@ pub(crate) fn scan(row: &Row, prefixes: &[String]) -> SendFacts {
 
 /// The alias prefixes the index remembers: of every configured client key, of the
 /// default caller, and of every key a translating-proxy attempt used. A name under one
-/// is the text after the first `_` that follows the prefix (the alias's tool word ends
-/// there); every other name, including real MCP names shaped like an alias, is kept.
+/// is read as the executor parses an alias, as the text after its tool word; every
+/// other name, including real MCP names shaped like an alias, is kept.
 struct Names<'a>(&'a [String]);
 
 impl Names<'_> {
     fn read(&self, name: &str) -> String {
-        self.0
-            .iter()
-            .filter_map(|prefix| name.strip_prefix(prefix.as_str()))
-            .filter_map(|rest| rest.split_once('_').map(|(_, original)| original))
-            .find(|original| !original.is_empty())
-            .unwrap_or(name)
+        cpa_exec::claude::alias_parts(name)
+            .filter(|(server, _, _)| {
+                self.0
+                    .iter()
+                    .any(|prefix| prefix.strip_prefix("mcp__").and_then(|p| p.strip_suffix("__")) == Some(*server))
+            })
+            .map_or(name, |(_, _, original)| original)
             .to_owned()
     }
 
