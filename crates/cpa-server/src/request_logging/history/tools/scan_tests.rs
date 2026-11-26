@@ -180,19 +180,79 @@ fn text_after_a_result_is_loaded_bytes() {
 }
 
 #[test]
-fn server_tools_are_named_by_type() {
+fn tools_are_named_by_name_and_by_type_only_without_one() {
     let web = r#"{"type":"web_search_20250305","name":"web_search","max_uses":5}"#;
+    let bash = r#"{"type":"bash_20250124","name":"bash"}"#;
     let custom = r#"{"type":"custom","name":"Lookup","input_schema":{}}"#;
     let plain = r#"{"name":"Edit","input_schema":{}}"#;
-    let request = format!(r#"{{"tools":[{web},{custom},{plain}],"messages":[{{"role":"user","content":"go"}}]}}"#);
+    let unnamed = r#"{"type":"web_fetch_20250910"}"#;
+    let request = format!(
+        r#"{{"tools":[{web},{bash},{custom},{plain},{unnamed}],"messages":[{{"role":"user","content":"go"}}]}}"#
+    );
     assert_eq!(
         facts(&request, DONE).defs,
         vec![
-            def("web_search_20250305", web),
+            def("web_search", web),
+            def("bash", bash),
             def("Lookup", custom),
-            def("Edit", plain)
+            def("Edit", plain),
+            def("web_fetch_20250910", unnamed)
         ]
     );
+}
+
+#[test]
+fn server_tool_calls_and_results_count() {
+    let failed = r#"{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}"#;
+    let found = r#"[{"type":"web_search_result","url":"https://example.invalid/","title":"t"}]"#;
+    let request = format!(
+        r#"{{"tools":[{{"type":"web_search_20250305","name":"web_search"}}],"messages":[{{"role":"user","content":"go"}},{{"role":"assistant","content":[{{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{{"query":"q"}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":{failed}}},{{"type":"server_tool_use","id":"srvtoolu_2","name":"web_search","input":{{}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_2","content":{found}}}]}}]}}"#
+    );
+    let buffered = format!(
+        r#"{{"id":"msg_s","content":[{{"type":"server_tool_use","id":"srvtoolu_3","name":"web_search","input":{{}}}},{{"type":"web_search_tool_result","tool_use_id":"srvtoolu_3","is_error":true,"content":[]}}]}}"#
+    );
+    let read = facts(&request, &buffered);
+    assert_eq!(
+        read.calls,
+        vec![
+            call("srvtoolu_1", "web_search", None),
+            call("srvtoolu_2", "web_search", None),
+            call("srvtoolu_3", "web_search", None)
+        ]
+    );
+    assert_eq!(
+        read.results,
+        vec![
+            Outcome {
+                id: hash(b"srvtoolu_1"),
+                is_error: true,
+                bytes: failed.len() as i64,
+                loaded: 0
+            },
+            Outcome {
+                id: hash(b"srvtoolu_2"),
+                is_error: false,
+                bytes: found.len() as i64,
+                loaded: 0
+            },
+            Outcome {
+                id: hash(b"srvtoolu_3"),
+                is_error: true,
+                bytes: 2,
+                loaded: 0
+            },
+        ]
+    );
+    let streamed = [
+        r#"data: {"type":"message_start","message":{"id":"msg_t"}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_4","name":"web_search","input":{}}}"#,
+        r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_4","content":[]}}"#,
+    ]
+    .join("\n");
+    let streamed = facts(r#"{"messages":[{"role":"user","content":"go"}]}"#, &streamed);
+    assert_eq!(streamed.calls, vec![call("srvtoolu_4", "web_search", None)]);
+    assert_eq!(streamed.results.len(), 1);
+    assert!(!streamed.results[0].is_error);
 }
 
 #[test]

@@ -112,7 +112,7 @@ impl Names<'_> {
             .to_owned()
     }
 
-    /// A `tool_use` block of a request message or a buffered response.
+    /// A `tool_use` or `server_tool_use` block.
     fn call(&self, block: &gj::Res<'_>) -> Option<Call> {
         let id = block.get("id").str();
         if id.is_empty() {
@@ -135,12 +135,10 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
     let tools = gj::get(body, "tools");
     if tools.is_array() {
         for tool in tools.array() {
-            let kind = tool.get("type");
-            let name = if kind.exists() && kind.str() != "custom" {
-                kind.str()
-            } else {
-                tool.get("name").str()
-            };
+            // Calls name a tool by its `name`, versioned server tools included.
+            let name = Some(tool.get("name").str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| tool.get("type").str());
             if !name.is_empty() {
                 facts.defs.push(Def {
                     tool: names.read(&name),
@@ -174,7 +172,10 @@ fn read_request(body: &[u8], session: &str, names: &Names<'_>, facts: &mut SendF
         let mut after_result = false;
         for block in content.array() {
             match block.get("type").str().as_ref() {
-                "tool_use" if assistant => facts.calls.extend(names.call(&block)),
+                "tool_use" | "server_tool_use" if assistant => facts.calls.extend(names.call(&block)),
+                kind if assistant && kind.ends_with("_tool_result") => {
+                    facts.results.extend(server_result(&block));
+                }
                 "tool_result" => {
                     let id = block.get("tool_use_id").str();
                     after_result = !id.is_empty();
@@ -209,8 +210,10 @@ fn read_response(body: &[u8], names: &Names<'_>, facts: &mut SendFacts) -> bool 
         let content = gj::get(body, "content");
         if content.is_array() {
             for block in content.array() {
-                if block.get("type").str() == "tool_use" {
-                    facts.calls.extend(names.call(&block));
+                match block.get("type").str().as_ref() {
+                    "tool_use" | "server_tool_use" => facts.calls.extend(names.call(&block)),
+                    kind if kind.ends_with("_tool_result") => facts.results.extend(server_result(&block)),
+                    _ => {}
                 }
             }
         }
@@ -236,7 +239,10 @@ fn read_response(body: &[u8], names: &Names<'_>, facts: &mut SendFacts) -> bool 
             }
             "content_block_start" => {
                 let block = gj::get(event, "content_block");
-                if block.get("type").str() == "tool_use"
+                let kind = block.get("type").str();
+                if kind.ends_with("_tool_result") {
+                    facts.results.extend(server_result(&block));
+                } else if (kind == "tool_use" || kind == "server_tool_use")
                     && let Some(call) = names.call(&block)
                 {
                     let input = (call.tool == "Skill").then(String::new);
@@ -263,6 +269,22 @@ fn read_response(body: &[u8], names: &Names<'_>, facts: &mut SendFacts) -> bool 
         facts.calls.push(call);
     }
     true
+}
+
+/// The result of a server tool, an assistant block whose type ends in `_tool_result`:
+/// an error when its content's type ends in `_error` or `is_error` is true.
+fn server_result(block: &gj::Res<'_>) -> Option<Outcome> {
+    let id = block.get("tool_use_id").str();
+    if id.is_empty() {
+        return None;
+    }
+    let content = block.get("content");
+    Some(Outcome {
+        id: hash(id.as_bytes()),
+        is_error: block.get("is_error").kind == Kind::True || content.get("type").str().ends_with("_error"),
+        bytes: len(content.raw()),
+        loaded: 0,
+    })
 }
 
 /// The `skill` string of a Skill call's joined input.

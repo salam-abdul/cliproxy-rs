@@ -518,3 +518,27 @@ fn a_tool_called_only_outside_known_conversations_is_not_dead_weight() {
     assert_eq!(read["used"], 0);
     assert!(!labels(&answer, "Read").contains(&"dead".to_owned()));
 }
+
+#[test]
+fn server_and_versioned_tools_are_carried_and_used() {
+    use crate::request_logging::history::row::Row;
+    let request = r#"{"tools":[{"type":"bash_20250124","name":"bash"},{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"go"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"bash","input":{}},{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}]}]}"#;
+    let row = Row {
+        started_at_us: (NOW - 1000) * 1000,
+        provider: Some("claude".into()),
+        session_id: Some("s".into()),
+        request_body: Some(request.into()),
+        response_body: Some(r#"{"id":"msg_1","content":[]}"#.into()),
+        ..Row::default()
+    };
+    let mut store = Store::new();
+    store.file(&[crate::request_logging::history::tools::scan::scan(&row, &[])]);
+    let answer = store.read(Range::Day, None);
+    assert_eq!(names(&answer, "tools"), ["bash", "web_search"]);
+    for name in ["bash", "web_search"] {
+        assert_eq!(tool(&answer, name)["carried"], 1, "{name}");
+        assert_eq!(tool(&answer, name)["used"], 1, "{name}");
+        assert!(!labels(&answer, name).contains(&"dead".to_owned()), "{name}");
+    }
+    assert_eq!(tool(&answer, "web_search")["errors"], 1);
+}
