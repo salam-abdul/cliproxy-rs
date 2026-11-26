@@ -12,6 +12,7 @@
   import Payload from "./pages/Payload.svelte";
   import Activity from "./pages/Activity.svelte";
   import Logs from "./pages/Logs.svelte";
+  import Tools from "./pages/Tools.svelte";
   import Config from "./pages/Config.svelte";
   import System from "./pages/System.svelte";
 
@@ -35,6 +36,7 @@
     payload: Payload,
     activity: Activity,
     logs: Logs,
+    tools: Tools,
     config: Config,
     system: System,
   };

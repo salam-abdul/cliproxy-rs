@@ -12,7 +12,7 @@ import { clockSkew, equal, fieldPath, newKey, nextTheme, reconcile, type Data, t
 export const sections: [name: string, pages: [id: string, title: string][]][] = [
   ["Overview", [["overview", "Overview"]]],
   ["Accounts", [["credentials", "Accounts"]]],
-  ["Activity", [["activity", "Requests"], ["logs", "Logs"]]],
+  ["Activity", [["activity", "Requests"], ["logs", "Logs"], ["tools", "Tools"]]],
   [
     "Settings",
     [
@@ -102,6 +102,7 @@ class Store {
   speed = new Res<Data>(() =>
     api(`/observability/speed?range=${this.historyRange}&offset=${-new Date().getTimezoneOffset()}`),
   );
+  tools = new Res<Data>(() => api(`/observability/tools?range=${this.historyRange}`));
   config = new Res<Data>(() => api("/config"));
   creds: Res<Data[]> = new Res(async (): Promise<Data[]> => {
     const list = await api("/credentials");
@@ -170,6 +171,7 @@ class Store {
       this.history,
       this.providerActivity,
       this.speed,
+      this.tools,
     ]) {
       resource.data = undefined;
       resource.error = null;
