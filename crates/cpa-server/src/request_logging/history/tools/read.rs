@@ -9,12 +9,10 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
-use super::store::INDEX_FILE;
+use super::len_i64;
+use super::store::{INDEX_FILE, is_current};
 use crate::activity::Range;
-
-/// The tables [`super::store::Index::open`] creates. Until all exist, the indexer is
-/// still creating the file and nothing was indexed.
-const TABLES: [&str; 6] = ["files", "sends", "messages", "defs", "calls", "results"];
+use crate::activity::speed::percentile;
 
 /// Dead weight: carried by this share of conversations with tools, with no call of
 /// the tool in the range.
@@ -42,15 +40,7 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     db.busy_timeout(Duration::from_secs(2))?;
     db.pragma_update(None, "query_only", true)?;
     let tx = db.transaction()?;
-    let tables: i64 = tx.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ({})",
-            TABLES.map(|t| format!("'{t}'")).join(",")
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    if tables < count(TABLES.len()) {
+    if !is_current(&tx)? {
         return Ok(Answer::default().json(range));
     }
     let from = now_ms.saturating_sub(range.duration());
@@ -91,7 +81,7 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
                 .insert(conv, r.get(2)?);
         }
     }
-    answer.conversations = i64::try_from(with_tools.len()).unwrap_or(i64::MAX);
+    answer.conversations = len_i64(with_tools.len());
 
     // Calls by the first copy of their ID, with the first copy of their result: a retry,
     // failover or resend repeats both. A call's conversation is that of its earliest copy
@@ -163,7 +153,7 @@ struct Tool {
 
 impl Tool {
     fn carried(&self) -> i64 {
-        count(self.carriers.len())
+        len_i64(self.carriers.len())
     }
 
     /// Weight times carried: the sum of the carrying conversations' definition bytes.
@@ -220,9 +210,9 @@ impl Answer {
             let mut sizes = tool.results.clone();
             sizes.sort_unstable();
             let carried = tool.carried();
-            let used = count(tool.used.len());
-            let results = count(sizes.len());
-            let p95 = nearest_rank(&sizes, 95);
+            let used = len_i64(tool.used.len());
+            let results = len_i64(sizes.len());
+            let p95 = percentile(&sizes, 95);
             let mut labels = Vec::new();
             if carried > 0 && tool.calls == 0 && carried.saturating_mul(100) >= DEAD_SHARE_PERCENT * conversations {
                 labels.push("dead");
@@ -280,7 +270,7 @@ impl Answer {
                 skill.loaded.sort_unstable();
                 json!({"name": name, "calls": skill.calls, "conversations": skill.conversations.len(),
                        "errors": skill.errors, "loadedMean": mean(&skill.loaded),
-                       "loadedP95": nearest_rank(&skill.loaded, 95)})
+                       "loadedP95": percentile(&skill.loaded, 95)})
             })
             .collect();
         json!({
@@ -311,12 +301,6 @@ fn server_of(name: &str) -> Option<&str> {
     (!server.is_empty() && !tool.is_empty()).then_some(server)
 }
 
-/// The nearest-rank `p`th percentile of ascending `sorted`: `sorted[ceil(p * n / 100) - 1]`.
-fn nearest_rank(sorted: &[i64], p: usize) -> Option<i64> {
-    let rank = p.saturating_mul(sorted.len()).div_ceil(100);
-    sorted.get(rank.checked_sub(1)?).copied()
-}
-
 fn mean(values: &[i64]) -> Option<f64> {
     (!values.is_empty()).then(|| values.iter().map(|v| *v as f64).sum::<f64>() / values.len() as f64)
 }
@@ -327,10 +311,6 @@ fn ratio(part: i64, whole: i64) -> Option<f64> {
 
 fn total(values: &[i64]) -> i64 {
     values.iter().fold(0, |sum: i64, v| sum.saturating_add(*v))
-}
-
-fn count(len: usize) -> i64 {
-    i64::try_from(len).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

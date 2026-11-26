@@ -255,7 +255,7 @@ A request that does not continue a thread (`thread.type` is `continue` with a `p
 
 A tool is named by its `name`, server and versioned tools included, and by its `type` only when it has no name. `server_tool_use` blocks count as calls, and an assistant block whose type ends in `_tool_result` counts as their result, an error when its content's type ends in `_error`. A name `mcp__<server>__<tool>` belongs to MCP server `<server>`. A tool the Claude executor renamed to cloak a request is read back under the client's name: by the prefix of a configured client key or the default caller, and on translating-proxy rows also when the name is `mcp__<word>_<word>__<word>_<name>` with three words of the executor's alias word list, which covers a Home user key or a removed key. Native rows are never aliased, so their names stay as sent. A name that had other characters or was cut at 64 bytes comes back altered.
 
-One background thread keeps the index. It runs a pass when the writer finishes a file or runs its periodic cleanup, and when the route is read. A pass indexes every finished file that is new or changed since it was indexed, oldest first, one row group at a time. A file it cannot read counts as unreadable and adds no facts.
+One background thread keeps the index. It runs a pass when the writer finishes a file or runs its periodic cleanup, and when the route is read. A pass indexes every finished file that is new or changed since it was indexed, oldest first, one row group at a time. A file it cannot read counts as unreadable and adds no facts. An index written under earlier indexing rules is emptied when the server opens it, and every file is indexed again.
 
 | History file | Its facts |
 | --- | --- |

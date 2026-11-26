@@ -5,7 +5,19 @@
 use cpa_common::json::{self as gj, Kind};
 
 use super::super::row::{Row, Source};
-use super::{Hasher, hash};
+use super::{Hasher, hash, len_i64};
+
+/// The history columns [`scan`] reads.
+pub(crate) const SCAN_COLUMNS: &[&str] = &[
+    "started_at",
+    "source",
+    "provider",
+    "session_id",
+    "request_body",
+    "response_body",
+    "request_truncated",
+    "response_truncated",
+];
 
 /// Which conversation a send belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +364,7 @@ fn skill_of(input: &str) -> Option<String> {
 }
 
 fn len(raw: &[u8]) -> i64 {
-    i64::try_from(raw.len()).unwrap_or(i64::MAX)
+    len_i64(raw.len())
 }
 
 #[cfg(test)]

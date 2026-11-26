@@ -615,18 +615,6 @@ pub(crate) fn read_keys(path: &Path) -> io::Result<Vec<Row>> {
         .collect()
 }
 
-/// The columns a scan of Claude tool traffic reads.
-pub(crate) const SCAN_COLUMNS: &[&str] = &[
-    "started_at",
-    "source",
-    "provider",
-    "session_id",
-    "request_body",
-    "response_body",
-    "request_truncated",
-    "response_truncated",
-];
-
 /// Calls `each` with the rows of every row group of the open history file `file`, in
 /// order, one group at a time. Only the named columns are read; every other field keeps
 /// its `Row::default()` value. A name that is not a history column is `InvalidData`.

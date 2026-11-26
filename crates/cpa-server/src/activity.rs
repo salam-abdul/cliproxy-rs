@@ -2,9 +2,8 @@ mod cycles;
 mod panels;
 mod quota;
 pub(crate) mod sends;
-mod speed;
+pub(crate) mod speed;
 
-use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -141,7 +140,7 @@ struct Ending {
 
 impl Activity {
     pub(crate) fn start(path: PathBuf, lost: Arc<AtomicU64>) -> anyhow::Result<Self> {
-        secure_file(&path)?;
+        cpa_core::private_fs::secure_file(&path)?;
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -474,31 +473,6 @@ fn epoch_ms() -> i64 {
         .as_millis()
         .try_into()
         .unwrap_or(i64::MAX)
-}
-
-pub(crate) fn secure_file(path: &Path) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => anyhow::ensure!(meta.file_type().is_file(), "History path is not a regular file"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-            options
-                .open(path)
-                .with_context(|| "Could not create private history file")?;
-        }
-        Err(e) => return Err(e.into()),
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
 }
 
 fn write_request(conn: &Connection, row: &RequestRow) -> rusqlite::Result<()> {

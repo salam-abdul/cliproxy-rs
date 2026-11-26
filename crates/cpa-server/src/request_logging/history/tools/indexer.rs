@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 
 use super::super::Settings;
 use super::super::dir::HistoryDir;
-use super::super::file::{SCAN_COLUMNS, for_each_group};
-use super::scan::scan;
+use super::super::file::for_each_group;
+use super::scan::{SCAN_COLUMNS, scan};
 use super::store::{Fingerprint, Index, rel_path};
 
 /// How long after a refused commit the next pass starts: a delete changed a file while

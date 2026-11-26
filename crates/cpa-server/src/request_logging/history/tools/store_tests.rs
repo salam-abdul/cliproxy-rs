@@ -252,6 +252,22 @@ fn open_existing_creates_no_index_and_lists_capped_files() {
     assert_eq!(existing.capped_files().unwrap(), vec![a]);
 }
 
+#[test]
+fn an_index_from_another_version_is_emptied() {
+    let dir = TempDir::new();
+    let (a, a_path) = file(&dir.0, "080000-1-0000.parquet");
+    let mut index = Index::open_or_create(&dir.0);
+    assert!(commit(&mut index, &a, &a_path, &[send(1, Conv::Start(1), None)]));
+    assert!(is_current(&index.conn).unwrap());
+    index.conn.pragma_update(None, "user_version", VERSION - 1).unwrap();
+    assert!(!is_current(&index.conn).unwrap());
+    drop(index);
+    let index = Index::open(&dir.0).unwrap();
+    assert!(is_current(&index.conn).unwrap());
+    assert_eq!(total(&index, "files"), 0);
+    assert_eq!(total(&index, "sends"), 0);
+}
+
 #[cfg(unix)]
 #[test]
 fn index_file_is_private() {

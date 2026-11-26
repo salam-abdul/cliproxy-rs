@@ -21,9 +21,11 @@ pub(crate) const RETAIN_CAPPED_MS: i64 = 2_678_400_000;
 /// cannot tell a rewritten file from the one that was read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Fingerprint {
-    len: u64,
-    modified_ns: i128,
-    ino: u64,
+    /// The values exactly as stored: the length and inode bit for bit, the modification
+    /// time in nanoseconds since the epoch.
+    len: i64,
+    modified_ns: i64,
+    ino: i64,
 }
 
 impl Fingerprint {
@@ -37,28 +39,35 @@ impl Fingerprint {
     }
 
     fn of(meta: &std::fs::Metadata) -> Self {
+        // Outside 1677 to 2262 the time reads as 0, the same on every read.
         let modified_ns = meta
             .modified()
-            .map_or(0, |at| match at.duration_since(SystemTime::UNIX_EPOCH) {
-                Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
-                Err(before) => -i128::try_from(before.duration().as_nanos()).unwrap_or(i128::MAX),
-            });
+            .ok()
+            .and_then(|at| match at.duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(after) => i64::try_from(after.as_nanos()).ok(),
+                Err(before) => i64::try_from(before.duration().as_nanos()).ok().map(|ns| -ns),
+            })
+            .unwrap_or(0);
         #[cfg(unix)]
         let ino = std::os::unix::fs::MetadataExt::ino(meta);
         #[cfg(not(unix))]
-        let ino = 0;
+        let ino = 0u64;
         Self {
-            len: meta.len(),
+            len: i64::from_ne_bytes(meta.len().to_ne_bytes()),
             modified_ns,
-            ino,
+            ino: i64::from_ne_bytes(ino.to_ne_bytes()),
         }
     }
 }
 
+/// The version of the facts' rules and tables. An index written under another version
+/// is emptied and every file indexed again.
+const VERSION: i64 = 2;
+
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS files (
         rel TEXT PRIMARY KEY, len INTEGER NOT NULL, modified_ns INTEGER NOT NULL, ino INTEGER NOT NULL,
-        indexed_ms INTEGER NOT NULL, capped_ms INTEGER, unreadable INTEGER NOT NULL
+        capped_ms INTEGER, unreadable INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sends (
         rel TEXT NOT NULL, at_ms INTEGER NOT NULL, provider TEXT, conv INTEGER,
@@ -108,11 +117,19 @@ impl Index {
     /// when it does not exist. The folder must exist.
     pub(crate) fn open(dir: &Path) -> anyhow::Result<Index> {
         let path = dir.join(INDEX_FILE);
-        crate::activity::secure_file(&path)?;
-        let conn = Connection::open(&path)?;
+        cpa_core::private_fs::secure_file(&path)?;
+        let mut conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if version(&tx)? != VERSION {
+            for table in TABLES {
+                tx.execute(&format!("DROP TABLE IF EXISTS {table}"), [])?;
+            }
+            tx.pragma_update(None, "user_version", VERSION)?;
+        }
+        tx.execute_batch(SCHEMA)?;
+        tx.commit()?;
         Ok(Index {
             conn,
             #[cfg(test)]
@@ -128,9 +145,9 @@ impl Index {
             .prepare("SELECT rel, len, modified_ns, ino, capped_ms FROM files")?;
         stmt.query_map([], |r| {
             let fingerprint = Fingerprint {
-                len: u64::try_from(r.get::<_, i64>(1)?).unwrap_or_default(),
-                modified_ns: i128::from(r.get::<_, i64>(2)?),
-                ino: u64::from_ne_bytes(r.get::<_, i64>(3)?.to_ne_bytes()),
+                len: r.get(1)?,
+                modified_ns: r.get(2)?,
+                ino: r.get(3)?,
             };
             Ok((r.get(0)?, (fingerprint, r.get(4)?)))
         })?
@@ -162,15 +179,8 @@ impl Index {
             tx.execute(&format!("DELETE FROM {table} WHERE rel = ?1"), [rel])?;
         }
         tx.execute(
-            "INSERT INTO files VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
-            params![
-                rel,
-                i64::try_from(read_as.len).unwrap_or(i64::MAX),
-                i64::try_from(read_as.modified_ns).unwrap_or(i64::MAX),
-                i64::from_ne_bytes(read_as.ino.to_ne_bytes()),
-                epoch_ms(),
-                unreadable
-            ],
+            "INSERT INTO files VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+            params![rel, read_as.len, read_as.modified_ns, read_as.ino, unreadable],
         )?;
         {
             let mut parent = tx.prepare("SELECT conv FROM messages WHERE message = ?1 ORDER BY rel LIMIT 1")?;
@@ -302,13 +312,15 @@ pub(crate) fn open_existing(dir: &Path) -> anyhow::Result<Option<Index>> {
     Ok(Some(Index::open(dir)?))
 }
 
-fn epoch_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(i64::MAX)
+/// The `user_version` of an open index: [`VERSION`] once its tables are made.
+fn version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.pragma_query_value(None, "user_version", |r| r.get(0))
+}
+
+/// Whether the open index `conn` was written under this version's rules. A file the
+/// indexer is still creating, or one from another version, holds no facts to read.
+pub(crate) fn is_current(conn: &Connection) -> rusqlite::Result<bool> {
+    Ok(version(conn)? == VERSION)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::*;
 use crate::request_logging::history::row::body_columns;
 use crate::request_logging::history::test_support::TempDir;
+use crate::request_logging::history::tools::scan::SCAN_COLUMNS;
 
 fn at(rfc3339: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)

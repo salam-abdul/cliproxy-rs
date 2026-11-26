@@ -400,7 +400,9 @@ fn others_p95(items: &[Item], others: usize, member: impl Fn(&Item) -> bool) -> 
 }
 
 /// Nearest rank: the `p`th percentile of ascending `sorted` is `sorted[ceil(p * n / 100) - 1]`.
-fn percentile<T: Copy>(sorted: &[T], p: usize) -> Option<T> {
+/// The nearest-rank `p`th percentile of ascending `sorted`: value number
+/// `ceil(p * n / 100)`.
+pub(crate) fn percentile<T: Copy>(sorted: &[T], p: usize) -> Option<T> {
     let rank = (p * sorted.len()).div_ceil(100);
     sorted.get(rank.checked_sub(1)?).copied()
 }

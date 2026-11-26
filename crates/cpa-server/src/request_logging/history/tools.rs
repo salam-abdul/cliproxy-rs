@@ -27,7 +27,13 @@ impl Hasher {
     }
 
     pub(crate) fn finish(self) -> i64 {
-        let digest = self.0.finalize();
-        digest.first_chunk::<8>().map_or(0, |head| i64::from_be_bytes(*head))
+        let digest: [u8; 32] = self.0.finalize().into();
+        let [a, b, c, d, e, f, g, h, ..] = digest;
+        i64::from_be_bytes([a, b, c, d, e, f, g, h])
     }
+}
+
+/// A length or count as stored in the index.
+pub(crate) fn len_i64(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
