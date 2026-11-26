@@ -71,8 +71,12 @@ pub struct Report {
     /// written yet.
     pub pending_for_writer: bool,
     /// History files whose facts the tool index still holds because it could not be
-    /// updated; a running server drops them at its next index pass.
+    /// updated: a running server indexes a rewritten one again at its next pass and
+    /// drops a removed one's at the second pass that finds it missing.
     pub index_files_kept: usize,
+    /// The tool index may still hold facts kept from files the size cap removed, which
+    /// stay up to 31 days after each removal.
+    pub capped_facts_kept: bool,
 }
 
 impl std::fmt::Display for Report {
@@ -88,8 +92,14 @@ impl std::fmt::Display for Report {
         if self.index_files_kept > 0 {
             write!(
                 f,
-                "; {} history file(s) could not be removed from the tool index, and a running server drops their facts at its next index pass",
+                "; {} history file(s) could not be removed from the tool index: a rewritten file is indexed again at the next index pass, and a removed file's facts go at the second index pass that finds it missing",
                 self.index_files_kept
+            )?;
+        }
+        if self.capped_facts_kept {
+            write!(
+                f,
+                "; the tool index could not be updated, so facts kept from files the size cap removed stay up to 31 days after each removal"
             )?;
         }
         Ok(())
@@ -176,7 +186,7 @@ pub fn delete(dir: &Path, selector: &Selector, dry_run: bool) -> anyhow::Result<
     if !dry_run {
         history.remove_empty_partitions();
         // Facts kept from files the size cap removed may hold rows this delete covers.
-        report.index_files_kept += tools.forget_capped(dir);
+        report.capped_facts_kept = !tools.forget_capped(dir);
     }
     Ok(report)
 }
@@ -214,13 +224,14 @@ impl Tools {
         }
     }
 
-    /// Drops the facts of every file the size cap removed; returns how many it could not.
-    fn forget_capped(&mut self, dir: &Path) -> usize {
-        let Ok(Some(index)) = self.index(dir) else { return 0 };
-        match index.capped_files() {
-            Ok(capped) => capped.iter().filter(|rel| index.forget(rel).is_err()).count(),
-            // How many is unknown; one is enough for the report to say so.
-            Err(_) => 1,
+    /// Drops the facts of every file the size cap removed; false when some may remain.
+    fn forget_capped(&mut self, dir: &Path) -> bool {
+        match self.index(dir) {
+            Ok(None) => true,
+            Ok(Some(index)) => index
+                .capped_files()
+                .is_ok_and(|capped| capped.iter().filter(|rel| index.forget(rel).is_err()).count() == 0),
+            Err(()) => false,
         }
     }
 }

@@ -533,9 +533,21 @@ fn cli_delete_finishes_when_a_forget_fails() {
     // The rows are gone, so the delete succeeds and says what the index still holds.
     let report = delete(&dir.0, &session("s1"), false).unwrap();
     assert_eq!(report.index_files_kept, 2);
+    assert!(report.capped_facts_kept);
     let text = report.to_string();
     assert!(text.contains("2 history file(s)"), "{text}");
-    assert!(text.contains("next index pass"), "{text}");
+    assert!(
+        text.contains("a rewritten file is indexed again at the next index pass"),
+        "{text}"
+    );
+    assert!(
+        text.contains("a removed file's facts go at the second index pass that finds it missing"),
+        "{text}"
+    );
+    assert!(
+        text.contains("facts kept from files the size cap removed stay up to 31 days after each removal"),
+        "{text}"
+    );
     assert!(!text.contains(&*dir.0.to_string_lossy()), "{text}");
     assert!(!whole.exists());
     assert_eq!(ids(&part), ["c"]);
