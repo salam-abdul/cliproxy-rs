@@ -129,7 +129,7 @@ fn duplicate_calls_survive_forgetting_one_file() {
     let (a, a_path) = file(&dir.0, "080000-1-0000.parquet");
     let (b, b_path) = file(&dir.0, "090000-1-0000.parquet");
     let resend = with_tools(send(1, Conv::Start(10), Some(100)), "Read", 5);
-    assert!(commit(&mut index, &a, &a_path, &[resend.clone()]));
+    assert!(commit(&mut index, &a, &a_path, std::slice::from_ref(&resend)));
     assert!(commit(&mut index, &b, &b_path, &[resend]));
     assert_eq!(total(&index, "calls"), 2);
     index.forget(&a).unwrap();
