@@ -5,7 +5,6 @@ use crate::request_logging::history::file::{ParquetFile, rewrite_without};
 use crate::request_logging::history::row::Row;
 use crate::request_logging::history::test_support::{Logs, TempDir, claude_row, indexed_calls};
 use crate::request_logging::history::tools::store::INDEX_FILE;
-use rusqlite::OptionalExtension;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -515,6 +514,7 @@ fn a_prefix_from_an_earlier_config_still_reads_back() {
 #[cfg(unix)]
 #[test]
 fn a_file_the_pass_cannot_open_is_unreadable_and_not_pending() {
+    use rusqlite::OptionalExtension;
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new();
     let path = write(

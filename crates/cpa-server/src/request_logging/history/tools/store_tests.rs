@@ -199,7 +199,7 @@ fn sweep_forgets_missing_files_and_keeps_capped_ones_for_31_days() {
     let on_disk: HashSet<String> = [c.clone()].into();
     // A missing file is forgotten at the second sweep that finds it missing.
     let missing = index.sweep(&on_disk, removed, &HashSet::new()).unwrap();
-    assert_eq!(missing, [a.clone()].into());
+    assert_eq!(missing, HashSet::from([a.clone()]));
     assert!(index.indexed().unwrap().contains_key(&a));
     let missing = index.sweep(&on_disk, removed, &missing).unwrap();
     assert!(missing.is_empty());
