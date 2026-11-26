@@ -681,18 +681,6 @@ fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_store_path_that_is_not_a_file_names_the_activity_store() {
-        let dir = std::env::temp_dir().join(format!("cpa-activity-path-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let error = format!(
-            "{:#}",
-            super::Activity::start(dir.clone(), Default::default()).err().unwrap()
-        );
-        assert!(error.contains("activity store"), "{error}");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     use super::*;
 
     #[test]
@@ -726,6 +714,18 @@ mod tests {
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_store_path_that_is_not_a_file_names_the_activity_store() {
+        let dir = std::env::temp_dir().join(format!("cpa-activity-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = format!(
+            "{:#}",
+            Activity::start(dir.clone(), Arc::new(AtomicU64::new(0))).err().unwrap()
+        );
+        assert!(error.contains("activity store"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn inference(id: &str) -> Value {

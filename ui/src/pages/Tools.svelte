@@ -15,18 +15,21 @@
     });
   });
   // While finished files wait for the indexer, reload every 5 s until none do.
-  // The pending count of the previous load, so reloads stop when it no longer falls:
-  // a file the indexer keeps failing on would otherwise reload the page for good.
+  // Reloads stop after 12 in a row (about a minute) whose pending count did not fall:
+  // one large file can take longer than a reload to index, but a file the indexer keeps
+  // failing on would otherwise reload the page for good. A range change starts over.
   let before: number | undefined;
+  let flat = 0;
   $effect(() => {
     if (!data) {
       before = undefined;
+      flat = 0;
       return;
     }
     const pending: number = data.pendingFiles ?? 0;
-    const stalled = before !== undefined && pending >= before;
+    if (before !== undefined) flat = pending < before ? 0 : flat + 1;
     before = pending;
-    if (pending <= 0 || stalled) return;
+    if (pending <= 0 || flat >= 12) return;
     const timer = setTimeout(() => store.tools.load(true), 5000);
     return () => clearTimeout(timer);
   });

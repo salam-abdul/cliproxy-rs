@@ -650,21 +650,30 @@ try {
   assert.equal(toolsChecks - pendingStart,2,"pending files reload every 5 seconds");
   await page.clock.fastForward(60_000);
   assert.equal(toolsChecks - pendingStart,2,"reloads stop once nothing is pending");
-  // A count that does not fall stops the reloads and stays on the page.
-  toolsPending = [3, 3];
+  // Reloads go on while the count falls at least once in 12 reloads, and stop after
+  // 12 in a row that do not fall; the count stays on the page. The page's real 5 s
+  // timer runs on the installed fake clock, so this takes no wall time.
+  toolsPending = [5, ...Array(11).fill(5), 4, ...Array(12).fill(4), ...Array(5).fill(4)];
   await page.reload();
-  await page.getByText("Indexing history: 3 files left.",{exact:true}).waitFor();
+  await page.getByText("Indexing history: 5 files left.",{exact:true}).waitFor();
   const stalledStart = toolsChecks;
-  const stalledRead = page.waitForResponse(r => new URL(r.url()).pathname === "/v8/management/observability/tools");
-  await page.clock.fastForward(5_000);
-  await stalledRead;
-  await settle();
+  const reloadOnce = async () => {
+    const read = page.waitForResponse(r => new URL(r.url()).pathname === "/v8/management/observability/tools");
+    await page.clock.fastForward(5_000);
+    await read;
+    await settle();
+  };
+  for (let n = 0; n < 12; n++) await reloadOnce();
+  await page.getByText("Indexing history: 4 files left.",{exact:true}).waitFor();
+  assert.equal(toolsChecks - stalledStart,12,"11 reloads without a fall do not stop the reloads");
+  for (let n = 0; n < 12; n++) await reloadOnce();
+  assert.equal(toolsChecks - stalledStart,24);
   await page.clock.fastForward(5_000);
   await settle();
   await page.clock.fastForward(60_000);
   await settle();
-  assert.equal(toolsChecks - stalledStart,1,"a count that did not fall stops the reloads");
-  await page.getByText("Indexing history: 3 files left.",{exact:true}).waitFor();
+  assert.equal(toolsChecks - stalledStart,24,"12 reloads in a row without a fall stop the reloads");
+  await page.getByText("Indexing history: 4 files left.",{exact:true}).waitFor();
   toolsPending = [];
   toolsConflict = true;
   await page.reload();
