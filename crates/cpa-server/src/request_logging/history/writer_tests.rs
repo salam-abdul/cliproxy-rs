@@ -421,7 +421,8 @@ fn files_the_size_cap_removed_keep_their_facts() {
     assert!(!capped[0].exists(), "the cap did not remove the oldest file");
     assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
 
-    // A file removed by hand loses its facts at the next pass.
+    // A file removed by hand keeps its facts for one pass, in case its cap removal is
+    // still on its way, and loses them at the second.
     clock.set("2026-11-09T08:02:00Z");
     send(claude_row("b", "s2", 2, "Bash", "toolu_b0"));
     let by_hand = files(&dir.0);
@@ -430,5 +431,63 @@ fn files_the_size_cap_removed_keep_their_facts() {
     std::fs::remove_file(&by_hand[0]).unwrap();
     writer.flush();
     writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0).len(), 2);
+    writer.flush();
+    writer.indexer().sync();
     assert_eq!(indexed_calls(&dir.0), vec![("toolu_a0".to_owned(), "Read".to_owned())]);
+}
+
+#[test]
+fn the_final_rotation_queues_index_work_without_starting_a_pass() {
+    use crate::request_logging::history::test_support::{claude_row, indexed_calls};
+    use sha2::{Digest, Sha256};
+    let dir = TempDir::new();
+    let clock = Clock::new("2026-11-09T08:00:00Z");
+    let writer = Writer::with_limits(clock.limits());
+    let cfg = crate::testing::config(&format!(
+        "observability: {{history: {{enable: true, dir: '{}', max-total-size-mb: 1}}}}",
+        dir.0.display()
+    ));
+    let submit = |row: Row| {
+        let mut pending = http(
+            Row {
+                request_body: None,
+                response_body: None,
+                ..row.clone()
+            },
+            writer.budget(),
+        );
+        let bodies = http_bodies(&mut pending);
+        bodies
+            .request
+            .push_slice(row.request_body.as_deref().unwrap().as_bytes());
+        if let Some(response) = row.response_body.as_deref() {
+            bodies.response.push_line(response.as_bytes());
+        }
+        writer.submit(&cfg, pending);
+    };
+    submit(claude_row("a", "s1", 1, "Read", "toolu_a0"));
+    writer.flush();
+    writer.indexer().sync();
+    assert_eq!(indexed_calls(&dir.0).len(), 1);
+    // Rows the shutdown's final rotation writes: past the cap, so it removes both files
+    // and hands the removals to the indexer.
+    clock.set("2026-11-09T08:01:00Z");
+    let mut filler = String::new();
+    let mut block = Sha256::digest(b"synthetic filler");
+    while filler.len() < 3 << 20 {
+        block = Sha256::digest(block);
+        filler.extend(block.iter().map(|b| format!("{b:02x}")));
+    }
+    submit(Row {
+        provider: Some("codex".into()),
+        request_body: Some(filler),
+        response_body: None,
+        ..row("big")
+    });
+    writer.sync();
+    writer.shutdown(Duration::from_secs(10));
+    // The cap removed both files; neither removal was applied.
+    assert_eq!(files(&dir.0).len(), 0);
+    assert_eq!(writer.indexer().queued(), 2, "the final rotation started an index pass");
 }

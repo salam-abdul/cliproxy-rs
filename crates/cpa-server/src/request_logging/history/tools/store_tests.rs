@@ -197,16 +197,25 @@ fn sweep_forgets_missing_files_and_keeps_capped_ones_for_31_days() {
     let removed = 1_764_000_000_000;
     index.capped(&b, removed).unwrap();
     let on_disk: HashSet<String> = [c.clone()].into();
-    index.sweep(&on_disk, removed).unwrap();
+    // A missing file is forgotten at the second sweep that finds it missing.
+    let missing = index.sweep(&on_disk, removed, &HashSet::new()).unwrap();
+    assert_eq!(missing, [a.clone()].into());
+    assert!(index.indexed().unwrap().contains_key(&a));
+    let missing = index.sweep(&on_disk, removed, &missing).unwrap();
+    assert!(missing.is_empty());
     let indexed = index.indexed().unwrap();
     assert!(!indexed.contains_key(&a));
     assert_eq!(indexed.get(&b).map(|(_, capped)| *capped), Some(Some(removed)));
     assert_eq!(indexed.get(&c).map(|(_, capped)| *capped), Some(None));
     assert_eq!(count(&index, "sends", &b), 1);
 
-    index.sweep(&on_disk, removed + RETAIN_CAPPED_MS - 1).unwrap();
+    index
+        .sweep(&on_disk, removed + RETAIN_CAPPED_MS - 1, &HashSet::new())
+        .unwrap();
     assert_eq!(count(&index, "sends", &b), 1);
-    index.sweep(&on_disk, removed + RETAIN_CAPPED_MS).unwrap();
+    index
+        .sweep(&on_disk, removed + RETAIN_CAPPED_MS, &HashSet::new())
+        .unwrap();
     assert_eq!(count(&index, "sends", &b), 0);
     assert!(!index.indexed().unwrap().contains_key(&b));
     assert_eq!(count(&index, "sends", &c), 1);

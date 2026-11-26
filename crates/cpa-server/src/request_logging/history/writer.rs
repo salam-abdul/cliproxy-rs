@@ -438,7 +438,7 @@ impl Worker {
             match apply_tombstones(&file.path, &todo) {
                 Ok(changed) => {
                     if changed && let Some(rel) = rel_path(&dir, &file.path) {
-                        self.indexer.forget(rel);
+                        self.indexer.forget(&dir, rel, !self.closing);
                     }
                 }
                 // Retention removed it meanwhile.
@@ -649,7 +649,7 @@ impl Worker {
     fn capped(&self, dir: &std::path::Path, removed: Vec<PathBuf>) {
         for path in removed {
             if let Some(rel) = rel_path(dir, &path) {
-                self.indexer.capped(rel);
+                self.indexer.capped(dir, rel, !self.closing);
             }
         }
     }

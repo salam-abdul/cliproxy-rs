@@ -261,7 +261,7 @@ One background thread keeps the index. It runs a pass when the writer finishes a
 | --- | --- |
 | Removed by the size cap | Kept for 31 days after the removal |
 | Rewritten or removed by a delete | Dropped before anything else is indexed: by `cliproxy history delete` in the same run, by the server at the start of its next pass. A rewritten file is indexed again. |
-| Removed any other way | Dropped at the next pass |
+| Removed any other way | Dropped at the second pass that finds it missing, so a cap removal that reaches the index a pass late still keeps the facts |
 
 `cliproxy history delete` updates the index in the same run, also with the server stopped. When it cannot, it exits with an error naming how many files it could not update, and a running server drops their facts at its next pass.
 

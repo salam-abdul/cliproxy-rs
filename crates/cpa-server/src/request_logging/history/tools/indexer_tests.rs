@@ -109,7 +109,7 @@ fn catch_up_indexes_oldest_first() {
     std::fs::remove_file(dir.0.join(INDEX_FILE)).unwrap();
     let _ = std::fs::remove_file(dir.0.join(format!("{INDEX_FILE}-wal")));
     let _ = std::fs::remove_file(dir.0.join(format!("{INDEX_FILE}-shm")));
-    let second = indexer();
+    let second = Indexer::with_retry(Arc::new(Utc::now), Duration::from_millis(50));
     let (reached, release) = second.pause_before_commit();
     second.nudge(&settings);
     assert_eq!(reached.recv_timeout(WAIT).unwrap(), rel(&dir.0, &older));
@@ -123,7 +123,11 @@ fn catch_up_indexes_oldest_first() {
         indexed_rels(&dir.0).is_empty(),
         "the pass went on after a refused commit"
     );
-    second.tick();
+    // The retry runs when the wait for a message times out, with no nudge.
+    let started = Instant::now();
+    while indexed_rels(&dir.0).len() < 2 && started.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(indexed_rels(&dir.0).len(), 2);
     assert_eq!(conv_of(&dir.0, "toolu_a0"), conv);
     assert_eq!(conv_of(&dir.0, "toolu_b0"), conv);
@@ -189,9 +193,100 @@ fn missing_file_loses_its_facts() {
     run(&indexer, &settings);
     assert_eq!(indexed_calls(&dir.0).len(), 1);
     std::fs::remove_file(&path).unwrap();
+    // A cap removal may still be on its way to the queue: one pass keeps the facts.
+    run(&indexer, &settings);
+    assert_eq!(indexed_calls(&dir.0).len(), 1);
     run(&indexer, &settings);
     assert!(indexed_calls(&dir.0).is_empty());
     assert!(indexed_rels(&dir.0).is_empty());
+}
+
+#[test]
+fn a_cap_reported_one_pass_late_keeps_the_facts() {
+    let dir = TempDir::new();
+    let path = write(
+        &dir.0,
+        "2026-11-24T08:00:00Z",
+        &[claude_row("p", "s1", us("2026-11-24T08:00:00Z"), "Read", "toolu_a0")],
+    );
+    let indexer = indexer();
+    let settings = settings(&dir.0, &[]);
+    run(&indexer, &settings);
+    std::fs::remove_file(&path).unwrap();
+    run(&indexer, &settings);
+    indexer.capped(&dir.0, rel(&dir.0, &path), true);
+    indexer.sync();
+    run(&indexer, &settings);
+    run(&indexer, &settings);
+    assert_eq!(indexed_calls(&dir.0).len(), 1);
+    assert!(capped_at(&dir.0, &rel(&dir.0, &path)).is_some());
+}
+
+fn capped_at(dir: &Path, rel: &str) -> Option<i64> {
+    let conn = rusqlite::Connection::open(dir.join(INDEX_FILE)).unwrap();
+    conn.query_row("SELECT capped_ms FROM files WHERE rel = ?1", [rel], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn an_index_open_failure_keeps_the_queue() {
+    let dir = TempDir::new();
+    let path = write(
+        &dir.0,
+        "2026-11-24T08:00:00Z",
+        &[claude_row("p", "s1", us("2026-11-24T08:00:00Z"), "Read", "toolu_a0")],
+    );
+    let indexer = indexer();
+    let settings = settings(&dir.0, &[]);
+    indexer.pass_here(&settings);
+    std::fs::remove_file(&path).unwrap();
+    let index = dir.0.join(INDEX_FILE);
+    let aside = dir.0.join("index-aside");
+    std::fs::rename(&index, &aside).unwrap();
+    std::fs::create_dir(&index).unwrap();
+    let rel = rel(&dir.0, &path);
+    indexer.capped(&dir.0, rel.clone(), false);
+    indexer.pass_here(&settings);
+    assert_eq!(indexer.queued(), 1, "the failed pass dropped its queue");
+    std::fs::remove_dir(&index).unwrap();
+    std::fs::rename(&aside, &index).unwrap();
+    indexer.pass_here(&settings);
+    assert_eq!(indexer.queued(), 0);
+    assert!(capped_at(&dir.0, &rel).is_some());
+}
+
+#[test]
+fn queued_work_without_a_wake_waits_for_the_next_pass() {
+    let dir = TempDir::new();
+    two_sessions(&dir.0);
+    let indexer = indexer();
+    let settings = settings(&dir.0, &[]);
+    run(&indexer, &settings);
+    indexer.forget(&dir.0, "date=2026-11-24/080000-0-0000.parquet".into(), false);
+    indexer.capped(&dir.0, "date=2026-11-24/090000-0-0000.parquet".into(), false);
+    indexer.sync();
+    assert_eq!(indexer.queued(), 2, "work queued without a wake started a pass");
+    indexer.forget(&dir.0, "date=2026-11-24/100000-0-0000.parquet".into(), true);
+    indexer.sync();
+    assert_eq!(indexer.queued(), 0);
+}
+
+#[test]
+fn queued_work_for_another_history_folder_is_dropped() {
+    let dir = TempDir::new();
+    let other = TempDir::new();
+    let path = two_sessions(&dir.0);
+    let indexer = indexer();
+    let settings = settings(&dir.0, &[]);
+    run(&indexer, &settings);
+    std::fs::remove_file(&path).unwrap();
+    // A cap removal reported for the same name in another folder does not keep this
+    // folder's facts.
+    indexer.capped(&other.0, rel(&dir.0, &path), false);
+    run(&indexer, &settings);
+    run(&indexer, &settings);
+    assert_eq!(indexer.queued(), 0);
+    assert!(indexed_calls(&dir.0).is_empty(), "work for another folder was applied");
 }
 
 #[test]
@@ -209,7 +304,7 @@ fn cap_removed_file_keeps_facts_for_31_days() {
     let settings = settings(&dir.0, &[]);
     run(&indexer, &settings);
     std::fs::remove_file(&path).unwrap();
-    indexer.capped(rel(&dir.0, &path));
+    indexer.capped(&dir.0, rel(&dir.0, &path), true);
     run(&indexer, &settings);
     assert_eq!(indexed_calls(&dir.0).len(), 1);
     *clock.lock().unwrap() = removed + chrono::TimeDelta::milliseconds(2_678_400_000 - 1);
@@ -306,7 +401,7 @@ fn nudge_never_blocks() {
     let started = Instant::now();
     for _ in 0..5 {
         indexer.nudge(&settings);
-        indexer.forget("date=2026-11-24/000000-1-0000.parquet".into());
+        indexer.forget(&dir.0, "date=2026-11-24/000000-1-0000.parquet".into(), true);
     }
     assert!(started.elapsed() < Duration::from_secs(1));
     drop(release);

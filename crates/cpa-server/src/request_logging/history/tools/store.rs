@@ -236,22 +236,34 @@ impl Index {
         Ok(())
     }
 
-    /// Forgets every indexed file that is not in `on_disk` and was not removed by the
-    /// size cap, and every capped file removed [`RETAIN_CAPPED_MS`] or more ago.
-    pub(crate) fn sweep(&mut self, on_disk: &HashSet<String>, now_ms: i64) -> rusqlite::Result<()> {
-        let gone: Vec<String> = self
-            .indexed()?
-            .into_iter()
-            .filter(|(rel, (_, capped))| match capped {
-                None => !on_disk.contains(rel),
-                Some(at) => now_ms.saturating_sub(*at) >= RETAIN_CAPPED_MS,
-            })
-            .map(|(rel, _)| rel)
-            .collect();
+    /// Forgets every capped file removed [`RETAIN_CAPPED_MS`] or more ago, and every
+    /// indexed file that is not in `on_disk`, was not removed by the size cap, and was
+    /// already missing at the previous sweep (`missing`): a cap removal reaches the index
+    /// one pass late when it happens during a pass. Returns the files missing now that
+    /// were not forgotten, for the next sweep.
+    pub(crate) fn sweep(
+        &mut self,
+        on_disk: &HashSet<String>,
+        now_ms: i64,
+        missing: &HashSet<String>,
+    ) -> rusqlite::Result<HashSet<String>> {
+        let mut gone = Vec::new();
+        let mut still = HashSet::new();
+        for (rel, (_, capped)) in self.indexed()? {
+            match capped {
+                None if on_disk.contains(&rel) => {}
+                None if missing.contains(&rel) => gone.push(rel),
+                None => {
+                    still.insert(rel);
+                }
+                Some(at) if now_ms.saturating_sub(at) >= RETAIN_CAPPED_MS => gone.push(rel),
+                Some(_) => {}
+            }
+        }
         for rel in gone {
             self.forget(&rel)?;
         }
-        Ok(())
+        Ok(still)
     }
 }
 

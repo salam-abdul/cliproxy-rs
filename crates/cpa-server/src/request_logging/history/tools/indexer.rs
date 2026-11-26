@@ -2,8 +2,9 @@
 //! finished history files. It owns the only SQLite connection the server opens on the
 //! index while writing, so the history writer only queues work and never waits on it.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -30,14 +31,21 @@ enum Msg {
     Nudge,
     #[cfg(test)]
     Sync(SyncSender<()>),
-    #[cfg(test)]
-    Tick(SyncSender<()>),
 }
 
-/// Work from the history writer, applied at the start of the next pass.
+/// Work from the history writer, applied at the start of the next pass under the same
+/// history folder; a pass under another folder drops it.
 enum Queued {
-    Forget(String),
-    Capped(String, i64),
+    Forget { dir: PathBuf, rel: String },
+    Capped { dir: PathBuf, rel: String, at: i64 },
+}
+
+impl Queued {
+    fn dir(&self) -> &Path {
+        match self {
+            Queued::Forget { dir, .. } | Queued::Capped { dir, .. } => dir,
+        }
+    }
 }
 
 /// How a pass ended.
@@ -53,9 +61,14 @@ enum End {
 struct Shared {
     /// The settings of the newest nudge: merged nudges run with the last one's.
     latest: Mutex<Option<Settings>>,
-    queue: Mutex<Vec<Queued>>,
+    queue: Mutex<VecDeque<Queued>>,
+    /// The history folder of the last sweep, and the indexed files it found missing and
+    /// not capped: the next sweep forgets those still missing.
+    missing: Mutex<(PathBuf, HashSet<String>)>,
     stop: AtomicBool,
     now: Clock,
+    /// How long after a refused commit the next pass starts.
+    retry: Duration,
     #[cfg(test)]
     hooks: Hooks,
 }
@@ -75,12 +88,18 @@ pub(crate) struct Indexer {
 
 impl Indexer {
     pub(crate) fn new(now: Clock) -> Self {
+        Self::with_retry(now, RETRY)
+    }
+
+    pub(crate) fn with_retry(now: Clock, retry: Duration) -> Self {
         Self {
             shared: Arc::new(Shared {
                 latest: Mutex::new(None),
-                queue: Mutex::new(Vec::new()),
+                queue: Mutex::new(VecDeque::new()),
+                missing: Mutex::new((PathBuf::new(), HashSet::new())),
                 stop: AtomicBool::new(false),
                 now,
+                retry,
                 #[cfg(test)]
                 hooks: Hooks::default(),
             }),
@@ -98,26 +117,31 @@ impl Indexer {
         self.wake();
     }
 
-    /// Drops the facts of the history file `rel` (relative to the history folder) at
-    /// the start of the next pass: a delete rewrote or removed it.
-    pub(crate) fn forget(&self, rel: String) {
-        self.enqueue(Queued::Forget(rel));
+    /// Drops the facts of the history file `rel` of the history folder `dir` at the
+    /// start of the next pass: a delete rewrote or removed it. `wake` asks for that pass
+    /// now; a writer that is closing passes false, so shutdown starts no pass.
+    pub(crate) fn forget(&self, dir: &Path, rel: String, wake: bool) {
+        let dir = dir.to_path_buf();
+        self.enqueue(Queued::Forget { dir, rel }, wake);
     }
 
-    /// Marks the history file `rel` as removed by the size cap now, so its facts stay for
-    /// 31 days.
-    pub(crate) fn capped(&self, rel: String) {
+    /// Marks the history file `rel` of `dir` as removed by the size cap now, so its facts
+    /// stay for 31 days. `wake` as for [`Indexer::forget`].
+    pub(crate) fn capped(&self, dir: &Path, rel: String, wake: bool) {
         let at = (self.shared.now)().timestamp_millis();
-        self.enqueue(Queued::Capped(rel, at));
+        let dir = dir.to_path_buf();
+        self.enqueue(Queued::Capped { dir, rel, at }, wake);
     }
 
-    fn enqueue(&self, work: Queued) {
+    fn enqueue(&self, work: Queued, wake: bool) {
         self.shared
             .queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(work);
-        self.wake();
+            .push_back(work);
+        if wake {
+            self.wake();
+        }
     }
 
     /// Starts the thread when settings are known, and asks it for a pass.
@@ -192,14 +216,6 @@ fn run(shared: &Shared, rx: &Receiver<Msg>) {
                 let _ = ack.send(());
                 continue;
             }
-            #[cfg(test)]
-            Ok(Msg::Tick(ack)) => {
-                if retry.is_some() {
-                    retry = (pass(shared) == End::Refused).then(|| Instant::now() + RETRY);
-                }
-                let _ = ack.send(());
-                continue;
-            }
             Err(RecvTimeoutError::Timeout) if retry.is_some() => {}
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
@@ -207,7 +223,7 @@ fn run(shared: &Shared, rx: &Receiver<Msg>) {
         if shared.stop.load(Ordering::Relaxed) {
             return;
         }
-        retry = (pass(shared) == End::Refused).then(|| Instant::now() + RETRY);
+        retry = (pass(shared) == End::Refused).then(|| Instant::now() + shared.retry);
     }
 }
 
@@ -217,26 +233,38 @@ fn pass(shared: &Shared) -> End {
     let Some(settings) = shared.latest.lock().unwrap_or_else(PoisonError::into_inner).clone() else {
         return End::Done;
     };
-    let queued = std::mem::take(&mut *shared.queue.lock().unwrap_or_else(PoisonError::into_inner));
+    // Work for another history folder belongs to an index this pass does not open.
+    let mut pending: VecDeque<Queued> =
+        std::mem::take(&mut *shared.queue.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_iter()
+            .filter(|work| work.dir() == settings.dir)
+            .collect();
     if !settings.dir.is_dir() {
         // Nothing was written yet, so nothing was indexed.
         return End::Done;
     }
     let result = (|| -> anyhow::Result<End> {
         let mut index = Index::open(&settings.dir)?;
-        for work in queued {
+        while let Some(work) = pending.front() {
             match work {
-                Queued::Forget(rel) => index.forget(&rel)?,
-                Queued::Capped(rel, at) => index.capped(&rel, at)?,
+                Queued::Forget { rel, .. } => index.forget(rel)?,
+                Queued::Capped { rel, at, .. } => index.capped(rel, *at)?,
             }
+            pending.pop_front();
         }
         let history = HistoryDir::new(&settings.dir);
         let files = history.files()?;
         let on_disk: HashSet<String> = files
             .iter()
-            .map(|file| format!("{}/{}", file.partition, file.name))
+            .filter_map(|file| rel_path(&settings.dir, &file.path))
             .collect();
-        index.sweep(&on_disk, (shared.now)().timestamp_millis())?;
+        {
+            let mut missing = shared.missing.lock().unwrap_or_else(PoisonError::into_inner);
+            if missing.0 != settings.dir {
+                *missing = (settings.dir.clone(), HashSet::new());
+            }
+            missing.1 = index.sweep(&on_disk, (shared.now)().timestamp_millis(), &missing.1)?;
+        }
         let indexed = index.indexed()?;
         for file in &files {
             if shared.stop.load(Ordering::Relaxed) {
@@ -285,6 +313,13 @@ fn pass(shared: &Shared) -> End {
         }
         Ok(End::Done)
     })();
+    if !pending.is_empty() {
+        // Ahead of newer work, in order, so the next pass applies it first.
+        let mut queue = shared.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        for work in pending.into_iter().rev() {
+            queue.push_front(work);
+        }
+    }
     result.unwrap_or_else(|_| {
         // Fixed text: errors here can name history paths.
         tracing::warn!("history: tool index pass stopped");
@@ -330,14 +365,8 @@ impl Indexer {
         }
     }
 
-    /// Runs the pass a refused commit scheduled, as if its delay had passed.
-    pub(crate) fn tick(&self) {
-        if let Some(tx) = self.sender() {
-            let (ack, done) = sync_channel(1);
-            if tx.send(Msg::Tick(ack)).is_ok() {
-                let _ = done.recv();
-            }
-        }
+    pub(crate) fn queued(&self) -> usize {
+        self.shared.queue.lock().unwrap().len()
     }
 
     /// Holds the next file between its read and its commit: the first receiver gets the
