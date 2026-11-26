@@ -546,3 +546,13 @@ fn a_file_the_pass_cannot_open_is_unreadable_and_not_pending() {
     .unwrap();
     assert_eq!(answer["pendingFiles"], 0);
 }
+
+#[test]
+fn queued_work_waits_while_the_history_folder_is_missing() {
+    let dir = TempDir::new();
+    let indexer = indexer();
+    indexer.forget(&dir.0, "date=2026-11-24/080000-1-0000.parquet".into(), false);
+    indexer.remember(&dir.0, cpa_exec::claude::alias_prefix("k1"));
+    indexer.pass_here(&settings(&dir.0, &[]));
+    assert_eq!(indexer.queued(), 2, "a pass without the folder dropped its queue");
+}

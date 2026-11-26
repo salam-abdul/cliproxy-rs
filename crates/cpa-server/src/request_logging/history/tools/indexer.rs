@@ -281,7 +281,8 @@ fn pass(shared: &Shared) -> End {
         }
     }
     if !settings.dir.is_dir() {
-        // Nothing was written yet, so nothing was indexed.
+        // Nothing was written yet, so nothing was indexed; the work waits for the folder.
+        put_back(shared, pending);
         return End::Done;
     }
     let result = (|| -> anyhow::Result<End> {
@@ -369,18 +370,21 @@ fn pass(shared: &Shared) -> End {
         }
         Ok(End::Done)
     })();
-    if !pending.is_empty() {
-        // Ahead of newer work, in order, so the next pass applies it first.
-        let mut queue = shared.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        for work in pending.into_iter().rev() {
-            queue.push_front(work);
-        }
-    }
+    put_back(shared, pending);
     result.unwrap_or_else(|_| {
         // Fixed text: errors here can name history paths.
         tracing::warn!("history: tool index pass stopped");
         End::Failed
     })
+}
+
+/// Returns work a pass did not apply to the queue, ahead of newer work and in order, so
+/// the next pass applies it first.
+fn put_back(shared: &Shared, pending: VecDeque<Queued>) {
+    let mut queue = shared.queue.lock().unwrap_or_else(PoisonError::into_inner);
+    for work in pending.into_iter().rev() {
+        queue.push_front(work);
+    }
 }
 
 /// Points where a test holds the indexer thread.
