@@ -114,10 +114,6 @@ impl Writer {
     }
 
     /// The tool indexer of this writer's history.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests read it until the tools route nudges it")
-    )]
     pub(crate) fn indexer(&self) -> &Arc<Indexer> {
         &self.indexer
     }

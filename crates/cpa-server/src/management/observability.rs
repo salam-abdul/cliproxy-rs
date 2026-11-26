@@ -276,6 +276,37 @@ pub(crate) async fn speed(State(state): State<Arc<Management>>, AxumQuery(params
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct ToolsParams {
+    #[serde(default = "default_history_range")]
+    range: String,
+    provider: Option<String>,
+}
+
+pub(crate) async fn tools(State(state): State<Arc<Management>>, AxumQuery(params): AxumQuery<ToolsParams>) -> Response {
+    let Some(range) = crate::activity::Range::parse(&params.range) else {
+        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
+    };
+    if let Err(message) = check(params.provider.as_deref()) {
+        return fail(StatusCode::BAD_REQUEST, message);
+    }
+    let settings = crate::request_logging::history::settings(&state.rt.config());
+    let Some(settings) = settings.as_ref() else {
+        return fail(StatusCode::CONFLICT, "Body history is off");
+    };
+    state.rt.history().indexer().nudge(settings);
+    let dir = settings.dir.clone();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let read = tokio::task::spawn_blocking(move || {
+        crate::request_logging::history::tools::read::read(&dir, range, params.provider.as_deref(), now_ms)
+    })
+    .await;
+    match read {
+        Ok(Ok(result)) => super::json_ordered(StatusCode::OK, &result),
+        _ => fail(StatusCode::INTERNAL_SERVER_ERROR, "Tools could not be read"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

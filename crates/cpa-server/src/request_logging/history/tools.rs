@@ -5,6 +5,7 @@
 use sha2::{Digest, Sha256};
 
 pub(crate) mod indexer;
+pub(crate) mod read;
 pub(crate) mod scan;
 pub(crate) mod store;
 

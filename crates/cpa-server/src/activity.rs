@@ -42,7 +42,7 @@ impl Range {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Day => "24h",
             Self::Week => "7d",
@@ -50,7 +50,7 @@ impl Range {
         }
     }
 
-    fn duration(self) -> i64 {
+    pub(crate) fn duration(self) -> i64 {
         match self {
             Self::Day => DAY_MS,
             Self::Week => 7 * DAY_MS,
