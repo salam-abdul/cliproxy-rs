@@ -17,6 +17,7 @@ pub(crate) mod native;
 pub(crate) mod row;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub(crate) mod tools;
 pub mod writer;
 
 const DEFAULT_MAX_TOTAL_MB: u64 = 10240;
