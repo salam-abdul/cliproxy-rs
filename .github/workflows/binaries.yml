@@ -49,10 +49,17 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
       - uses: ./.github/actions/rust
       - name: Build
-        run: cargo build --release --locked -p cliproxy
+        # The rolling release keeps no per-commit files, so `cliproxy --version` and the
+        # startup banner are how a downloaded binary names its commit.
+        run: |
+          export CPA_COMMIT="$SOURCE_SHA" CPA_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo build --release --locked -p cliproxy
+          target/release/cliproxy --version
       - name: Package
         env:
           TARGET: ${{ matrix.target }}
+          # Keeps macOS tar from adding ._cliproxy metadata entries.
+          COPYFILE_DISABLE: "1"
         run: |
           mkdir -p "$RUNNER_TEMP/dist"
           archive="cliproxy-$TARGET.tar.gz"
@@ -86,19 +93,20 @@ jobs:
       - name: Move the latest release
         working-directory: ${{ runner.temp }}/dist
         # `latest` moves only to main's current tip, so a late run for an older commit
-        # does not move it backwards. The file names are fixed per target, so --clobber
-        # replaces every file of the previous build.
+        # does not move it backwards. The files go up before the tag and notes move, so the
+        # tag never names a commit whose files failed to upload.
+        # --clobber replaces files of the same name, one target's archive and checksum each.
         run: |
           tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
           if [ "$tip" != "$SOURCE_SHA" ]; then
             echo "main is at $tip, not $SOURCE_SHA; leaving latest alone"
             exit 0
           fi
-          notes="Built from $SOURCE_SHA on main. This prerelease moves to each commit that passes CI."
+          notes="Built from $SOURCE_SHA on main, after CI passed or by a manual run of the workflow."
           if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload latest --repo "$GITHUB_REPOSITORY" --clobber ./*
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/latest" -f sha="$SOURCE_SHA" -F force=true > /dev/null
             gh release edit latest --repo "$GITHUB_REPOSITORY" --notes "$notes"
-            gh release upload latest --repo "$GITHUB_REPOSITORY" --clobber ./*
           else
             gh release create latest --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
               --target "$SOURCE_SHA" --title "latest" --notes "$notes" ./*
