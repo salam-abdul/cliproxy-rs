@@ -20,7 +20,8 @@ fn words() -> &'static [&'static str] {
     WORDS.get_or_init(|| include_str!("bip39_words.txt").split_whitespace().collect())
 }
 
-pub(crate) const DEFAULT_SECRET: &str = "cpa-claude-mcp-default-caller";
+/// The alias secret of a request whose caller has no client key.
+pub const DEFAULT_SECRET: &str = "cpa-claude-mcp-default-caller";
 
 pub(crate) fn is_mcp_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 || !name.starts_with("mcp__") {
@@ -84,6 +85,12 @@ fn word(digest: &[u8], offset: usize) -> &'static str {
 fn server(secret: &str) -> String {
     let d = digest(secret, "server", "");
     format!("{}_{}", word(&d, 0), word(&d, 2))
+}
+
+/// `mcp__<word>_<word>__`: the start of every alias [`remap`] gives under `secret`. The
+/// tool word and the original name follow it, joined by `_`.
+pub fn alias_prefix(secret: &str) -> String {
+    format!("mcp__{}__", server(secret))
 }
 
 fn semantic_suffix(original: &str, max: usize) -> String {
@@ -664,6 +671,18 @@ pub(crate) fn restore_event_payload(payload: &str, reverse: &Reverse) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alias_prefix_matches_remap() {
+        let body = r#"{"tools":[{"name":"Read","input_schema":{"type":"object"}}]}"#;
+        let (out, _) = remap(body, "k1");
+        let renamed = rawjson::string(&out, "tools.0.name");
+        let prefix = alias_prefix("k1");
+        let rest = renamed
+            .strip_prefix(prefix.as_str())
+            .unwrap_or_else(|| panic!("{renamed}"));
+        assert_eq!(rest.split_once('_').map(|(_, name)| name), Some("Read"), "{renamed}");
+    }
 
     #[test]
     fn harness_alias_matches_clean_go_capture() {

@@ -3,6 +3,7 @@
 //! files hold prompts and outputs; headers, URLs, tokens and keys are never stored.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use cpa_core::config::Config;
 
@@ -26,6 +27,9 @@ pub struct Settings {
     pub dir: PathBuf,
     /// `None`: no cap.
     pub max_total_bytes: Option<u64>,
+    /// The Claude tool alias prefixes of every client key and of the default caller,
+    /// sorted and deduplicated, so history readers can name aliased tools.
+    pub alias_prefixes: Arc<[String]>,
 }
 
 impl Settings {
@@ -63,8 +67,22 @@ impl Settings {
         Some(Settings {
             dir,
             max_total_bytes: (mb > 0).then(|| mb.saturating_mul(1 << 20)),
+            alias_prefixes: alias_prefixes(cfg),
         })
     }
+}
+
+fn alias_prefixes(cfg: &Config) -> Arc<[String]> {
+    let mut prefixes: Vec<String> = cfg
+        .api_keys
+        .iter()
+        .map(String::as_str)
+        .chain([cpa_exec::claude::DEFAULT_ALIAS_SECRET])
+        .map(cpa_exec::claude::alias_prefix)
+        .collect();
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes.into()
 }
 
 /// `value` as an optional column: empty is absent.
