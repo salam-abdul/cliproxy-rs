@@ -455,3 +455,37 @@ fn an_index_file_still_being_created_is_the_empty_answer() {
     assert_eq!(answer["covered"], Value::Null);
     assert_eq!(answer["tools"], json!([]));
 }
+
+#[test]
+fn the_index_reads_after_the_indexer_closed_it() {
+    let mut store = Store::new();
+    store.file(&[send(NOW - 1000, Conv::Start(1)).def("Read", 10).call(1, "Read")]);
+    let Store { dir, index, .. } = store;
+    drop(index);
+    let path = dir.0.join(INDEX_FILE);
+    let side = |suffix: &str| dir.0.join(format!("{INDEX_FILE}{suffix}"));
+    // Closing the last connection checkpoints and removes the side files; where it
+    // does not, remove them after a full checkpoint, as SQLite itself would.
+    if side("-wal").exists() || side("-shm").exists() {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        drop(conn);
+        let _ = std::fs::remove_file(side("-wal"));
+        let _ = std::fs::remove_file(side("-shm"));
+    }
+    assert!(!side("-wal").exists() && !side("-shm").exists());
+    let listing = || {
+        let mut names: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing();
+    let answer = read(&dir.0, Range::Day, None, NOW).unwrap();
+    assert_eq!(answer["sends"], 1);
+    assert_eq!(tool(&answer, "Read")["calls"], 1);
+    assert_eq!(listing(), before, "the read leaves no file behind");
+}

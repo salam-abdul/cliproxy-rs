@@ -1,4 +1,4 @@
-//! Tool and skill measures over a range, read from the tool index on a read-only
+//! Tool and skill measures over a range, read from the tool index on a query-only
 //! connection. Measures count conversations, not requests: a conversation is in range
 //! when one of its sends is, and the tools it carried are its definitions on any date.
 
@@ -31,11 +31,15 @@ pub(crate) fn read(dir: &Path, range: Range, provider: Option<&str>, now_ms: i64
     if !path.is_file() {
         return Ok(Answer::default().json(range));
     }
+    // Read-write without create, then query-only: the index is in WAL mode, and once
+    // the indexer's connection closes its side files are gone, which a read-only
+    // connection can neither recreate reliably nor remove when it closes.
     let mut db = Connection::open_with_flags(
         &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     db.busy_timeout(Duration::from_secs(2))?;
+    db.pragma_update(None, "query_only", true)?;
     let tx = db.transaction()?;
     let tables: i64 = tx.query_row(
         &format!(
