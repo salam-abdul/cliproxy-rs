@@ -41,7 +41,7 @@ Facts that shape the design:
 
 - **The activity store starts inside native routing** (`native_claude.rs:1279`) and lives beside its event log. With native routing off there is no store.
 - **Its `requests` table is keyed by request ID and written with `INSERT OR REPLACE`** (`native_claude/history.rs:121`, `:375`), so a second row for the same request replaces the first.
-- **Native events carry timings the store drops**, measured from the request's arrival and summed across failovers (`native_claude.rs:861`, `native_claude/send.rs:198`; `native_claude/observation.rs:458`). Body history times the same send from its own start (`crates/cpa-server/src/request_logging/history/native.rs:133`).
+- **Native events carry timings the store drops**, measured from the request's arrival and summed across failovers (`native_claude.rs:849`, `native_claude/send.rs:200`; `native_claude/observation.rs:458`). Body history times the same send from its own start (`crates/cpa-server/src/request_logging/history/native.rs:133`).
 - **A translating-proxy request is measured only when the usage queue or body history is on** (`crates/cpa-server/src/dispatch.rs:931`). Otherwise no usage tracker runs and no response is scanned for token counts.
 - **Time to first byte has three meanings.** Native routing measures the first response byte. Claude, Kimi, xAI, Devin and Meta report the first token, else the first packet. Codex, Gemini and Antigravity report nothing, so the figure is the first translated event or the response headers (`crates/cpa-server/src/usage_record.rs:2097`).
 - **Stage timings exist for Claude only** on the translating proxy (`usage_record.rs:1299`), and they count from the request's arrival, not the send.
