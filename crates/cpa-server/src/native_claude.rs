@@ -16,6 +16,7 @@ mod status;
 use axum::http::StatusCode;
 #[cfg(test)]
 use observation::UsageScanner;
+#[cfg(test)]
 use observation::{Exchange, Observation};
 use policy::choose_account;
 #[cfg(test)]
@@ -857,10 +858,10 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         sessions.retain(|_, lock| Arc::strong_count(lock) > 1);
         sessions.entry(sid.clone()).or_default().clone()
     };
-    let preparation_ms = request_started.elapsed().as_millis();
-    let mut session_wait_ms = 0u128;
-    let mut admission_ms = 0u128;
-    let mut upstream_headers_ms = 0u128;
+    let mut timing = send::Timing {
+        preparation_ms: request_started.elapsed().as_millis(),
+        ..send::Timing::default()
+    };
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut tried = HashSet::new();
     let mut rejection: Option<quota::Rejection> = None;
@@ -909,8 +910,8 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         .await;
         let attempt_ms = attempt_started.elapsed().as_millis();
         let wait_ms = waited.unwrap_or(attempt_ms);
-        session_wait_ms += wait_ms;
-        admission_ms += attempt_ms - wait_ms;
+        timing.session_wait_ms += wait_ms;
+        timing.admission_ms += attempt_ms - wait_ms;
         let a = match admitted {
             Ok(Ok((Some(a), _))) => a,
             other => {
@@ -957,7 +958,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         false,
                     ),
                 };
-                let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}});
+                let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":timing.session_wait_ms,"admissionMs":timing.admission_ms}});
                 if quota {
                     if let Some(response) = s.fall_back(refused(tried.len()), rejected).await {
                         return Ok(response);
@@ -978,19 +979,9 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"account":a.id,"outcome":"routing_error","status":502,"attempts":tried.len()}));
             return Ok(error(502, "Native routing state unavailable; no request sent"));
         };
-        let timing = send::Timing {
-            preparation_ms,
-            session_wait_ms,
-            admission_ms,
-            upstream_headers_ms,
-        };
-        match send::run(&s, &request, a, client, tried.len(), timing).await? {
+        match send::run(&s, &request, a, client, tried.len(), &mut timing).await? {
             send::Ending::Lost(response) | send::Ending::Answered(response) => return Ok(response),
-            send::Ending::Rejected {
-                headers_ms,
-                rejection: next,
-            } => {
-                upstream_headers_ms += headers_ms;
+            send::Ending::Rejected(next) => {
                 if let Some(next) = next {
                     rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
                 }

@@ -611,6 +611,36 @@ async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
     }
 }
 
+/// An answer's `upstreamHeadersMs` sums the waits for every send's response head, the
+/// refused send's included.
+#[tokio::test]
+async fn upstream_header_time_sums_every_send_of_a_request() {
+    const SLOW: &[u8] =
+        br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[],"mode":"MODE_SLOW"}"#;
+    let fixture = Fixture::new(Reply {
+        status: 503,
+        body: Vec::new(),
+        broken: false,
+    })
+    .await;
+    let response = fixture.request_body(SLOW).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap(), SUCCESS);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let inference = loop {
+        let events = fixture.state.rt.native_events.snapshot()["events"].clone();
+        if let Some(e) = events.as_array().unwrap().iter().find(|e| e["type"] == "inference") {
+            break e.clone();
+        }
+        assert!(Instant::now() < deadline, "no inference event: {events}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(inference["attempts"], 2, "{inference}");
+    // Each of the two heads arrives after the upstream's 150ms delay.
+    let headers_ms = inference["timing"]["upstreamHeadersMs"].as_u64().unwrap();
+    assert!(headers_ms >= 300, "{inference}");
+}
+
 /// A send whose connection was lost counts as a failed request for its credential and
 /// leaves a failed usage record, statusless like a transport fault on the translating
 /// path, and the request is still not replayed.

@@ -1,9 +1,14 @@
 //! A native send is one upstream request of a native Claude exchange, made with one admitted
 //! account. It starts the send's history capture, sends, reads the response head, and ends one
-//! of three ways: the connection is lost, the account refuses, or the account answers. Each
-//! ending applies its own effects on that account (history, activity row, failed counter,
-//! usage record, cooldown and event), so the attempt loop only decides whether to try another.
-use super::{Account, Exchange, Observation, State, error, hash, headers, now, observation, policy, quota};
+//! of three ways: the send gets no response head, the account refuses, or the account answers.
+//! A send that gets no head or is refused writes its records and cools the account here. An
+//! answer streams to the client, and `Observation` writes its records when the stream ends.
+use super::observation::{self, Exchange, Observation, UsageEntry};
+use super::{Account, State, error, hash, headers, now, policy, quota};
+use crate::request_logging::history::{
+    native::{NativeCapture, NativeEnd, NativeSend},
+    row::Outcome,
+};
 use axum::{
     body::Body,
     http::{HeaderMap, Method, StatusCode},
@@ -36,46 +41,114 @@ pub(super) struct Request<'a> {
     pub(super) session: &'a Arc<tokio::sync::Mutex<()>>,
 }
 
-/// Milliseconds the request spent before this send, reported with its answer.
+/// Milliseconds the request has spent so far, reported with its answer. The waits add up
+/// across the request's attempts.
+#[derive(Default)]
 pub(super) struct Timing {
     pub(super) preparation_ms: u128,
     pub(super) session_wait_ms: u128,
     pub(super) admission_ms: u128,
-    /// Waits for the response heads of earlier sends.
+    /// Waits for response heads.
     pub(super) upstream_headers_ms: u128,
 }
 
 pub(super) enum Ending {
-    /// The connection was lost after the send. The request ends with this response and is
-    /// never resent, since the upstream may have produced output for it.
+    /// The send got no response head. The request ends with this response and is never
+    /// resent: a send error rarely shows whether the upstream received the request, and a
+    /// connection that could not be made is treated the same way.
     Lost(Response),
-    /// The account refused, and the request may try another. `headers_ms` is the wait for the
-    /// refusal's response head; `rejection` is set when the refusal was a 429.
-    Rejected {
-        headers_ms: u128,
-        rejection: Option<quota::Rejection>,
-    },
+    /// The account refused, and the request may try another. Set for a 429, with when the
+    /// account may be tried again.
+    Rejected(Option<quota::Rejection>),
     /// The account answered, and the response streams its body to the client.
     Answered(Response),
 }
 
-/// Sends `req` with account `a` through `client`, as send number `attempts` (counting from 1)
-/// of the request.
+/// One send's place in its request, which its failure records carry.
+struct Attempt<'r> {
+    s: &'r Arc<State>,
+    req: &'r Request<'r>,
+    a: &'r Account,
+    /// This send's index within the request, counting from 0.
+    index: i32,
+    started: Instant,
+}
+impl Attempt<'_> {
+    /// Ends a send that got no response head (`failure` status 0) or was refused with the
+    /// `failure` status: it finishes the history capture with `error`, writes the activity
+    /// row, counts a failed request for the account, enqueues a failed usage record and
+    /// cools the account.
+    async fn fail(
+        &self,
+        capture: Option<NativeCapture>,
+        outcome: Outcome,
+        error: &str,
+        failure: (u16, &'static str),
+        delay: Option<u64>,
+        entitlement: bool,
+    ) -> anyhow::Result<()> {
+        let (s, req, a) = (self.s, self.req, self.a);
+        if let Some(capture) = capture {
+            capture.finish(NativeEnd {
+                stream: false,
+                outcome,
+                detail: None,
+                error: Some(error.to_owned()),
+            });
+        }
+        s.rt.record_send(crate::activity::sends::SendRow {
+            status: (failure.0 != 0).then_some(i64::from(failure.0)),
+            ..observation::send_row(
+                req.request_id,
+                self.index,
+                a,
+                req.model,
+                req.started,
+                self.started,
+                outcome,
+            )
+        });
+        s.rt.store().note_activity(&a.file_id, false);
+        UsageEntry {
+            request_id: req.request_id,
+            a,
+            model: req.model,
+            sid: req.sid,
+            request_started: req.started,
+            stream: req.requested_stream,
+            detail: Default::default(),
+            failure: Some(failure),
+        }
+        .enqueue(s);
+        s.cool(a, req.model, failure.0, delay, entitlement).await
+    }
+}
+
+/// Sends `req` with account `a` through `client`, as attempt number `attempts` (counting
+/// from 1) of the request. A send that gets a response head adds its wait for it to
+/// `timing`.
 pub(super) async fn run(
     s: &Arc<State>,
     req: &Request<'_>,
     a: Account,
     client: wreq::Client,
     attempts: usize,
-    timing: Timing,
+    timing: &mut Timing,
 ) -> anyhow::Result<Ending> {
     let started = Instant::now();
-    let send = i32::try_from(attempts.saturating_sub(1)).unwrap_or(i32::MAX);
-    let mut capture = crate::request_logging::history::native::NativeCapture::start(
+    let index = attempts.saturating_sub(1);
+    let send = Attempt {
+        s,
+        req,
+        a: &a,
+        index: i32::try_from(index).unwrap_or(i32::MAX),
+        started,
+    };
+    let mut capture = NativeCapture::start(
         &s.rt,
-        crate::request_logging::history::native::NativeSend {
+        NativeSend {
             exchange_id: req.request_id,
-            send: attempts.saturating_sub(1),
+            send: index,
             credential: &a.file_id,
             account_id: &a.id,
             model: req.model,
@@ -108,36 +181,15 @@ pub(super) async fn run(
             } else {
                 "transport"
             };
-            if let Some(capture) = capture.take() {
-                capture.finish(crate::request_logging::history::native::NativeEnd {
-                    stream: false,
-                    outcome: crate::request_logging::history::row::Outcome::TransportLost,
-                    detail: None,
-                    error: Some(failure_kind.to_owned()),
-                });
-            }
-            s.rt.record_send(observation::send_row(
-                req.request_id,
-                send,
-                &a,
-                req.model,
-                req.started,
-                started,
-                crate::request_logging::history::row::Outcome::TransportLost,
-            ));
-            s.rt.store().note_activity(&a.file_id, false);
-            observation::UsageEntry {
-                request_id: req.request_id,
-                a: &a,
-                model: req.model,
-                sid: req.sid,
-                request_started: req.started,
-                stream: req.requested_stream,
-                detail: Default::default(),
-                failure: Some((0, "transport_lost")),
-            }
-            .enqueue(s);
-            s.cool(&a, req.model, 0, None, false).await?;
+            send.fail(
+                capture.take(),
+                Outcome::TransportLost,
+                failure_kind,
+                (0, "transport_lost"),
+                None,
+                false,
+            )
+            .await?;
             s.event(json!({"type":"transport-failure","requestId":req.request_id,"model":req.model,"outcome":"transport_lost","session":req.sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
             return Ok(Ending::Lost(error(
                 422,
@@ -145,7 +197,7 @@ pub(super) async fn run(
             )));
         }
     };
-    let headers_ms = started.elapsed().as_millis();
+    timing.upstream_headers_ms += started.elapsed().as_millis();
     let status = r.status();
     if let Some(capture) = capture.as_mut() {
         capture.response_head(status.as_u16(), r.headers());
@@ -176,39 +228,15 @@ pub(super) async fn run(
         } else {
             "retryable_rejection"
         };
-        if let Some(capture) = capture.take() {
-            capture.finish(crate::request_logging::history::native::NativeEnd {
-                stream: false,
-                outcome: crate::request_logging::history::row::Outcome::Failover,
-                detail: None,
-                error: Some(outcome.to_owned()),
-            });
-        }
-        s.rt.record_send(crate::activity::sends::SendRow {
-            status: Some(i64::from(status.as_u16())),
-            ..observation::send_row(
-                req.request_id,
-                send,
-                &a,
-                req.model,
-                req.started,
-                started,
-                crate::request_logging::history::row::Outcome::Failover,
-            )
-        });
-        s.rt.store().note_activity(&a.file_id, false);
-        observation::UsageEntry {
-            request_id: req.request_id,
-            a: &a,
-            model: req.model,
-            sid: req.sid,
-            request_started: req.started,
-            stream: req.requested_stream,
-            detail: Default::default(),
-            failure: Some((status.as_u16(), outcome)),
-        }
-        .enqueue(s);
-        s.cool(&a, req.model, status.as_u16(), delay, entitlement).await?;
+        send.fail(
+            capture.take(),
+            Outcome::Failover,
+            outcome,
+            (status.as_u16(), outcome),
+            delay,
+            entitlement,
+        )
+        .await?;
         if !entitlement {
             s.rt.claude_usage.invalidate(&a.token).await;
         }
@@ -216,8 +244,9 @@ pub(super) async fn run(
             s.refresh_unauthorized(&a);
         }
         s.event(json!({"type":"failover","requestId":req.request_id,"model":req.model,"session":req.sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":attempts,"retryAfterMs":delay}));
-        return Ok(Ending::Rejected { headers_ms, rejection });
+        return Ok(Ending::Rejected(rejection));
     }
+    let send = send.index;
     let facts = Exchange {
         request_id: req.request_id.to_owned(),
         requested_stream: req.requested_stream,
@@ -226,7 +255,7 @@ pub(super) async fn run(
                 .next()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
         }),
-        timing: json!({"preparationMs":timing.preparation_ms,"sessionWaitMs":timing.session_wait_ms,"admissionMs":timing.admission_ms,"upstreamHeadersMs":timing.upstream_headers_ms + headers_ms}),
+        timing: json!({"preparationMs":timing.preparation_ms,"sessionWaitMs":timing.session_wait_ms,"admissionMs":timing.admission_ms,"upstreamHeadersMs":timing.upstream_headers_ms}),
         headers_at: Instant::now(),
         attempts,
         a,
