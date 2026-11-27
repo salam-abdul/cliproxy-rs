@@ -132,7 +132,7 @@ cliproxy-native status
 cliproxy-native dashboard --copy-key
 ```
 
-`refresh` asks the Rust credential owner to refresh; the management command never exchanges refresh tokens itself. `status` shows recent cache counters and session affinity without model requests. `dashboard` opens the owner's dashboard: Overview shows remaining quota, the default new-session order, history and token counts; Settings has account controls; Activity shows recent errors and switches. Session affinity and model limits can override the displayed order. Request counters for other providers need `observability.usage.usage-statistics-enabled`, which the installer turns on.
+`refresh` asks the Rust credential owner to refresh; the management command never exchanges refresh tokens itself. `status` shows recent cache counters and session affinity without model requests. `dashboard` opens the owner's dashboard: Overview shows remaining quota, the default new-session order, history and token counts; Settings has account controls; Activity shows recent errors and switches. Session affinity and model limits can override the displayed order. Request counters for other providers need `observability.usage.usage-statistics-enabled`, which the installer turns on. A native send that fails over or loses its connection counts as a failed request for its account, and leaves a failed usage record while usage statistics are on, so an account that answers 429 shows failed requests.
 
 | Port | Use |
 | --- | --- |

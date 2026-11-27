@@ -844,6 +844,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
+    let requested_stream = !matches!(body.get("stream"), None | Some(Value::Bool(false)));
     // Holding this handle marks the session active, which keeps its affinity binding from
     // being pruned or evicted, until the response stream ends. Its lock is held only for
     // admission and affinity binding: same-session requests wait for each other's account
@@ -1049,8 +1050,19 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     started,
                     crate::request_logging::history::row::Outcome::TransportLost,
                 ));
-                s.cool(&a, &model, 0, None, false).await?;
                 s.rt.store().note_activity(&a.file_id, false);
+                observation::UsageEntry {
+                    request_id: &request_id,
+                    a: &a,
+                    model: &model,
+                    sid: &sid,
+                    request_started,
+                    stream: requested_stream,
+                    detail: Default::default(),
+                    failure: Some((0, "transport_lost")),
+                }
+                .enqueue(&s);
+                s.cool(&a, &model, 0, None, false).await?;
                 s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
                 return Ok(error(
                     422,
@@ -1110,6 +1122,18 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                     crate::request_logging::history::row::Outcome::Failover,
                 )
             });
+            s.rt.store().note_activity(&a.file_id, false);
+            observation::UsageEntry {
+                request_id: &request_id,
+                a: &a,
+                model: &model,
+                sid: &sid,
+                request_started,
+                stream: requested_stream,
+                detail: Default::default(),
+                failure: Some((status.as_u16(), outcome)),
+            }
+            .enqueue(&s);
             s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
             if !entitlement {
                 s.rt.claude_usage.invalidate(&a.token).await;
@@ -1122,6 +1146,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         }
         let facts = Exchange {
             request_id,
+            requested_stream,
             sse: h.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| {
                 v.split(';')
                     .next()

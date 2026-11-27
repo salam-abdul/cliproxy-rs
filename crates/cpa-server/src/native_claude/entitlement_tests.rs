@@ -14,6 +14,8 @@ use cpa_core::credential::Credential;
 pub(super) const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
 pub(super) const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
+const STREAMING: &[u8] =
+    br#"{"model":"claude-opus-test","stream":true,"metadata":{"session_id":"synthetic-session"},"messages":[]}"#;
 
 #[derive(Clone)]
 pub(super) struct Reply {
@@ -489,8 +491,7 @@ async fn a_reply_read_to_its_content_length_is_recorded_as_complete() {
             broken: false,
         })
         .await;
-        let usage = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
-        fixture.state.rt.usage_queue().configure(true, &usage);
+        enable_usage(&fixture);
         let response = fixture.request().await;
         assert_eq!(response.status(), status);
         assert_eq!(response.headers()["content-length"], body.len().to_string().as_str());
@@ -521,6 +522,180 @@ async fn a_reply_read_to_its_content_length_is_recorded_as_complete() {
         assert_eq!(event["status"], status, "{event}");
         assert_eq!(event["usage"]["input_tokens"], input_tokens, "{event}");
     }
+}
+
+/// A Claude credential for account `a` that exists only in the runtime's store.
+fn synthetic_claude_credential() -> Credential {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("type".into(), "claude".into());
+    let auth = Path::new("/synthetic-auth");
+    Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap()
+}
+
+fn enable_usage(fixture: &Fixture) {
+    let usage = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
+    fixture.state.rt.usage_queue().configure(true, &usage);
+}
+
+/// Exactly `count` usage records, waiting up to five seconds for them and briefly for any
+/// extra one.
+async fn usage_records(fixture: &Fixture, count: usize) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut records: Vec<Value> = Vec::new();
+    while records.len() < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} of {count} usage records: {records:?}",
+            records.len()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        for record in fixture.state.rt.usage_queue().pop_oldest(10) {
+            records.push(serde_json::from_slice(&record).unwrap());
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for record in fixture.state.rt.usage_queue().pop_oldest(10) {
+        records.push(serde_json::from_slice(&record).unwrap());
+    }
+    assert_eq!(records.len(), count, "{records:?}");
+    records
+}
+
+/// Each native send leaves its own usage record under the request's id. One that failed
+/// over is failed, with its status and the reason, never provider text, no tokens, and
+/// the client's stream choice.
+#[tokio::test]
+async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
+    for (status, body, reason) in [
+        (
+            403,
+            br#"{"error":{"code":"model_access_denied"}}"#.to_vec(),
+            "model_entitlement",
+        ),
+        (
+            429,
+            br#"{"error":{"type":"rate_limit_error","message":"synthetic"}}"#.to_vec(),
+            "retryable_rejection",
+        ),
+        (503, Vec::new(), "retryable_rejection"),
+    ] {
+        let fixture = Fixture::new(Reply {
+            status,
+            body,
+            broken: false,
+        })
+        .await;
+        enable_usage(&fixture);
+        let response = fixture.request_body(STREAMING).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().await.unwrap(), SUCCESS);
+        let records = usage_records(&fixture, 2).await;
+        let failover = &records[0];
+        assert_eq!(failover["failed"], true, "{failover}");
+        assert_eq!(failover["fail"]["status_code"], status, "{failover}");
+        assert_eq!(failover["fail"]["body"], reason, "{failover}");
+        assert_eq!(failover["model"], "claude-opus-test", "{failover}");
+        assert_eq!(failover["session_source"], "native", "{failover}");
+        assert_eq!(failover["endpoint"], "POST /v1/messages", "{failover}");
+        assert_eq!(failover["tokens"]["input_tokens"], 0, "{failover}");
+        assert_eq!(failover["stream"], true, "{failover}");
+        let answer = &records[1];
+        assert!(
+            failover["request_id"].as_str().is_some_and(|id| !id.is_empty()),
+            "{failover}"
+        );
+        assert_eq!(failover["request_id"], answer["request_id"], "{answer}");
+        assert_eq!(answer["failed"], false, "{answer}");
+        assert_eq!(answer["stream"], true, "{answer}");
+        assert_eq!(answer["tokens"]["input_tokens"], 1, "{answer}");
+    }
+}
+
+/// A send whose connection was lost counts as a failed request for its credential and
+/// leaves a failed usage record, statusless like a transport fault on the translating
+/// path, and the request is still not replayed.
+#[tokio::test]
+async fn a_lost_native_send_leaves_a_failed_usage_record() {
+    let credential = synthetic_claude_credential();
+    let id = credential.id.clone();
+    let fixture = Fixture::build(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        None,
+        Some(credential),
+        Some("http://127.0.0.1:9"),
+    )
+    .await;
+    enable_usage(&fixture);
+    assert_eq!(fixture.request_body(STREAMING).await.status(), 422);
+    let records = usage_records(&fixture, 1).await;
+    assert_eq!(records[0]["stream"], true, "{}", records[0]);
+    assert!(
+        records[0]["request_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{}",
+        records[0]
+    );
+    assert_eq!(records[0]["failed"], true, "{}", records[0]);
+    assert_eq!(records[0]["fail"]["status_code"], 500, "{}", records[0]);
+    assert_eq!(records[0]["fail"]["body"], "transport_lost", "{}", records[0]);
+    assert!(fixture.seen.lock().unwrap().is_empty());
+    let activity = fixture.state.rt.store().activity(&id);
+    assert_eq!((activity.success, activity.failed), (0, 1), "{activity:?}");
+}
+
+/// A send that failed over counts as a failed request for its credential.
+#[tokio::test]
+async fn a_native_failover_counts_as_a_failed_request_for_its_credential() {
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let credential = synthetic_claude_credential();
+    let id = credential.id.clone();
+    let fixture = Fixture::with_credential(
+        Reply {
+            status: 403,
+            body: br#"{"error":{"code":"model_access_denied"}}"#.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+        credential,
+    )
+    .await;
+    assert_eq!(fixture.request().await.bytes().await.unwrap(), SUCCESS);
+    let activity = fixture.state.rt.store().activity(&id);
+    assert_eq!((activity.success, activity.failed), (0, 1), "{activity:?}");
+}
+
+/// A client that leaves before the response head leaves no usage record: the account
+/// did not fail.
+#[tokio::test]
+async fn a_client_that_leaves_before_the_headers_leaves_no_usage_record() {
+    use crate::request_logging::history::row::Outcome;
+    let dir = crate::request_logging::history::test_support::TempDir::new();
+    let fixture = Fixture::with_history(
+        Reply {
+            status: 200,
+            body: SUCCESS.to_vec(),
+            broken: false,
+        },
+        &dir.0,
+    )
+    .await;
+    enable_usage(&fixture);
+    let stalled = br#"{"model":"claude-opus-test","metadata":{"session_id":"synthetic-session"},"messages":[{"role":"user","content":"MODE_STALL"}]}"#;
+    let request = wreq::Client::builder()
+        .no_proxy()
+        .retry(wreq::retry::Policy::never())
+        .build()
+        .unwrap()
+        .post(format!("{}/v1/messages", fixture.url))
+        .body(&stalled[..])
+        .send();
+    assert!(tokio::time::timeout(Duration::from_millis(500), request).await.is_err());
+    let rows = flushed_rows(&fixture, &dir.0, 1).await;
+    assert_eq!(rows[0].outcome, Outcome::Cancelled);
+    assert!(fixture.state.rt.usage_queue().pop_oldest(10).is_empty());
 }
 
 /// A panic while the routing and session locks were held does not take the router
@@ -571,6 +746,7 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
         let account = fixture.state.accounts().await.unwrap().remove(0);
         let facts = Exchange {
             request_id: "in-flight".into(),
+            requested_stream: true,
             sse: true,
             timing: json!({}),
             headers_at: std::time::Instant::now(),
