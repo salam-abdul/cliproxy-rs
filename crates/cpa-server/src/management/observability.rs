@@ -163,40 +163,8 @@ pub(crate) async fn native_events(State(state): State<Arc<Management>>) -> Respo
     super::json_ordered(StatusCode::OK, &state.rt.native_events.snapshot())
 }
 
-#[derive(serde::Deserialize)]
-pub(crate) struct NativeHistoryParams {
-    #[serde(default = "default_history_range")]
-    range: String,
-    account: Option<String>,
-}
-
 fn default_history_range() -> String {
     "24h".to_owned()
-}
-
-pub(crate) async fn native_history(
-    State(state): State<Arc<Management>>,
-    AxumQuery(params): AxumQuery<NativeHistoryParams>,
-) -> Response {
-    let Some(range) = crate::activity::Range::parse(&params.range) else {
-        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
-    };
-    if params.account.as_ref().is_some_and(|a| a.is_empty() || a.len() > 256) {
-        return fail(StatusCode::BAD_REQUEST, "Invalid account filter");
-    }
-    let native = state
-        .rt
-        .native_state
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .upgrade();
-    let Some(native) = native else {
-        return fail(StatusCode::CONFLICT, "Native routing is not enabled on this server");
-    };
-    match native.history(range, params.account).await {
-        Ok(result) => super::json_ordered(StatusCode::OK, &result),
-        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Native history could not be read"),
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -231,6 +199,32 @@ pub(crate) async fn activity(
     match activity.panels(range, params.provider, params.credential).await {
         Ok(result) => super::json_ordered(StatusCode::OK, &result),
         Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "Activity could not be read"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct HistoryParams {
+    #[serde(default = "default_history_range")]
+    range: String,
+    provider: Option<String>,
+}
+
+pub(crate) async fn history(
+    State(state): State<Arc<Management>>,
+    AxumQuery(params): AxumQuery<HistoryParams>,
+) -> Response {
+    let Some(range) = crate::activity::Range::parse(&params.range) else {
+        return fail(StatusCode::BAD_REQUEST, "Range must be 24h, 7d, or 30d");
+    };
+    if let Err(message) = check(params.provider.as_deref()) {
+        return fail(StatusCode::BAD_REQUEST, message);
+    }
+    let Some(activity) = state.rt.activity() else {
+        return fail(StatusCode::CONFLICT, "Activity store is not running on this server");
+    };
+    match activity.history(range, params.provider).await {
+        Ok(result) => super::json_ordered(StatusCode::OK, &result),
+        Err(_) => fail(StatusCode::INTERNAL_SERVER_ERROR, "History could not be read"),
     }
 }
 

@@ -16,6 +16,7 @@
   $effect(() => {
     if (!enabled) return;
     store.historyRange;
+    store.historyProvider;
     store.history.data = undefined;
     store.history.error = null;
     return every(30000, () => store.history.load(true), true);
@@ -59,6 +60,14 @@
       ? store.history.data
       : undefined,
   );
+  // The selected provider stays listed while a reload has not returned it.
+  const historyProviders = $derived.by(() => {
+    const ids = (
+      Array.isArray(historyData?.providers) ? historyData.providers : []
+    ).map(String);
+    const chosen = store.historyProvider;
+    return chosen && !ids.includes(chosen) ? [chosen, ...ids] : ids;
+  });
   const activityData = $derived(
     store.providerActivity.data?.range === store.historyRange
       ? store.providerActivity.data
@@ -94,7 +103,7 @@
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
         const recent = n?.id
-          ? requestBuckets(historyData || {}, n.id)
+          ? requestBuckets(historyData || {}, { credential: n.fileId, id: n.id })
           : [];
         return { a, n, rank, state, recent };
       })
@@ -117,13 +126,19 @@
     <h1>Overview</h1>
     <p class="muted small">Accounts, capacity, and history in one place.</p>
   </div>
-  {#if native?.enabled}<div class="seg history-range" role="group" aria-label="History range">
-      {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
-        <button
-          aria-pressed={store.historyRange === value}
-          onclick={() => (store.historyRange = value)}>{title}</button
-        >
-      {/each}
+  {#if native?.enabled}<div class="history-controls">
+      <select aria-label="History provider" bind:value={store.historyProvider}>
+        <option value="">All providers</option>
+        {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
+      </select>
+      <div class="seg history-range" role="group" aria-label="History range">
+        {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
+          <button
+            aria-pressed={store.historyRange === value}
+            onclick={() => (store.historyRange = value)}>{title}</button
+          >
+        {/each}
+      </div>
     </div>{/if}
 </div>
 {#if !store.creds.error && (store.native.error || !store.online)}
