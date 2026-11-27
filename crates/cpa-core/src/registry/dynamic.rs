@@ -585,6 +585,27 @@ fn codex_channel(name: &str) -> Vec<Spec> {
     models
 }
 
+/// Go `GetStaticModelDefinitionsByChannel` for the channels the models.json feed covers,
+/// from the current catalog: Codex lists the Pro plan's models with the built-in image
+/// models, and xAI its built-in image and video models. `None` for any other channel, or
+/// when the current catalog has no models for it.
+pub fn channel_definitions(name: &str) -> Option<Vec<ModelInfo>> {
+    let section = match name {
+        "codex" => "codex-pro",
+        "claude" | "gemini" | "vertex" | "aistudio" | "antigravity" | "kimi" | "xai" | "meta" => name,
+        _ => return None,
+    };
+    if pinned().channel(section).is_empty() {
+        return None;
+    }
+    let models = match name {
+        "codex" => codex_channel(section),
+        "xai" => with_xai_builtins(channel(section)),
+        _ => channel(section),
+    };
+    Some(models.iter().map(Spec::to_info).collect())
+}
+
 /// Go `WithXAIBuiltins` (`upsertModelInfos`): the hard-coded image and video models,
 /// appended after the channel's models and replacing any with the same ID.
 fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {

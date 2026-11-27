@@ -2805,3 +2805,38 @@ async fn config_etag_legacy_missing_file_requires_unconditional_creation() {
     assert!(response.headers().get("etag").is_some());
     server.abort();
 }
+
+/// With the embedded catalog, every channel the catalog covers shows the dashboard the
+/// same models as the embedded dashboard definitions, built-in Codex image and xAI media
+/// models included, and the channels it does not cover still answer from those
+/// definitions. Compares the fields the Models page reads.
+#[tokio::test]
+async fn model_definitions_from_the_embedded_catalog_match_the_embedded_definitions() {
+    let f = Fixture::new("model-definitions");
+    let (base, server) = f.server().await;
+    let embedded: serde_json::Map<String, Value> =
+        serde_json::from_str(include_str!("../src/management/model_definitions.json")).unwrap();
+    for (channel, want) in &embedded {
+        let got: Value = wreq::Client::new()
+            .get(format!("{base}/v8/management/routing/model-definitions/{channel}"))
+            .bearer_auth("fake-management-only")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let shown = |v: &Value| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    ["id", "display_name", "context_length", "max_completion_tokens"]
+                        .map(|k| m.get(k).cloned().unwrap_or(Value::Null))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&got["models"]), shown(want), "{channel}");
+    }
+    server.abort();
+}

@@ -75,10 +75,65 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
         google: Default::default(),
     };
     let dir = std::env::temp_dir().join(format!("cpa-model-refresh-{}", uuid::Uuid::new_v4()));
-    let cfg = cpa_core::config::Config::parse(&format!("auth-dir: {}\n", dir.display())).unwrap();
-    let rt = cpa_server::testing::runtime(cfg, vec![credential], executors);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.yaml");
+    let hash = bcrypt::hash("fake-management-only", 4).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "config-version: 8\nmanagement:\n  secret-key: '{hash}'\noauth:\n  auth-dir: {}\naccess:\n  api-keys: [fake-client]\n",
+            dir.join("auth").display()
+        ),
+    )
+    .unwrap();
+    let cfg = cpa_core::config::Config::load(&path).unwrap();
+    let rt = Arc::new(cpa_server::testing::runtime(cfg, vec![credential], executors));
     let registered = |rt: &cpa_server::Runtime| rt.registry().ids().any(|id| id == "claude-refreshed-1");
     assert!(!registered(&rt));
+    // What clients and the dashboard see: `/v1/models` and the Models page's catalog.
+    let app = cpa_server::app(
+        rt.clone(),
+        cpa_server::management::router(cpa_server::management::Management::new(rt.clone(), path)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
+    let listed = |route: &'static str, key: &'static str, list: &'static str| {
+        let proxy = proxy.clone();
+        async move {
+            let body: serde_json::Value = wreq::Client::new()
+                .get(format!("{proxy}{route}"))
+                .bearer_auth(key)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == "claude-refreshed-1")
+        }
+    };
+    let client_models = || listed("/v1/models", "fake-client", "data");
+    let dashboard_models = || {
+        listed(
+            "/v8/management/routing/model-definitions/claude",
+            "fake-management-only",
+            "models",
+        )
+    };
+    assert!(!client_models().await);
+    assert!(!dashboard_models().await);
     let meta_before = pinned().channel("meta").len();
     let generation = catalog_generation();
 
@@ -93,6 +148,8 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
     assert!(pinned().lookup("claude-refreshed-1").is_some());
     // Go's refresh callback re-registers the credentials of changed providers.
     assert!(registered(&rt));
+    assert!(client_models().await);
+    assert!(dashboard_models().await);
 
     // The same content again changes nothing.
     cpa_server::model_updater::refresh(&urls(&["modified"]), "test").await;
