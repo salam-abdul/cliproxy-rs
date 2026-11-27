@@ -612,6 +612,7 @@ impl AntigravityExecutor {
         let client = self.client(credential, cfg);
         gemini::send_captured(
             req.capture(),
+            &req.usage,
             credential,
             PROVIDER,
             &client,
@@ -910,6 +911,7 @@ impl AntigravityExecutor {
         let client = self.client(credential, cfg);
         let upstream = gemini::send_captured(
             req.capture(),
+            &req.usage,
             credential,
             PROVIDER,
             &client,

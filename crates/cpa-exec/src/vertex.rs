@@ -461,6 +461,7 @@ impl VertexExecutor {
         let body = Bytes::from(body);
         let upstream = g::send_captured(
             capture,
+            &req.usage,
             credential,
             PROVIDER,
             &client,
@@ -531,6 +532,7 @@ impl VertexExecutor {
         let body = Bytes::from(body);
         let upstream = g::send_captured(
             capture,
+            &req.usage,
             credential,
             PROVIDER,
             &client,

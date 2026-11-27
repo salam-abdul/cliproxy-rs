@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::*;
+use crate::openai_compat_usage::{Recorder, Report};
 use crate::{gemini_payload as payload, gemini_stream as sse};
 
 /// The model info Go's conductor bound for the scenario (the fixture's `resolved`).
@@ -940,5 +941,140 @@ async fn portable_request_gets_no_thinking_blocks() {
             assert!(out.contains("visible"), "portable {portable}: {out}");
             assert_eq!(out.contains("thinking"), !portable, "portable {portable}: {out}");
         }
+    }
+}
+
+/// The client bytes of an executor's answer, any stream read to its end; none for an
+/// error.
+pub(crate) async fn answer_bytes(answer: Result<ExecResponse, ExecError>) -> Vec<u8> {
+    let mut out = Vec::new();
+    match answer.map(|response| response.body) {
+        Ok(ResponseBody::Buffered(bytes)) => out.extend_from_slice(&bytes),
+        Ok(ResponseBody::Stream(mut stream)) => {
+            while let Some(item) = stream.next().await {
+                if let Ok(bytes) = item {
+                    out.extend_from_slice(&bytes);
+                }
+            }
+        }
+        Err(_) => {}
+    }
+    out
+}
+
+/// One attempt's time-to-first-response marks: one round-trip start, then one first
+/// byte when a body byte arrived, before any payload was observed.
+pub(crate) fn assert_first_byte_marks(name: &str, reports: &[Report], body_arrived: bool) {
+    let positions = |kind: fn(&Report) -> bool| {
+        reports
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| kind(r))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+    };
+    let starts = positions(|r| matches!(r, Report::RoundTrip));
+    let first_bytes = positions(|r| matches!(r, Report::FirstByte));
+    let payload = reports
+        .iter()
+        .position(|r| matches!(r, Report::Line(..) | Report::Body(..)));
+    assert_eq!(starts.len(), 1, "{name}: round-trip starts");
+    assert_eq!(first_bytes.len(), usize::from(body_arrived), "{name}: first bytes");
+    if let Some(&first) = first_bytes.first() {
+        assert!(starts[0] < first, "{name}: first byte before the round trip");
+        assert!(
+            payload.is_none_or(|p| p > first),
+            "{name}: payload before the first byte"
+        );
+    }
+}
+
+/// A rate-limit answer with an error body.
+pub(crate) fn rejected_upstream() -> Value {
+    serde_json::json!({
+        "status": 429,
+        "headers": [["Content-Type", "application/json"]],
+        "body": r#"{"error":{"code":429,"message":"slow down","status":"RESOURCE_EXHAUSTED"}}"#,
+    })
+}
+
+/// A 2xx answer without a body byte.
+pub(crate) fn empty_upstream() -> Value {
+    serde_json::json!({"status": 200, "headers": [["Content-Type", "application/json"]], "body": ""})
+}
+
+/// Runs the fixture scenario `name` against `upstream` (none: nothing listens), with a
+/// recording usage sink when `usage`; returns the reports and the client bytes.
+async fn run_recorded(name: &str, upstream: Option<&Value>, usage: bool) -> (Vec<Report>, Vec<u8>) {
+    let s = fixture()["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap();
+    let mock = match upstream {
+        Some(up) => Some(Mock::start(up).await),
+        None => None,
+    };
+    let addr = mock.as_ref().map_or("127.0.0.1:9".to_owned(), |m| m.addr.clone());
+    let cfg = Config::parse(&s["config"].as_str().unwrap_or_default().replace("UPSTREAM", &addr)).unwrap();
+    let cred = credential(s, &cfg, &addr);
+    let mut req = request(s);
+    let recorder = Arc::new(Recorder::default());
+    if usage {
+        req.usage = cpa_core::exec::UsageSink::new(recorder.clone());
+    }
+    let out = answer_bytes(GeminiExecutor::default().execute(&cred, req, &cfg).await).await;
+    let reports = std::mem::take(&mut *recorder.0.lock().unwrap());
+    (reports, out)
+}
+
+/// Generate, stream and Interactions sends mark the start of their round trip, then
+/// the first non-empty body chunk once, whether it carries an answer or an error. A
+/// send refused before an answer, or answered without a body, marks no first byte.
+#[tokio::test]
+async fn sends_mark_the_round_trip_and_the_first_body_byte() {
+    let (rejected, empty) = (rejected_upstream(), empty_upstream());
+    for name in [
+        "gen_basic_headers",
+        "stream_payload_rules",
+        "int_basic",
+        "int_stream_frames",
+    ] {
+        let answer = &fixture()["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()["upstream"];
+        assert!(!answer["body"].as_str().unwrap().is_empty(), "{name}");
+        for (label, upstream, body_arrived) in [
+            ("answer", Some(answer), true),
+            ("rejected", Some(&rejected), true),
+            ("empty", Some(&empty), false),
+            ("refused", None, false),
+        ] {
+            let (reports, _) = run_recorded(name, upstream, true).await;
+            assert_first_byte_marks(&format!("{name} {label}"), &reports, body_arrived);
+        }
+    }
+}
+
+/// The first-byte mark only inspects the upstream body: a streamed answer reaches the
+/// client byte for byte as it does with usage off.
+#[tokio::test]
+async fn first_byte_marks_leave_the_client_bytes_unchanged() {
+    for name in ["stream_payload_rules", "int_stream_frames"] {
+        let answer = &fixture()["scenarios"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()["upstream"];
+        let (_, plain) = run_recorded(name, Some(answer), false).await;
+        let (reports, marked) = run_recorded(name, Some(answer), true).await;
+        assert!(reports.iter().any(|r| matches!(r, Report::FirstByte)), "{name}: marked");
+        assert!(!plain.is_empty(), "{name}: answered");
+        assert_eq!(marked, plain, "{name}: client bytes");
     }
 }

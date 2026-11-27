@@ -276,10 +276,12 @@ pub(crate) use crate::kimi_http::capture_metadata;
 /// `RecordAPIRequest`, `Client.Do`, then `RecordAPIResponseMetadata`, or
 /// `RecordAPIResponseError` when the request fails. `lines`: the caller scans the body
 /// line by line, so a body cut short fails with Go's `unexpected EOF`
-/// ([`proxy::send_scanned`]).
+/// ([`proxy::send_scanned`]). `usage` times the attempt's first response from this
+/// send's start to the first upstream body byte, of an answer or an error alike.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_captured(
     capture: &CaptureSink,
+    usage: &cpa_core::exec::UsageSink,
     credential: &Credential,
     provider: &str,
     client: &wreq::Client,
@@ -289,14 +291,16 @@ pub(crate) async fn send_captured(
     lines: bool,
 ) -> Result<Upstream, ExecError> {
     capture_request(capture, credential, provider, url, headers.pairs(), &body);
+    usage.round_trip_started();
     let sent = if lines {
         proxy::send_scanned(client, url, headers, body, None).await
     } else {
         proxy::send(client, url, headers, body, None).await
     };
     match sent {
-        Ok(upstream) => {
+        Ok(mut upstream) => {
             capture_metadata(capture, upstream.status, &upstream.headers);
+            upstream.body = crate::kimi_http::track_first_byte(upstream.body, usage, false);
             Ok(upstream)
         }
         Err(error) => {
@@ -472,6 +476,7 @@ impl GeminiExecutor {
         let body = Bytes::from(body);
         let upstream = send_captured(
             capture,
+            &req.usage,
             credential,
             identifier(credential),
             &client,
@@ -554,6 +559,7 @@ impl GeminiExecutor {
         let body = Bytes::from(body);
         let upstream = send_captured(
             capture,
+            &req.usage,
             credential,
             identifier(credential),
             &client,
@@ -616,6 +622,7 @@ impl GeminiExecutor {
         let body = Bytes::from(body);
         let upstream = send_captured(
             capture,
+            &req.usage,
             credential,
             identifier(credential),
             &client,

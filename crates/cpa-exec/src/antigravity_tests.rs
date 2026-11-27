@@ -932,3 +932,51 @@ async fn bound_level_model_keeps_the_thinking_level() {
     assert_eq!(thinking.get("thinkingLevel").str(), "medium", "{wire}");
     assert!(!thinking.get("thinkingBudget").exists(), "{wire}");
 }
+
+/// Runs the scenario `name` against `upstream` (none: nothing listens) on a fresh
+/// executor with a recording usage sink; returns the reports.
+async fn recorded_marks(name: &str, upstream: Option<&Value>) -> Vec<crate::openai_compat_usage::Report> {
+    let s = scenario(name);
+    let mock = match upstream {
+        Some(up) => Some(Mock::start(up).await),
+        None => None,
+    };
+    let addr = mock.as_ref().map_or("127.0.0.1:9".to_owned(), |m| m.addr().to_owned());
+    let cfg = Config::parse(s["config"].as_str().unwrap_or_default()).unwrap();
+    let mut req = request(s);
+    let recorder = Arc::new(crate::openai_compat_usage::Recorder::default());
+    req.usage = cpa_core::exec::UsageSink::new(recorder.clone());
+    let answer = AntigravityExecutor::default()
+        .execute(&credential(s, &addr), req, &cfg)
+        .await;
+    crate::gemini::tests::answer_bytes(answer).await;
+    std::mem::take(&mut *recorder.0.lock().unwrap())
+}
+
+/// Generate, merged-stream and stream sends mark the start of their round trip, then
+/// the first non-empty body chunk once, whether it carries an answer or an error. A
+/// send refused before an answer, or answered without a body, marks no first byte.
+#[tokio::test]
+async fn sends_mark_the_round_trip_and_the_first_body_byte() {
+    let (rejected, empty) = (
+        crate::gemini::tests::rejected_upstream(),
+        crate::gemini::tests::empty_upstream(),
+    );
+    for name in [
+        "gemini_execute_basic",
+        "gemini_pro_execute_merges_stream",
+        "gemini_stream",
+    ] {
+        let answer = &scenario(name)["upstream"];
+        assert!(!answer["body"].as_str().unwrap().is_empty(), "{name}");
+        for (label, upstream, body_arrived) in [
+            ("answer", Some(answer), true),
+            ("rejected", Some(&rejected), true),
+            ("empty", Some(&empty), false),
+            ("refused", None, false),
+        ] {
+            let reports = recorded_marks(name, upstream).await;
+            crate::gemini::tests::assert_first_byte_marks(&format!("{name} {label}"), &reports, body_arrived);
+        }
+    }
+}
