@@ -10,7 +10,10 @@ mod observation;
 mod policy;
 mod quota;
 mod routing;
+mod send;
 mod status;
+#[cfg(test)]
+use axum::http::StatusCode;
 #[cfg(test)]
 use observation::UsageScanner;
 use observation::{Exchange, Observation};
@@ -23,7 +26,7 @@ use crate::Runtime;
 use anyhow::Context;
 use axum::{
     body::Body,
-    http::{HeaderMap, HeaderValue, Method, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, Request},
     response::Response,
 };
 use base64::Engine;
@@ -861,25 +864,34 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
     let admission_deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut tried = HashSet::new();
     let mut rejection: Option<quota::Rejection> = None;
+    let refused = |attempts| fallback::Refused {
+        request_id: &request_id,
+        sid: &sid,
+        model: &model,
+        raw: &raw,
+        headers: &parts.headers,
+        attempts,
+        started: request_started,
+    };
+    let url = format!("{target}{path}");
+    let request = send::Request {
+        request_id: &request_id,
+        sid: &sid,
+        client_sid: &client_sid,
+        model: &model,
+        requested_stream,
+        method: &parts.method,
+        url: &url,
+        headers: &parts.headers,
+        raw: &raw,
+        started: request_started,
+        session: &session,
+    };
     loop {
         if tried.len() >= s.config.max_attempts {
             if let Some(rejection) = rejection {
                 let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()});
-                if let Some(response) = s
-                    .fall_back(
-                        fallback::Refused {
-                            request_id: &request_id,
-                            sid: &sid,
-                            model: &model,
-                            raw: &raw,
-                            headers: &parts.headers,
-                            attempts: tried.len(),
-                            started: request_started,
-                        },
-                        rejected,
-                    )
-                    .await
-                {
+                if let Some(response) = s.fall_back(refused(tried.len()), rejected).await {
                     return Ok(response);
                 }
                 return Ok(rejection.response(now()));
@@ -909,21 +921,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                         rejection.earliest(quota::Rejection::new(Some(reset), None, now()))
                     });
                     let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":"quota_unavailable","status":429,"attempts":tried.len()});
-                    if let Some(response) = s
-                        .fall_back(
-                            fallback::Refused {
-                                request_id: &request_id,
-                                sid: &sid,
-                                model: &model,
-                                raw: &raw,
-                                headers: &parts.headers,
-                                attempts: tried.len(),
-                                started: request_started,
-                            },
-                            rejected,
-                        )
-                        .await
-                    {
+                    if let Some(response) = s.fall_back(refused(tried.len()), rejected).await {
                         return Ok(response);
                     }
                     return Ok(rejection.response(now()));
@@ -961,21 +959,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 };
                 let rejected = json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"outcome":outcome,"status":status,"attempts":tried.len(),"timing":{"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms}});
                 if quota {
-                    if let Some(response) = s
-                        .fall_back(
-                            fallback::Refused {
-                                request_id: &request_id,
-                                sid: &sid,
-                                model: &model,
-                                raw: &raw,
-                                headers: &parts.headers,
-                                attempts: tried.len(),
-                                started: request_started,
-                            },
-                            rejected,
-                        )
-                        .await
-                    {
+                    if let Some(response) = s.fall_back(refused(tried.len()), rejected).await {
                         return Ok(response);
                     }
                 } else {
@@ -994,224 +978,24 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             s.event(json!({"type":"rejected","requestId":request_id,"session":sid,"model":model,"account":a.id,"outcome":"routing_error","status":502,"attempts":tried.len()}));
             return Ok(error(502, "Native routing state unavailable; no request sent"));
         };
-        let started = Instant::now();
-        let send = i32::try_from(tried.len().saturating_sub(1)).unwrap_or(i32::MAX);
-        let mut capture = crate::request_logging::history::native::NativeCapture::start(
-            &s.rt,
-            crate::request_logging::history::native::NativeSend {
-                exchange_id: &request_id,
-                send: tried.len().saturating_sub(1),
-                credential: &a.file_id,
-                account_id: &a.id,
-                model: &model,
-                session_id: &client_sid,
-                user_agent: parts
-                    .headers
-                    .get(axum::http::header::USER_AGENT)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default(),
-            },
-            &raw,
-        );
-        let result = client
-            .request(parts.method.clone(), format!("{target}{path}"))
-            .headers(headers(&parts.headers, Some(&a.token)))
-            .body(raw.clone())
-            .read_timeout(Duration::from_secs(600))
-            .send()
-            .await;
-        let r = match result {
-            Ok(r) => r,
-            Err(upstream_error) => {
-                // Log only classifications, never error Display strings containing URLs or credentials.
-                let failure_kind = if upstream_error.is_timeout() {
-                    "timeout"
-                } else if upstream_error.is_connect() {
-                    "connect"
-                } else if upstream_error.is_connection_reset() {
-                    "connection-reset"
-                } else {
-                    "transport"
-                };
-                if let Some(capture) = capture.take() {
-                    capture.finish(crate::request_logging::history::native::NativeEnd {
-                        stream: false,
-                        outcome: crate::request_logging::history::row::Outcome::TransportLost,
-                        detail: None,
-                        error: Some(failure_kind.to_owned()),
-                    });
-                }
-                s.rt.record_send(observation::send_row(
-                    &request_id,
-                    send,
-                    &a,
-                    &model,
-                    request_started,
-                    started,
-                    crate::request_logging::history::row::Outcome::TransportLost,
-                ));
-                s.rt.store().note_activity(&a.file_id, false);
-                observation::UsageEntry {
-                    request_id: &request_id,
-                    a: &a,
-                    model: &model,
-                    sid: &sid,
-                    request_started,
-                    stream: requested_stream,
-                    detail: Default::default(),
-                    failure: Some((0, "transport_lost")),
-                }
-                .enqueue(&s);
-                s.cool(&a, &model, 0, None, false).await?;
-                s.event(json!({"type":"transport-failure","requestId":request_id,"model":model,"outcome":"transport_lost","session":sid,"account":a.id,"replayed":false,"failureKind":failure_kind,"elapsedMs":started.elapsed().as_millis()}));
-                return Ok(error(
-                    422,
-                    "Upstream response was lost; request was not replayed to avoid duplicate inference. Check the session before explicitly retrying.",
-                ));
-            }
+        let timing = send::Timing {
+            preparation_ms,
+            session_wait_ms,
+            admission_ms,
+            upstream_headers_ms,
         };
-        upstream_headers_ms += started.elapsed().as_millis();
-        let status = r.status();
-        if let Some(capture) = capture.as_mut() {
-            capture.response_head(status.as_u16(), r.headers());
-        }
-        s.rt.executors
-            .claude
-            .quota()
-            .observe_model(a.quota_id(), &model, r.headers());
-        let h = headers(r.headers(), None);
-        let encoding = h
-            .get("content-encoding")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
-        let stream: observation::ResponseStream = Box::pin(r.bytes_stream());
-        let (stream, entitlement) = if matches!(status.as_u16(), 400 | 403 | 404 | 422) {
-            observation::inspect_rejection(stream, status.as_u16(), &encoding).await
-        } else {
-            (stream, false)
-        };
-        if entitlement || [401, 403, 429, 503, 529].contains(&status.as_u16()) {
-            let delay = policy::retry_delay(h.get("retry-after").and_then(|v| v.to_str().ok()), now());
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                let next = quota::Rejection::new(s.reset(&a, &model), Some(delay.unwrap_or(60000)), now());
-                rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
-            }
-            let outcome = if entitlement {
-                "model_entitlement"
-            } else {
-                "retryable_rejection"
-            };
-            if let Some(capture) = capture.take() {
-                capture.finish(crate::request_logging::history::native::NativeEnd {
-                    stream: false,
-                    outcome: crate::request_logging::history::row::Outcome::Failover,
-                    detail: None,
-                    error: Some(outcome.to_owned()),
-                });
-            }
-            s.rt.record_send(crate::activity::sends::SendRow {
-                status: Some(i64::from(status.as_u16())),
-                ..observation::send_row(
-                    &request_id,
-                    send,
-                    &a,
-                    &model,
-                    request_started,
-                    started,
-                    crate::request_logging::history::row::Outcome::Failover,
-                )
-            });
-            s.rt.store().note_activity(&a.file_id, false);
-            observation::UsageEntry {
-                request_id: &request_id,
-                a: &a,
-                model: &model,
-                sid: &sid,
-                request_started,
-                stream: requested_stream,
-                detail: Default::default(),
-                failure: Some((status.as_u16(), outcome)),
-            }
-            .enqueue(&s);
-            s.cool(&a, &model, status.as_u16(), delay, entitlement).await?;
-            if !entitlement {
-                s.rt.claude_usage.invalidate(&a.token).await;
-            }
-            if status == StatusCode::UNAUTHORIZED {
-                s.refresh_unauthorized(&a);
-            }
-            s.event(json!({"type":"failover","requestId":request_id,"model":model,"session":sid,"account":a.id,"status":status.as_u16(),"outcome":outcome,"attempt":tried.len(),"retryAfterMs":delay}));
-            continue;
-        }
-        let facts = Exchange {
-            request_id,
-            requested_stream,
-            sse: h.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| {
-                v.split(';')
-                    .next()
-                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
-            }),
-            timing: json!({"preparationMs":preparation_ms,"sessionWaitMs":session_wait_ms,"admissionMs":admission_ms,"upstreamHeadersMs":upstream_headers_ms}),
-            headers_at: Instant::now(),
-            attempts: tried.len(),
-            a,
-            model,
-            sid,
-            status: status.as_u16(),
-            digest: hash(&raw),
-            body_bytes: raw.len(),
-            started: request_started,
-            sent_at: started,
-            send,
-        };
-        let mut record = Some(Observation::new(s.clone(), facts, &encoding, capture));
-        // The server stops polling a body once it has sent the declared content-length, so the
-        // stream never reaches its end; the exchange completes when that many bytes arrived.
-        let declared = h
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
-        if declared == Some(0)
-            && let Some(o) = record.take()
-        {
-            o.finish("complete").await;
-        }
-        let stream = futures_util::stream::unfold(
-            (stream, record, session, declared),
-            |(mut stream, mut record, session, mut remaining)| async move {
-                match stream.next().await {
-                    Some(item) => {
-                        if let Some(o) = record.as_mut()
-                            && let Ok(b) = &item
-                        {
-                            o.observe(b).await;
-                            remaining = remaining.map(|n| n.saturating_sub(b.len() as u64));
-                        }
-                        if item.is_err()
-                            && let Some(o) = record.take()
-                        {
-                            o.finish("upstream_stream_error").await;
-                        } else if remaining == Some(0)
-                            && let Some(o) = record.take()
-                        {
-                            o.finish("complete").await;
-                        }
-                        Some((item, (stream, record, session, remaining)))
-                    }
-                    None => {
-                        if let Some(o) = record.take() {
-                            o.finish("complete").await;
-                        }
-                        None
-                    }
+        match send::run(&s, &request, a, client, tried.len(), timing).await? {
+            send::Ending::Lost(response) | send::Ending::Answered(response) => return Ok(response),
+            send::Ending::Rejected {
+                headers_ms,
+                rejection: next,
+            } => {
+                upstream_headers_ms += headers_ms;
+                if let Some(next) = next {
+                    rejection = Some(rejection.map_or(next, |previous| previous.earliest(next)));
                 }
-            },
-        );
-        let mut response = Response::new(Body::from_stream(stream));
-        *response.status_mut() = status;
-        *response.headers_mut() = h;
-        return Ok(response);
+            }
+        }
     }
 }
 fn constant(a: &str, b: &str) -> bool {
