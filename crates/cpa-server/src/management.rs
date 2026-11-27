@@ -467,8 +467,8 @@ pub fn router(state: Arc<Management>) -> Router {
             methods().get(guarded!(s, observability::native_events)),
         ),
         (
-            "observability/native/history",
-            methods().get(guarded!(s, observability::native_history)),
+            "observability/history",
+            methods().get(guarded!(s, observability::history)),
         ),
         (
             "observability/activity",

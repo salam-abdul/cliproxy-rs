@@ -1401,6 +1401,57 @@ async fn activity_route_reads_the_running_store() {
     server.abort();
 }
 
+/// `GET /observability/history` refuses a bad range or provider filter, answers 409 while no
+/// activity store runs, and reads the store once one does. The native-only history route is
+/// gone.
+#[tokio::test]
+async fn history_route_reads_the_running_store() {
+    let f = Fixture::new("history-route");
+    let (base, server) = f.server().await;
+    let client = wreq::Client::new();
+    let get = |path: &str, query: &str| {
+        client
+            .get(format!("{base}/v8/management/observability/{path}{query}"))
+            .bearer_auth("fake-management-only")
+            .send()
+    };
+    let status = |response: wreq::Response| response.status().as_u16();
+    assert_eq!(status(get("history", "").await.unwrap()), 409);
+    assert_eq!(status(get("history", "?range=1h").await.unwrap()), 400);
+    assert_eq!(status(get("history", "?provider=").await.unwrap()), 400);
+    cpa_server::testing::start_activity(&f.rt, f.dir.join("activity.sqlite")).unwrap();
+    let response = get("history", "?range=7d&provider=codex").await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let mut keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "accountBuckets",
+            "bucketMs",
+            "buckets",
+            "coverageUncertain",
+            "errors",
+            "from",
+            "lostEvents",
+            "models",
+            "modelsTruncated",
+            "oldest",
+            "oldestStatus",
+            "providers",
+            "range",
+            "statuses",
+            "to",
+            "tokens"
+        ]
+    );
+    assert_eq!(body["range"], "7d");
+    assert_eq!(status(get("native/history", "").await.unwrap()), 404);
+    f.rt.stop_activity();
+    server.abort();
+}
+
 /// `GET /observability/speed` refuses a bad range, filter or offset, answers 409 while no
 /// activity store runs, and reads the store once one does.
 #[tokio::test]

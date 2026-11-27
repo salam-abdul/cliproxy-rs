@@ -93,8 +93,12 @@ class Store {
   });
   activity = new Res<Data>(() => api("/observability/native/events"));
   historyRange = $state("24h");
+  /** The provider the history panels are narrowed to; empty for every provider. */
+  historyProvider = $state("");
   history = new Res<Data>(() =>
-    api(`/observability/native/history?range=${this.historyRange}`),
+    api(
+      `/observability/history?range=${this.historyRange}${this.historyProvider ? `&provider=${encodeURIComponent(this.historyProvider)}` : ""}`,
+    ),
   );
   providerActivity = new Res<Data>(() =>
     api(`/observability/activity?range=${this.historyRange}`),

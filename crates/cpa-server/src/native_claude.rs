@@ -490,18 +490,6 @@ impl State {
         self.rt.native_events.record(v);
     }
 
-    pub(crate) async fn history(
-        &self,
-        range: crate::activity::Range,
-        account: Option<String>,
-    ) -> anyhow::Result<Value> {
-        self.rt
-            .activity()
-            .context("Native history is unavailable")?
-            .query(range, account)
-            .await
-    }
-
     /// Reads every Claude account fresh from disk on the blocking pool, so admission
     /// sees current tokens and flags without stalling an async worker.
     async fn accounts(self: &Arc<Self>) -> anyhow::Result<Vec<Account>> {

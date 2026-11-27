@@ -12,6 +12,7 @@ const errors = [];
 page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
+const historyUrls = [];
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
@@ -46,22 +47,29 @@ await page.route("**/*", async route => {
   }
   if (path === "/v8/management/credentials/models") return send({models:[]});
   if (path === "/v8/management/observability/native/events") return send({events:[{type:"inference",requestId:"r",at:new Date().toISOString(),account:"a",model:"claude-opus-4-6",outcome:"success",recovered:true,usage:{input_tokens:1000,output_tokens:100,cache_read_input_tokens:10000,cache_creation_input_tokens:200,cache_creation:{ephemeral_5m_input_tokens:200,ephemeral_1h_input_tokens:0}}},{type:"failover",requestId:"r",at:new Date().toISOString(),account:"b",status:429},{type:"inference",requestId:"cancel",at:new Date().toISOString(),account:"a",outcome:"client_cancelled"}]});
-  if (path === "/v8/management/observability/native/history") {
+  if (path === "/v8/management/observability/history") {
     historyChecks++;
+    historyUrls.push(request.url());
     if (historyHold) await historyHold;
-    if (historyFailure) return route.fulfill({status:500,json:{error:"History unavailable"}});
-    const range = new URL(request.url()).searchParams.get("range") || "24h";
+    if (historyFailure) return route.fulfill({status:500,json:{error:"History could not be read"}});
+    const params = new URL(request.url()).searchParams;
+    const range = params.get("range") || "24h", filter = params.get("provider");
     const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
-    const width = {"24h":3600000,"7d":21600000,"30d":86400000}[range];
-    return send({range,from:now-duration,to:now,bucketMs:width,oldestRequest:now-86400000,
-      buckets:[{at:Math.floor(now/width)*width,requests:2,failures:1}],
-      accountBuckets:[{account:"a",at:Math.floor(now/width)*width,requests:2,failures:1}],
-      models:[{model:"claude-opus-4-6",requests:2,inputTokens:1000,
-        outputTokens:100,cacheReadTokens:10000,cacheWriteTokens:200,
-        reportedInput:1,reportedOutput:1,reportedCacheRead:1,reportedCacheWrite:1,
-      }],
-      statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}],
-      errors:[{outcome:"quota_unavailable",requests:1}],lostEvents:0});
+    const width = {"24h":3600000,"7d":21600000,"30d":86400000}[range], last = Math.floor(now/width)*width;
+    const tokens = (uncached, read, write, output, sends, exactSends) => ({uncachedInputTokens:uncached,cacheReadTokens:read,
+      cacheWriteTokens:write,outputTokens:output,sends,exactSends});
+    const models = [{provider:"claude",model:"claude-opus-4-6",requests:2,...tokens(1000,10000,200,100,3,3)},
+      {provider:"codex",model:"gpt-5",requests:1,...tokens(50,0,0,20,1,1)}].filter(m => !filter || m.provider === filter);
+    const requests = models.reduce((n, m) => n + m.requests, 0);
+    return send({range,from:now-duration,to:now,bucketMs:width,oldest:now-86400000,oldestStatus:now-600000,
+      lostEvents:0,coverageUncertain:false,providers:["claude","codex"],
+      buckets:requests ? [{at:last,requests,failures:filter === "codex" ? 0 : 1}] : [],
+      errors:filter === "codex" ? [] : [{outcome:"quota_unavailable",status:null,requests:1}],
+      tokens:models.reduce((t, m) => tokens(t.uncachedInputTokens + m.uncachedInputTokens, t.cacheReadTokens + m.cacheReadTokens,
+        t.cacheWriteTokens + m.cacheWriteTokens, t.outputTokens + m.outputTokens, t.sends + m.sends, t.exactSends + m.exactSends), tokens(0,0,0,0,0,0)),
+      models,modelsTruncated:false,
+      accountBuckets:[{credential:"account-a.json",at:last,requests:2,failures:1}],
+      statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}]});
   }
   if (path === "/v8/management/observability/activity") {
     activityChecks++;
@@ -449,6 +457,21 @@ try {
   historyFailure = false;
   await page.getByRole("button",{name:"24 hours"}).click();
   await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
+  const providerSelect = page.getByRole("combobox",{name:"History provider"});
+  assert.deepEqual(await providerSelect.locator("option").allInnerTexts(),["All providers","Claude","Codex"],"the dropdown lists every provider with history");
+  await providerSelect.selectOption("codex");
+  await page.locator(".history-model").getByText("gpt-5",{exact:true}).waitFor();
+  assert.equal(await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).count(),0,"the filter narrows top models");
+  await page.locator(".account-row").first().getByText("2 requests",{exact:true}).waitFor();
+  await page.getByRole("button",{name:"7 days"}).click();
+  await page.getByText("By requests · selected period",{exact:true}).waitFor();
+  const filtered = new URL(historyUrls.at(-1)).searchParams;
+  assert.deepEqual([filtered.get("range"),filtered.get("provider")],["7d","codex"],"a range change keeps the provider filter");
+  assert.equal(await providerSelect.inputValue(),"codex","the dropdown keeps its value across a range change");
+  await providerSelect.selectOption("");
+  await page.getByRole("button",{name:"24 hours"}).click();
+  await page.locator(".history-model").getByText("claude-opus-4-6",{exact:true}).waitFor();
+  assert.equal(new URL(historyUrls.at(-1)).searchParams.has("provider"),false,"All providers sends no filter");
   activityConflict = true;
   const conflictBefore = activityChecks;
   await page.getByRole("button",{name:"7 days"}).click();

@@ -327,7 +327,8 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 /* Overview */
 .overview-heading { display: flex; align-items: end; justify-content: space-between; gap: var(--s4); }
 .overview-heading > div:first-child { display: grid; gap: var(--s1); }
-.history-range { flex: none; }
+.history-controls { display: flex; flex: none; gap: var(--s2); }
+.history-controls select { width: auto; }
 .overview-accounts { gap: 0; overflow: hidden; padding: 0; }
 .account-panel-head { align-items: center; min-height: 56px; padding: var(--s3) var(--s4); }
 .account-count { font-size: var(--t-sm); font-weight: 500; }
@@ -366,6 +367,7 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
 }
 @media (max-width: 600px) {
   .overview-heading { align-items: start; flex-direction: column; }
+  .history-controls { width: 100%; flex-direction: column; }
   .history-range { width: 100%; }
   .history-range button { flex: 1; }
   .account-panel-head { flex-wrap: wrap; }

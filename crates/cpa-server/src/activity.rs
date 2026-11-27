@@ -1,4 +1,5 @@
 mod cycles;
+mod history;
 mod panels;
 mod quota;
 pub(crate) mod sends;
@@ -6,9 +7,9 @@ pub(crate) mod speed;
 
 use anyhow::Context;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -365,12 +366,6 @@ impl Activity {
         }
     }
 
-    pub(crate) async fn query(&self, range: Range, account: Option<String>) -> anyhow::Result<Value> {
-        let path = self.path.clone();
-        let lost = self.lost.load(Ordering::Relaxed);
-        tokio::task::spawn_blocking(move || query(&path, range, account.as_deref(), epoch_ms(), lost)).await?
-    }
-
     /// Blocks until every record queued before it is written, or for at most two seconds
     /// once it is queued.
     pub(crate) fn flush(&self) {
@@ -577,111 +572,11 @@ fn trim(
     Ok(())
 }
 
-fn query(path: &Path, range: Range, account: Option<&str>, now: i64, lost: u64) -> anyhow::Result<Value> {
-    let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    db.busy_timeout(Duration::from_secs(2))?;
-    let conn = db.transaction()?;
-    let from = now - range.duration();
-    let bucket_ms = range.bucket();
-    let mut statement = conn.prepare(
-        "SELECT (at_ms / ?3) * ?3, COUNT(*),
-        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled','fallback_served') THEN 1 ELSE 0 END)
-        FROM requests WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?4 IS NULL OR account = ?4)
-        GROUP BY 1 ORDER BY 1",
-    )?;
-    let buckets = statement
-        .query_map(params![from, now, bucket_ms, account], |row| {
-            Ok(json!({
-                "at": row.get::<_, i64>(0)?, "requests": row.get::<_, i64>(1)?,
-                "failures": row.get::<_, i64>(2)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut statement = conn.prepare(
-        "SELECT account, (at_ms / ?3) * ?3, COUNT(*),
-        SUM(CASE WHEN outcome NOT IN ('success','client_cancelled','fallback_served') THEN 1 ELSE 0 END)
-        FROM requests WHERE at_ms >= ?1 AND at_ms <= ?2 AND account IS NOT NULL
-        AND (?4 IS NULL OR account = ?4) GROUP BY account, 2 ORDER BY account, 2",
-    )?;
-    let account_buckets = statement
-        .query_map(params![from, now, bucket_ms, account], |row| {
-            Ok(json!({
-                "account": row.get::<_, String>(0)?, "at": row.get::<_, i64>(1)?,
-                "requests": row.get::<_, i64>(2)?, "failures": row.get::<_, i64>(3)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut statement = conn.prepare(
-        "SELECT outcome, COUNT(*) FROM requests
-        WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR account = ?3)
-        AND outcome NOT IN ('success','client_cancelled','fallback_served')
-        GROUP BY outcome ORDER BY COUNT(*) DESC LIMIT 5",
-    )?;
-    let errors = statement
-        .query_map(params![from, now, account], |row| {
-            Ok(json!({
-                "outcome": row.get::<_, String>(0)?, "requests": row.get::<_, i64>(1)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut statement = conn.prepare(
-        "SELECT model, COUNT(*),
-        SUM(COALESCE(input_tokens,0)), SUM(COALESCE(output_tokens,0)),
-        SUM(COALESCE(cache_read_tokens,0)), SUM(COALESCE(cache_write_tokens,0)),
-        COUNT(input_tokens), COUNT(output_tokens), COUNT(cache_read_tokens), COUNT(cache_write_tokens)
-        FROM requests WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR account = ?3)
-        GROUP BY model ORDER BY COUNT(*) DESC LIMIT 501",
-    )?;
-    let mut models = statement
-        .query_map(params![from, now, account], |row| {
-            Ok(json!({
-                "model": row.get::<_, Option<String>>(0)?, "requests": row.get::<_, i64>(1)?,
-                "inputTokens": row.get::<_, i64>(2)?, "outputTokens": row.get::<_, i64>(3)?,
-                "cacheReadTokens": row.get::<_, i64>(4)?, "cacheWriteTokens": row.get::<_, i64>(5)?,
-                "reportedInput": row.get::<_, i64>(6)?, "reportedOutput": row.get::<_, i64>(7)?,
-                "reportedCacheRead": row.get::<_, i64>(8)?, "reportedCacheWrite": row.get::<_, i64>(9)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let models_truncated = models.len() > 500;
-    models.truncate(500);
-    let sample_ms = range.duration() / 144;
-    let mut statement = conn.prepare(
-        "SELECT s.account, s.model, s.at_ms, s.availability,
-        s.five_hour, s.weekly, s.five_hour_reset, s.weekly_reset
-        FROM account_status s JOIN (
-            SELECT account, model, availability, MAX(at_ms) AS at_ms FROM account_status
-            WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR account = ?3)
-            GROUP BY account, model, availability, at_ms / ?4
-        ) latest ON s.account = latest.account AND s.model = latest.model
-            AND s.availability = latest.availability AND s.at_ms = latest.at_ms
-        ORDER BY s.at_ms",
-    )?;
-    let statuses = statement
-        .query_map(params![from, now, account, sample_ms], |row| {
-            Ok(json!({
-                "account": row.get::<_, String>(0)?, "model": row.get::<_, String>(1)?,
-                "at": row.get::<_, i64>(2)?, "availability": row.get::<_, String>(3)?,
-                "fiveHourUsed": row.get::<_, Option<f64>>(4)?, "weeklyUsed": row.get::<_, Option<f64>>(5)?,
-                "fiveHourReset": row.get::<_, Option<i64>>(6)?, "weeklyReset": row.get::<_, Option<i64>>(7)?
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let oldest: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM requests", [], |row| row.get(0))?;
-    let oldest_status: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM account_status", [], |row| row.get(0))?;
-    let lost = lost.max(meta(&conn, "lost_events")?.unwrap_or(0).max(0) as u64);
-    let coverage_uncertain = meta(&conn, "uncertain_at")?.is_some_and(|at| at >= from && at <= now);
-    let result = json!({"range": range.name(), "from": from, "to": now, "bucketMs": bucket_ms,
-        "buckets": buckets, "accountBuckets": account_buckets, "errors": errors, "models": models,
-        "modelsTruncated": models_truncated, "statuses": statuses,
-        "oldestRequest": oldest, "oldestStatus": oldest_status, "lostEvents": lost,
-        "coverageUncertain": coverage_uncertain});
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn lost_records_and_unclean_restarts_remain_visible() {
@@ -700,7 +595,7 @@ mod tests {
         {
             let history = Activity::start(path.clone(), restarted.clone()).unwrap();
             assert_eq!(restarted.load(Ordering::Relaxed), 2);
-            let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+            let data = history::read(&path, Range::Day, None, epoch_ms(), 0).unwrap();
             assert_eq!(data["lostEvents"], 2);
             assert_eq!(data["coverageUncertain"], false);
             drop(history);
@@ -709,7 +604,7 @@ mod tests {
         set_meta(&conn, "dirty", 1).unwrap();
         drop(conn);
         let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
-        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        let data = history::read(&path, Range::Day, None, epoch_ms(), 0).unwrap();
         assert_eq!(data["lostEvents"], 2);
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
@@ -732,6 +627,30 @@ mod tests {
         json!({"type":"inference","requestId":id,"at":chrono::Utc::now().to_rfc3339(),"outcome":"success"})
     }
 
+    /// A native send for `request_id` a second before now, so the combined record starts
+    /// before a request row recorded now.
+    fn native_send(request_id: &str) -> sends::SendRow {
+        use crate::request_logging::history::row::{Outcome, Source};
+        sends::SendRow {
+            request_id: request_id.into(),
+            turn: 0,
+            send: 0,
+            parent_request: None,
+            at_ms: epoch_ms() - 1_000,
+            source: Source::Native,
+            provider: "claude".into(),
+            credential: Some("cred-a".into()),
+            model: Some("claude-test".into()),
+            outcome: Outcome::Complete,
+            status: None,
+            stream: true,
+            start_ms: 0,
+            latency_ms: Some(10),
+            ttft: None,
+            tokens: None,
+        }
+    }
+
     fn dirty(path: &Path) -> Option<i64> {
         meta(&Connection::open(path).unwrap(), "dirty").unwrap()
     }
@@ -742,6 +661,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("activity.sqlite");
         let activity = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        activity.record_send(native_send("before"));
         activity.record_event(&inference("before"));
         activity.finish();
         assert_eq!(dirty(&path), Some(0), "nothing was lost yet");
@@ -749,7 +669,7 @@ mod tests {
         assert_eq!(dirty(&path), Some(1));
         drop(activity);
         let restarted = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
-        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        let data = history::read(&path, Range::Day, None, epoch_ms(), 0).unwrap();
         assert_eq!(data["buckets"][0]["requests"], 1, "{data}");
         assert_eq!(data["lostEvents"], 1);
         assert_eq!(data["coverageUncertain"], true);
@@ -789,6 +709,9 @@ mod tests {
         let stamp = chrono::DateTime::from_timestamp_millis(at).unwrap().to_rfc3339();
         {
             let history = Activity::start(path.clone(), lost.clone()).unwrap();
+            let mut send = native_send("synthetic-1");
+            send.at_ms = at - 1_000;
+            history.record_send(send);
             history.record_event(&json!({"type":"inference","requestId":"synthetic-1","at":stamp,
                 "session":"private-session","bodySha256":"private-digest","account":"account-a",
                 "model":"claude-sonnet-4-6","outcome":"success","status":200,
@@ -809,10 +732,19 @@ mod tests {
                 }
             }
         }
-        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
+        let data = history::read(&path, Range::Day, None, epoch_ms(), 0).unwrap();
         assert_eq!(data["buckets"][0]["requests"], 1);
-        assert_eq!(data["models"][0]["inputTokens"], 100);
-        assert_eq!(data["models"][0]["reportedCacheWrite"], 1);
+        let conn = Connection::open(&path).unwrap();
+        let (input, reported_cache_write): (i64, i64) = conn
+            .query_row(
+                "SELECT SUM(input_tokens), COUNT(cache_write_tokens) FROM requests",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(input, 100);
+        assert_eq!(reported_cache_write, 1);
         assert_eq!(data["statuses"][0]["fiveHourUsed"], 30.0);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!cpa_common::gostr::contains(&bytes, b"private-session"));
@@ -822,78 +754,6 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_served_fallback_is_a_request_and_not_a_failure() {
-        let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("history.sqlite");
-        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
-        let stamp = chrono::Utc::now().to_rfc3339();
-        history.record_event(
-            &json!({"type":"fallback","requestId":"one","at":stamp,"model":"claude-opus-test",
-            "fallbackModel":"local-test","outcome":"fallback_served","status":200,"attempts":0}),
-        );
-        history.record_event(
-            &json!({"type":"rejected","requestId":"two","at":stamp,"model":"claude-opus-test",
-            "outcome":"quota_unavailable","status":429,"attempts":0}),
-        );
-        history.flush();
-        let all = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
-        assert_eq!(all["buckets"][0]["requests"], 2);
-        assert_eq!(all["buckets"][0]["failures"], 1);
-        assert_eq!(all["errors"].as_array().unwrap().len(), 1);
-        assert_eq!(all["errors"][0]["outcome"], "quota_unavailable");
-        drop(history);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn rejected_requests_count_as_failures_and_account_filter_is_exact() {
-        let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("history.sqlite");
-        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
-        let stamp = chrono::Utc::now().to_rfc3339();
-        for (id, account, outcome) in [("one", "a", "success"), ("two", "b", "quota_unavailable")] {
-            history.record_event(&json!({"type":"inference","requestId":id,"at":stamp,
-                "account":account,"model":"claude-sonnet-4-6","outcome":outcome}));
-        }
-        history.flush();
-        let all = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
-        assert_eq!(all["buckets"][0]["requests"], 2);
-        assert_eq!(all["buckets"][0]["failures"], 1);
-        assert_eq!(all["errors"][0]["outcome"], "quota_unavailable");
-        let filtered = query(&path, Range::Day, Some("a"), epoch_ms(), 0).unwrap();
-        assert_eq!(filtered["buckets"][0]["requests"], 1);
-        assert_eq!(filtered["buckets"][0]["failures"], 0);
-        drop(history);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn model_usage_counts_only_reported_counters() {
-        let dir = std::env::temp_dir().join(format!("native-history-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("history.sqlite");
-        let history = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
-        let stamp = chrono::Utc::now().to_rfc3339();
-        for (id, usage) in [
-            ("one", json!({"input_tokens":10,"cache_creation_input_tokens":5})),
-            ("two", json!({"input_tokens":20})),
-        ] {
-            history.record_event(&json!({"type":"inference","requestId":id,"at":stamp,
-                "model":"claude-sonnet-4-6","outcome":"success","usage":usage}));
-        }
-        history.flush();
-        let data = query(&path, Range::Day, None, epoch_ms(), 0).unwrap();
-        assert_eq!(data["models"][0]["inputTokens"], 30);
-        assert_eq!(data["models"][0]["reportedInput"], 2);
-        assert_eq!(data["models"][0]["cacheWriteTokens"], 5);
-        assert_eq!(data["models"][0]["reportedCacheWrite"], 1);
-        drop(history);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

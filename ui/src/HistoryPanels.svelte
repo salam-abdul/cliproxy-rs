@@ -2,11 +2,19 @@
   import { store } from "./store.svelte";
   import { requestBuckets } from "./history";
   import { outcomeLabel, summarizeHistory } from "./traffic";
-  import type { Data } from "./core";
+  import { label, type Data } from "./core";
 
   let { data }: { data: Data | undefined } = $props();
   const summary = $derived(summarizeHistory(data || {}));
-  const buckets = $derived(requestBuckets(data || {}));
+  // A status reading is a Claude observation, so it marks a quiet bucket only when the
+  // panels include Claude.
+  const buckets = $derived(
+    requestBuckets(
+      data || {},
+      undefined,
+      store.historyProvider === "" || store.historyProvider === "claude",
+    ),
+  );
   const hasObserved = $derived(buckets.some((bucket) => bucket.known));
   const peak = $derived(
     Math.max(1, ...buckets.map((bucket) => bucket.requests)),
@@ -41,7 +49,9 @@
       <section class="card">
         <div class="section-head">
           <h3>Requests & failures</h3>
-          <span class="muted small">Selected period</span>
+          <span class="muted small"
+            >Selected period · rate limits count as failures</span
+          >
         </div>
         <div class="history-totals">
           <strong>{compact(summary.requests)}</strong><span>requests</span>
@@ -97,10 +107,10 @@
       <section class="card">
         <div class="section-head">
           <h3>Tokens by category</h3>
-          <span class="muted small">Reported counts</span>
+          <span class="muted small">Exact counts</span>
         </div>
         {#if mixTotal > 0}
-          <div class="history-mix" role="img" aria-label="Reported token mix">
+          <div class="history-mix" role="img" aria-label="Exact token mix">
             {#each summary.tokens as row, i}
               {#if row.tokens && row.tokens > 0}<span
                   class={`mix-${i}`}
@@ -114,15 +124,14 @@
           <div class="history-token">
             <span><i class={`mix-${i}`}></i>{row.label}</span>
             <strong
-              >{row.tokens !== null &&
-              (row.reported < summary.requests || data.modelsTruncated)
+              >{row.tokens !== null && summary.partialTokens
                 ? "≥"
                 : ""}{compact(row.tokens)}</strong
             >
           </div>
         {/each}
         {#if summary.partialTokens}<p class="muted small">
-            Some usage is omitted; ≥ values are lower bounds.
+            Some sends have no exact token counts; ≥ values are lower bounds.
           </p>{/if}
       </section>
       <section class="card top-models">
@@ -132,7 +141,10 @@
         </div>
         {#each summary.models.slice(0, 5) as model}
           <div class="history-model">
-            <code class="ellipsis">{model.model || "Unknown model"}</code>
+            <span class="ellipsis"
+              ><span class="muted">{label(String(model.provider))}</span>
+              <code>{model.model || "Unknown model"}</code></span
+            >
             <span class="meter-track"
               ><i
                 style:width={`${summary.requests ? (100 * model.requests) / summary.requests : 0}%`}
@@ -146,9 +158,9 @@
       </section>
     </div>
     <p class="muted small">
-      {#if data.oldestRequest == null}No requests recorded yet.
-      {:else if data.oldestRequest > data.from}Request records begin {date(
-          data.oldestRequest,
+      {#if data.oldest == null}No requests recorded yet.
+      {:else if data.oldest > data.from}Request records begin {date(
+          data.oldest,
         )}.
       {:else}Retained requests reach this period; offline gaps are unknown.{/if}
       {#if data.lostEvents}
