@@ -22,8 +22,9 @@ const secret = "test-native-proxy-secret-test-native-proxy-secret";
 async function start() {
   child = cp.spawn(
     process.env.NATIVE_MANAGER_TEST_BINARY || process.execPath,
-    process.env.NATIVE_MANAGER_TEST_BINARY ? ["--config",dir+"/manager.yaml","--local-model"] : [path.join(__dirname, "server.cjs"), dir + "/config.json"],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    process.env.NATIVE_MANAGER_TEST_BINARY ? ["--config",dir+"/manager.yaml"] : [path.join(__dirname, "server.cjs"), dir + "/config.json"],
+    // The manager's model catalog refresh goes to a dead loopback proxy, never the network.
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HTTPS_PROXY: "http://127.0.0.1:9", NO_PROXY: "localhost,127.0.0.1,::1" } },
   );
   await new Promise((resolve, reject) => {
     child.stdout.once("data", resolve);

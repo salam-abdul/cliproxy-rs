@@ -121,9 +121,6 @@ struct Args {
     /// Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)
     #[arg(long, default_value = "")]
     management_base_url: String,
-    /// Use embedded models.json and codex_client_models.json only, skip remote model catalog fetching
-    #[arg(long)]
-    local_model: bool,
 }
 
 /// Go's `discover` subcommand flag set.
@@ -264,7 +261,7 @@ fn go_parse_bool(v: &str) -> Option<bool> {
 /// Go `argvEnablesBoolFlag`: a pre-parse scan (stops at the first non-flag) used to
 /// keep stdout clean for `--discover-json`.
 fn argv_enables_bool_flag(args: &[String], name: &str) -> bool {
-    const BOOL_FLAGS: [&str; 16] = [
+    const BOOL_FLAGS: [&str; 15] = [
         "codex-login",
         "codex-device-login",
         "claude-login",
@@ -280,7 +277,6 @@ fn argv_enables_bool_flag(args: &[String], name: &str) -> bool {
         "home-disable-cluster-discovery",
         "tui",
         "standalone",
-        "local-model",
     ];
     let mut enabled = false;
     let mut i = 0;
@@ -797,12 +793,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         wait_for_cloud_deploy().await;
         return Ok(());
     }
-    if args.local_model && (!args.tui || args.standalone) {
-        tracing::info!("Local model mode: using embedded model catalogs, remote model updates disabled");
-    }
     if args.tui {
         if args.standalone {
-            standalone_tui(config, config_path, args.password, args.local_model, store, home_config).await;
+            standalone_tui(config, config_path, args.password, store, home_config).await;
         } else {
             let base = resolve_management_base_url(&args.management_base_url, &config);
             remote_tui(base, args.password).await;
@@ -818,7 +811,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
         config,
         config_path,
         args.password,
-        args.local_model,
         store,
         home_config,
         shutdown_signal(),
@@ -947,7 +939,6 @@ async fn standalone_tui(
     config: Config,
     config_path: PathBuf,
     password: String,
-    local_model: bool,
     store: Option<cpa_store::Store>,
     home_config: Option<cpa_home::HomeConfig>,
 ) {
@@ -973,7 +964,6 @@ async fn standalone_tui(
         config,
         config_path,
         password.clone(),
-        local_model,
         store,
         home_config,
         shutdown,
@@ -1175,7 +1165,6 @@ async fn serve(
     config: Config,
     config_path: PathBuf,
     password: String,
-    local_model: bool,
     store: Option<cpa_store::Store>,
     home_config: Option<cpa_home::HomeConfig>,
     shutdown: impl std::future::Future<Output = ()>,
@@ -1220,11 +1209,12 @@ async fn serve(
         google: Default::default(),
     };
     let rt = Arc::new(Runtime::new(config, credentials, executors));
-    rt.set_local_model(local_model);
     if let Some(cooldown) = store.as_ref().and_then(|store| store.cooldown.clone()) {
         rt.set_cooldown_backend(cooldown);
     }
-    // Go `misc.StartAntigravityVersionUpdater` and `startModelCatalogUpdaters`.
+    // Go `misc.StartAntigravityVersionUpdater` and `startModelCatalogUpdaters`. Unit
+    // tests run `serve` in-process and must not reach the network.
+    #[cfg(not(test))]
     cpa_server::model_updater::start(&rt, home_config.is_some());
     let home = home_config.map(|home_config| {
         let dispatcher = Arc::new(home::Dispatcher::new(&rt));
@@ -1441,6 +1431,20 @@ mod tests {
         ));
     }
 
+    /// The server always refreshes the model catalog, so the flag that turned the
+    /// refresh off is gone and a service that still passes it fails to start.
+    #[test]
+    fn the_retired_local_model_flag_is_an_unknown_argument() {
+        for spelling in ["-local-model", "--local-model"] {
+            let cmd = Args::command();
+            let flags = go_flags(&cmd, ["cliproxy", spelling, "-config", "c.yaml"].map(String::from)).unwrap();
+            let err = cmd.try_get_matches_from(flags).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{spelling}");
+            assert_eq!(err.exit_code(), 2, "{spelling}");
+            assert!(err.to_string().contains("--local-model"), "{spelling}: {err}");
+        }
+    }
+
     #[test]
     fn every_go_flag_parses_in_single_and_double_dash_form() {
         let argv = |a: &[&str]| {
@@ -1472,7 +1476,6 @@ mod tests {
             "-standalone",
             "-management-base-url",
             "https://x",
-            "-local-model",
             "-antigravity-login",
             "-devin-login",
             "-config",
@@ -1481,7 +1484,7 @@ mod tests {
             "pw",
         ]))
         .unwrap();
-        assert!(args.discover && args.discover_json && args.tui && args.standalone && args.local_model);
+        assert!(args.discover && args.discover_json && args.tui && args.standalone);
         assert!(args.antigravity_login && args.devin_login && args.home_disable_cluster_discovery);
         assert_eq!(args.discover_timeout, -2);
         assert_eq!(csv_flags(&args.discover_include), ["eth0", "en0", "wl*"]);
@@ -1544,7 +1547,7 @@ mod tests {
                 &["--working-dir", "d"],
                 &["-working-dir=d"],
                 &["--working-dir=d"],
-                &["-tui", "-config", "c.yaml", "--working-dir", "d", "-local-model"],
+                &["-tui", "-config", "c.yaml", "--working-dir", "d", "-standalone"],
                 &["-working-dir", "x", "-working-dir=d"],
                 // An undefined flag with a value, or a boolean one before a flag.
                 &["-unknown-mode", "fast", "-working-dir", "d"],
@@ -1635,7 +1638,6 @@ mod tests {
             config,
             path,
             "fake-tui-password".into(),
-            true,
             None,
             None,
             async {
@@ -1676,7 +1678,6 @@ mod tests {
                 config,
                 path.clone(),
                 String::new(),
-                true,
                 None,
                 None,
                 async {

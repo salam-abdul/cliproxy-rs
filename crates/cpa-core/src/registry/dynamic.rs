@@ -560,34 +560,45 @@ const CODEX_BUILTIN_IMAGES: [(&str, &str); 5] = [
     ("gpt-image-2.5", "GPT Image 2.5"),
 ];
 
-/// Go `GetCodex*Models`: a plan catalog `WithCodexBuiltins` (`upsertModelInfos`), where
-/// the built-ins replace same-ID models (case-insensitive) and come last.
-fn codex_channel(name: &str) -> Vec<Spec> {
-    let builtins = CODEX_BUILTIN_IMAGES.map(|(id, display_name)| Spec {
-        id: id.into(),
-        object: "model".into(),
-        // 2024-01-01.
-        created: 1_704_067_200,
-        owned_by: "openai".into(),
-        kind: "openai".into(),
-        display_name: display_name.into(),
-        version: id.into(),
-        ..Spec::default()
-    });
-    let mut models: Vec<Spec> = channel(name)
+/// Go `upsertModelInfos`: `builtins` replace same-ID models (case-insensitive) and come
+/// last; models with a blank ID are dropped.
+fn upsert<T>(models: Vec<T>, id: impl Fn(&T) -> &str, builtins: Vec<T>) -> Vec<T> {
+    let mut out: Vec<T> = models
         .into_iter()
         .filter(|m| {
-            let id = m.id.trim().to_lowercase();
-            !id.is_empty() && !builtins.iter().any(|b| b.id == id)
+            let m = id(m).trim();
+            !m.is_empty() && !builtins.iter().any(|b| id(b).eq_ignore_ascii_case(m))
         })
         .collect();
-    models.extend(builtins);
-    models
+    out.extend(builtins);
+    out
 }
 
-/// Go `WithXAIBuiltins` (`upsertModelInfos`): the hard-coded image and video models,
-/// appended after the channel's models and replacing any with the same ID.
-fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
+/// Go `WithCodexBuiltins`: the Images API models every Codex catalog carries.
+fn codex_builtins() -> Vec<Spec> {
+    CODEX_BUILTIN_IMAGES
+        .iter()
+        .map(|(id, display_name)| Spec {
+            id: (*id).into(),
+            object: "model".into(),
+            // 2024-01-01.
+            created: 1_704_067_200,
+            owned_by: "openai".into(),
+            kind: "openai".into(),
+            display_name: (*display_name).into(),
+            version: (*id).into(),
+            ..Spec::default()
+        })
+        .collect()
+}
+
+/// Go `GetCodex*Models`: a plan catalog with the built-in image models.
+fn codex_channel(name: &str) -> Vec<Spec> {
+    upsert(channel(name), |m| &m.id, codex_builtins())
+}
+
+/// Go `WithXAIBuiltins`: the hard-coded image and video models.
+fn xai_builtins() -> Vec<Spec> {
     const BUILTINS: [(&str, i64, &str, &str); 6] = [
         (
             "grok-imagine-image",
@@ -626,25 +637,42 @@ fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
             "Compatibility alias for the xAI Grok video generation model.",
         ),
     ];
-    let mut out: Vec<Spec> = models
-        .into_iter()
-        .filter(|m| {
-            let id = m.id.trim();
-            !id.is_empty() && !BUILTINS.iter().any(|(b, ..)| b.eq_ignore_ascii_case(id))
+    BUILTINS
+        .iter()
+        .map(|(id, created, display, description)| Spec {
+            id: (*id).into(),
+            object: "model".into(),
+            created: *created,
+            owned_by: "xai".into(),
+            kind: "xai".into(),
+            display_name: (*display).into(),
+            name: (*id).into(),
+            description: (*description).into(),
+            ..Spec::default()
         })
-        .collect();
-    out.extend(BUILTINS.iter().map(|(id, created, display, description)| Spec {
-        id: (*id).into(),
-        object: "model".into(),
-        created: *created,
-        owned_by: "xai".into(),
-        kind: "xai".into(),
-        display_name: (*display).into(),
-        name: (*id).into(),
-        description: (*description).into(),
-        ..Spec::default()
-    }));
-    out
+        .collect()
+}
+
+fn with_xai_builtins(models: Vec<Spec>) -> Vec<Spec> {
+    upsert(models, |m| &m.id, xai_builtins())
+}
+
+/// Go `GetStaticModelDefinitionsByChannel` for the channels the models.json feed covers:
+/// the current catalog's definitions as published, so a refresh reaches the dashboard
+/// and an emptied section lists nothing, as the registry then serves nothing. Codex
+/// lists the Pro plan with the built-in image models, xAI adds its built-in image and
+/// video models, and `gemini-interactions` shares the Gemini section. `None` for a
+/// channel the feed does not carry.
+pub fn channel_definitions(name: &str) -> Option<Vec<ModelInfo>> {
+    let (section, builtins) = match name {
+        "codex" => ("codex-pro", codex_builtins()),
+        "xai" => (name, xai_builtins()),
+        "gemini-interactions" => ("gemini", Vec::new()),
+        "claude" | "gemini" | "vertex" | "aistudio" | "antigravity" | "kimi" | "meta" => (name, Vec::new()),
+        _ => return None,
+    };
+    let builtins = builtins.iter().map(Spec::to_info).collect();
+    Some(upsert(pinned().channel(section).to_vec(), |m| &m.id, builtins))
 }
 
 /// Go `buildConfigModels`; `metadata_channel` is the static channel whose native

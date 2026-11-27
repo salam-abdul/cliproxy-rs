@@ -200,7 +200,7 @@ Updates are manual and pinned. Stop the login service, then run:
 python3 native/install.py target/release/cliproxy --upgrade
 ```
 
-This keeps credentials and settings, migrates the predecessor's SQLite pins and cooldowns to atomic JSON, and prints the new executable. It does not edit the login service: if the service passes `--local-model`, it serves only the model catalog embedded in the binary, so remove the flag unless the proxy must not download model catalogs. The binary refuses an unmigrated SQLite configuration. It takes the exclusive refresh-owner lock before automatic refresh starts; never run another refresh owner against the same auth directory.
+This keeps credentials and settings, migrates the predecessor's SQLite pins and cooldowns to atomic JSON, and prints the new executable. It does not edit the login service: this version no longer accepts `--local-model`, so a service that still passes it exits at startup. Remove the flag before the service runs the new executable. The binary refuses an unmigrated SQLite configuration. It takes the exclusive refresh-owner lock before automatic refresh starts; never run another refresh owner against the same auth directory.
 
 ## Qualification
 

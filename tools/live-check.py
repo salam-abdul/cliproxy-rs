@@ -626,7 +626,7 @@ class Server:
         self.log_path = work / "server.log"
         self._log = open(self.log_path, "wb")
         self.proc = subprocess.Popen(
-            [str(binary), "--config", str(config), "--working-dir", str(work), "--local-model"],
+            [str(binary), "--config", str(config), "--working-dir", str(work)],
             cwd=str(work),
             env=child_env(os.environ, run_dir),
             stdin=subprocess.DEVNULL,
