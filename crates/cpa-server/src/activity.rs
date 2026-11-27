@@ -1,4 +1,5 @@
 mod cycles;
+mod history;
 mod panels;
 mod quota;
 pub(crate) mod sends;
