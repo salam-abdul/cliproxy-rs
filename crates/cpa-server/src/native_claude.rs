@@ -844,6 +844,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
+    let requested_stream = body["stream"].as_bool() == Some(true);
     // Holding this handle marks the session active, which keeps its affinity binding from
     // being pruned or evicted, until the response stream ends. Its lock is held only for
     // admission and affinity binding: same-session requests wait for each other's account
@@ -1051,11 +1052,12 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
                 ));
                 s.rt.store().note_activity(&a.file_id, false);
                 observation::UsageEntry {
+                    request_id: &request_id,
                     a: &a,
                     model: &model,
                     sid: &sid,
-                    started: request_started,
-                    stream: false,
+                    request_started,
+                    stream: requested_stream,
                     detail: Default::default(),
                     failure: Some((0, "transport_lost")),
                 }
@@ -1122,11 +1124,12 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
             });
             s.rt.store().note_activity(&a.file_id, false);
             observation::UsageEntry {
+                request_id: &request_id,
                 a: &a,
                 model: &model,
                 sid: &sid,
-                started: request_started,
-                stream: false,
+                request_started,
+                stream: requested_stream,
                 detail: Default::default(),
                 failure: Some((status.as_u16(), outcome)),
             }

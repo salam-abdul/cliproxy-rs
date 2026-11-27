@@ -489,8 +489,7 @@ async fn a_reply_read_to_its_content_length_is_recorded_as_complete() {
             broken: false,
         })
         .await;
-        let usage = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
-        fixture.state.rt.usage_queue().configure(true, &usage);
+        enable_usage(&fixture);
         let response = fixture.request().await;
         assert_eq!(response.status(), status);
         assert_eq!(response.headers()["content-length"], body.len().to_string().as_str());
@@ -528,7 +527,8 @@ fn enable_usage(fixture: &Fixture) {
     fixture.state.rt.usage_queue().configure(true, &usage);
 }
 
-/// Exactly `count` usage records, waiting up to five seconds for them.
+/// Exactly `count` usage records, waiting up to five seconds for them and briefly for any
+/// extra one.
 async fn usage_records(fixture: &Fixture, count: usize) -> Vec<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut records: Vec<Value> = Vec::new();
@@ -543,14 +543,21 @@ async fn usage_records(fixture: &Fixture, count: usize) -> Vec<Value> {
             records.push(serde_json::from_slice(&record).unwrap());
         }
     }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for record in fixture.state.rt.usage_queue().pop_oldest(10) {
+        records.push(serde_json::from_slice(&record).unwrap());
+    }
     assert_eq!(records.len(), count, "{records:?}");
     records
 }
 
-/// Each native send leaves its own usage record. One that failed over is failed, with
-/// its status and the reason, never provider text, and no tokens.
+/// Each native send leaves its own usage record under the request's id. One that failed
+/// over is failed, with its status and the reason, never provider text, no tokens, and
+/// the client's stream choice.
 #[tokio::test]
 async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
+    const STREAMING: &[u8] =
+        br#"{"model":"claude-opus-test","stream":true,"metadata":{"session_id":"synthetic-session"},"messages":[]}"#;
     for (status, body, reason) in [
         (
             403,
@@ -571,7 +578,7 @@ async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
         })
         .await;
         enable_usage(&fixture);
-        let response = fixture.request().await;
+        let response = fixture.request_body(STREAMING).await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.bytes().await.unwrap(), SUCCESS);
         let records = usage_records(&fixture, 2).await;
@@ -583,23 +590,37 @@ async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
         assert_eq!(failover["session_source"], "native", "{failover}");
         assert_eq!(failover["endpoint"], "POST /v1/messages", "{failover}");
         assert_eq!(failover["tokens"]["input_tokens"], 0, "{failover}");
+        assert_eq!(failover["stream"], true, "{failover}");
         let answer = &records[1];
+        assert!(
+            failover["request_id"].as_str().is_some_and(|id| !id.is_empty()),
+            "{failover}"
+        );
+        assert_eq!(failover["request_id"], answer["request_id"], "{answer}");
         assert_eq!(answer["failed"], false, "{answer}");
         assert_eq!(answer["tokens"]["input_tokens"], 1, "{answer}");
     }
 }
 
-/// A send whose connection was lost leaves a failed usage record, statusless like a
-/// transport fault on the translating path, and the request is still not replayed.
+/// A send whose connection was lost counts as a failed request for its credential and
+/// leaves a failed usage record, statusless like a transport fault on the translating
+/// path, and the request is still not replayed.
 #[tokio::test]
 async fn a_lost_native_send_leaves_a_failed_usage_record() {
-    let fixture = Fixture::with_proxy(
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("type".into(), "claude".into());
+    let auth = Path::new("/synthetic-auth");
+    let credential = Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap();
+    let id = credential.id.clone();
+    let fixture = Fixture::build(
         Reply {
             status: 200,
             body: SUCCESS.to_vec(),
             broken: false,
         },
-        "http://127.0.0.1:9",
+        None,
+        Some(credential),
+        Some("http://127.0.0.1:9"),
     )
     .await;
     enable_usage(&fixture);
@@ -609,10 +630,11 @@ async fn a_lost_native_send_leaves_a_failed_usage_record() {
     assert_eq!(records[0]["fail"]["status_code"], 500, "{}", records[0]);
     assert_eq!(records[0]["fail"]["body"], "transport_lost", "{}", records[0]);
     assert!(fixture.seen.lock().unwrap().is_empty());
+    let activity = fixture.state.rt.store().activity(&id);
+    assert_eq!((activity.success, activity.failed), (0, 1), "{activity:?}");
 }
 
-/// A send that failed over counts as a failed request for its credential, as a lost one
-/// does.
+/// A send that failed over counts as a failed request for its credential.
 #[tokio::test]
 async fn a_native_failover_counts_as_a_failed_request_for_its_credential() {
     let dir = crate::request_logging::history::test_support::TempDir::new();

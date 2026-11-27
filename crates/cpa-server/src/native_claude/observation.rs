@@ -390,15 +390,17 @@ pub(super) fn send_row(
 /// The usage record of one native send, queued while usage statistics are on. Its latency
 /// counts from the request's arrival, like the request's own timings.
 pub(super) struct UsageEntry<'a> {
+    /// Shared by every send of one request, so its records can be grouped.
+    pub(super) request_id: &'a str,
     pub(super) a: &'a Account,
     pub(super) model: &'a str,
     pub(super) sid: &'a str,
-    pub(super) started: Instant,
+    pub(super) request_started: Instant,
     pub(super) stream: bool,
     pub(super) detail: crate::usage_record::Detail,
-    /// The status and reason of a failed send. The reason is an outcome name, never
-    /// provider text.
-    pub(super) failure: Option<(u16, &'a str)>,
+    /// The status and outcome name of a failed send; a status of 0 is a send that got no
+    /// response. A static name keeps provider text out of the record.
+    pub(super) failure: Option<(u16, &'static str)>,
 }
 impl UsageEntry<'_> {
     pub(super) fn enqueue(self, s: &State) {
@@ -406,11 +408,11 @@ impl UsageEntry<'_> {
         if !queue.accepts() {
             return;
         }
-        let credential = s.rt.store().snapshot().into_iter().find(|c| c.id == self.a.file_id);
-        let auth_index = credential
-            .as_ref()
-            .map(|c| cpa_core::config::credentials::auth_index(c))
-            .unwrap_or_default();
+        let auth_index =
+            s.rt.store()
+                .get(&self.a.file_id)
+                .map(|c| cpa_core::config::credentials::auth_index(&c))
+                .unwrap_or_default();
         let record = crate::usage_record::Record {
             timestamp: chrono::Utc::now().to_rfc3339(),
             execution_id: uuid::Uuid::new_v4().to_string(),
@@ -427,13 +429,14 @@ impl UsageEntry<'_> {
             failed: self.failure.is_some(),
             fail_status: self.failure.map_or(0, |(status, _)| i64::from(status)),
             fail_body: self.failure.map_or_else(String::new, |(_, reason)| reason.to_owned()),
-            latency_ms: self.started.elapsed().as_millis() as i64,
+            latency_ms: millis(self.request_started.elapsed()),
             detail: self.detail,
             ..Default::default()
         };
         queue.enqueue(crate::usage_record::queued(
             &record,
             &crate::usage_record::Client {
+                request_id: self.request_id.to_owned(),
                 session_id: self.sid.to_owned(),
                 session_source: "native",
                 endpoint: "POST /v1/messages".into(),
@@ -591,10 +594,11 @@ impl Observation {
             ..send_row(&f.request_id, f.send, &f.a, &f.model, f.started, f.sent_at, ended)
         });
         UsageEntry {
+            request_id: &f.request_id,
             a: &f.a,
             model: &f.model,
             sid: &f.sid,
-            started: f.started,
+            request_started: f.started,
             stream: f.sse,
             detail,
             failure: (!success).then_some((status, outcome)),
