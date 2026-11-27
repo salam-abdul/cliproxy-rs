@@ -110,7 +110,7 @@
           <span class="muted small">Exact counts</span>
         </div>
         {#if mixTotal > 0}
-          <div class="history-mix" role="img" aria-label="Reported token mix">
+          <div class="history-mix" role="img" aria-label="Exact token mix">
             {#each summary.tokens as row, i}
               {#if row.tokens && row.tokens > 0}<span
                   class={`mix-${i}`}

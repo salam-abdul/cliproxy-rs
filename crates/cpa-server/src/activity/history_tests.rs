@@ -36,14 +36,19 @@ impl Store {
         read(&self.path, range, provider, self.now, 0).unwrap()
     }
 
-    /// A native request row, `ago` milliseconds before `now`.
+    /// A native request row on account `native-a`, `ago` milliseconds before `now`.
     fn event(&self, kind: &str, id: &str, outcome: &str, ago: i64) {
+        self.event_on(Some("native-a"), kind, id, outcome, ago);
+    }
+
+    /// A native request row on `account`, or on none, as refusals and fallbacks are.
+    fn event_on(&self, account: Option<&str>, kind: &str, id: &str, outcome: &str, ago: i64) {
         let at = chrono::DateTime::from_timestamp_millis(self.now - ago)
             .unwrap()
             .to_rfc3339();
         self.activity
             .record_event(&json!({"type": kind, "requestId": id, "at": at,
-            "account": "native-a", "model": "claude-test", "outcome": outcome}));
+            "account": account, "model": "claude-test", "outcome": outcome}));
     }
 
     /// A proxy send half an hour before `now`, `send` milliseconds after the first.
@@ -301,4 +306,78 @@ fn account_buckets_use_the_send_credential() {
         json!([{"credential": "cred-a", "at": store.now - HOUR_MS, "requests": 2, "failures": 0}]),
         "{history}"
     );
+}
+
+#[test]
+fn sends_without_token_counts_leave_totals_whole() {
+    let store = Store::new();
+    let refused = store.send("r1", 0, "codex", Outcome::Failed, Some(429));
+    let mut served = store.send("r2", 0, "codex", Outcome::Complete, None);
+    served.tokens = exact(40, 0, 0, 8, true);
+    store.record([refused, served]);
+    let history = store.read(Range::Day, None);
+    assert_eq!(
+        history["tokens"],
+        json!({"uncachedInputTokens": 40, "cacheReadTokens": 0, "cacheWriteTokens": 0,
+            "outputTokens": 8, "sends": 1, "exactSends": 1}),
+        "{history}"
+    );
+    assert_eq!(
+        history["models"],
+        json!([{"provider": "codex", "model": "model-test", "requests": 2, "uncachedInputTokens": 40,
+            "cacheReadTokens": 0, "cacheWriteTokens": 0, "outputTokens": 8, "sends": 1, "exactSends": 1}]),
+        "{history}"
+    );
+}
+
+#[test]
+fn refusals_and_fallbacks_without_an_account_stay_off_account_cards() {
+    let refused = Store::new();
+    refused.record([refused.native("n1", 0, Outcome::Failover, Some(429))]);
+    refused.event_on(None, "rejected", "n1", "quota_unavailable", HOUR_MS / 2);
+    let history = refused.read(Range::Day, None);
+    assert_eq!(history["accountBuckets"], json!([]), "{history}");
+    assert_eq!(totals(&history), (1, 1), "{history}");
+
+    let served = Store::new();
+    served.record([served.native("n2", 0, Outcome::Failover, Some(429))]);
+    served.event_on(None, "fallback", "n2", "fallback_served", HOUR_MS / 2);
+    let history = served.read(Range::Day, None);
+    assert_eq!(history["accountBuckets"], json!([]), "{history}");
+    assert_eq!(totals(&history), (1, 0), "{history}");
+}
+
+#[test]
+fn a_native_request_counts_under_its_last_send_credential() {
+    let store = Store::new();
+    let mut first = store.native("n1", 0, Outcome::Failover, Some(429));
+    first.credential = Some("cred-a".into());
+    let mut last = store.native("n1", 1, Outcome::Complete, None);
+    last.credential = Some("cred-b".into());
+    store.record([first, last]);
+    store.event("inference", "n1", "success", HOUR_MS / 2);
+    let history = store.read(Range::Day, None);
+    assert_eq!(
+        history["accountBuckets"],
+        json!([{"credential": "cred-b", "at": store.now - HOUR_MS, "requests": 1, "failures": 0}]),
+        "{history}"
+    );
+}
+
+#[test]
+fn the_read_starts_at_the_first_request_when_sends_go_back_further() {
+    let store = Store::new();
+    let mut early = store.send("p1", 0, "codex", Outcome::Failed, Some(500));
+    early.at_ms = store.now - 3 * HOUR_MS;
+    early.tokens = exact(11, 0, 0, 2, true);
+    let mut late = store.send("p2", 0, "codex", Outcome::Complete, None);
+    late.tokens = exact(5, 0, 0, 1, true);
+    store.record([early, late]);
+    store.event("inference", "n1", "success", HOUR_MS);
+    let history = store.read(Range::Day, None);
+    assert_eq!(history["oldest"], store.now - HOUR_MS, "{history}");
+    assert_eq!(totals(&history), (2, 0), "{history}");
+    assert_eq!(history["errors"], json!([]), "{history}");
+    assert_eq!(history["tokens"]["uncachedInputTokens"], 5, "{history}");
+    assert_eq!(history["tokens"]["sends"], 1, "{history}");
 }

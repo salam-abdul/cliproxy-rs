@@ -14,18 +14,21 @@ const ERRORS: usize = 5;
 /// One row per provider (kind 0), filtered bucket (1), filtered failure reason (2), Claude
 /// credential bucket (3), filtered provider and model (4), and the filtered token totals (5).
 ///
-/// A native request is its `requests` row from `?4` on, under `claude`, with the credential
-/// of its last native send. A proxy request is a `(request_id, turn)` of proxy sends that
+/// A native request is its `requests` row, under `claude`, with the credential of its last
+/// native send when the row names an account; refusals and fallbacks name none, so they count
+/// in the totals and on no account. A proxy request is a `(request_id, turn)` of proxy sends that
 /// serve no other request, taken from its last send; when that send is in range, so is every
 /// send after it, so judging among sends in range finds it. A fallback send carries the
 /// native request as `parent_request`, so the request counts once, under its native row.
-/// Tokens come from every send in range and only from exact ones.
+/// Tokens come from every send in range and only from exact ones; `sends` counts the sends
+/// that reported tokens, so a send with none (a 429, a transport loss) leaves totals whole.
 const READ: &str = "WITH native AS (
         SELECT r.at_ms, 'claude' AS provider, r.model, r.outcome, NULL AS status,
             r.outcome NOT IN ('success', 'client_cancelled', 'fallback_served') AS failed,
-            (SELECT s.credential FROM sends s WHERE s.request_id = r.request_id AND s.source = 'native'
-                ORDER BY s.send DESC LIMIT 1) AS credential
-        FROM requests r WHERE r.at_ms >= ?4 AND r.at_ms <= ?2
+            CASE WHEN r.account IS NOT NULL THEN (SELECT s.credential FROM sends s
+                WHERE s.request_id = r.request_id AND s.source = 'native'
+                ORDER BY s.send DESC LIMIT 1) END AS credential
+        FROM requests r WHERE r.at_ms >= ?1 AND r.at_ms <= ?2
     ), proxy AS (
         SELECT at_ms, provider, model, outcome, status, outcome NOT IN ('complete', 'cancelled') AS failed,
             credential
@@ -46,17 +49,18 @@ const READ: &str = "WITH native AS (
             CASE WHEN tokens_exact = 1 THEN COALESCE(cache_write_tokens, 0) ELSE 0 END AS cache_write,
             CASE WHEN tokens_exact = 1 THEN COALESCE(output_tokens, 0) ELSE 0 END AS output
         FROM sends WHERE at_ms >= ?1 AND at_ms <= ?2 AND (?3 IS NULL OR provider = ?3)
+            AND tokens_exact IS NOT NULL
     )
     SELECT * FROM (
         SELECT 0 AS kind, provider AS name, NULL AS model, NULL AS at, NULL AS status, 0 AS requests,
             0 AS failures, 0 AS uncached, 0 AS cache_read, 0 AS cache_write, 0 AS output, 0 AS sends,
             0 AS exact
         FROM every GROUP BY provider
-        UNION ALL SELECT 1, NULL, NULL, (at_ms / ?5) * ?5, NULL, COUNT(*), SUM(failed), 0, 0, 0, 0, 0, 0
+        UNION ALL SELECT 1, NULL, NULL, (at_ms / ?4) * ?4, NULL, COUNT(*), SUM(failed), 0, 0, 0, 0, 0, 0
         FROM picked GROUP BY 4
         UNION ALL SELECT 2, outcome, NULL, NULL, status, COUNT(*), COUNT(*), 0, 0, 0, 0, 0, 0
         FROM picked WHERE failed GROUP BY outcome, status
-        UNION ALL SELECT 3, credential, NULL, (at_ms / ?5) * ?5, NULL, COUNT(*), SUM(failed), 0, 0, 0, 0, 0, 0
+        UNION ALL SELECT 3, credential, NULL, (at_ms / ?4) * ?4, NULL, COUNT(*), SUM(failed), 0, 0, 0, 0, 0, 0
         FROM every WHERE provider = 'claude' AND credential IS NOT NULL GROUP BY credential, 4
         UNION ALL SELECT 4, provider, model, NULL, NULL, SUM(requests), 0, SUM(uncached), SUM(cache_read),
             SUM(cache_write), SUM(output), SUM(sends), SUM(exact)
@@ -88,10 +92,16 @@ pub(super) fn read(path: &Path, range: Range, provider: Option<&str>, now: i64, 
     let conn = db.transaction()?;
     let from = now - range.duration();
     let bucket_ms = range.bucket();
-    // Native rows older than the first send have no proxy record beside them, so the read
-    // starts at the first send and reads nothing before one exists.
-    let oldest: Option<i64> = conn.query_row("SELECT MIN(at_ms) FROM sends", [], |row| row.get(0))?;
-    let native_from = oldest.map(|start| start.max(from));
+    // Native rows older than the first send have no proxy record beside them, and the request
+    // and send tables are trimmed at different row counts, so either may reach back further.
+    // The read starts where both have rows, so every panel covers the period `oldest` reports,
+    // and reads nothing before a send exists.
+    let oldest: Option<i64> = conn.query_row(
+        "SELECT MAX(sends, COALESCE(requests, sends)) FROM
+            (SELECT (SELECT MIN(at_ms) FROM sends) AS sends, (SELECT MIN(at_ms) FROM requests) AS requests)",
+        [],
+        |row| row.get(0),
+    )?;
     let mut providers = Vec::new();
     let mut buckets = Vec::new();
     let mut errors = Vec::new();
@@ -100,9 +110,9 @@ pub(super) fn read(path: &Path, range: Range, provider: Option<&str>, now: i64, 
     let mut models_truncated = false;
     let mut tokens = json!({"uncachedInputTokens": 0, "cacheReadTokens": 0, "cacheWriteTokens": 0,
         "outputTokens": 0, "sends": 0, "exactSends": 0});
-    if native_from.is_some() {
+    if let Some(oldest) = oldest {
         let mut statement = conn.prepare(READ)?;
-        let mut rows = statement.query(params![from, now, provider, native_from, bucket_ms])?;
+        let mut rows = statement.query(params![from.max(oldest), now, provider, bucket_ms])?;
         while let Some(row) = rows.next()? {
             let count = |index: usize| row.get::<_, i64>(index);
             match row.get::<_, i64>(0)? {
