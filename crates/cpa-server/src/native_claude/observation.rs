@@ -387,6 +387,61 @@ pub(super) fn send_row(
         tokens: None,
     }
 }
+/// The usage record of one native send, queued while usage statistics are on. Its latency
+/// counts from the request's arrival, like the request's own timings.
+pub(super) struct UsageEntry<'a> {
+    pub(super) a: &'a Account,
+    pub(super) model: &'a str,
+    pub(super) sid: &'a str,
+    pub(super) started: Instant,
+    pub(super) stream: bool,
+    pub(super) detail: crate::usage_record::Detail,
+    /// The status and reason of a failed send. The reason is an outcome name, never
+    /// provider text.
+    pub(super) failure: Option<(u16, &'a str)>,
+}
+impl UsageEntry<'_> {
+    pub(super) fn enqueue(self, s: &State) {
+        let queue = s.rt.usage_queue();
+        if !queue.accepts() {
+            return;
+        }
+        let credential = s.rt.store().snapshot().into_iter().find(|c| c.id == self.a.file_id);
+        let auth_index = credential
+            .as_ref()
+            .map(|c| cpa_core::config::credentials::auth_index(c))
+            .unwrap_or_default();
+        let record = crate::usage_record::Record {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            execution_id: uuid::Uuid::new_v4().to_string(),
+            provider: "claude".into(),
+            executor_type: "claude".into(),
+            model: self.model.to_owned(),
+            alias: self.model.to_owned(),
+            response_model: String::new(),
+            source: self.a.name.clone(),
+            auth_index,
+            auth_type: "oauth".into(),
+            generate: true,
+            stream: self.stream,
+            failed: self.failure.is_some(),
+            fail_status: self.failure.map_or(0, |(status, _)| i64::from(status)),
+            fail_body: self.failure.map_or_else(String::new, |(_, reason)| reason.to_owned()),
+            latency_ms: self.started.elapsed().as_millis() as i64,
+            detail: self.detail,
+            ..Default::default()
+        };
+        queue.enqueue(crate::usage_record::queued(
+            &record,
+            &crate::usage_record::Client {
+                session_id: self.sid.to_owned(),
+                session_source: "native",
+                endpoint: "POST /v1/messages".into(),
+                ..Default::default()
+            },
+        ));
+    }
+}
 pub(super) struct Observation {
     s: Arc<State>,
     facts: Exchange,
@@ -505,11 +560,6 @@ impl Observation {
         timing["totalMs"] = json!(f.started.elapsed().as_millis());
         self.s.event(json!({"type":"inference","requestId":f.request_id,"session":f.sid,"account":f.a.id,"model":f.model,"status":status,"upstreamStatus":f.status,"complete":complete,"outcome":outcome,"attempts":f.attempts,"recovered":success && f.attempts>1,"timing":timing,"bodySha256":f.digest,"bodyBytes":f.body_bytes,"usage":usage}));
         self.s.rt.store().note_activity(&f.a.file_id, success);
-        let credential = self.s.rt.store().snapshot().into_iter().find(|c| c.id == f.a.file_id);
-        let auth_index = credential
-            .as_ref()
-            .map(|c| cpa_core::config::credentials::auth_index(c))
-            .unwrap_or_default();
         let detail = crate::usage_record::parse_claude(&serde_json::to_vec(&json!({"usage":usage})).unwrap());
         let ended = {
             use crate::request_logging::history::row::Outcome;
@@ -540,35 +590,16 @@ impl Observation {
             tokens: crate::activity::sends::Tokens::of(&detail, "claude", "claude"),
             ..send_row(&f.request_id, f.send, &f.a, &f.model, f.started, f.sent_at, ended)
         });
-        let record = crate::usage_record::Record {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            execution_id: uuid::Uuid::new_v4().to_string(),
-            provider: "claude".into(),
-            executor_type: "claude".into(),
-            model: f.model.clone(),
-            alias: f.model.clone(),
-            response_model: String::new(),
-            source: f.a.name.clone(),
-            auth_index,
-            auth_type: "oauth".into(),
-            generate: true,
+        UsageEntry {
+            a: &f.a,
+            model: &f.model,
+            sid: &f.sid,
+            started: f.started,
             stream: f.sse,
-            failed: !success,
-            fail_status: if success { 0 } else { status as i64 },
-            fail_body: if success { String::new() } else { outcome.into() },
-            latency_ms: f.started.elapsed().as_millis() as i64,
             detail,
-            ..Default::default()
-        };
-        self.s.rt.usage_queue().enqueue(crate::usage_record::queued(
-            &record,
-            &crate::usage_record::Client {
-                session_id: f.sid.clone(),
-                session_source: "native",
-                endpoint: "POST /v1/messages".into(),
-                ..Default::default()
-            },
-        ));
+            failure: (!success).then_some((status, outcome)),
+        }
+        .enqueue(&self.s);
     }
 }
 impl Drop for Observation {
