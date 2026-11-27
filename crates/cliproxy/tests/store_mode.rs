@@ -49,15 +49,16 @@ impl Drop for Server {
     }
 }
 
-/// The binary with a clean environment: only what the store selection needs.
-/// `-local-model` keeps the model catalog updaters from fetching remote URLs.
+/// The binary with a clean environment: only what the store selection needs. The
+/// model catalog refresh goes to a dead loopback proxy, so it never reaches the network.
 fn cliproxy(wd: &Path, env: &[(&str, &str)]) -> Server {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cliproxy"));
-    cmd.arg("-local-model")
-        .current_dir(wd)
+    cmd.current_dir(wd)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", wd)
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in env {

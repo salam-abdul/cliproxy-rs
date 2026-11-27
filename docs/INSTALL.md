@@ -35,7 +35,7 @@ Updates are manual. Build and qualify the candidate, then stop the installed ser
 
 4. Open `http://127.0.0.1:8317/management.html` (with your configured port) and sign in with the management key. With `management.local-dashboard: true` and a loopback `server.host` (`127.0.0.1` or `::1`), the dashboard opens without the key.
 
-Client keys go in client settings; never share either key. For access from another machine, bind to a private interface, require client keys and list trusted proxies explicitly. `--local-model` turns off model catalog downloads.
+Client keys go in client settings; never share either key. For access from another machine, bind to a private interface, require client keys and list trusted proxies explicitly. Outside Home mode, the server downloads the model catalog at startup and every three hours, and keeps the catalog embedded in the binary until a download succeeds.
 
 ## Prebuilt binaries
 

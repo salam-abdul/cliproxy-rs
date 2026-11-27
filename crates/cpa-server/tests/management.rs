@@ -2805,3 +2805,83 @@ async fn config_etag_legacy_missing_file_requires_unconditional_creation() {
     assert!(response.headers().get("etag").is_some());
     server.abort();
 }
+
+/// The Models page's catalog: the current model catalog's definitions as published
+/// (fields routing does not read included) for every channel the catalog covers, with
+/// the built-in Codex image and xAI media models, and the embedded definitions for Devin.
+#[tokio::test]
+async fn model_definitions_serve_the_current_catalog_with_the_built_ins() {
+    let f = Fixture::new("model-definitions");
+    let (base, server) = f.server().await;
+    let get = |channel: &'static str| {
+        let base = base.clone();
+        async move {
+            let body: Value = wreq::Client::new()
+                .get(format!("{base}/v8/management/routing/model-definitions/{channel}"))
+                .bearer_auth("fake-management-only")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(body["channel"], channel);
+            body["models"].as_array().unwrap().clone()
+        }
+    };
+    let catalog = |section: &str| -> Vec<Value> {
+        let models = cpa_core::registry::pinned().channel(section);
+        assert!(!models.is_empty(), "{section}");
+        models.iter().map(|m| Value::Object(m.raw.clone())).collect()
+    };
+    let ids = |models: &[Value]| {
+        models
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (channel, section) in [
+        ("claude", "claude"),
+        ("gemini", "gemini"),
+        ("gemini-interactions", "gemini"),
+        ("vertex", "vertex"),
+        ("aistudio", "aistudio"),
+        ("antigravity", "antigravity"),
+        ("kimi", "kimi"),
+        ("meta", "meta"),
+    ] {
+        assert_eq!(get(channel).await, catalog(section), "{channel}");
+    }
+    let codex = get("codex").await;
+    let (plan, images) = codex.split_at(codex.len() - 5);
+    assert_eq!(plan, catalog("codex-pro"));
+    assert_eq!(
+        ids(images),
+        [
+            "gpt-image-1.5",
+            "gpt-image-2",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5"
+        ]
+    );
+    let luna = plan.iter().find(|m| m["id"] == "gpt-5.6-luna").unwrap();
+    assert!(luna["config"]["override_header"].is_object(), "{luna}");
+    let xai = get("xai").await;
+    let (models, media) = xai.split_at(xai.len() - 6);
+    assert_eq!(models, catalog("xai"));
+    assert_eq!(
+        ids(media),
+        [
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+            "grok-imagine-image-2.0",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5",
+            "grok-imagine-video-1.5-preview"
+        ]
+    );
+    let embedded: Value = serde_json::from_str(include_str!("../src/management/model_definitions.json")).unwrap();
+    assert_eq!(get("devin").await, embedded["devin"].as_array().unwrap().clone());
+    server.abort();
+}

@@ -43,16 +43,9 @@ pub struct Plan {
     pub devin: bool,
 }
 
-/// `--local-model` disables every updater; Home mode disables only models.json because
-/// Codex client metadata and Devin models stay edge-local.
-pub fn plan(local_model: bool, home_enabled: bool) -> Plan {
-    if local_model {
-        return Plan {
-            models: false,
-            codex_client: false,
-            devin: false,
-        };
-    }
+/// Home mode disables only models.json because Codex client metadata and Devin models
+/// stay edge-local.
+pub fn plan(home_enabled: bool) -> Plan {
     Plan {
         models: !home_enabled,
         codex_client: true,
@@ -69,7 +62,7 @@ pub fn start(rt: &Arc<Runtime>, home_enabled: bool) {
     if rt.deny_external.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let plan = plan(rt.local_model(), home_enabled);
+    let plan = plan(home_enabled);
     // Updaters that serve one provider, each started by that provider's first credential.
     let mut wanted: Vec<(&'static str, fn())> = Vec::new();
     if plan.codex_client {
@@ -127,10 +120,10 @@ pub fn start(rt: &Arc<Runtime>, home_enabled: bool) {
     }
 }
 
-/// A Codex client asked for its model catalog: start the catalog's updater, unless
-/// `--local-model` or the test runtime's network guard keeps every catalog local.
+/// A Codex client asked for its model catalog: start the catalog's updater, unless the
+/// test runtime's network guard keeps every catalog local.
 pub(crate) fn codex_client_catalog_wanted(rt: &Runtime) {
-    if !rt.local_model() && !rt.deny_external.load(std::sync::atomic::Ordering::Relaxed) {
+    if !rt.deny_external.load(std::sync::atomic::Ordering::Relaxed) {
         cpa_exec::codex_catalog_updater::start_codex_client_models_updater();
     }
 }
@@ -254,9 +247,7 @@ mod tests {
             codex_client,
             devin,
         };
-        assert_eq!(plan(true, false), p(false, false, false));
-        assert_eq!(plan(true, true), p(false, false, false));
-        assert_eq!(plan(false, true), p(false, true, true));
-        assert_eq!(plan(false, false), p(true, true, true));
+        assert_eq!(plan(true), p(false, true, true));
+        assert_eq!(plan(false), p(true, true, true));
     }
 }

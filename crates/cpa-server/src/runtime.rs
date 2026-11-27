@@ -60,8 +60,6 @@ pub struct Runtime {
     pub(crate) quota_resets: crate::quota_resets::QuotaResets,
     pub(crate) native_state: RwLock<std::sync::Weak<crate::native_claude::State>>,
     pub(crate) native_events: crate::native_claude::diagnostics::Diagnostics,
-    /// `--local-model`: embedded model catalogs only, no remote catalog refresh.
-    local_model: std::sync::atomic::AtomicBool,
     /// The remote dispatcher that replaces local selection (Go Home mode).
     remote: RwLock<Option<Arc<dyn crate::remote::RemoteDispatch>>>,
     /// Set only by [`crate::testing::runtime`]: executor calls get credentials that
@@ -128,7 +126,6 @@ impl Runtime {
             native_state: Default::default(),
             claude_usage: Default::default(),
             quota_resets: Default::default(),
-            local_model: Default::default(),
             remote: RwLock::default(),
             deny_external: Default::default(),
             config_changed: tokio::sync::watch::Sender::new(()),
@@ -234,21 +231,10 @@ impl Runtime {
         }
     }
 
-    /// Records `--local-model` (Go `modelCatalogUpdaterPlan`'s `localModel`): remote
-    /// model catalog updaters must not start when set (additive API).
-    pub fn set_local_model(&self, on: bool) {
-        self.local_model.store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// Persists cooldowns to `backend` instead of `.cds` files (PGSTORE's cooldown
     /// table; additive API). Call before serving.
     pub fn set_cooldown_backend(&self, backend: Arc<dyn crate::cooldown_store::Backend>) {
         self.store.set_cooldown_backend(backend);
-    }
-
-    /// Whether `--local-model` was given.
-    pub fn local_model(&self) -> bool {
-        self.local_model.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The config snapshot to use for one whole request.
