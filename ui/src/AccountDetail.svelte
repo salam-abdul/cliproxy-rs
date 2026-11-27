@@ -29,7 +29,9 @@
       ? store.history.data
       : undefined,
   );
-  const buckets = $derived(n?.id ? requestBuckets(history || {}, n.id) : []);
+  const buckets = $derived(
+    n?.id ? requestBuckets(history || {}, { credential: n.fileId, id: n.id }) : [],
+  );
   const statuses = $derived(
     (history?.statuses || []).filter(
       (row: Data) => row.account === n?.id && row.model === "claude",

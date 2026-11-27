@@ -7,9 +7,9 @@ test("request buckets distinguish observed quiet intervals from gaps", () => {
     from: 0,
     to: 400,
     bucketMs: 100,
-    oldestRequest: 120,
+    oldest: 120,
     buckets: [{ at: 100, requests: 3, failures: 1 }],
-    accountBuckets: [{ account: "a", at: 100, requests: 2, failures: 0 }],
+    accountBuckets: [{ credential: "cred-a", at: 100, requests: 2, failures: 0 }],
     statuses: [
       { account: "a", model: "claude", at: 50, availability: "included" },
       { account: "b", model: "claude", at: 250, availability: "included" },
@@ -25,7 +25,7 @@ test("request buckets distinguish observed quiet intervals from gaps", () => {
     ],
   );
   assert.deepEqual(
-    requestBuckets(data, "a").map((b) => [b.known, b.requests]),
+    requestBuckets(data, { credential: "cred-a", id: "a" }).map((b) => [b.known, b.requests]),
     [
       [true, 0],
       [true, 2],
@@ -40,6 +40,56 @@ test("request buckets distinguish observed quiet intervals from gaps", () => {
       accountBuckets: [],
       statuses: [],
     }).every((b) => !b.known),
+  );
+});
+
+test("a card reads buckets by credential and status readings by native id", () => {
+  const data = {
+    from: 0,
+    to: 300,
+    bucketMs: 100,
+    buckets: [{ at: 0, requests: 9, failures: 0 }],
+    accountBuckets: [
+      { credential: "cred-a", at: 0, requests: 2, failures: 1 },
+      { credential: "native-a", at: 100, requests: 5, failures: 0 },
+      { credential: "cred-b", at: 100, requests: 4, failures: 0 },
+    ],
+    statuses: [
+      { account: "native-a", model: "claude", at: 250, availability: "included" },
+      { account: "cred-a", model: "claude", at: 150, availability: "included" },
+    ],
+  };
+  assert.deepEqual(
+    requestBuckets(data, { credential: "cred-a", id: "native-a" }).map((b) => [
+      b.known,
+      b.requests,
+      b.failures,
+    ]),
+    [
+      [true, 2, 1],
+      [false, 0, 0],
+      [true, 0, 0],
+    ],
+  );
+});
+
+test("the panels count a status reading as an observation only when asked", () => {
+  const data = {
+    from: 0,
+    to: 200,
+    bucketMs: 100,
+    buckets: [{ at: 0, requests: 1, failures: 0 }],
+    statuses: [
+      { account: "native-a", model: "claude", at: 150, availability: "included" },
+    ],
+  };
+  assert.deepEqual(
+    requestBuckets(data, undefined, false).map((b) => b.known),
+    [true, false],
+  );
+  assert.deepEqual(
+    requestBuckets(data, undefined, true).map((b) => b.known),
+    [true, true],
   );
 });
 

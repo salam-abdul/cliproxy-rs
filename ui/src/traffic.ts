@@ -2,12 +2,12 @@ import type { Data } from "./core.ts";
 
 const counter = (v: unknown): number | null =>
   typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
-const tokenRows = () =>
-  ["Uncached input", "Output", "Cache read", "Cache write"].map((label) => ({
-    label,
-    tokens: null as number | null,
-    reported: 0,
-  }));
+const tokenFields = [
+  ["Uncached input", "uncachedInputTokens"],
+  ["Output", "outputTokens"],
+  ["Cache read", "cacheReadTokens"],
+  ["Cache write", "cacheWriteTokens"],
+];
 export const isFailure = (e: Data) =>
   !["success", "pending", "client_cancelled", "fallback_served"].includes(
     e.outcome,
@@ -25,6 +25,7 @@ const outcomes: Record<string, string> = {
   observation_incomplete: "Response observation incomplete",
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
+  stream_error: "Response stream error",
 };
 const fallbackFailures: Record<string, string> = {
   unknown_model: "no provider serves it",
@@ -41,10 +42,14 @@ export const outcomeLabel = (e: Data) =>
     ? "Recovered after account switch"
     : e.outcome === "fallback_served"
       ? `Fell back to ${e.fallbackModel || "another model"}`
-      : Object.hasOwn(outcomes, e.outcome)
+      : (e.outcome === "failed" || e.outcome === "failover") &&
+          counter(e.status) !== null
+        ? `HTTP ${e.status}`
+        : Object.hasOwn(outcomes, e.outcome)
         ? outcomes[e.outcome]
         : String(e.outcome || "Unknown outcome").replaceAll("_", " ");
 
+/** Request totals from the buckets, and token totals from the exact sends. */
 export function summarizeHistory(history: Data) {
   const buckets = Array.isArray(history.buckets)
     ? (history.buckets as Data[])
@@ -52,7 +57,6 @@ export function summarizeHistory(history: Data) {
   const models = Array.isArray(history.models)
     ? (history.models as Data[])
     : [];
-  const tokens = tokenRows();
   const requests = buckets.reduce(
     (n, bucket) => n + (counter(bucket.requests) ?? 0),
     0,
@@ -61,36 +65,19 @@ export function summarizeHistory(history: Data) {
     (n, bucket) => n + (counter(bucket.failures) ?? 0),
     0,
   );
-  for (const model of models) {
-    const reported = [
-      model.reportedInput,
-      model.reportedOutput,
-      model.reportedCacheRead,
-      model.reportedCacheWrite,
-    ];
-    const counts = [
-      model.inputTokens,
-      model.outputTokens,
-      model.cacheReadTokens,
-      model.cacheWriteTokens,
-    ];
-    counts.forEach((value, kind) => {
-      const n = counter(value);
-      const observed = counter(reported[kind]);
-      if (n === null || !observed) return;
-      const row = tokens[kind];
-      row.tokens = (row.tokens ?? 0) + n;
-      row.reported += observed;
-    });
-  }
+  const totals: Data = history.tokens || {};
+  const sends = counter(totals.sends) ?? 0;
+  const exactSends = counter(totals.exactSends) ?? 0;
+  const tokens = tokenFields.map(([label, field]) => ({
+    label,
+    tokens: exactSends > 0 ? counter(totals[field]) : null,
+  }));
   return {
     buckets,
     models,
     requests,
     failures,
     tokens,
-    partialTokens:
-      !!history.modelsTruncated ||
-      tokens.some((row) => row.reported < requests),
+    partialTokens: exactSends < sends,
   };
 }

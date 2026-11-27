@@ -1,6 +1,15 @@
 import type { Data } from "./core.ts";
 
-export function requestBuckets(history: Data, account?: string) {
+/**
+ * Request buckets over the history period. An account card passes its credential, which
+ * keys `accountBuckets`, and its native id, which keys `statuses`. A Claude status reading
+ * marks a bucket observed only when `statusesCount` is true.
+ */
+export function requestBuckets(
+  history: Data,
+  account?: { credential: string; id: string },
+  statusesCount = true,
+) {
   const from = Number(history.from);
   const to = Number(history.to);
   const width = Number(history.bucketMs);
@@ -16,14 +25,16 @@ export function requestBuckets(history: Data, account?: string) {
   const rows = account ? history.accountBuckets : history.buckets;
   const byStart = new Map<number, Data>();
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (account && row.account !== account) continue;
+    if (account && row.credential !== account.credential) continue;
     byStart.set(Number(row.at), row);
   }
   const observed = new Set<number>();
-  for (const row of Array.isArray(history.statuses) ? history.statuses : []) {
+  const statuses =
+    statusesCount && Array.isArray(history.statuses) ? history.statuses : [];
+  for (const row of statuses) {
     if (
       row.model !== "claude" ||
-      (account && row.account !== account) ||
+      (account && row.account !== account.id) ||
       typeof row.at !== "number" ||
       !Number.isFinite(row.at) ||
       row.at < from ||
