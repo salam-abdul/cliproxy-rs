@@ -14,6 +14,8 @@ use cpa_core::credential::Credential;
 pub(super) const REQUEST: &[u8] =
     br#"{ "model" : "claude-opus-test", "metadata":{"session_id":"synthetic-session"}, "messages": [] }"#;
 pub(super) const SUCCESS: &[u8] = br#"{ "content":[], "usage":{"input_tokens":1} }"#;
+const STREAMING: &[u8] =
+    br#"{"model":"claude-opus-test","stream":true,"metadata":{"session_id":"synthetic-session"},"messages":[]}"#;
 
 #[derive(Clone)]
 pub(super) struct Reply {
@@ -522,6 +524,14 @@ async fn a_reply_read_to_its_content_length_is_recorded_as_complete() {
     }
 }
 
+/// A Claude credential for account `a` that exists only in the runtime's store.
+fn synthetic_claude_credential() -> Credential {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("type".into(), "claude".into());
+    let auth = Path::new("/synthetic-auth");
+    Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap()
+}
+
 fn enable_usage(fixture: &Fixture) {
     let usage = crate::testing::config("observability:\n  usage:\n    usage-statistics-enabled: true\n");
     fixture.state.rt.usage_queue().configure(true, &usage);
@@ -556,8 +566,6 @@ async fn usage_records(fixture: &Fixture, count: usize) -> Vec<Value> {
 /// the client's stream choice.
 #[tokio::test]
 async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
-    const STREAMING: &[u8] =
-        br#"{"model":"claude-opus-test","stream":true,"metadata":{"session_id":"synthetic-session"},"messages":[]}"#;
     for (status, body, reason) in [
         (
             403,
@@ -598,6 +606,7 @@ async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
         );
         assert_eq!(failover["request_id"], answer["request_id"], "{answer}");
         assert_eq!(answer["failed"], false, "{answer}");
+        assert_eq!(answer["stream"], true, "{answer}");
         assert_eq!(answer["tokens"]["input_tokens"], 1, "{answer}");
     }
 }
@@ -607,10 +616,7 @@ async fn a_native_failover_leaves_a_failed_usage_record_before_the_answer() {
 /// path, and the request is still not replayed.
 #[tokio::test]
 async fn a_lost_native_send_leaves_a_failed_usage_record() {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert("type".into(), "claude".into());
-    let auth = Path::new("/synthetic-auth");
-    let credential = Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap();
+    let credential = synthetic_claude_credential();
     let id = credential.id.clone();
     let fixture = Fixture::build(
         Reply {
@@ -624,8 +630,14 @@ async fn a_lost_native_send_leaves_a_failed_usage_record() {
     )
     .await;
     enable_usage(&fixture);
-    assert_eq!(fixture.request().await.status(), 422);
+    assert_eq!(fixture.request_body(STREAMING).await.status(), 422);
     let records = usage_records(&fixture, 1).await;
+    assert_eq!(records[0]["stream"], true, "{}", records[0]);
+    assert!(
+        records[0]["request_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{}",
+        records[0]
+    );
     assert_eq!(records[0]["failed"], true, "{}", records[0]);
     assert_eq!(records[0]["fail"]["status_code"], 500, "{}", records[0]);
     assert_eq!(records[0]["fail"]["body"], "transport_lost", "{}", records[0]);
@@ -638,10 +650,7 @@ async fn a_lost_native_send_leaves_a_failed_usage_record() {
 #[tokio::test]
 async fn a_native_failover_counts_as_a_failed_request_for_its_credential() {
     let dir = crate::request_logging::history::test_support::TempDir::new();
-    let mut metadata = serde_json::Map::new();
-    metadata.insert("type".into(), "claude".into());
-    let auth = Path::new("/synthetic-auth");
-    let credential = Credential::from_file(auth, &auth.join("a.json"), metadata).unwrap();
+    let credential = synthetic_claude_credential();
     let id = credential.id.clone();
     let fixture = Fixture::with_credential(
         Reply {
@@ -737,6 +746,7 @@ fn a_response_in_flight_at_runtime_shutdown_is_recorded_once_as_cancelled() {
         let account = fixture.state.accounts().await.unwrap().remove(0);
         let facts = Exchange {
             request_id: "in-flight".into(),
+            requested_stream: true,
             sse: true,
             timing: json!({}),
             headers_at: std::time::Instant::now(),

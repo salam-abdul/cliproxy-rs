@@ -844,7 +844,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         return Ok(error(400, "Native Claude model required; aliases are not rewritten"));
     };
     let model = model.to_owned();
-    let requested_stream = body["stream"].as_bool() == Some(true);
+    let requested_stream = !matches!(body.get("stream"), None | Some(Value::Bool(false)));
     // Holding this handle marks the session active, which keeps its affinity binding from
     // being pruned or evicted, until the response stream ends. Its lock is held only for
     // admission and affinity binding: same-session requests wait for each other's account
@@ -1146,6 +1146,7 @@ async fn handle_result(s: Arc<State>, req: Request<Incoming>, diagnostics: bool)
         }
         let facts = Exchange {
             request_id,
+            requested_stream,
             sse: h.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| {
                 v.split(';')
                     .next()

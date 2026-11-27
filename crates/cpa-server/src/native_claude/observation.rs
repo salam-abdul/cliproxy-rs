@@ -333,6 +333,9 @@ fn error_type(v: &Value) -> &'static str {
 #[derive(Clone)]
 pub(super) struct Exchange {
     pub(super) request_id: String,
+    /// The client asked for a stream: the usage record's stream flag, as on the
+    /// translating path. `sse` is how the upstream answered.
+    pub(super) requested_stream: bool,
     pub(super) sse: bool,
     pub(super) timing: Value,
     pub(super) headers_at: Instant,
@@ -390,7 +393,8 @@ pub(super) fn send_row(
 /// The usage record of one native send, queued while usage statistics are on. Its latency
 /// counts from the request's arrival, like the request's own timings.
 pub(super) struct UsageEntry<'a> {
-    /// Shared by every send of one request, so its records can be grouped.
+    /// Shared by the native sends of one request, so their records can be grouped. A quota
+    /// fallback's answer is recorded under its own id.
     pub(super) request_id: &'a str,
     pub(super) a: &'a Account,
     pub(super) model: &'a str,
@@ -399,7 +403,8 @@ pub(super) struct UsageEntry<'a> {
     pub(super) stream: bool,
     pub(super) detail: crate::usage_record::Detail,
     /// The status and outcome name of a failed send; a status of 0 is a send that got no
-    /// response. A static name keeps provider text out of the record.
+    /// response, which the queued record shows as 500. A static name keeps provider text
+    /// out of the record.
     pub(super) failure: Option<(u16, &'static str)>,
 }
 impl UsageEntry<'_> {
@@ -599,7 +604,7 @@ impl Observation {
             model: &f.model,
             sid: &f.sid,
             request_started: f.started,
-            stream: f.sse,
+            stream: f.requested_stream,
             detail,
             failure: (!success).then_some((status, outcome)),
         }
