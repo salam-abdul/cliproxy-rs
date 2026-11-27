@@ -112,8 +112,6 @@ Built. [Configuration](CONFIGURATION.md#activity-store) owns the route's totals 
 - Tokens per percent counts exact sends only: the uncached input, cache write and output tokens of sends whose token counts are exact.
 - The section has no speed columns; speed has its own section (part 3).
 
-Deferred to one later change: a provider filter on the history panels, a provider split of top models, and retiring the native history route, which the history panels still read.
-
 ### Part 3: what slows responses
 
 Built. [Configuration](CONFIGURATION.md#activity-store) owns the speed route, its time parts, percentiles and slow slices, and the [dashboard](../ui/README.md#pages) the Speed section on Overview. Facts of the built part that later parts rely on:
@@ -145,7 +143,6 @@ Each is its own change.
 
 | Decision | Proposal |
 | --- | --- |
-| When the native history route goes | In the change that moves the dashboard to the activity route. |
 | First-byte marks in the Gemini and Antigravity executors | Codex has one. Add them for Gemini and Antigravity, so their time to first response is comparable; until then the Speed table marks their rows as timed by the first event. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
 

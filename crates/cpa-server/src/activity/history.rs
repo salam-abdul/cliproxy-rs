@@ -75,7 +75,6 @@ const READ: &str = "WITH native AS (
 impl Activity {
     /// Native and proxy requests over `range`, with requests, failures, tokens and models
     /// narrowed to `provider` when given.
-    #[allow(dead_code)]
     pub(crate) async fn history(&self, range: Range, provider: Option<String>) -> anyhow::Result<Value> {
         let path = self.path.clone();
         let lost = self.lost.load(Ordering::Relaxed);
@@ -83,7 +82,7 @@ impl Activity {
     }
 }
 
-fn read(path: &Path, range: Range, provider: Option<&str>, now: i64, lost: u64) -> anyhow::Result<Value> {
+pub(super) fn read(path: &Path, range: Range, provider: Option<&str>, now: i64, lost: u64) -> anyhow::Result<Value> {
     let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     db.busy_timeout(Duration::from_secs(2))?;
     let conn = db.transaction()?;

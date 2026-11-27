@@ -168,6 +168,17 @@ A cycle is one account's weekly readings between two resets. A new cycle starts 
 
 The store keeps the latest quota reading per account, window, 10 minutes and stated reset, so the last reading before a reset survives the first one after it.
 
+`GET /v8/management/observability/history?range=24h|7d|30d` reads native Claude and translating-proxy requests for the Overview history panels. The optional `provider` parameter narrows requests, failures, failure reasons, tokens and models; it never narrows the provider list, the per-account buckets or the account status readings. A bad range, or a `provider` that is empty or over 256 bytes, answers `400`; the route answers `409` while the store is not running and `500` when the store cannot be read.
+
+The route reads nothing before the first send in the store, and reports that time as `oldest`; with no send yet it returns no requests. Native requests recorded before sends existed have no proxy counterpart, so they are left out.
+
+| Request | Counted as |
+| --- | --- |
+| Native | One request row: provider `claude`, the row's model and time. It failed unless its outcome is `success`, `client_cancelled` or `fallback_served`, and that outcome is its reason. A quota fallback, served or failed, counts once here. Its account is the credential of its last native send; a row with no send counts in the totals only. |
+| Proxy | The sends under one request ID and WebSocket turn that serve no native request, taken from the last send to start: its provider, model, credential and time. It failed unless that send completed or was cancelled, so a final 429 is a failure. Its reason is the send's outcome and status. |
+
+Tokens are the uncached input, cache read, cache write and output tokens of every send in the range with exact token counts, fallback sends included, with the count of all sends and of exact sends; a total is a lower bound when some sends are inexact. Models count requests by the request's model and tokens by each send's own model, the 500 with the most requests first. Account buckets count Claude requests per credential and time bucket. Failure reasons are the 5 most frequent.
+
 `GET /v8/management/observability/speed` reads how long completed requests took. It takes the same `range`, `provider` and `credential` parameters, and `offset`, the viewer's minutes east of UTC: a whole number from -840 to 840, `0` when absent. Any other value answers `400`, and the route answers `409` while the store is not running.
 
 A request is its sends under one request ID and WebSocket turn; a native request's quota fallback counts under the native request. Its last send is the latest to start, a fallback after every native send of the same millisecond. The request counts when its last send completed and started inside the range, and the provider and credential filters match that send. Earlier sends are counted from an hour before the range. A counted request whose last send has no latency or no first-response time is untimed: it appears only in the top-level `untimed` count.

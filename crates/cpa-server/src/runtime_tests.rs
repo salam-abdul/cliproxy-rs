@@ -1786,6 +1786,25 @@ async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
     let (rt, dir, _) = oauth_accounts("claude", &[], answer(|_| (500, "{}"))).await;
     let path = dir.join("activity.sqlite");
     rt.start_activity(path.clone()).unwrap();
+    // A native send first, so the combined history has started when the request row lands.
+    rt.activity().unwrap().record_send(crate::activity::sends::SendRow {
+        request_id: "one".into(),
+        turn: 0,
+        send: 0,
+        parent_request: None,
+        at_ms: chrono::Utc::now().timestamp_millis() - 1_000,
+        source: crate::request_logging::history::row::Source::Native,
+        provider: "claude".into(),
+        credential: Some("cred-a".into()),
+        model: Some("claude-test".into()),
+        outcome: crate::request_logging::history::row::Outcome::Complete,
+        status: None,
+        stream: true,
+        start_ms: 0,
+        latency_ms: Some(10),
+        ttft: None,
+        tokens: None,
+    });
     rt.activity()
         .unwrap()
         .record_event(&serde_json::json!({"type":"inference","requestId":"one",
@@ -1793,7 +1812,7 @@ async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
     rt.stop_activity();
     assert!(rt.activity().is_some());
     let next = crate::activity::Activity::start(path, Arc::new(AtomicU64::new(0))).unwrap();
-    let data = next.query(crate::activity::Range::Day, None).await.unwrap();
+    let data = next.history(crate::activity::Range::Day, None).await.unwrap();
     assert_eq!(data["buckets"][0]["requests"], 1);
     assert_eq!(data["coverageUncertain"], false);
     drop(next);
