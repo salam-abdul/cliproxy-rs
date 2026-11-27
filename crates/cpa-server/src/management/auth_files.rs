@@ -1596,8 +1596,8 @@ fn definitions() -> &'static Map<String, Value> {
 }
 
 /// Go `GetStaticModelDefinitionsByChannel`: the current model catalog for the channels
-/// it covers, so a refresh reaches the dashboard, and the embedded definitions for the
-/// rest.
+/// it covers, so a refresh reaches the dashboard, and the embedded definitions (Devin's)
+/// for the rest.
 fn channel_models(channel: &str) -> Option<Vec<Value>> {
     let key = match channel.trim().to_lowercase().as_str() {
         "kimi-ai" | "kimi.ai" | "kimi.com" => "kimi".to_owned(),
@@ -1605,11 +1605,10 @@ fn channel_models(channel: &str) -> Option<Vec<Value>> {
         "muse" => "meta".to_owned(),
         other => other.to_owned(),
     };
-    let embedded = definitions().get(&key)?.as_array()?;
-    Some(match cpa_core::registry::dynamic::channel_definitions(&key) {
-        Some(models) => models.into_iter().map(|m| Value::Object(m.raw)).collect(),
-        None => embedded.clone(),
-    })
+    match cpa_core::registry::dynamic::channel_definitions(&key) {
+        Some(models) => Some(models.into_iter().map(|m| Value::Object(m.raw)).collect()),
+        None => definitions().get(&key)?.as_array().cloned(),
+    }
 }
 
 pub(crate) async fn model_definitions(UrlPath(channel): UrlPath<String>) -> Response {

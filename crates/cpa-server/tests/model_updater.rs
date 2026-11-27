@@ -37,17 +37,28 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
         root.insert("meta".into(), serde_json::Value::Array(Vec::new()));
         serde_json::to_string(&root).unwrap()
     };
+    let without_kimi = {
+        let mut root: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&modified).unwrap();
+        root.insert("kimi".into(), serde_json::Value::Array(Vec::new()));
+        serde_json::to_string(&root).unwrap()
+    };
     let app = axum::Router::new()
         .route(
             "/{name}",
             axum::routing::get(move |State(hits): State<Arc<AtomicUsize>>, Path(name): Path<String>| {
-                let (modified, invalid, without_meta) = (modified.clone(), invalid.clone(), without_meta.clone());
+                let (modified, invalid, without_meta, without_kimi) = (
+                    modified.clone(),
+                    invalid.clone(),
+                    without_meta.clone(),
+                    without_kimi.clone(),
+                );
                 async move {
                     hits.fetch_add(1, Ordering::SeqCst);
                     match name.as_str() {
                         "down" => (StatusCode::INTERNAL_SERVER_ERROR, String::new()).into_response(),
                         "invalid" => invalid.into_response(),
                         "modified" => modified.into_response(),
+                        "no-kimi" => without_kimi.into_response(),
                         _ => without_meta.into_response(),
                     }
                 }
@@ -159,4 +170,24 @@ async fn refresh_skips_failing_sources_and_swaps_a_changed_catalog() {
     cpa_server::model_updater::refresh(&urls(&["no-meta"]), "test").await;
     assert_eq!(catalog_generation(), generation + 1, "identical once meta is kept");
     assert_eq!(pinned().channel("meta").len(), meta_before);
+
+    // An emptied section empties the dashboard's list too: the registry then serves none
+    // of those models, so the embedded catalog must not stand in for it.
+    let kimi = || async {
+        let body: serde_json::Value = wreq::Client::new()
+            .get(format!("{proxy}/v8/management/routing/model-definitions/kimi"))
+            .bearer_auth("fake-management-only")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["models"].as_array().unwrap().len()
+    };
+    assert!(kimi().await > 0);
+    cpa_server::model_updater::refresh(&urls(&["no-kimi"]), "test").await;
+    assert_eq!(catalog_generation(), generation + 2);
+    assert_eq!(kimi().await, 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
