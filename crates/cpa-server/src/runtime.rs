@@ -154,7 +154,7 @@ impl Runtime {
     }
 
     /// Starts the activity store at `path` unless one already runs; a later call opens nothing.
-    pub(crate) fn start_activity(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+    pub fn start_activity(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
         let _starting = self.activity_start.lock().unwrap_or_else(PoisonError::into_inner);
         if self.activity.get().is_some() {
             return Ok(());

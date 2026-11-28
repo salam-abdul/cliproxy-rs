@@ -12,28 +12,23 @@
   import { loadResets } from "../resets";
   import { credName, provider, label, resetSummary, type Data } from "../core";
   $effect(() => every(15000, () => store.creds.load(true), true));
-  const enabled = $derived(!!store.native.data?.enabled);
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.history.data = undefined;
   });
   // A provider change keeps the loaded history for the account cards and the drawer.
   $effect(() => {
-    if (!enabled) return;
     store.historyProvider;
     store.history.error = null;
     return every(historyPollMs(store.historyRange), () => store.history.load(true), true);
   });
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.providerActivity.data = undefined;
     store.providerActivity.error = null;
     return every(60000, () => store.providerActivity.load(true), true);
   });
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.speed.data = undefined;
     store.speed.error = null;
@@ -95,6 +90,26 @@
       ? (native.selectionOrder as string[])
       : null,
   );
+  // Kept apart from `accounts`, which reads the server clock, so its tick does not
+  // recompute every account's buckets.
+  const recentByCredential = $derived.by(() => {
+    const grouped = new Map<string, Data[]>();
+    for (const row of Array.isArray(historyData?.accountBuckets) ? historyData.accountBuckets : []) {
+      const rows = grouped.get(row.credential);
+      if (rows) rows.push(row);
+      else grouped.set(row.credential, [row]);
+    }
+    const recent = new Map<string, ReturnType<typeof requestBuckets>>();
+    for (const a of store.creds.data || []) {
+      const credential = String(a.id || a.name);
+      const id = native?.accounts?.find((n: Data) => n.fileId === credential)?.id;
+      recent.set(
+        credential,
+        requestBuckets({ ...historyData, accountBuckets: grouped.get(credential) || [] }, { credential, id }),
+      );
+    }
+    return recent;
+  });
   const accounts = $derived(
     (store.creds.data || [])
       .map((a) => {
@@ -109,9 +124,7 @@
           store.serverNow,
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
-        const recent = n?.id
-          ? requestBuckets(historyData || {}, { credential: n.fileId, id: n.id })
-          : [];
+        const recent = recentByCredential.get(String(a.id || a.name)) || [];
         return { a, n, rank, state, recent };
       })
       .sort(
@@ -133,20 +146,20 @@
     <h1>Overview</h1>
     <p class="muted small">Accounts, capacity, and history in one place.</p>
   </div>
-  {#if native?.enabled}<div class="history-controls">
-      <select aria-label="History provider" bind:value={store.historyProvider}>
-        <option value="">All providers</option>
-        {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
-      </select>
-      <div class="seg history-range" role="group" aria-label="History range">
-        {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
-          <button
-            aria-pressed={store.historyRange === value}
-            onclick={() => (store.historyRange = value)}>{title}</button
-          >
-        {/each}
-      </div>
-    </div>{/if}
+  <div class="history-controls">
+    <select aria-label="History provider" bind:value={store.historyProvider}>
+      <option value="">All providers</option>
+      {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
+    </select>
+    <div class="seg history-range" role="group" aria-label="History range">
+      {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
+        <button
+          aria-pressed={store.historyRange === value}
+          onclick={() => (store.historyRange = value)}>{title}</button
+        >
+      {/each}
+    </div>
+  </div>
 </div>
 {#if !store.creds.error && (store.native.error || !store.online)}
   <p class="alert">Refresh failed. Showing the last readings.</p>
@@ -195,8 +208,7 @@
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">
-          {#if !native?.enabled || !n?.id}<span class="muted account-history-note">Not tracked</span>
-          {:else if recent.length}<span class="quota-caption"
+          {#if recent.length}<span class="quota-caption"
               ><span>Last {store.historyRange}</span><strong class="num"
                 >{recent.reduce((sum, b) => sum + b.requests, 0)} requests</strong
               ></span
@@ -219,7 +231,7 @@
       </div>{/each}
   </div>{/snippet}</Load>
 </section>
-{#if native?.enabled}<HistoryPanels data={panelData} /><ProviderActivity data={activityData} /><Speed data={speedData} />{/if}
+<HistoryPanels data={panelData} /><ProviderActivity data={activityData} /><Speed data={speedData} />
 
 {#if selected}{#key selectedId}<AccountDetail a={selected} onclose={() => (selectedId = "")} />{/key}{/if}
 

@@ -141,27 +141,7 @@ fn is_hex4(s: &str) -> bool {
 
 /// Go `ResolveDiscoveryStateDir`: `$WRITABLE_PATH/discovery`, else the user config dir.
 pub fn state_dir() -> Option<PathBuf> {
-    let trimmed = |k: &str| {
-        std::env::var(k)
-            .ok()
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
-    };
-    if let Some(w) = trimmed("WRITABLE_PATH").or_else(|| trimmed("writable_path")) {
-        return Some(Path::new(&w).join("discovery"));
-    }
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    let config_dir = if cfg!(target_os = "macos") {
-        env("HOME").map(|h| Path::new(&h).join("Library/Application Support"))
-    } else if cfg!(windows) {
-        env("AppData").map(PathBuf::from)
-    } else {
-        env("XDG_CONFIG_HOME")
-            .filter(|d| Path::new(d).is_absolute())
-            .map(PathBuf::from)
-            .or_else(|| env("HOME").map(|h| Path::new(&h).join(".config")))
-    };
-    config_dir.map(|d| d.join("cpa").join("discovery"))
+    crate::state::root().map(|root| root.join("discovery"))
 }
 
 static INSTANCE_IDS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());

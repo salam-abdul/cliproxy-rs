@@ -2,6 +2,7 @@ mod discovery;
 mod dotenv;
 mod history;
 mod home;
+mod state;
 mod tui;
 
 use std::io;
@@ -1159,6 +1160,44 @@ fn ensure_auth_dir(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// Opens the activity store in the state folder when neither native routing, which keeps
+/// it beside its event log, nor Home mode, which serves no route that reads it, runs.
+/// Returns the owner lock, held for the server's lifetime so that one server records at a
+/// path. A store that cannot open leaves the server running.
+#[cfg(not(test))]
+fn start_default_activity(rt: &Runtime) -> Option<std::fs::File> {
+    let Some(root) = state::root() else {
+        tracing::warn!("Activity store is unavailable: no writable path or user config folder");
+        return None;
+    };
+    open_default_activity(rt, &root)
+        .inspect_err(|error| tracing::warn!(%error, "Activity store is unavailable"))
+        .ok()
+}
+
+#[cfg(not(test))]
+fn open_default_activity(rt: &Runtime, root: &Path) -> anyhow::Result<std::fs::File> {
+    cpa_core::private_fs::create_dir_all(root)?;
+    let path = root.join("activity.sqlite");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let lock = options.open(root.join("activity.lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `flock` reads only the descriptor, which `lock` keeps open.
+        anyhow::ensure!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "another server records activity at {}",
+            path.display()
+        );
+    }
+    rt.start_activity(path)?;
+    Ok(lock)
+}
+
 /// `listening` (standalone TUI only) receives the bound address and whether TLS is on.
 #[allow(clippy::too_many_arguments)]
 async fn serve(
@@ -1225,6 +1264,13 @@ async fn serve(
     // overlay; without it they see only the static catalog.
     cpa_server::install_registry(&rt);
     let native_router = cpa_server::native_claude::start(rt.clone()).await?;
+    // In-process tests must not write to the user's config folder.
+    #[cfg(not(test))]
+    let _activity_owner = if native_router.is_none() && home.is_none() {
+        start_default_activity(&rt)
+    } else {
+        None
+    };
     rt.start_auto_refresh();
     let options = cpa_server::management::Options {
         local_password: password,

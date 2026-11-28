@@ -28,7 +28,7 @@ The fork had two stores. Neither answers the three questions alone.
 
 | | Activity store (SQLite) | Body history (Parquet) |
 | --- | --- | --- |
-| On by default | Yes, when native routing runs | No, `observability.history.enable` |
+| On by default | Yes, except in Home mode without native routing | No, `observability.history.enable` |
 | Fed by | Native Claude routing only (`crates/cpa-server/src/native_claude.rs:452`, `:1331`) | Every upstream send on both paths |
 | Grain | One row per client request, keyed by request ID | One row per upstream send |
 | Tokens | Input, output, cache read, cache write | The same, plus reasoning and 5-minute and 1-hour cache writes |
@@ -39,10 +39,10 @@ The fork had two stores. Neither answers the three questions alone.
 
 Facts that shape the design:
 
-- **The activity store starts inside native routing** (`native_claude.rs:1279`) and lives beside its event log. With native routing off there is no store.
+- **The activity store sits beside native routing's event log while native routing runs, and otherwise opens in the state folder** (`start_default_activity` in `crates/cliproxy/src/main.rs`).
 - **Its `requests` table is keyed by request ID and written with `INSERT OR REPLACE`** (`native_claude/history.rs:121`, `:375`), so a second row for the same request replaces the first.
 - **Native events carry timings the store drops**, measured from the request's arrival and summed across failovers (`native_claude.rs:849`, `native_claude/send.rs:200`; `native_claude/observation.rs:458`). Body history times the same send from its own start (`crates/cpa-server/src/request_logging/history/native.rs:133`).
-- **A translating-proxy request is measured only when the usage queue or body history is on** (`crates/cpa-server/src/dispatch.rs:931`). Otherwise no usage tracker runs and no response is scanned for token counts.
+- **A translating-proxy request is measured only when the usage queue, body history or the activity store is on** (`crates/cpa-server/src/dispatch.rs:908`). Otherwise no usage tracker runs and no response is scanned for token counts.
 - **Time to first byte depends on the route and provider.** Native routing measures the first response byte. On the translating proxy Claude, Codex, xAI, Kimi, Devin, Gemini, Vertex and Antigravity report the first upstream body byte, or over a WebSocket the first non-empty message; Meta reports the first byte of a whole answer and the first packet of a stream. AI Studio and OpenAI-compatible providers report nothing, so the figure is the first translated event or the response headers (`crates/cpa-server/src/usage_record.rs:2286`).
 - **Stage timings exist for Claude only** on the translating proxy (`usage_record.rs:1299`), and they count from the request's arrival, not the send.
 - **A quota-refused native request served by a fallback model** is recorded by native routing and sent through the translating proxy under a second ID (`native_claude/fallback.rs:151`).
@@ -98,7 +98,7 @@ Four parts, built in order. Part 1 unlocks parts 2 and 3. Part 4 stands on body 
 
 Built. [Configuration](CONFIGURATION.md#activity-store) and [Native Claude](../native/README.md#diagnostics-and-history) own it. Facts of the built store that later parts rely on:
 
-- The store's file stays beside the native routing event log, and the store runs only while native routing runs. The server has no state folder of its own.
+- The store's file stays beside the native routing event log while native routing runs, and is `activity.sqlite` in the server's state folder otherwise.
 - The translating proxy writes no request row, and `requests` gained no columns. Each send stores `start_ms`, the time from its request's arrival to the send's start, so a request's total and its time in the server follow from its sends.
 - On the translating proxy `send` numbers the request's attempts, counting on across bootstrap retry rounds. Body history numbers each request it sends on a counter of its own, so the two differ once an attempt resends its request or fails before sending.
 - Quota readings come from response headers for Claude and Codex alike, on both paths, from the snapshots the executors keep. The native status loop and `account_status` are unchanged.

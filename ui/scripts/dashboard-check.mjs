@@ -13,8 +13,8 @@ page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 const historyUrls = [];
-let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
-let activityChecks = 0, activityConflict = false;
+let historyHold, historyRelease, historyFailure = false, historyConflict = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
+let activityChecks = 0, activityConflict = false, codexHistory = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
 let toolsChecks = 0, toolsConflict = false, toolsFailure = false, toolsPending = [];
 const statusCalls = [], deleteBodies = [], apiCalls = [];
@@ -52,6 +52,7 @@ await page.route("**/*", async route => {
     historyUrls.push(request.url());
     if (historyHold) await historyHold;
     if (historyFailure) return route.fulfill({status:500,json:{error:"History could not be read"}});
+    if (historyConflict) return route.fulfill({status:409,json:{error:"activity store is not running"}});
     const params = new URL(request.url()).searchParams;
     const range = params.get("range") || "24h", filter = params.get("provider");
     const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
@@ -68,7 +69,8 @@ await page.route("**/*", async route => {
       tokens:models.reduce((t, m) => tokens(t.uncachedInputTokens + m.uncachedInputTokens, t.cacheReadTokens + m.cacheReadTokens,
         t.cacheWriteTokens + m.cacheWriteTokens, t.outputTokens + m.outputTokens, t.sends + m.sends, t.exactSends + m.exactSends), tokens(0,0,0,0,0,0)),
       models,modelsTruncated:false,
-      accountBuckets:[{credential:"account-a.json",at:last,requests:2,failures:1}],
+      accountBuckets:[{credential:"account-a.json",at:last,requests:2,failures:1},
+        ...(codexHistory ? [{credential:"codex-a.json",at:last,requests:1,failures:0}] : [])],
       statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}]});
   }
   if (path === "/v8/management/observability/activity") {
@@ -268,7 +270,8 @@ try {
   }};
   await page.goto("http://dashboard.test/management.html#overview");
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0, "policy is absent from Overview");
-  assert.equal(await page.getByText("Loading history…").count(), 0, "servers without native routing do not promise history");
+  const accountCard = page.locator(".account-row", {has: page.getByRole("button", {name:"account-a.json", exact:true})});
+  await accountCard.getByText("2 requests", {exact:true}).waitFor({state:"attached"});
   assert.equal(await page.getByText(/Native Claude routing · Account switches/).count(), 0);
   const meter = page.getByRole("meter", {name:"5-hour limit remaining"});
   await meter.waitFor();
@@ -308,6 +311,45 @@ try {
   await page.getByRole("button", {name:"Close",exact:true}).click();
 
   await page.setViewportSize({width:1280,height:900});
+  // History without native routing: durable history and request bars on every card.
+  // An API-key Codex account reads no quota resets, so its drawer stays within the resets mock.
+  creds.push({ name: "codex-a.json", auth_index: "c", provider: "codex", account_type: "api_key", status: "active" });
+  codexHistory = true;
+  const mountLoads = historyChecks;
+  await page.reload();
+  const codexCard = page.locator(".account-row", {has: page.getByRole("button", {name:"codex-a.json", exact:true})});
+  await codexCard.getByText("1 requests", {exact:true}).waitFor();
+  assert.ok(await codexCard.locator(".account-history span.served").count() > 0, "a Codex card draws its request bars");
+  await page.getByRole("group", {name:"History range"}).waitFor();
+  await page.getByRole("heading", {name:"Top models", exact:true}).waitFor();
+  await settle();
+  assert.equal(historyChecks - mountLoads, 1, "history loads once at mount, not again when native status arrives");
+  await codexCard.getByRole("button", {name:"codex-a.json", exact:true}).click();
+  const codexDetail = page.getByRole("dialog", {name:/codex-a.json details/});
+  const usage = codexDetail.locator("section", {has: page.getByRole("heading", {name:"Usage history", exact:true})});
+  await usage.locator(".drawer-numbers div", {hasText:"requests"}).getByText("1", {exact:true}).waitFor();
+  assert.equal(await codexDetail.getByText("History could not be loaded", {exact:false}).count(), 0, "a Codex drawer shows its usage history");
+  await page.getByRole("button", {name:"Close", exact:true}).click();
+  await codexDetail.waitFor({state:"hidden"});
+  // The Accounts page loads history for its drawer without native routing.
+  await page.goto("http://dashboard.test/management.html#credentials/account-a.json");
+  await page.reload();
+  const accountDetail = page.getByRole("dialog", {name:/account-a.json details/});
+  const accountUsage = accountDetail.locator("section", {has: page.getByRole("heading", {name:"Usage history", exact:true})});
+  await accountUsage.locator(".drawer-numbers div", {hasText:"requests"}).getByText("2", {exact:true}).waitFor();
+  assert.equal(await accountDetail.getByText("Loading history…").count(), 0, "the Accounts drawer shows loaded history");
+  await page.getByRole("button", {name:"Close", exact:true}).click();
+  await accountDetail.waitFor({state:"hidden"});
+  // A stopped activity store is named, not reported as a failed load.
+  historyConflict = true;
+  await page.goto("http://dashboard.test/management.html#overview");
+  await page.reload();
+  await page.getByText("The activity store is not running.", {exact:true}).waitFor();
+  assert.equal(await page.getByText(/History could not be loaded/).count(), 0, "a 409 is not a failed load");
+  historyConflict = false;
+  creds.pop();
+  codexHistory = false;
+
   delete creds[0].quota;
   requireKey = true;
   native = false;

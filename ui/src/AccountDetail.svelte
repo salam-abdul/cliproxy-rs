@@ -30,7 +30,7 @@
       : undefined,
   );
   const buckets = $derived(
-    n?.id ? requestBuckets(history || {}, { credential: n.fileId, id: n.id }) : [],
+    requestBuckets(history || {}, { credential: a.id || a.name, id: n?.id }),
   );
   const statuses = $derived(
     (history?.statuses || []).filter(
@@ -218,37 +218,37 @@
             No availability observations in this period.
           </p>{/if}
       </section>
-      <section class="card">
-        <div class="section-head">
-          <h3>Usage history</h3>
-          <span class="muted small">{store.historyRange}</span>
-        </div>
-        {#if !history}<p class="muted small">
-            {store.history.error
-              ? "History could not be loaded for this period."
-              : "Loading history…"}
-          </p>
-        {:else}
-          <div class="drawer-numbers">
-            <div><strong>{total("requests")}</strong><span>requests</span></div>
-            <div><strong>{total("failures")}</strong><span>failed</span></div>
-          </div>
-          {#if statuses.length}<h4>5-hour quota observations</h4>
-            <div
-              class="quota-trend"
-              role="img"
-              aria-label="Recorded 5-hour quota remaining"
-            >
-              {#each statuses
-                .filter((s: Data) => typeof s.fiveHourUsed === "number")
-                .slice(-36) as point}<span
-                  title={`${new Date(point.at).toLocaleString()} · ${Math.max(0, 100 - point.fiveHourUsed).toFixed(1)}% left`}
-                  style:height={`${Math.max(2, 100 - point.fiveHourUsed)}%`}
-                ></span>{/each}
-            </div>{/if}
-        {/if}
-      </section>
     {/if}
+    <section class="card">
+      <div class="section-head">
+        <h3>Usage history</h3>
+        <span class="muted small">{store.historyRange}</span>
+      </div>
+      {#if !history}<p class="muted small">
+          {store.history.error
+            ? "History could not be loaded for this period."
+            : "Loading history…"}
+        </p>
+      {:else}
+        <div class="drawer-numbers">
+          <div><strong>{total("requests")}</strong><span>requests</span></div>
+          <div><strong>{total("failures")}</strong><span>failed</span></div>
+        </div>
+        {#if statuses.length}<h4>5-hour quota observations</h4>
+          <div
+            class="quota-trend"
+            role="img"
+            aria-label="Recorded 5-hour quota remaining"
+          >
+            {#each statuses
+              .filter((s: Data) => typeof s.fiveHourUsed === "number")
+              .slice(-36) as point}<span
+                title={`${new Date(point.at).toLocaleString()} · ${Math.max(0, 100 - point.fiveHourUsed).toFixed(1)}% left`}
+                style:height={`${Math.max(2, 100 - point.fiveHourUsed)}%`}
+              ></span>{/each}
+          </div>{/if}
+      {/if}
+    </section>
     <details class="card">
       <summary>Advanced account settings</summary>
       <dl class="facts">

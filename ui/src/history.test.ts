@@ -83,6 +83,30 @@ test("a card reads buckets by credential and status readings by native id", () =
   );
 });
 
+test("an account without status readings knows only buckets with requests", () => {
+  const data = {
+    from: 0,
+    to: 300,
+    bucketMs: 100,
+    accountBuckets: [{ credential: "codex-a.json", at: 100, requests: 1, failures: 0 }],
+    statuses: [
+      { account: "x", model: "claude", at: 50, availability: "included" },
+      { account: "x", model: "claude", at: 250, availability: "included" },
+    ],
+  };
+  assert.deepEqual(
+    requestBuckets(data, { credential: "codex-a.json" }).map((b) => [
+      b.known,
+      b.requests,
+    ]),
+    [
+      [false, 0],
+      [true, 1],
+      [false, 0],
+    ],
+  );
+});
+
 test("the panels count a status reading as an observation only when asked", () => {
   const data = {
     from: 0,

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "./store.svelte";
+  import { ApiError } from "./api";
   import { requestBuckets } from "./history";
   import { outcomeLabel, summarizeHistory } from "./traffic";
   import { label, type Data } from "./core";
@@ -40,7 +41,9 @@
 <section class="section">
   {#if store.history.error}
     <p class="alert">
-      History could not be loaded. Current account readings remain available.
+      {store.history.error instanceof ApiError && store.history.error.status === 409
+        ? "The activity store is not running."
+        : "History could not be loaded. Current account readings remain available."}
     </p>
   {:else if !data}
     <p class="muted">Loading history…</p>
