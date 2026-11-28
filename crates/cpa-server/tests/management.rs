@@ -1115,7 +1115,7 @@ async fn runtime_credential_disable_clears_its_cooldowns() {
         assert_eq!(lease.credential.id, id);
         let mut quota = ExecError::local(429, FailureScope::Credential, "rate limited");
         quota.retry_after = Some(std::time::Duration::from_secs(600));
-        lease.complete(Outcome::Failure(quota));
+        lease.complete(Outcome::failure(quota));
         assert!(!f.rt.store().cooldowns(id).is_empty(), "{endpoint}: cooling");
         assert!(f.rt.store().select(selection()).is_none(), "{endpoint}: blocked");
         for disabled in [true, false] {

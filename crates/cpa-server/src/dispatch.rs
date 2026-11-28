@@ -22,6 +22,11 @@ use crate::respond;
 use crate::runtime::{AcquireError, Completing, Lease, Outcome, Runtime, Selection};
 use crate::scheduler::{Policy, canonical_model};
 
+mod fault;
+#[cfg(test)]
+mod fault_tests;
+use fault::{Fault, Reached, Verdict, VerdictInput};
+
 /// One client request, already parsed by its route.
 #[derive(Clone)]
 pub struct Call {
@@ -838,77 +843,6 @@ impl From<Failure> for RunError {
     }
 }
 
-/// One attempt's failure.
-#[derive(Clone)]
-struct Fault {
-    error: ExecError,
-    bootstrap: Option<Box<HeaderMap>>,
-    reached: Reached,
-}
-
-/// How far an attempt's response got before it failed, as dispatch saw it. With the
-/// executor's [`AfterAccept`], it decides failover: only a response that broke off
-/// before any of it was consumed may move to another credential.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Reached {
-    /// The executor failed without a response.
-    Executing,
-    /// An accepted response failed before any of it was consumed.
-    NoOutput,
-    /// Part of an accepted response was already consumed.
-    Output,
-}
-
-impl Fault {
-    fn executing(error: ExecError) -> Self {
-        Self {
-            error,
-            bootstrap: None,
-            reached: Reached::Executing,
-        }
-    }
-
-    /// Whether the failover rule ends the request here: output was consumed, an
-    /// accepted response broke off after the executor had it, or the executor reported
-    /// a request failure of its own. A response that broke off before any output may
-    /// fail over.
-    fn terminal(&self) -> bool {
-        let error = &self.error;
-        let broke = self.broke_off();
-        match self.reached {
-            Reached::Output => true,
-            Reached::NoOutput if broke => false,
-            _ => broke || (error.scope == cpa_core::exec::FailureScope::Request && error.headers.is_empty()),
-        }
-    }
-
-    /// The response broke off: as the executor reports it, or a connection fault once a
-    /// response was accepted.
-    fn broke_off(&self) -> bool {
-        self.error.after_accept.is_some_and(AfterAccept::broke_off)
-            || (self.reached != Reached::Executing && self.error.scope == cpa_core::exec::FailureScope::Transport)
-    }
-
-    /// A response that broke off before any of it was consumed.
-    fn broke_silently(&self) -> bool {
-        self.reached == Reached::NoOutput && self.broke_off()
-    }
-
-    /// The account is not tried again for this request: its response broke off before
-    /// any output, or its stream was held back on a first-event error
-    /// ([`ExecError::held`]).
-    fn spends_account(&self) -> bool {
-        self.broke_silently() || self.error.held.is_some()
-    }
-
-    fn into_run_error(self) -> RunError {
-        RunError {
-            failure: Failure::Exec(self.error),
-            bootstrap: self.bootstrap.is_some(),
-        }
-    }
-}
-
 /// Runs one request through selection, execution and retry rounds (Go
 /// `Manager.Execute*`). Selection failures take part in retry rounds too.
 pub async fn run(rt: &Arc<Runtime>, call: Call, trace: &Trace) -> Result<Done, RunError> {
@@ -1363,7 +1297,7 @@ impl RemoteFault {
     fn retry_round(&self) -> bool {
         match &self.failure {
             Failure::Exec(e) | Failure::Remote { error: e, .. } => classify::is_retry_round(e),
-            other => matches!(other.status(), 403 | 408 | 429 | 500 | 502 | 503 | 504),
+            other => crate::scheduler::retry_status(other.status()),
         }
     }
 
@@ -1828,7 +1762,7 @@ async fn remote_round(
                         )
                     }
                     Err(error) => {
-                        lease.complete(Outcome::Failure(error.clone()));
+                        lease.complete(Outcome::failure(error.clone()));
                         (Attempt::Next(Fault::executing(error)), true)
                     }
                 }
@@ -2272,29 +2206,24 @@ async fn attempt(
             );
         }
         let action = rt.store().error_action(policy, &lease.credential, error);
-        let neutral = (target.compact && classify::is_compact_neutral(error) && !action.force_cooldown)
-            || (call.operation == Operation::CountTokens
-                && classify::is_count_endpoint_missing(error, upstream)
-                && !action.force_cooldown);
+        let Verdict {
+            stop,
+            neutral,
+            last_here,
+        } = fault.verdict(
+            &action,
+            VerdictInput {
+                compact: target.compact,
+                count_tokens: (call.operation == Operation::CountTokens).then_some(upstream.as_str()),
+                last_model: i + 1 == target.models.len(),
+            },
+        );
         let outcome = if neutral {
             Outcome::Neutral(error.clone())
         } else {
-            Outcome::Failure(error.clone())
+            lease.failure(error.clone(), policy, action)
         };
-        // A local request failure, or a response that broke off after the executor had it
-        // or after output, is terminal even when a custom rule says continue: inference
-        // may already have run. One that broke off before any output may fail over.
         let silent = fault.broke_silently();
-        let stop = fault.terminal()
-            || if action.matched {
-                action.stop
-            } else {
-                (target.compact && classify::is_compact_fault(error))
-                    || (!silent && classify::is_request_invalid(error))
-            };
-        // Go returns stopping bootstrap failures directly, outside handler bootstrap retries.
-        let last_here =
-            stop || i + 1 == target.models.len() || classify::credential_scoped(error) || error.held.is_some();
         let mut fault = fault;
         if let Some(held) = fault.error.held.as_mut()
             && target.alias.force_mapping
@@ -3211,21 +3140,6 @@ mod tests {
             buffer(events, 20).await.ok(),
             Some(Bytes::from_static(b"01234567890123456789"))
         );
-    }
-
-    /// A connection fault after a response was accepted is a break, so it fails over
-    /// once per account; before any response it is an ordinary transport fault.
-    #[test]
-    fn a_transport_fault_after_acceptance_broke_off() {
-        let error = ExecError::local(502, cpa_core::exec::FailureScope::Transport, "connection reset");
-        let mut fault = Fault::executing(error);
-        assert!(!fault.broke_silently());
-        assert!(!fault.terminal());
-        fault.reached = Reached::NoOutput;
-        assert!(fault.broke_silently());
-        assert!(!fault.terminal());
-        fault.reached = Reached::Output;
-        assert!(fault.terminal());
     }
 
     /// Hands out one grant per pick, in order, and counts the picks.

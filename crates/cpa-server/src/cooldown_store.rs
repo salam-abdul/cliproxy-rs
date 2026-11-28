@@ -367,7 +367,7 @@ mod tests {
                 let mut e = ExecError::local(status, scope, message);
                 e.headers.insert("content-type", "text/plain".parse().unwrap());
                 e.retry_after = (hint > 0).then(|| Duration::from_secs(hint));
-                s.record(&creds[i], model, &crate::runtime::Outcome::Failure(e), &policy, now);
+                s.record(&creds[i], model, &crate::runtime::Outcome::failure(e), &policy, now);
             };
         fail(&mut s, 0, "m1", 429, "rate limited", 30, false);
         fail(&mut s, 0, "m2", 401, "unauthorized", 0, false);

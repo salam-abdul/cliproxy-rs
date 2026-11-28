@@ -212,7 +212,7 @@ impl Scheduler {
         }
         let success = match outcome {
             Outcome::Success => true,
-            Outcome::Failure(error) if policy.error_action_with(rules, c, error).cooldown => false,
+            Outcome::Failure { error, action } if policy.failure_action(*action, rules, c, error).cooldown => false,
             _ => return,
         };
         if let Some(request) = selection.lcp.as_deref() {

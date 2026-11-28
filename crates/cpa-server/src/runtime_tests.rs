@@ -278,7 +278,7 @@ fn attribute_only_reload_changes_priority_and_rejects_stale_outcome() {
     b.attributes.insert("priority".into(), "2".into());
     store.reconcile(vec![a, b]);
     assert!(store.get("b.json").unwrap().revision > revision);
-    old.complete(Outcome::Failure(ExecError::local(
+    old.complete(Outcome::failure(ExecError::local(
         401,
         FailureScope::Credential,
         "expired",
@@ -301,7 +301,7 @@ fn stale_lease_cannot_poison_deleted_and_recreated_credential() {
     let old = store.select(sel("claude")).unwrap();
     store.reconcile(Vec::new());
     store.reconcile(vec![credential]);
-    old.complete(Outcome::Failure(ExecError::local(
+    old.complete(Outcome::failure(ExecError::local(
         429,
         FailureScope::Credential,
         "quota",
@@ -337,7 +337,7 @@ fn retry_wait_skips_cooldowns_beyond_the_cap_and_non_retryable_statuses() {
             store.scheduler.lock().unwrap().record(
                 &credential,
                 &selection.model,
-                &Outcome::Failure(error),
+                &Outcome::failure(error),
                 &policy,
                 now,
             );
@@ -391,7 +391,7 @@ fn retry_wait_obeys_exact_cap_and_attempted_quota_floor() {
     store.scheduler.lock().unwrap().record(
         &credential,
         &selection.model,
-        &Outcome::Failure(quota.clone()),
+        &Outcome::failure(quota.clone()),
         &policy,
         now,
     );
@@ -409,7 +409,7 @@ fn retry_wait_obeys_exact_cap_and_attempted_quota_floor() {
     store.scheduler.lock().unwrap().record(
         &credential,
         &selection.model,
-        &Outcome::Failure(quota.clone()),
+        &Outcome::failure(quota.clone()),
         &policy,
         later,
     );
@@ -430,7 +430,7 @@ fn retry_wait_obeys_exact_cap_and_attempted_quota_floor() {
 fn weekly_limit(scope: FailureScope) -> Outcome {
     let mut error = ExecError::local(429, scope, "usage_limit_reached");
     error.retry_after = Some(Duration::from_secs(6 * 24 * 3600));
-    Outcome::Failure(error)
+    Outcome::failure(error)
 }
 
 /// A probe whose hold lapsed was taken over by a later pick: the first probe's
@@ -723,7 +723,7 @@ fn cooldowns_persist_restore_and_reset_through_cds_files() {
     let lease = rt.store.select(selection.clone()).unwrap();
     let mut quota = ExecError::local(429, FailureScope::Model, "rate limited");
     quota.retry_after = Some(Duration::from_secs(120));
-    lease.complete(Outcome::Failure(quota));
+    lease.complete(Outcome::failure(quota));
     let file = dir.join("a.cds");
     let written = std::fs::read_to_string(&file).expect("cooldown written");
     #[cfg(unix)]
@@ -911,7 +911,7 @@ fn a_cooldown_change_leaves_other_credentials_files_alone() {
             .push(if id == "a.json" { "b.json" } else { "a.json" }.into());
         let mut quota = ExecError::local(429, FailureScope::Model, "rate limited");
         quota.retry_after = Some(Duration::from_secs(120));
-        rt.store.select(selection).unwrap().complete(Outcome::Failure(quota));
+        rt.store.select(selection).unwrap().complete(Outcome::failure(quota));
     };
     fail("a.json", "m1");
     fail("b.json", "m1");
@@ -1597,7 +1597,7 @@ async fn a_recorded_refusal_only_shortens_and_offers_no_retry_wait() {
         .scheduler
         .lock()
         .unwrap()
-        .record(&kept, "", &Outcome::Failure(error), &policy, Instant::now());
+        .record(&kept, "", &Outcome::failure(error), &policy, Instant::now());
     let retry_wait = || rt.store.retry_wait(&sel("claude"), &policy, 429, &[], &admit_all);
 
     assert!(rt.store.refuse_tokens("kept.json", version, refusal, Some(soon)));
@@ -1817,4 +1817,31 @@ async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
     assert_eq!(data["coverageUncertain"], false);
     drop(next);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A lease keeps an error rule action only when it was decided under the policy the
+/// lease records under, even an equal copy of it being another policy; otherwise the
+/// scheduler evaluates the action.
+#[test]
+fn a_lease_keeps_an_action_decided_under_its_own_policy() {
+    let store = CredentialStore::new(vec![cred("a.json", "claude", false)]);
+    let lease = store.select(sel("claude")).unwrap();
+    let action = crate::scheduler::ErrorAction {
+        matched: true,
+        stop: false,
+        cooldown: false,
+        force_cooldown: false,
+    };
+    let error = || ExecError::local(500, FailureScope::Credential, "boom");
+    let own = lease.policy.clone();
+    assert!(matches!(
+        lease.failure(error(), &own, action),
+        Outcome::Failure { action: Some(_), .. }
+    ));
+    let copy = Policy::clone(&own);
+    assert!(matches!(
+        lease.failure(error(), &copy, action),
+        Outcome::Failure { action: None, .. }
+    ));
+    lease.complete(Outcome::Success);
 }

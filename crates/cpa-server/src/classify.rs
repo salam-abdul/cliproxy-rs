@@ -318,7 +318,7 @@ pub fn is_transport(e: &ExecError) -> bool {
 
 /// `isCredentialRetryRoundStatus` or a transport fault (`isRequestRetryRoundError`).
 pub fn is_retry_round(e: &ExecError) -> bool {
-    is_transport(e) || matches!(e.status, 403 | 408 | 429 | 500 | 502 | 503 | 504)
+    is_transport(e) || crate::scheduler::retry_status(e.status)
 }
 
 /// `isExplicitModelNotFoundError` on an error text.
@@ -556,7 +556,7 @@ mod tests {
         scheduler.record(
             &credential,
             "m",
-            &crate::runtime::Outcome::Failure(error),
+            &crate::runtime::Outcome::failure(error),
             &crate::scheduler::Policy::default(),
             now,
         );

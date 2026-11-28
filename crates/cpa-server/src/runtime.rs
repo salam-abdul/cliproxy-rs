@@ -448,7 +448,7 @@ impl Runtime {
         match self.prepare_credential(&id, cfg, Trigger::Due).await {
             Ok(current) => lease.credential = current,
             Err(error) => {
-                lease.complete(Outcome::Failure(error.clone()));
+                lease.complete(Outcome::failure(error.clone()));
                 return Err(AcquireError::Prepare { id, error });
             }
         }
