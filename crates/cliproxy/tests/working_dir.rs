@@ -124,6 +124,7 @@ fn serve(root: &std::path::Path, env: &[(&str, &std::path::Path)]) -> std::proce
 }
 
 /// Every output line of `child` until one contains `needle` or 20 seconds pass.
+#[cfg(unix)]
 fn output_until(child: &mut std::process::Child, needle: &str) -> Vec<String> {
     use std::io::BufRead;
     let (tx, rx) = std::sync::mpsc::channel();
