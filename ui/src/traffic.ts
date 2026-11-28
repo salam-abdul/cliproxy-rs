@@ -26,6 +26,11 @@ const outcomes: Record<string, string> = {
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
   stream_error: "Response stream error",
+  upstream_stream_error: "Response stream error",
+  api_error: "Provider API error",
+  invalid_request_error: "Request rejected as invalid",
+  not_found_error: "Not found",
+  permission_error: "Permission denied",
 };
 const fallbackFailures: Record<string, string> = {
   unknown_model: "no provider serves it",

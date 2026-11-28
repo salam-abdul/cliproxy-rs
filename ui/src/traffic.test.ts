@@ -42,6 +42,17 @@ test("proxy send outcomes are labelled by status", () => {
   );
 });
 
+test("native error outcomes have their own labels", () => {
+  for (const [outcome, label] of [
+    ["upstream_stream_error", "Response stream error"],
+    ["api_error", "Provider API error"],
+    ["invalid_request_error", "Request rejected as invalid"],
+    ["not_found_error", "Not found"],
+    ["permission_error", "Permission denied"],
+  ])
+    assert.equal(outcomeLabel({ outcome }), label);
+});
+
 const tokens = (sends: number, exactSends: number) => ({
   uncachedInputTokens: 100,
   cacheReadTokens: 300,
