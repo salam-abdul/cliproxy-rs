@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   accountHealth,
-  historyFor,
   historyPollMs,
   requestBuckets,
 } from "./history.ts";
@@ -11,17 +10,6 @@ test("history reloads less often for a range with wider bars", () => {
   assert.equal(historyPollMs("24h"), 30_000);
   assert.equal(historyPollMs("7d"), 120_000);
   assert.equal(historyPollMs("30d"), 300_000);
-});
-
-test("filtered panels use history only for the selected provider and range", () => {
-  const codex = { range: "24h", provider: "codex" };
-  const every = { range: "24h", provider: "" };
-  assert.equal(historyFor(codex, "24h", "codex"), codex);
-  assert.equal(historyFor(every, "24h", ""), every);
-  assert.equal(historyFor(codex, "24h", ""), undefined);
-  assert.equal(historyFor(codex, "24h", "claude"), undefined);
-  assert.equal(historyFor(codex, "7d", "codex"), undefined);
-  assert.equal(historyFor(undefined, "24h", ""), undefined);
 });
 
 test("request buckets distinguish observed quiet intervals from gaps", () => {

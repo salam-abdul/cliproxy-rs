@@ -7,7 +7,7 @@
   import AccountDetail from "../AccountDetail.svelte";
   import { store, every } from "../store.svelte";
   import { accountStatus } from "../accounts";
-  import { historyFor, historyPollMs, requestBuckets } from "../history";
+  import { historyPollMs, requestBuckets } from "../history";
   import { checkAll } from "../quota";
   import { loadResets } from "../resets";
   import { credName, provider, label, resetSummary, type Data } from "../core";
@@ -65,7 +65,7 @@
       : undefined,
   );
   const panelData = $derived(
-    historyFor(store.history.data, store.historyRange, store.historyProvider),
+    historyData?.provider === store.historyProvider ? historyData : undefined,
   );
   // The selected provider stays listed while a reload has not returned it.
   const historyProviders = $derived.by(() => {
