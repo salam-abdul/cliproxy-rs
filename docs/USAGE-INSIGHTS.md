@@ -39,7 +39,7 @@ The fork had two stores. Neither answers the three questions alone.
 
 Facts that shape the design:
 
-- **The activity store starts inside native routing** (`native_claude.rs:1279`) and lives beside its event log. With native routing off there is no store.
+- **The activity store sits beside native routing's event log while native routing runs, and otherwise opens in the state folder** (`crates/cliproxy/src/main.rs:1164-1176`, called at `:1246-1248`).
 - **Its `requests` table is keyed by request ID and written with `INSERT OR REPLACE`** (`native_claude/history.rs:121`, `:375`), so a second row for the same request replaces the first.
 - **Native events carry timings the store drops**, measured from the request's arrival and summed across failovers (`native_claude.rs:849`, `native_claude/send.rs:200`; `native_claude/observation.rs:458`). Body history times the same send from its own start (`crates/cpa-server/src/request_logging/history/native.rs:133`).
 - **A translating-proxy request is measured only when the usage queue or body history is on** (`crates/cpa-server/src/dispatch.rs:931`). Otherwise no usage tracker runs and no response is scanned for token counts.

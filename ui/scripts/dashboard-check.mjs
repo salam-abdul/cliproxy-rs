@@ -269,7 +269,9 @@ try {
   }};
   await page.goto("http://dashboard.test/management.html#overview");
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0, "policy is absent from Overview");
-  assert.equal(await page.getByText("Loading history…").count(), 0, "servers without native routing do not promise history");
+  const accountCard = page.locator(".account-row", {has: page.getByRole("button", {name:"account-a.json", exact:true})});
+  await accountCard.getByText("2 requests", {exact:true}).waitFor({state:"attached"});
+  assert.equal(await accountCard.getByText("Not tracked", {exact:true}).count(), 0, "without native routing an account card shows its history, not Not tracked");
   assert.equal(await page.getByText(/Native Claude routing · Account switches/).count(), 0);
   const meter = page.getByRole("meter", {name:"5-hour limit remaining"});
   await meter.waitFor();
@@ -310,7 +312,8 @@ try {
 
   await page.setViewportSize({width:1280,height:900});
   // History without native routing: durable history and request bars on every card.
-  creds.push({ name: "codex-a.json", auth_index: "c", provider: "codex", status: "active" });
+  // An API-key Codex account reads no quota resets, so its drawer stays within the resets mock.
+  creds.push({ name: "codex-a.json", auth_index: "c", provider: "codex", account_type: "api_key", status: "active" });
   codexHistory = true;
   const mountLoads = historyChecks;
   await page.reload();
@@ -322,6 +325,13 @@ try {
   assert.equal(await page.getByText("Not tracked", {exact:true}).count(), 0, "every account card is tracked");
   await settle();
   assert.equal(historyChecks - mountLoads, 1, "history loads once at mount, not again when native status arrives");
+  await codexCard.getByRole("button", {name:"codex-a.json", exact:true}).click();
+  const codexDetail = page.getByRole("dialog", {name:/codex-a.json details/});
+  const usage = codexDetail.locator("section", {has: page.getByRole("heading", {name:"Usage history", exact:true})});
+  await usage.locator(".drawer-numbers div", {hasText:"requests"}).getByText("1", {exact:true}).waitFor();
+  assert.equal(await codexDetail.getByText("History could not be loaded", {exact:false}).count(), 0, "a Codex drawer shows its usage history");
+  await page.getByRole("button", {name:"Close", exact:true}).click();
+  await codexDetail.waitFor({state:"hidden"});
   creds.pop();
   codexHistory = false;
 
