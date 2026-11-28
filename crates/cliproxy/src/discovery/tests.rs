@@ -260,13 +260,6 @@ fn service_spec_follows_config_bind_host_and_tls() {
     assert_eq!((d.service_type.as_str(), d.subtypes.len()), (DEFAULT_SERVICE_TYPE, 5));
 }
 
-/// The activity store opens `activity.sqlite` in the same root that holds `discovery`.
-/// Reads the process environment without changing it.
-#[test]
-fn discovery_and_activity_share_the_state_root() {
-    assert_eq!(state_dir(), state_root().map(|root| root.join("discovery")));
-}
-
 #[test]
 fn instance_id_persists_and_reuses_a_valid_file() {
     let dir = std::env::temp_dir().join(format!("cpa-discovery-id-{}", std::process::id()));

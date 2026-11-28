@@ -99,9 +99,9 @@ fn a_missing_working_dir_fails_before_anything_runs() {
     assert!(stderr.contains("working directory"), "{stderr}");
 }
 
-/// Starts the server with only `env` beyond a temp `HOME`, waits for `store` to appear
-/// and stops it. The model catalog refresh goes to a dead loopback proxy.
-fn activity_store_opens_at(root: &std::path::Path, env: &[(&str, &std::path::Path)], store: &std::path::Path) {
+/// The server in `root` with a temp `HOME` and `env`, its output piped. The model catalog
+/// refresh goes to a dead loopback proxy.
+fn serve(root: &std::path::Path, env: &[(&str, &std::path::Path)]) -> std::process::Child {
     std::fs::create_dir_all(root.join("auth")).unwrap();
     std::fs::write(
         root.join("config.yaml"),
@@ -115,22 +115,67 @@ fn activity_store_opens_at(root: &std::path::Path, env: &[(&str, &std::path::Pat
         .env("HOME", root)
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .env("NO_PROXY", "localhost,127.0.0.1,::1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     for (key, value) in env {
         cmd.env(key, value);
     }
-    let mut child = cmd.spawn().unwrap();
+    cmd.spawn().unwrap()
+}
+
+/// Every output line of `child` until one contains `needle` or 20 seconds pass.
+fn output_until(child: &mut std::process::Child, needle: &str) -> Vec<String> {
+    use std::io::BufRead;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let streams: [Box<dyn std::io::Read + Send>; 2] = [
+        Box::new(child.stdout.take().unwrap()),
+        Box::new(child.stderr.take().unwrap()),
+    ];
+    for stream in streams {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !store.is_file() && std::time::Instant::now() < deadline {
+    let mut seen = Vec::new();
+    while !seen.iter().any(|line: &String| line.contains(needle)) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) => seen.push(line),
+            Err(_) => break,
+        }
+    }
+    seen
+}
+
+/// Waits up to 20 seconds for `path` while `child` runs.
+fn wait_for_file(child: &mut std::process::Child, path: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !path.is_file() && std::time::Instant::now() < deadline {
         if child.try_wait().unwrap().is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    path.is_file()
+}
+
+fn stop(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
-    let opened = store.is_file();
+}
+
+/// Starts the server with only `env` beyond a temp `HOME`, waits for `store` to appear
+/// and stops it.
+fn activity_store_opens_at(root: &std::path::Path, env: &[(&str, &std::path::Path)], store: &std::path::Path) {
+    let mut child = serve(root, env);
+    let opened = wait_for_file(&mut child, store);
+    stop(&mut child);
     let _ = std::fs::remove_dir_all(root);
     assert!(opened, "no activity store at {}", store.display());
 }
@@ -152,4 +197,31 @@ fn without_native_routing_or_writable_path_the_store_opens_in_the_user_config_fo
         root.join(".config")
     };
     activity_store_opens_at(&root, &[], &config.join("cpa/activity.sqlite"));
+}
+
+/// A second server with the same state folder leaves the store to the first, so the two
+/// never write one file.
+#[cfg(unix)]
+#[test]
+fn a_second_server_does_not_open_a_store_another_server_records_in() {
+    let root = scratch("activity-owner");
+    let state = root.join("state");
+    let (first_root, second_root) = (root.join("first"), root.join("second"));
+    let mut first = serve(&first_root, &[("WRITABLE_PATH", &state)]);
+    let opened = wait_for_file(&mut first, &state.join("activity.sqlite"));
+    let mut second = serve(&second_root, &[("WRITABLE_PATH", &state)]);
+    let output = output_until(&mut second, "another server records activity");
+    stop(&mut second);
+    stop(&mut first);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(opened, "the first server opened no store");
+    let refused = format!(
+        "another server records activity at {}",
+        state.join("activity.sqlite").display()
+    );
+    assert!(
+        output.iter().any(|line| line.contains(&refused)),
+        "{}",
+        output.join("\n")
+    );
 }
