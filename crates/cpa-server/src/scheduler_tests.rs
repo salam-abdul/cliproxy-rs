@@ -16,7 +16,7 @@ fn entitlement_cooldown_stays_bound_to_the_requested_account_and_model() {
         FailureScope::Credential,
         r#"{"error":{"code":"model_access_denied"}}"#,
     );
-    scheduler.record(&c, "blocked-model", &Outcome::Failure(error), &Policy::default(), now);
+    scheduler.record(&c, "blocked-model", &Outcome::failure(error), &Policy::default(), now);
     assert_eq!(
         scheduler.wait(&c, "blocked-model", now),
         Some(Duration::from_secs(43200))
@@ -274,11 +274,11 @@ fn secs(n: u64) -> Duration {
 fn hinted(scope: FailureScope, stated: Duration) -> Outcome {
     let mut e = ExecError::local(429, scope, "usage_limit_reached");
     e.retry_after = Some(stated);
-    Outcome::Failure(e)
+    Outcome::failure(e)
 }
 
 fn unhinted(scope: FailureScope) -> Outcome {
-    Outcome::Failure(ExecError::local(429, scope, "rate limited"))
+    Outcome::failure(ExecError::local(429, scope, "rate limited"))
 }
 
 fn entry<'a>(s: &'a Scheduler, c: &Credential, model: &str) -> &'a Cooldown {
@@ -386,7 +386,7 @@ fn a_reset_inside_another_cooldown_gets_the_bound() {
         s.record(
             &c,
             "m",
-            &Outcome::Failure(ExecError::local(status, scope, "earlier")),
+            &Outcome::failure(ExecError::local(status, scope, "earlier")),
             &p,
             start,
         );
@@ -739,7 +739,7 @@ fn an_earlier_credential_reset_shortens_inherited_model_windows() {
     let start = Instant::now();
     let mut s = Scheduler::default();
     let support = ExecError::local(400, FailureScope::Model, "model is not supported");
-    s.record(&c, "support", &Outcome::Failure(support), &p, start);
+    s.record(&c, "support", &Outcome::failure(support), &p, start);
     s.record(&c, "sibling", &unhinted(FailureScope::Model), &p, start);
     s.record(&c, "a", &hinted(FailureScope::Credential, secs(6 * 24 * H)), &p, start);
     let at = start + secs(MIN);
@@ -792,7 +792,7 @@ fn an_earlier_credential_reset_never_shortens_a_models_own_cooldown() {
     let c = cred("a", serde_json::json!({}));
     let p = Policy::default();
     let start = Instant::now();
-    let unauthorized = Outcome::Failure(ExecError::local(401, FailureScope::Credential, "unauthorized"));
+    let unauthorized = Outcome::failure(ExecError::local(401, FailureScope::Credential, "unauthorized"));
     for failing in ["a", "m"] {
         let mut s = Scheduler::default();
         s.record(&c, "m", &unauthorized, &p, start);
@@ -915,7 +915,7 @@ fn a_503_inside_a_bounded_window_keeps_it() {
     s.record(&c, "m", &hinted(FailureScope::Model, days), &p, now);
     let at = now + secs(30 * MIN);
     let unavailable = ExecError::local(503, FailureScope::Model, "overloaded");
-    s.record(&c, "m", &Outcome::Failure(unavailable), &p, at);
+    s.record(&c, "m", &Outcome::failure(unavailable), &p, at);
     let saved = &s.records(&c, at, wall + secs(30 * MIN))[0];
     assert!(saved.quota.exceeded);
     assert_eq!(saved.quota.next_recover_at, Some(wall + days));
@@ -932,7 +932,7 @@ fn a_cloudflare_challenge_inside_a_bounded_window_raises_the_level() {
     let start = Instant::now();
     let mut s = Scheduler::default();
     s.record(&c, "m", &hinted(FailureScope::Model, secs(6 * 24 * H)), &p, start);
-    let challenge = Outcome::Failure(ExecError::local(403, FailureScope::Model, "cloudflare challenge"));
+    let challenge = Outcome::failure(ExecError::local(403, FailureScope::Model, "cloudflare challenge"));
     for (n, level) in [(1, 1), (2, 2)] {
         s.record(&c, "m", &challenge, &p, start + secs(n * MIN));
         assert_eq!(entry(&s, &c, "m").level, level);
@@ -1038,7 +1038,7 @@ fn a_marked_sibling_restores_its_own_deadline() {
     let (now, wall) = (Instant::now(), SystemTime::now());
     let mut s = Scheduler::default();
     let support = ExecError::local(400, FailureScope::Model, "model is not supported");
-    s.record(&c, "b", &Outcome::Failure(support), &p, now);
+    s.record(&c, "b", &Outcome::failure(support), &p, now);
     assert_eq!(s.wait(&c, "b", now), Some(secs(12 * H)), "Go's model-support cooldown");
     s.record(&c, "a", &hinted(FailureScope::Credential, secs(6 * 24 * H)), &p, now);
     let records = s.records(&c, now, wall);
@@ -1092,7 +1092,7 @@ fn a_reset_inside_a_cloudflare_window_gets_the_first_bound() {
     let mut s = Scheduler::default();
     for _ in 0..5 {
         let challenge = ExecError::local(403, FailureScope::Model, "cloudflare challenge");
-        s.record(&c, "m", &Outcome::Failure(challenge), &p, now);
+        s.record(&c, "m", &Outcome::failure(challenge), &p, now);
         now += secs(1);
     }
     assert!(entry(&s, &c, "m").level >= 5);
@@ -1110,7 +1110,7 @@ fn cooldown_deadlines_floor_backoff_and_sibling_success() {
     let fail = |status, scope, hint| {
         let mut e = ExecError::local(status, scope, "failure");
         e.retry_after = hint;
-        Outcome::Failure(e)
+        Outcome::failure(e)
     };
     s.record(&c, "sibling", &fail(404, FailureScope::Model, None), &p, now);
     s.record(
@@ -1217,7 +1217,7 @@ fn cooldowns_match_go_mark_result() {
             s.record(
                 &c,
                 step["model"].as_str().unwrap(),
-                &Outcome::Failure(error),
+                &Outcome::failure(error),
                 &policy,
                 now,
             );
@@ -1309,7 +1309,7 @@ fn session_affinity_matches_go_selector() {
                     };
                     let mut e = ExecError::local(status, scope, step["message"].as_str().unwrap());
                     e.headers.insert("content-type", "text/plain".parse().unwrap());
-                    Outcome::Failure(e)
+                    Outcome::failure(e)
                 }
             };
             match step["op"].as_str().unwrap() {
@@ -1387,7 +1387,7 @@ fn delayed_failure_keeps_binding_made_after_policy_change() {
         .1
         .unwrap();
     assert!(fresh.access > old.access, "{} after {}", fresh.access, old.access);
-    let failure = Outcome::Failure(ExecError::local(500, FailureScope::Credential, "boom"));
+    let failure = Outcome::failure(ExecError::local(500, FailureScope::Credential, "boom"));
     s.session_result(&a, &sel, &failure, &p, Some(&old), now);
     let namespace = request.namespace("m");
     let kept = s.lcp.find(&namespace, request.prepared(), now);
@@ -1451,7 +1451,7 @@ fn policy_change_resets_rotation_and_affinity_but_keeps_cooldowns() {
     s.record(
         &a,
         "other",
-        &Outcome::Failure(ExecError::local(429, FailureScope::Model, "quota")),
+        &Outcome::failure(ExecError::local(429, FailureScope::Model, "quota")),
         &p,
         now,
     );
@@ -1482,7 +1482,7 @@ fn forced_cooling_uses_fallback_and_quota_does_not_reuse_transient_state() {
         s.record(
             &c,
             "m",
-            &Outcome::Failure(ExecError::local(status, FailureScope::Credential, "forced")),
+            &Outcome::failure(ExecError::local(status, FailureScope::Credential, "forced")),
             &Policy::default(),
             now,
         );
@@ -1502,10 +1502,10 @@ fn forced_cooling_uses_fallback_and_quota_does_not_reuse_transient_state() {
         ..Policy::default()
     };
     let mut s = Scheduler::default();
-    let forced = Outcome::Failure(ExecError::local(503, FailureScope::Credential, "forced"));
+    let forced = Outcome::failure(ExecError::local(503, FailureScope::Credential, "forced"));
     s.record(&c, "m", &forced, &no_transient, now);
     assert_eq!(s.wait(&c, "m", now), Some(Duration::from_secs(60)));
-    let plain = Outcome::Failure(ExecError::local(503, FailureScope::Credential, "plain"));
+    let plain = Outcome::failure(ExecError::local(503, FailureScope::Credential, "plain"));
     let mut s = Scheduler::default();
     s.record(&c, "m", &plain, &no_transient, now);
     assert_eq!(
@@ -1519,14 +1519,14 @@ fn forced_cooling_uses_fallback_and_quota_does_not_reuse_transient_state() {
     s.record(
         &c,
         "m",
-        &Outcome::Failure(ExecError::local(503, FailureScope::Model, "transient")),
+        &Outcome::failure(ExecError::local(503, FailureScope::Model, "transient")),
         &p,
         now,
     );
     s.record(
         &c,
         "m",
-        &Outcome::Failure(ExecError::local(429, FailureScope::Model, "quota")),
+        &Outcome::failure(ExecError::local(429, FailureScope::Model, "quota")),
         &p,
         now,
     );
@@ -1541,7 +1541,7 @@ fn forced_cooling_uses_fallback_and_quota_does_not_reuse_transient_state() {
     );
     let mut hint = ExecError::local(418, FailureScope::Model, "other status");
     hint.retry_after = Some(Duration::from_secs(900));
-    s.record(&c, "other", &Outcome::Failure(hint), &p, now);
+    s.record(&c, "other", &Outcome::failure(hint), &p, now);
     assert_eq!(
         s.wait(&c, "other", now),
         Some(Duration::from_secs(60)),
@@ -1611,7 +1611,7 @@ fn rules_are_ordered_status_and_body_matches_with_canonical_precedence() {
     assert!(action.cooldown && action.force_cooldown);
     let now = Instant::now();
     let mut s = Scheduler::default();
-    s.record(&c, "m", &Outcome::Failure(e), &p, now);
+    s.record(&c, "m", &Outcome::failure(e), &p, now);
     assert!(
         s.wait(&c, "m", now).is_some(),
         "force cooling bypasses disabled cooling"
@@ -1690,7 +1690,7 @@ fn rules_are_ordered_status_and_body_matches_with_canonical_precedence() {
         s.record(
             &c,
             "m",
-            &Outcome::Failure(ExecError::local(502, scope, "fault")),
+            &Outcome::failure(ExecError::local(502, scope, "fault")),
             &p,
             now,
         );
@@ -1770,7 +1770,7 @@ fn soonest_reset_spends_the_earliest_weekly_window_first() {
     s.record(
         &b,
         "m",
-        &Outcome::Failure(ExecError::local(429, FailureScope::Credential, "quota")),
+        &Outcome::failure(ExecError::local(429, FailureScope::Credential, "quota")),
         &policy,
         now,
     );
@@ -2506,4 +2506,32 @@ fn a_zero_second_codex_reset_is_no_reset() {
         readings("codex", &hour, now)[0].reset,
         Some(now + Duration::from_secs(3600))
     );
+}
+
+/// A failure that carries its error rule action is recorded by that action: the
+/// scheduler does not evaluate the credential's rules again.
+#[test]
+fn a_carried_action_decides_the_cooldown() {
+    let now = Instant::now();
+    let c = cred(
+        "a",
+        serde_json::json!({"request_scoped_errors":[{"status":503,"match":["forced"],"action":"continue-and-cooldown"}]}),
+    );
+    let p = Policy::default();
+    let forced = ExecError::local(503, FailureScope::Credential, "forced");
+    let mut s = Scheduler::default();
+    s.record(&c, "m", &Outcome::failure(forced.clone()), &p, now);
+    assert!(s.wait(&c, "m", now).is_some(), "the credential's rule cools it");
+    let carried = Outcome::Failure {
+        error: forced,
+        action: Some(ErrorAction {
+            matched: true,
+            stop: false,
+            cooldown: false,
+            force_cooldown: false,
+        }),
+    };
+    let mut s = Scheduler::default();
+    s.record(&c, "m", &carried, &p, now);
+    assert_eq!(s.wait(&c, "m", now), None);
 }

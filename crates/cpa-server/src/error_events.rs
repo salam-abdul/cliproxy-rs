@@ -208,7 +208,7 @@ mod tests {
                 let hint = step["retry_after_ms"].as_i64().unwrap();
                 error.retry_after = (hint >= 0).then(|| Duration::from_millis(hint as u64));
                 let model = step["model"].as_str().unwrap();
-                s.record(&c, model, &Outcome::Failure(error.clone()), &policy, now);
+                s.record(&c, model, &Outcome::failure(error.clone()), &policy, now);
                 let mut got: Value =
                     serde_json::from_slice(&payload(&c, model, &error, &s.records(&c, now, wall))).unwrap();
                 normalize(&mut got, wall);

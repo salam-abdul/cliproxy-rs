@@ -3,7 +3,12 @@ use super::*;
 #[derive(Debug, Clone)]
 pub enum Outcome {
     Success,
-    Failure(ExecError),
+    Failure {
+        error: ExecError,
+        /// The credential's error rule action as dispatch decided it, under the lease's
+        /// policy. `None` has the scheduler evaluate it.
+        action: Option<crate::scheduler::ErrorAction>,
+    },
     /// A failure that must not change availability (compact request faults, a
     /// missing count_tokens endpoint).
     Neutral(ExecError),
@@ -31,7 +36,20 @@ pub struct Lease {
     pub lcp: Option<crate::lcp::Match>,
 }
 
+impl Outcome {
+    /// A failure whose error rule action the scheduler evaluates.
+    pub fn failure(error: ExecError) -> Self {
+        Self::Failure { error, action: None }
+    }
+}
+
 impl Lease {
+    /// Whether the lease records its outcome under `policy`, so an error rule action
+    /// decided under it holds for the record.
+    pub(crate) fn records_under(&self, policy: &Policy) -> bool {
+        std::ptr::eq(&*self.policy, policy)
+    }
+
     /// Whether the credential came from the remote dispatcher (Go Home mode).
     pub fn is_remote(&self) -> bool {
         self.remote.is_some()
@@ -133,7 +151,7 @@ impl CredentialStore {
     fn record_model(&self, lease: &Lease, model: &str, outcome: &Outcome) {
         let slot = match outcome {
             Outcome::Success => 0,
-            Outcome::Failure(_) | Outcome::Neutral(_) => 1,
+            Outcome::Failure { .. } | Outcome::Neutral(_) => 1,
             Outcome::Cancelled => 2,
         };
         self.stats[slot].fetch_add(1, Ordering::Relaxed);
@@ -177,7 +195,8 @@ impl CredentialStore {
                 now,
             );
             // Go `publishErrorEvent` after MarkResult (and the availability-neutral record).
-            if let (Outcome::Failure(error) | Outcome::Neutral(error), Some(queue)) = (outcome, self.error_events.get())
+            if let (Outcome::Failure { error, .. } | Outcome::Neutral(error), Some(queue)) =
+                (outcome, self.error_events.get())
                 && queue.wants_errors()
             {
                 let records = scheduler.records(&lease.credential, now, wall);
@@ -278,7 +297,7 @@ impl Stream for Completing {
                 // The upstream body closes before the lease ends: a remote lease's release
                 // must not reach the control plane while the response is still open.
                 s.inner = Box::pin(futures_util::stream::empty());
-                s.lease.take().unwrap().complete(Outcome::Failure(e.clone()));
+                s.lease.take().unwrap().complete(Outcome::failure(e.clone()));
             }
         }
         Poll::Ready(item)

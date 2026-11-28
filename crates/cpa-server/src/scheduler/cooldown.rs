@@ -369,7 +369,10 @@ impl Scheduler {
         }
         match outcome {
             Outcome::Success => self.record_success(id, model, picked, now),
-            Outcome::Failure(error) => self.record_failure(c, rules, model, error, policy, picked, now),
+            Outcome::Failure { error, action } => {
+                let action = action.unwrap_or_else(|| policy.error_action_with(rules, c, error));
+                self.record_failure(c, model, error, action, policy, picked, now);
+            }
             Outcome::Cancelled | Outcome::Neutral(_) => {}
         }
     }
@@ -411,20 +414,19 @@ impl Scheduler {
         }
     }
 
-    /// A failure's cooldown, by cause.
+    /// A failure's cooldown under the error rule `action`, by cause.
     #[allow(clippy::too_many_arguments)]
     fn record_failure(
         &mut self,
         c: &Credential,
-        rules: Option<&[ErrorRule]>,
         model: &str,
         error: &ExecError,
+        action: ErrorAction,
         policy: &Policy,
         picked: u32,
         now: Instant,
     ) {
         let id = c.id.as_str();
-        let action = policy.error_action_with(rules, c, error);
         if !action.cooldown {
             return;
         }

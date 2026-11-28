@@ -255,7 +255,7 @@ async fn refresh_and_reload_preserve_active_quota_cooldowns() {
             .unwrap();
     let mut quota = ExecError::local(429, FailureScope::Credential, "usage_limit_reached");
     quota.retry_after = Some(Duration::from_secs(600));
-    lease.complete(Outcome::Failure(quota));
+    lease.complete(Outcome::failure(quota));
     let before = f.rt.store().cooldowns("account.json");
     assert_eq!(before.len(), 1);
     assert!(before[0].quota);
