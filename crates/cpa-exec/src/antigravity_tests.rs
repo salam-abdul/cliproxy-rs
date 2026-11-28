@@ -934,8 +934,11 @@ async fn bound_level_model_keeps_the_thinking_level() {
 }
 
 /// Runs the scenario `name` against `upstream` (none: nothing listens) on a fresh
-/// executor with a recording usage sink; returns the reports.
-async fn recorded_marks(name: &str, upstream: Option<&Value>) -> Vec<crate::openai_compat_usage::Report> {
+/// executor with a recording usage sink; returns the reports and how the answer ended.
+async fn recorded_marks(
+    name: &str,
+    upstream: Option<&Value>,
+) -> (Vec<crate::openai_compat_usage::Report>, Result<Vec<u8>, u16>) {
     let s = scenario(name);
     let mock = match upstream {
         Some(up) => Some(Mock::start(up).await),
@@ -949,34 +952,22 @@ async fn recorded_marks(name: &str, upstream: Option<&Value>) -> Vec<crate::open
     let answer = AntigravityExecutor::default()
         .execute(&credential(s, &addr), req, &cfg)
         .await;
-    crate::gemini::tests::answer_bytes(answer).await;
-    std::mem::take(&mut *recorder.0.lock().unwrap())
+    let outcome = crate::gemini::tests::answer_outcome(answer).await;
+    (std::mem::take(&mut *recorder.0.lock().unwrap()), outcome)
 }
 
-/// Generate, merged-stream and stream sends mark the start of their round trip, then
-/// the first non-empty body chunk once, whether it carries an answer or an error. A
-/// send refused before an answer, or answered without a body, marks no first byte.
+/// Generate, merged-stream and stream sends mark their round trip and first body byte
+/// ([`crate::gemini::tests::check_first_byte_marks`]).
 #[tokio::test]
 async fn sends_mark_the_round_trip_and_the_first_body_byte() {
-    let (rejected, empty) = (
-        crate::gemini::tests::rejected_upstream(),
-        crate::gemini::tests::empty_upstream(),
-    );
     for name in [
         "gemini_execute_basic",
         "gemini_pro_execute_merges_stream",
         "gemini_stream",
     ] {
-        let answer = &scenario(name)["upstream"];
-        assert!(!answer["body"].as_str().unwrap().is_empty(), "{name}");
-        for (label, upstream, body_arrived) in [
-            ("answer", Some(answer), true),
-            ("rejected", Some(&rejected), true),
-            ("empty", Some(&empty), false),
-            ("refused", None, false),
-        ] {
-            let reports = recorded_marks(name, upstream).await;
-            crate::gemini::tests::assert_first_byte_marks(&format!("{name} {label}"), &reports, body_arrived);
-        }
+        crate::gemini::tests::check_first_byte_marks(name, &scenario(name)["upstream"], async |upstream| {
+            recorded_marks(name, upstream).await
+        })
+        .await;
     }
 }

@@ -460,8 +460,7 @@ impl VertexExecutor {
         let client = self.client(credential, cfg);
         let body = Bytes::from(body);
         let upstream = g::send_captured(
-            capture,
-            &req.usage,
+            req,
             credential,
             PROVIDER,
             &client,
@@ -530,18 +529,7 @@ impl VertexExecutor {
         let capture = req.capture();
         let client = self.client(credential, cfg);
         let body = Bytes::from(body);
-        let upstream = g::send_captured(
-            capture,
-            &req.usage,
-            credential,
-            PROVIDER,
-            &client,
-            &url,
-            headers,
-            body.clone(),
-            false,
-        )
-        .await?;
+        let upstream = g::send_captured(req, credential, PROVIDER, &client, &url, headers, body.clone(), false).await?;
         if !(200..300).contains(&upstream.status) {
             return Err(g::error_from(capture, upstream).await);
         }

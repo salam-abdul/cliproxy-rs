@@ -276,12 +276,12 @@ pub(crate) use crate::kimi_http::capture_metadata;
 /// `RecordAPIRequest`, `Client.Do`, then `RecordAPIResponseMetadata`, or
 /// `RecordAPIResponseError` when the request fails. `lines`: the caller scans the body
 /// line by line, so a body cut short fails with Go's `unexpected EOF`
-/// ([`proxy::send_scanned`]). `usage` times the attempt's first response from this
-/// send's start to the first upstream body byte, of an answer or an error alike.
+/// ([`proxy::send_scanned`]). The request's usage sink times the attempt's first
+/// response from this send's start to the first upstream body byte, of an answer or an
+/// error alike.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_captured(
-    capture: &CaptureSink,
-    usage: &cpa_core::exec::UsageSink,
+    req: &ExecRequest,
     credential: &Credential,
     provider: &str,
     client: &wreq::Client,
@@ -290,6 +290,7 @@ pub(crate) async fn send_captured(
     body: Bytes,
     lines: bool,
 ) -> Result<Upstream, ExecError> {
+    let (capture, usage) = (req.capture(), &req.usage);
     capture_request(capture, credential, provider, url, headers.pairs(), &body);
     usage.round_trip_started();
     let sent = if lines {
@@ -475,8 +476,7 @@ impl GeminiExecutor {
         // One buffer for the send, the request log and the translators below.
         let body = Bytes::from(body);
         let upstream = send_captured(
-            capture,
-            &req.usage,
+            req,
             credential,
             identifier(credential),
             &client,
@@ -558,8 +558,7 @@ impl GeminiExecutor {
         // One buffer for the send, the request log and the translators below.
         let body = Bytes::from(body);
         let upstream = send_captured(
-            capture,
-            &req.usage,
+            req,
             credential,
             identifier(credential),
             &client,
@@ -621,8 +620,7 @@ impl GeminiExecutor {
         // One buffer for the send, the request log and the translators below.
         let body = Bytes::from(body);
         let upstream = send_captured(
-            capture,
-            &req.usage,
+            req,
             credential,
             identifier(credential),
             &client,

@@ -111,7 +111,7 @@
       {#if data.untimed > 0}{data.untimed} of {data.requests} completed requests have no timing and are left out.{/if}
       {#if data.lostEvents > 0}{data.lostEvents} events could not be saved.{/if}
       {#if data.coverageUncertain}Coverage is uncertain for this period.{/if}
-      First event marks a first response timed at the first translated event rather than the first byte.
+      First event marks a first response timed at the first translated event or packet rather than the first byte.
     </p>
   {/if}
 </section>
