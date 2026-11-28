@@ -88,7 +88,7 @@ export function slowLines(data: Data, providerName: (id: string) => string, cred
   });
 }
 
-/** The table rows; `firstEvent` marks rows whose first response is the first translated event. */
+/** The table rows; `firstEvent` marks rows whose first response is the first translated event or packet. */
 export function speedRows(data: Data): Row[] {
   return list(data.rows).map((r) => ({
     provider: String(r.provider),

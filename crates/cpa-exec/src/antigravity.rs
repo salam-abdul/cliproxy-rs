@@ -610,17 +610,7 @@ impl AntigravityExecutor {
         headers.set("User-Agent", ag::user_agent(credential));
         gemini::set_custom_headers(&mut headers, credential, req);
         let client = self.client(credential, cfg);
-        gemini::send_captured(
-            req.capture(),
-            credential,
-            PROVIDER,
-            &client,
-            &url,
-            headers,
-            body.into(),
-            stream,
-        )
-        .await
+        gemini::send_captured(req, credential, PROVIDER, &client, &url, headers, body.into(), stream).await
     }
 
     /// `Execute` for Gemini-family models: one `generateContent` answer.
@@ -908,17 +898,8 @@ impl AntigravityExecutor {
         headers.set("User-Agent", ag::user_agent(credential));
         gemini::set_custom_headers(&mut headers, credential, &req);
         let client = self.client(credential, cfg);
-        let upstream = gemini::send_captured(
-            req.capture(),
-            credential,
-            PROVIDER,
-            &client,
-            &url,
-            headers,
-            body.into(),
-            false,
-        )
-        .await?;
+        let upstream =
+            gemini::send_captured(&req, credential, PROVIDER, &client, &url, headers, body.into(), false).await?;
         let (status, response_headers) = (upstream.status, upstream.headers.clone());
         let ok = (200..300).contains(&status);
         let limit = if ok { usize::MAX } else { proxy::MAX_ERROR_BODY };

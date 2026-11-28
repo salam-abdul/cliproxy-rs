@@ -554,3 +554,46 @@ async fn claude_target_eof_requires_vertex_finish_signal() {
         }
     }
 }
+
+fn scenario(name: &str) -> &'static Value {
+    fixture()["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap()
+}
+
+/// Runs the API-key scenario `name` against `upstream` (none: nothing listens) with a
+/// recording usage sink; returns the reports and how the answer ended.
+async fn recorded_marks(
+    name: &str,
+    upstream: Option<&Value>,
+) -> (Vec<crate::openai_compat_usage::Report>, Result<Vec<u8>, u16>) {
+    let s = scenario(name);
+    let plain = match upstream {
+        Some(reply) => Some(Capture::start(vec![reply.clone()], false).await),
+        None => None,
+    };
+    let addr = plain.as_ref().map_or("127.0.0.1:9".to_owned(), |p| p.addr.clone());
+    let cfg = Config::parse(&s["config"].as_str().unwrap_or_default().replace("UPSTREAM", &addr)).unwrap();
+    let cred = credential(s, &cfg, &addr, "127.0.0.1:9");
+    let mut req = request(s);
+    let recorder = Arc::new(crate::openai_compat_usage::Recorder::default());
+    req.usage = cpa_core::exec::UsageSink::new(recorder.clone());
+    let answer = VertexExecutor::default().execute(&cred, req, &cfg).await;
+    let outcome = crate::gemini::tests::answer_outcome(answer).await;
+    (std::mem::take(&mut *recorder.0.lock().unwrap()), outcome)
+}
+
+/// Vertex generate and stream sends mark their round trip and first body byte
+/// ([`crate::gemini::tests::check_first_byte_marks`]).
+#[tokio::test]
+async fn sends_mark_the_round_trip_and_the_first_body_byte() {
+    for name in ["key_generate_alias_headers", "key_stream_trailing_slash_base"] {
+        crate::gemini::tests::check_first_byte_marks(name, &scenario(name)["replies"][0], async |upstream| {
+            recorded_marks(name, upstream).await
+        })
+        .await;
+    }
+}

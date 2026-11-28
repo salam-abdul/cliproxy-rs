@@ -43,7 +43,7 @@ Facts that shape the design:
 - **Its `requests` table is keyed by request ID and written with `INSERT OR REPLACE`** (`native_claude/history.rs:121`, `:375`), so a second row for the same request replaces the first.
 - **Native events carry timings the store drops**, measured from the request's arrival and summed across failovers (`native_claude.rs:849`, `native_claude/send.rs:200`; `native_claude/observation.rs:458`). Body history times the same send from its own start (`crates/cpa-server/src/request_logging/history/native.rs:133`).
 - **A translating-proxy request is measured only when the usage queue or body history is on** (`crates/cpa-server/src/dispatch.rs:931`). Otherwise no usage tracker runs and no response is scanned for token counts.
-- **Time to first byte has three meanings.** Native routing measures the first response byte. Claude, Kimi, xAI, Devin and Meta report the first token, else the first packet. Codex, Gemini and Antigravity report nothing, so the figure is the first translated event or the response headers (`crates/cpa-server/src/usage_record.rs:2097`).
+- **Time to first byte depends on the route and provider.** Native routing measures the first response byte. On the translating proxy Claude, Codex, xAI, Kimi, Devin, Gemini, Vertex and Antigravity report the first upstream body byte, or over a WebSocket the first non-empty message; Meta reports the first byte of a whole answer and the first packet of a stream. AI Studio and OpenAI-compatible providers report nothing, so the figure is the first translated event or the response headers (`crates/cpa-server/src/usage_record.rs:2286`).
 - **Stage timings exist for Claude only** on the translating proxy (`usage_record.rs:1299`), and they count from the request's arrival, not the send.
 - **A quota-refused native request served by a fallback model** is recorded by native routing and sent through the translating proxy under a second ID (`native_claude/fallback.rs:151`).
 - **Stored bodies hold the upstream form of tool names.** The Claude executor renames a client's tools to aliases keyed by the client key when it cloaks a request (`crates/cpa-exec/src/claude/alias.rs:4`), and the Codex translator shortens names over 64 bytes (`crates/cpa-translate/src/codex_names.rs:17`). Native rows keep the client's names.
@@ -118,7 +118,7 @@ Built. [Configuration](CONFIGURATION.md#activity-store) owns the speed route, it
 
 - The route is `GET /v8/management/observability/speed`, with the activity route's `range`, `provider` and `credential` and an `offset` in minutes east of UTC for the hour slice.
 - Codex sends record the first upstream byte, as Claude's do, so new Codex rows have kind `byte`. Codex sends stored before that mark keep kind `event`, and rows of different kinds are never merged.
-- Gemini and Antigravity still report no first-byte mark: their first response is the first translated event, kind `event`, and the Speed table marks those rows.
+- AI Studio and OpenAI-compatible providers report no first-byte mark: their first response is the first translated event, kind `event`, and the Speed table marks those rows, as it does streamed Meta rows, timed by their first packet.
 - On the translating proxy a send starts when its attempt starts, so its first response includes the executor's preparation before the upstream request, such as a WebSocket dial or token refresh.
 
 ### Part 4: tools and skills
@@ -143,7 +143,6 @@ Each is its own change.
 
 | Decision | Proposal |
 | --- | --- |
-| First-byte marks in the Gemini and Antigravity executors | Codex has one. Add them for Gemini and Antigravity, so their time to first response is comparable; until then the Speed table marks their rows as timed by the first event. |
 | Label thresholds | The numbers in parts 3 and 4 are first guesses, to be tuned on real data. |
 
 ## Left to the builder

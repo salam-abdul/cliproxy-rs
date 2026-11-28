@@ -932,3 +932,42 @@ async fn bound_level_model_keeps_the_thinking_level() {
     assert_eq!(thinking.get("thinkingLevel").str(), "medium", "{wire}");
     assert!(!thinking.get("thinkingBudget").exists(), "{wire}");
 }
+
+/// Runs the scenario `name` against `upstream` (none: nothing listens) on a fresh
+/// executor with a recording usage sink; returns the reports and how the answer ended.
+async fn recorded_marks(
+    name: &str,
+    upstream: Option<&Value>,
+) -> (Vec<crate::openai_compat_usage::Report>, Result<Vec<u8>, u16>) {
+    let s = scenario(name);
+    let mock = match upstream {
+        Some(up) => Some(Mock::start(up).await),
+        None => None,
+    };
+    let addr = mock.as_ref().map_or("127.0.0.1:9".to_owned(), |m| m.addr().to_owned());
+    let cfg = Config::parse(s["config"].as_str().unwrap_or_default()).unwrap();
+    let mut req = request(s);
+    let recorder = Arc::new(crate::openai_compat_usage::Recorder::default());
+    req.usage = cpa_core::exec::UsageSink::new(recorder.clone());
+    let answer = AntigravityExecutor::default()
+        .execute(&credential(s, &addr), req, &cfg)
+        .await;
+    let outcome = crate::gemini::tests::answer_outcome(answer).await;
+    (std::mem::take(&mut *recorder.0.lock().unwrap()), outcome)
+}
+
+/// Generate, merged-stream and stream sends mark their round trip and first body byte
+/// ([`crate::gemini::tests::check_first_byte_marks`]).
+#[tokio::test]
+async fn sends_mark_the_round_trip_and_the_first_body_byte() {
+    for name in [
+        "gemini_execute_basic",
+        "gemini_pro_execute_merges_stream",
+        "gemini_stream",
+    ] {
+        crate::gemini::tests::check_first_byte_marks(name, &scenario(name)["upstream"], async |upstream| {
+            recorded_marks(name, upstream).await
+        })
+        .await;
+    }
+}
