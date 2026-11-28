@@ -12,28 +12,23 @@
   import { loadResets } from "../resets";
   import { credName, provider, label, resetSummary, type Data } from "../core";
   $effect(() => every(15000, () => store.creds.load(true), true));
-  const enabled = $derived(!!store.native.data?.enabled);
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.history.data = undefined;
   });
   // A provider change keeps the loaded history for the account cards and the drawer.
   $effect(() => {
-    if (!enabled) return;
     store.historyProvider;
     store.history.error = null;
     return every(historyPollMs(store.historyRange), () => store.history.load(true), true);
   });
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.providerActivity.data = undefined;
     store.providerActivity.error = null;
     return every(60000, () => store.providerActivity.load(true), true);
   });
   $effect(() => {
-    if (!enabled) return;
     store.historyRange;
     store.speed.data = undefined;
     store.speed.error = null;
@@ -109,9 +104,10 @@
           store.serverNow,
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
-        const recent = n?.id
-          ? requestBuckets(historyData || {}, { credential: n.fileId, id: n.id })
-          : [];
+        const recent = requestBuckets(historyData || {}, {
+          credential: a.id || a.name,
+          id: n?.id ?? "",
+        });
         return { a, n, rank, state, recent };
       })
       .sort(
@@ -133,7 +129,7 @@
     <h1>Overview</h1>
     <p class="muted small">Accounts, capacity, and history in one place.</p>
   </div>
-  {#if native?.enabled}<div class="history-controls">
+  <div class="history-controls">
       <select aria-label="History provider" bind:value={store.historyProvider}>
         <option value="">All providers</option>
         {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
@@ -146,7 +142,7 @@
           >
         {/each}
       </div>
-    </div>{/if}
+    </div>
 </div>
 {#if !store.creds.error && (store.native.error || !store.online)}
   <p class="alert">Refresh failed. Showing the last readings.</p>
@@ -195,8 +191,7 @@
         </div>
         <QuotaBrief {a} compact />
         <div class="account-history-wrap">
-          {#if !native?.enabled || !n?.id}<span class="muted account-history-note">Not tracked</span>
-          {:else if recent.length}<span class="quota-caption"
+          {#if recent.length}<span class="quota-caption"
               ><span>Last {store.historyRange}</span><strong class="num"
                 >{recent.reduce((sum, b) => sum + b.requests, 0)} requests</strong
               ></span
@@ -219,7 +214,7 @@
       </div>{/each}
   </div>{/snippet}</Load>
 </section>
-{#if native?.enabled}<HistoryPanels data={panelData} /><ProviderActivity data={activityData} /><Speed data={speedData} />{/if}
+<HistoryPanels data={panelData} /><ProviderActivity data={activityData} /><Speed data={speedData} />
 
 {#if selected}{#key selectedId}<AccountDetail a={selected} onclose={() => (selectedId = "")} />{/key}{/if}
 

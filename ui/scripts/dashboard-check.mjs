@@ -14,7 +14,7 @@ let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, 
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 const historyUrls = [];
 let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
-let activityChecks = 0, activityConflict = false;
+let activityChecks = 0, activityConflict = false, codexHistory = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
 let toolsChecks = 0, toolsConflict = false, toolsFailure = false, toolsPending = [];
 const statusCalls = [], deleteBodies = [], apiCalls = [];
@@ -68,7 +68,8 @@ await page.route("**/*", async route => {
       tokens:models.reduce((t, m) => tokens(t.uncachedInputTokens + m.uncachedInputTokens, t.cacheReadTokens + m.cacheReadTokens,
         t.cacheWriteTokens + m.cacheWriteTokens, t.outputTokens + m.outputTokens, t.sends + m.sends, t.exactSends + m.exactSends), tokens(0,0,0,0,0,0)),
       models,modelsTruncated:false,
-      accountBuckets:[{credential:"account-a.json",at:last,requests:2,failures:1}],
+      accountBuckets:[{credential:"account-a.json",at:last,requests:2,failures:1},
+        ...(codexHistory ? [{credential:"codex-a.json",at:last,requests:1,failures:0}] : [])],
       statuses:[{account:"a",model:"claude",at:now-600000,availability:"included",fiveHourUsed:23}]});
   }
   if (path === "/v8/management/observability/activity") {
@@ -308,6 +309,22 @@ try {
   await page.getByRole("button", {name:"Close",exact:true}).click();
 
   await page.setViewportSize({width:1280,height:900});
+  // History without native routing: durable history and request bars on every card.
+  creds.push({ name: "codex-a.json", auth_index: "c", provider: "codex", status: "active" });
+  codexHistory = true;
+  const mountLoads = historyChecks;
+  await page.reload();
+  const codexCard = page.locator(".account-row", {has: page.getByRole("button", {name:"codex-a.json", exact:true})});
+  await codexCard.getByText("1 requests", {exact:true}).waitFor();
+  assert.ok(await codexCard.locator(".account-history span.served").count() > 0, "a Codex card draws its request bars");
+  await page.getByRole("group", {name:"History range"}).waitFor();
+  await page.getByRole("heading", {name:"Top models", exact:true}).waitFor();
+  assert.equal(await page.getByText("Not tracked", {exact:true}).count(), 0, "every account card is tracked");
+  await settle();
+  assert.equal(historyChecks - mountLoads, 1, "history loads once at mount, not again when native status arrives");
+  creds.pop();
+  codexHistory = false;
+
   delete creds[0].quota;
   requireKey = true;
   native = false;
