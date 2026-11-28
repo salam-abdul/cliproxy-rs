@@ -1159,6 +1159,22 @@ fn ensure_auth_dir(dir: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// Opens the activity store in the state root when native routing, which keeps it beside
+/// its event log, does not run. A store that cannot open leaves the server running.
+#[cfg(not(test))]
+fn start_default_activity(rt: &Runtime) {
+    let Some(root) = discovery::state_root() else {
+        tracing::warn!("Activity store is unavailable: no writable path or user config folder");
+        return;
+    };
+    let started = std::fs::create_dir_all(&root)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| rt.start_activity(root.join("activity.sqlite")));
+    if let Err(error) = started {
+        tracing::warn!(%error, "Activity store is unavailable");
+    }
+}
+
 /// `listening` (standalone TUI only) receives the bound address and whether TLS is on.
 #[allow(clippy::too_many_arguments)]
 async fn serve(
@@ -1225,6 +1241,11 @@ async fn serve(
     // overlay; without it they see only the static catalog.
     cpa_server::install_registry(&rt);
     let native_router = cpa_server::native_claude::start(rt.clone()).await?;
+    // In-process tests must not write to the user's config folder.
+    #[cfg(not(test))]
+    if native_router.is_none() {
+        start_default_activity(&rt);
+    }
     rt.start_auto_refresh();
     let options = cpa_server::management::Options {
         local_password: password,

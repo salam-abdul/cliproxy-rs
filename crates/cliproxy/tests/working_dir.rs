@@ -98,3 +98,58 @@ fn a_missing_working_dir_fails_before_anything_runs() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("working directory"), "{stderr}");
 }
+
+/// Starts the server with only `env` beyond a temp `HOME`, waits for `store` to appear
+/// and stops it. The model catalog refresh goes to a dead loopback proxy.
+fn activity_store_opens_at(root: &std::path::Path, env: &[(&str, &std::path::Path)], store: &std::path::Path) {
+    std::fs::create_dir_all(root.join("auth")).unwrap();
+    std::fs::write(
+        root.join("config.yaml"),
+        "config-version: 8\nhost: 127.0.0.1\nport: 0\nauth-dir: ./auth\napi-keys: [fake-client]\n",
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cliproxy"));
+    cmd.current_dir(root)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", root)
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !store.is_file() && std::time::Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let opened = store.is_file();
+    let _ = std::fs::remove_dir_all(root);
+    assert!(opened, "no activity store at {}", store.display());
+}
+
+#[test]
+fn without_native_routing_the_activity_store_opens_under_writable_path() {
+    let root = scratch("activity-writable");
+    let state = root.join("state");
+    activity_store_opens_at(&root, &[("WRITABLE_PATH", &state)], &state.join("activity.sqlite"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn without_native_routing_or_writable_path_the_store_opens_in_the_user_config_folder() {
+    let root = scratch("activity-config");
+    let config = if cfg!(target_os = "macos") {
+        root.join("Library/Application Support")
+    } else {
+        root.join(".config")
+    };
+    activity_store_opens_at(&root, &[], &config.join("cpa/activity.sqlite"));
+}

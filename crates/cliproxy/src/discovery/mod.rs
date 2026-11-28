@@ -141,6 +141,12 @@ fn is_hex4(s: &str) -> bool {
 
 /// Go `ResolveDiscoveryStateDir`: `$WRITABLE_PATH/discovery`, else the user config dir.
 pub fn state_dir() -> Option<PathBuf> {
+    state_root().map(|root| root.join("discovery"))
+}
+
+/// `$WRITABLE_PATH`, else `cpa` in the user config dir: the folder that holds discovery
+/// state and, without native routing, the activity store.
+pub fn state_root() -> Option<PathBuf> {
     let trimmed = |k: &str| {
         std::env::var(k)
             .ok()
@@ -148,7 +154,7 @@ pub fn state_dir() -> Option<PathBuf> {
             .filter(|v| !v.is_empty())
     };
     if let Some(w) = trimmed("WRITABLE_PATH").or_else(|| trimmed("writable_path")) {
-        return Some(Path::new(&w).join("discovery"));
+        return Some(PathBuf::from(w));
     }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let config_dir = if cfg!(target_os = "macos") {
@@ -161,7 +167,7 @@ pub fn state_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| env("HOME").map(|h| Path::new(&h).join(".config")))
     };
-    config_dir.map(|d| d.join("cpa").join("discovery"))
+    config_dir.map(|d| d.join("cpa"))
 }
 
 static INSTANCE_IDS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
