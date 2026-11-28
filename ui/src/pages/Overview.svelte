@@ -7,7 +7,7 @@
   import AccountDetail from "../AccountDetail.svelte";
   import { store, every } from "../store.svelte";
   import { accountStatus } from "../accounts";
-  import { requestBuckets } from "../history";
+  import { historyPollMs, requestBuckets } from "../history";
   import { checkAll } from "../quota";
   import { loadResets } from "../resets";
   import { credName, provider, label, resetSummary, type Data } from "../core";
@@ -16,10 +16,14 @@
   $effect(() => {
     if (!enabled) return;
     store.historyRange;
-    store.historyProvider;
     store.history.data = undefined;
+  });
+  // A provider change keeps the loaded history for the account cards and the drawer.
+  $effect(() => {
+    if (!enabled) return;
+    store.historyProvider;
     store.history.error = null;
-    return every(30000, () => store.history.load(true), true);
+    return every(historyPollMs(store.historyRange), () => store.history.load(true), true);
   });
   $effect(() => {
     if (!enabled) return;
@@ -59,6 +63,9 @@
     store.history.data?.range === store.historyRange
       ? store.history.data
       : undefined,
+  );
+  const panelData = $derived(
+    historyData?.provider === store.historyProvider ? historyData : undefined,
   );
   // The selected provider stays listed while a reload has not returned it.
   const historyProviders = $derived.by(() => {
@@ -212,7 +219,7 @@
       </div>{/each}
   </div>{/snippet}</Load>
 </section>
-{#if native?.enabled}<HistoryPanels data={historyData} /><ProviderActivity data={activityData} /><Speed data={speedData} />{/if}
+{#if native?.enabled}<HistoryPanels data={panelData} /><ProviderActivity data={activityData} /><Speed data={speedData} />{/if}
 
 {#if selected}{#key selectedId}<AccountDetail a={selected} onclose={() => (selectedId = "")} />{/key}{/if}
 

@@ -26,6 +26,13 @@ const outcomes: Record<string, string> = {
   attempt_limit: "Account retry limit reached",
   provider_error: "Provider error",
   stream_error: "Response stream error",
+  upstream_stream_error: "Response stream error",
+  invalid_request_error: "Request rejected as invalid",
+  not_found: "Not found",
+  permission_error: "Permission denied",
+  routing_unavailable: "No remaining account for this model",
+  admission_timeout: "Quota admission timed out",
+  routing_error: "Routing state unavailable",
 };
 const fallbackFailures: Record<string, string> = {
   unknown_model: "no provider serves it",

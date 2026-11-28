@@ -1,6 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accountHealth, requestBuckets } from "./history.ts";
+import {
+  accountHealth,
+  historyPollMs,
+  requestBuckets,
+} from "./history.ts";
+
+test("history reloads less often for a range with wider bars", () => {
+  assert.equal(historyPollMs("24h"), 30_000);
+  assert.equal(historyPollMs("7d"), 120_000);
+  assert.equal(historyPollMs("30d"), 300_000);
+});
 
 test("request buckets distinguish observed quiet intervals from gaps", () => {
   const data = {
