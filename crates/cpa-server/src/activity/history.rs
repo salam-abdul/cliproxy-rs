@@ -11,8 +11,8 @@ const MODELS: usize = 500;
 /// The most failure reasons a read returns.
 const ERRORS: usize = 5;
 
-/// One row per provider (kind 0), filtered bucket (1), filtered failure reason (2), Claude
-/// credential bucket (3), filtered provider and model (4), and the filtered token totals (5).
+/// One row per provider (kind 0), filtered bucket (1), filtered failure reason (2), credential
+/// bucket (3), filtered provider and model (4), and the filtered token totals (5).
 ///
 /// A native request is its `requests` row, under `claude`, with the credential of its last
 /// native send when the row names an account; refusals and fallbacks name none, so they count
