@@ -13,12 +13,12 @@
   import { credName, provider, label, resetSummary, type Data } from "../core";
   $effect(() => every(15000, () => store.creds.load(true), true));
   const enabled = $derived(!!store.native.data?.enabled);
-  // A provider change keeps the loaded history for the account cards and the drawer.
   $effect(() => {
     if (!enabled) return;
     store.historyRange;
     store.history.data = undefined;
   });
+  // A provider change keeps the loaded history for the account cards and the drawer.
   $effect(() => {
     if (!enabled) return;
     store.historyProvider;
@@ -70,7 +70,7 @@
   // The selected provider stays listed while a reload has not returned it.
   const historyProviders = $derived.by(() => {
     const ids = (
-      Array.isArray(panelData?.providers) ? panelData.providers : []
+      Array.isArray(historyData?.providers) ? historyData.providers : []
     ).map(String);
     const chosen = store.historyProvider;
     return chosen && !ids.includes(chosen) ? [chosen, ...ids] : ids;

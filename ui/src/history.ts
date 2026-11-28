@@ -1,6 +1,6 @@
 import type { Data } from "./core.ts";
 
-/** How often Overview reloads history. A longer range has wider bars and a slower read. */
+/** How often Overview reloads history. A longer range has wider bars. */
 export const historyPollMs = (range: string) =>
   range === "30d" ? 300_000 : range === "7d" ? 120_000 : 30_000;
 

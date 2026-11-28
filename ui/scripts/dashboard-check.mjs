@@ -467,11 +467,13 @@ try {
   await providerSelect.selectOption("claude");
   await page.locator("p.muted",{hasText:"Loading history…"}).waitFor();
   assert.equal(await page.locator(".history-model").count(),0,"panels hide another provider's history while the reload is out");
+  assert.ok((await providerSelect.locator("option").allInnerTexts()).includes("Codex"),"the dropdown keeps every provider while the reload is out");
   assert.equal(await page.locator(".account-row").first().getByText("2 requests",{exact:true}).count(),1,"account cards keep their history across a provider change");
   assert.ok(await page.locator(".account-row").first().locator(".account-history span.served").count() > 0,"account cards keep their bars across a provider change");
   await page.getByRole("button",{name:"account-a.json"}).first().click();
   await detail.waitFor();
-  assert.equal(await detail.getByText("Loading history…").count(),0,"the drawer keeps its history across a provider change");
+  assert.equal(await detail.locator("div:has(> span:text-is('requests')) > strong").innerText(),"2","the drawer keeps its request total across a provider change");
+  assert.equal(await detail.getByText("History could not be loaded",{exact:false}).count(),0,"the drawer shows no history error across a provider change");
   await page.keyboard.press("Escape");
   await detail.waitFor({state:"hidden"});
   historyRelease(); historyHold = null;

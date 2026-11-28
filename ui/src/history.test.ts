@@ -7,7 +7,7 @@ import {
   requestBuckets,
 } from "./history.ts";
 
-test("history polls as often as its bars are wide allow", () => {
+test("history reloads less often for a range with wider bars", () => {
   assert.equal(historyPollMs("24h"), 30_000);
   assert.equal(historyPollMs("7d"), 120_000);
   assert.equal(historyPollMs("30d"), 300_000);
