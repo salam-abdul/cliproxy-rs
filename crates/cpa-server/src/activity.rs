@@ -155,7 +155,7 @@ impl Activity {
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER, attempts INTEGER
             );
             CREATE INDEX IF NOT EXISTS requests_by_time ON requests(at_ms);
-            CREATE INDEX IF NOT EXISTS requests_by_account_time ON requests(account, at_ms);
+            DROP INDEX IF EXISTS requests_by_account_time;
             CREATE TABLE IF NOT EXISTS account_status (
                 account TEXT NOT NULL, model TEXT NOT NULL, bucket_ms INTEGER NOT NULL,
                 at_ms INTEGER NOT NULL, availability TEXT NOT NULL,
@@ -608,6 +608,40 @@ mod tests {
         assert_eq!(data["lostEvents"], 2);
         assert_eq!(data["coverageUncertain"], true);
         drop(history);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opening_a_store_drops_the_unused_account_time_index() {
+        let dir = std::env::temp_dir().join(format!("cpa-activity-index-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("activity.sqlite");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE requests (
+                    request_id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, account TEXT, model TEXT,
+                    outcome TEXT NOT NULL, status INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+                    cache_read_tokens INTEGER, cache_write_tokens INTEGER, attempts INTEGER
+                );
+                CREATE INDEX requests_by_time ON requests(at_ms);
+                CREATE INDEX requests_by_account_time ON requests(account, at_ms);",
+            )
+            .unwrap();
+        let activity = Activity::start(path.clone(), Arc::new(AtomicU64::new(0))).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let index = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(!index("requests_by_account_time"));
+        assert!(index("requests_by_time"));
+        drop(conn);
+        drop(activity);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
