@@ -288,7 +288,7 @@ fn the_filter_narrows_requests_not_providers_accounts_or_statuses() {
     assert!(models.iter().all(|model| model["provider"] == "codex"), "{history}");
     assert_eq!(history["providers"], json!(["claude", "codex"]), "{history}");
     assert_eq!(history["accountBuckets"], all["accountBuckets"], "{history}");
-    assert_eq!(history["accountBuckets"].as_array().unwrap().len(), 1, "{history}");
+    assert_eq!(history["accountBuckets"].as_array().unwrap().len(), 2, "{history}");
     assert_eq!(history["statuses"], all["statuses"], "{history}");
     assert_eq!(history["statuses"].as_array().unwrap().len(), 1, "{history}");
 }
@@ -304,6 +304,25 @@ fn account_buckets_use_the_send_credential() {
     assert_eq!(
         history["accountBuckets"],
         json!([{"credential": "cred-a", "at": store.now - HOUR_MS, "requests": 2, "failures": 0}]),
+        "{history}"
+    );
+}
+
+#[test]
+fn account_buckets_cover_every_provider() {
+    let store = Store::new();
+    store.record([
+        store.send("c1", 0, "codex", Outcome::Complete, None),
+        store.native("n1", 0, Outcome::Complete, None),
+    ]);
+    store.event("inference", "n1", "success", HOUR_MS / 2);
+    let history = store.read(Range::Day, None);
+    assert_eq!(
+        history["accountBuckets"],
+        json!([
+            {"credential": "codex-a.json", "at": store.now - HOUR_MS, "requests": 1, "failures": 0},
+            {"credential": "cred-a", "at": store.now - HOUR_MS, "requests": 1, "failures": 0},
+        ]),
         "{history}"
     );
 }

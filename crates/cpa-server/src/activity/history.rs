@@ -61,7 +61,7 @@ const READ: &str = "WITH native AS (
         UNION ALL SELECT 2, outcome, NULL, NULL, status, COUNT(*), COUNT(*), 0, 0, 0, 0, 0, 0
         FROM picked WHERE failed GROUP BY outcome, status
         UNION ALL SELECT 3, credential, NULL, (at_ms / ?4) * ?4, NULL, COUNT(*), SUM(failed), 0, 0, 0, 0, 0, 0
-        FROM every WHERE provider = 'claude' AND credential IS NOT NULL GROUP BY credential, 4
+        FROM every WHERE credential IS NOT NULL GROUP BY credential, 4
         UNION ALL SELECT 4, provider, model, NULL, NULL, SUM(requests), 0, SUM(uncached), SUM(cache_read),
             SUM(cache_write), SUM(output), SUM(sends), SUM(exact)
         FROM (
