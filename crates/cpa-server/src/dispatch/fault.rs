@@ -31,6 +31,7 @@ pub(super) enum Reached {
 }
 
 /// What [`Fault::verdict`] needs to know about the attempt beyond its error.
+#[derive(Clone, Copy)]
 pub(super) struct VerdictInput<'a> {
     /// The request is a `responses/compact` request.
     pub(super) compact: bool,
@@ -70,9 +71,8 @@ impl Fault {
                 || input
                     .count_tokens
                     .is_some_and(|model| classify::is_count_endpoint_missing(error, model)));
-        // A local request failure, or a response that broke off after the executor had it
-        // or after output, is terminal even when a custom rule says continue: inference
-        // may already have run. One that broke off before any output may fail over.
+        // A terminal failure stops even when a matched rule says continue: inference may
+        // already have run.
         let stop = self.terminal()
             || if action.matched {
                 action.stop

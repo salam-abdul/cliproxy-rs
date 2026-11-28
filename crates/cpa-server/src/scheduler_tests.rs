@@ -2535,3 +2535,37 @@ fn a_carried_action_decides_the_cooldown() {
     s.record(&c, "m", &carried, &p, now);
     assert_eq!(s.wait(&c, "m", now), None);
 }
+
+/// A failure that carries its error rule action keeps or ends the session binding by
+/// that action.
+#[test]
+fn a_carried_action_decides_the_session_binding() {
+    let low = cred("a", serde_json::json!({"priority":-1}));
+    let high = cred("b", serde_json::json!({"priority":9}));
+    let p = Policy {
+        strategy: Strategy::FillFirst,
+        session_affinity: true,
+        ..Default::default()
+    };
+    let sel = Selection {
+        session: Some("session".into()),
+        ..selection("m")
+    };
+    let now = Instant::now();
+    let kept = ErrorAction {
+        matched: true,
+        stop: false,
+        cooldown: false,
+        force_cooldown: false,
+    };
+    for (action, next) in [(None, "b"), (Some(kept), "a")] {
+        let mut s = Scheduler::default();
+        assert_eq!(s.pick(&tag(&[&low]), &sel, &p, now).unwrap().id, "a");
+        let failure = Outcome::Failure {
+            error: ExecError::local(500, FailureScope::Credential, "boom"),
+            action,
+        };
+        s.session_result(&low, &sel, &failure, &p, None, now);
+        assert_eq!(s.pick(&tag(&[&low, &high]), &sel, &p, now).unwrap().id, next);
+    }
+}

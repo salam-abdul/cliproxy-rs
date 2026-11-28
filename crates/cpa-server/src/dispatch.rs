@@ -2221,12 +2221,7 @@ async fn attempt(
         let outcome = if neutral {
             Outcome::Neutral(error.clone())
         } else {
-            Outcome::Failure {
-                error: error.clone(),
-                // The scheduler evaluates the action itself when the lease records under
-                // a newer policy than this request's.
-                action: lease.records_under(policy).then_some(action),
-            }
+            lease.failure(error.clone(), policy, action)
         };
         let silent = fault.broke_silently();
         let mut fault = fault;
@@ -3145,21 +3140,6 @@ mod tests {
             buffer(events, 20).await.ok(),
             Some(Bytes::from_static(b"01234567890123456789"))
         );
-    }
-
-    /// A connection fault after a response was accepted is a break, so it fails over
-    /// once per account; before any response it is an ordinary transport fault.
-    #[test]
-    fn a_transport_fault_after_acceptance_broke_off() {
-        let error = ExecError::local(502, cpa_core::exec::FailureScope::Transport, "connection reset");
-        let mut fault = Fault::executing(error);
-        assert!(!fault.broke_silently());
-        assert!(!fault.terminal());
-        fault.reached = Reached::NoOutput;
-        assert!(fault.broke_silently());
-        assert!(!fault.terminal());
-        fault.reached = Reached::Output;
-        assert!(fault.terminal());
     }
 
     /// Hands out one grant per pick, in order, and counts the picks.

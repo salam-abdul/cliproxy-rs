@@ -1818,3 +1818,30 @@ async fn a_stopped_store_is_marked_clean_while_the_runtime_still_holds_it() {
     drop(next);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A lease keeps an error rule action only when it was decided under the policy the
+/// lease records under, even an equal copy of it being another policy; otherwise the
+/// scheduler evaluates the action.
+#[test]
+fn a_lease_keeps_an_action_decided_under_its_own_policy() {
+    let store = CredentialStore::new(vec![cred("a.json", "claude", false)]);
+    let lease = store.select(sel("claude")).unwrap();
+    let action = crate::scheduler::ErrorAction {
+        matched: true,
+        stop: false,
+        cooldown: false,
+        force_cooldown: false,
+    };
+    let error = || ExecError::local(500, FailureScope::Credential, "boom");
+    let own = lease.policy.clone();
+    assert!(matches!(
+        lease.failure(error(), &own, action),
+        Outcome::Failure { action: Some(_), .. }
+    ));
+    let copy = Policy::clone(&own);
+    assert!(matches!(
+        lease.failure(error(), &copy, action),
+        Outcome::Failure { action: None, .. }
+    ));
+    lease.complete(Outcome::Success);
+}

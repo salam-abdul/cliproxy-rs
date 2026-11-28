@@ -370,7 +370,7 @@ impl Scheduler {
         match outcome {
             Outcome::Success => self.record_success(id, model, picked, now),
             Outcome::Failure { error, action } => {
-                let action = action.unwrap_or_else(|| policy.error_action_with(rules, c, error));
+                let action = policy.failure_action(*action, rules, c, error);
                 self.record_failure(c, model, error, action, policy, picked, now);
             }
             Outcome::Cancelled | Outcome::Neutral(_) => {}

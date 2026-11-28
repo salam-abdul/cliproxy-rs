@@ -42,7 +42,7 @@ const RULE_STOP: ErrorAction = ErrorAction {
     force_cooldown: false,
 };
 
-fn generate() -> VerdictInput<'static> {
+fn plain_attempt() -> VerdictInput<'static> {
     VerdictInput {
         compact: false,
         count_tokens: None,
@@ -63,12 +63,18 @@ fn verdict(stop: bool, neutral: bool, last_here: bool) -> Verdict {
 #[test]
 fn a_continue_rule_never_resends_a_request_that_may_have_run() {
     let consumed = fault(answered(503, FailureScope::Credential, "overloaded"), Reached::Output);
-    assert_eq!(consumed.verdict(&RULE_CONTINUE, generate()), verdict(true, false, true));
+    assert_eq!(
+        consumed.verdict(&RULE_CONTINUE, plain_attempt()),
+        verdict(true, false, true)
+    );
     let local = fault(
         ExecError::local(400, FailureScope::Request, "bad body"),
         Reached::Executing,
     );
-    assert_eq!(local.verdict(&RULE_CONTINUE, generate()), verdict(true, false, true));
+    assert_eq!(
+        local.verdict(&RULE_CONTINUE, plain_attempt()),
+        verdict(true, false, true)
+    );
 }
 
 /// A matched rule decides whether a failure the request could survive stops it.
@@ -78,11 +84,17 @@ fn a_matched_rule_decides_stop() {
         answered(503, FailureScope::Credential, "unavailable"),
         Reached::Executing,
     );
-    assert_eq!(unavailable.verdict(&RULE_STOP, generate()), verdict(true, false, true));
-    assert_eq!(unavailable.verdict(&NO_RULE, generate()), verdict(false, false, false));
+    assert_eq!(
+        unavailable.verdict(&RULE_STOP, plain_attempt()),
+        verdict(true, false, true)
+    );
+    assert_eq!(
+        unavailable.verdict(&NO_RULE, plain_attempt()),
+        verdict(false, false, false)
+    );
     let invalid = fault(answered(400, FailureScope::Request, "bad request"), Reached::Executing);
     assert_eq!(
-        invalid.verdict(&RULE_CONTINUE, generate()),
+        invalid.verdict(&RULE_CONTINUE, plain_attempt()),
         verdict(false, false, false)
     );
 }
@@ -92,12 +104,12 @@ fn a_matched_rule_decides_stop() {
 #[test]
 fn an_invalid_request_stops_unless_it_broke_off_silently() {
     let invalid = fault(answered(400, FailureScope::Request, "bad request"), Reached::Executing);
-    assert_eq!(invalid.verdict(&NO_RULE, generate()), verdict(true, false, true));
+    assert_eq!(invalid.verdict(&NO_RULE, plain_attempt()), verdict(true, false, true));
     let broke = fault(
         answered(400, FailureScope::Request, "bad request").accepted(AfterAccept::Truncated),
         Reached::NoOutput,
     );
-    assert_eq!(broke.verdict(&NO_RULE, generate()), verdict(false, false, false));
+    assert_eq!(broke.verdict(&NO_RULE, plain_attempt()), verdict(false, false, false));
 }
 
 /// A compact request stops on a compact fault and leaves the credential's availability
@@ -105,10 +117,10 @@ fn an_invalid_request_stops_unless_it_broke_off_silently() {
 #[test]
 fn a_compact_fault_stops_and_is_neutral_unless_a_rule_forces_cooldown() {
     let missing = fault(answered(404, FailureScope::Model, "not found"), Reached::Executing);
-    assert_eq!(missing.verdict(&NO_RULE, generate()), verdict(false, false, false));
+    assert_eq!(missing.verdict(&NO_RULE, plain_attempt()), verdict(false, false, false));
     let compact = VerdictInput {
         compact: true,
-        ..generate()
+        ..plain_attempt()
     };
     assert_eq!(missing.verdict(&NO_RULE, compact), verdict(true, true, true));
     let forced = ErrorAction {
@@ -117,22 +129,39 @@ fn a_compact_fault_stops_and_is_neutral_unless_a_rule_forces_cooldown() {
         cooldown: true,
         force_cooldown: true,
     };
-    let compact = VerdictInput {
-        compact: true,
-        ..generate()
-    };
     assert_eq!(missing.verdict(&forced, compact), verdict(false, false, false));
 }
 
 /// A count_tokens 404 that names no model is a missing endpoint: neutral, not a stop.
+/// One that says the model was not found changes availability like any 404.
 #[test]
 fn a_missing_count_tokens_endpoint_is_neutral() {
     let missing = fault(answered(404, FailureScope::Model, "not found"), Reached::Executing);
     let count = VerdictInput {
         count_tokens: Some("claude-sonnet"),
-        ..generate()
+        ..plain_attempt()
     };
     assert_eq!(missing.verdict(&NO_RULE, count), verdict(false, true, false));
+    let model = fault(
+        answered(404, FailureScope::Model, r#"{"error":{"code":"model_not_found"}}"#),
+        Reached::Executing,
+    );
+    assert_eq!(model.verdict(&NO_RULE, count), verdict(false, false, false));
+}
+
+/// A connection fault after a response was accepted is a break, so it fails over
+/// once per account; before any response it is an ordinary transport fault.
+#[test]
+fn a_transport_fault_after_acceptance_broke_off() {
+    let error = ExecError::local(502, FailureScope::Transport, "connection reset");
+    let mut fault = Fault::executing(error);
+    assert!(!fault.broke_silently());
+    assert!(!fault.terminal());
+    fault.reached = Reached::NoOutput;
+    assert!(fault.broke_silently());
+    assert!(!fault.terminal());
+    fault.reached = Reached::Output;
+    assert!(fault.terminal());
 }
 
 /// The credential's turn ends after the last model of its pool, on a credential-wide
@@ -145,16 +174,16 @@ fn the_credential_turn_ends_without_stopping_the_request() {
     );
     let last = VerdictInput {
         last_model: true,
-        ..generate()
+        ..plain_attempt()
     };
     assert_eq!(unavailable.verdict(&NO_RULE, last), verdict(false, false, true));
     let quota = fault(answered(429, FailureScope::Credential, "quota"), Reached::Executing);
-    assert_eq!(quota.verdict(&NO_RULE, generate()), verdict(false, false, true));
+    assert_eq!(quota.verdict(&NO_RULE, plain_attempt()), verdict(false, false, true));
     let mut overloaded = answered(529, FailureScope::Credential, "overloaded");
     overloaded.held = Some(std::sync::Arc::new(HeldStream {
         events: vec![],
         end: overloaded.clone(),
     }));
     let held = fault(overloaded, Reached::Executing);
-    assert_eq!(held.verdict(&NO_RULE, generate()), verdict(false, false, true));
+    assert_eq!(held.verdict(&NO_RULE, plain_attempt()), verdict(false, false, true));
 }

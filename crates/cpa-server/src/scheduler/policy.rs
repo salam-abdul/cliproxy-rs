@@ -399,6 +399,18 @@ impl Policy {
         self.error_action_with(file_rules(c).as_deref(), c, error)
     }
 
+    /// A failure's error rule action: the one it `carried`, else evaluated with the
+    /// credential's own rules.
+    pub(crate) fn failure_action(
+        &self,
+        carried: Option<ErrorAction>,
+        own: Option<&[ErrorRule]>,
+        c: &Credential,
+        error: &ExecError,
+    ) -> ErrorAction {
+        carried.unwrap_or_else(|| self.error_action_with(own, c, error))
+    }
+
     /// [`Self::error_action`] with the credential's own rules already parsed.
     pub(crate) fn error_action_with(
         &self,

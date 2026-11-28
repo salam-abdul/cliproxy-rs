@@ -1,13 +1,14 @@
 use super::*;
+use crate::scheduler::ErrorAction;
 
 #[derive(Debug, Clone)]
 pub enum Outcome {
     Success,
     Failure {
         error: ExecError,
-        /// The credential's error rule action as dispatch decided it, under the lease's
-        /// policy. `None` has the scheduler evaluate it.
-        action: Option<crate::scheduler::ErrorAction>,
+        /// The credential's error rule action as dispatch decided it under the lease's
+        /// policy ([`Lease::failure`]). `None` has the scheduler evaluate it.
+        action: Option<ErrorAction>,
     },
     /// A failure that must not change availability (compact request faults, a
     /// missing count_tokens endpoint).
@@ -44,10 +45,13 @@ impl Outcome {
 }
 
 impl Lease {
-    /// Whether the lease records its outcome under `policy`, so an error rule action
-    /// decided under it holds for the record.
-    pub(crate) fn records_under(&self, policy: &Policy) -> bool {
-        std::ptr::eq(&*self.policy, policy)
+    /// A failure carrying the error rule `action` decided under `policy`. A lease that
+    /// records under another policy drops the action, and the scheduler evaluates it.
+    pub(crate) fn failure(&self, error: ExecError, policy: &Policy, action: ErrorAction) -> Outcome {
+        Outcome::Failure {
+            error,
+            action: std::ptr::eq(&*self.policy, policy).then_some(action),
+        }
     }
 
     /// Whether the credential came from the remote dispatcher (Go Home mode).
