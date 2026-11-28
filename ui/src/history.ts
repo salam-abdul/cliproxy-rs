@@ -1,5 +1,20 @@
 import type { Data } from "./core.ts";
 
+/** How often Overview reloads history. A longer range has wider bars and a slower read. */
+export const historyPollMs = (range: string) =>
+  range === "30d" ? 300_000 : range === "7d" ? 120_000 : 30_000;
+
+/**
+ * History that the provider-filtered panels may show: loaded for `range` and requested
+ * for `provider`. Account cards and the drawer check only the range, since the server
+ * builds their rows from every provider.
+ */
+export const historyFor = (
+  data: Data | undefined,
+  range: string,
+  provider: string,
+) => (data?.range === range && data.provider === provider ? data : undefined);
+
 /**
  * Request buckets over the history period. An account card passes its credential, which
  * keys `accountBuckets`, and its native id, which keys `statuses`. A Claude status reading

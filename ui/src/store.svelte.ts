@@ -95,11 +95,14 @@ class Store {
   historyRange = $state("24h");
   /** The provider the history panels are narrowed to; empty for every provider. */
   historyProvider = $state("");
-  history = new Res<Data>(() =>
-    api(
-      `/observability/history?range=${this.historyRange}${this.historyProvider ? `&provider=${encodeURIComponent(this.historyProvider)}` : ""}`,
-    ),
-  );
+  /** History tagged with the provider it was requested for, read when the request starts. */
+  history = new Res<Data>(async () => {
+    const provider = this.historyProvider;
+    const data = await api(
+      `/observability/history?range=${this.historyRange}${provider ? `&provider=${encodeURIComponent(provider)}` : ""}`,
+    );
+    return { ...data, provider };
+  });
   providerActivity = new Res<Data>(() =>
     api(`/observability/activity?range=${this.historyRange}`),
   );
