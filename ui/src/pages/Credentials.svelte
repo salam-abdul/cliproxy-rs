@@ -11,7 +11,7 @@
   $effect(() => every(15000, () => store.creds.load(true), true));
   // The drawer shows the account's history; Overview keeps it current, this page reads it once.
   $effect(() => {
-    if (store.native.data?.enabled) untrack(() => store.history.load(true));
+    untrack(() => store.history.load(true));
   });
 
   let query = $state(""),

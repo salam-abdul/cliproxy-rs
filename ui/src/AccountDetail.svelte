@@ -30,7 +30,7 @@
       : undefined,
   );
   const buckets = $derived(
-    requestBuckets(history || {}, { credential: a.id || a.name, id: n?.id ?? "" }),
+    requestBuckets(history || {}, { credential: a.id || a.name, id: n?.id }),
   );
   const statuses = $derived(
     (history?.statuses || []).filter(

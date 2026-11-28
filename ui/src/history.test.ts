@@ -95,7 +95,7 @@ test("an account without status readings knows only buckets with requests", () =
     ],
   };
   assert.deepEqual(
-    requestBuckets(data, { credential: "codex-a.json", id: "" }).map((b) => [
+    requestBuckets(data, { credential: "codex-a.json" }).map((b) => [
       b.known,
       b.requests,
     ]),

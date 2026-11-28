@@ -90,6 +90,26 @@
       ? (native.selectionOrder as string[])
       : null,
   );
+  // Kept apart from `accounts`, which reads the server clock, so its tick does not
+  // recompute every account's buckets.
+  const recentByCredential = $derived.by(() => {
+    const grouped = new Map<string, Data[]>();
+    for (const row of Array.isArray(historyData?.accountBuckets) ? historyData.accountBuckets : []) {
+      const rows = grouped.get(row.credential);
+      if (rows) rows.push(row);
+      else grouped.set(row.credential, [row]);
+    }
+    const recent = new Map<string, ReturnType<typeof requestBuckets>>();
+    for (const a of store.creds.data || []) {
+      const credential = String(a.id || a.name);
+      const id = native?.accounts?.find((n: Data) => n.fileId === credential)?.id;
+      recent.set(
+        credential,
+        requestBuckets({ ...historyData, accountBuckets: grouped.get(credential) || [] }, { credential, id }),
+      );
+    }
+    return recent;
+  });
   const accounts = $derived(
     (store.creds.data || [])
       .map((a) => {
@@ -104,10 +124,7 @@
           store.serverNow,
         );
         const rank = state.available && n && order ? order.indexOf(n.id) : -1;
-        const recent = requestBuckets(historyData || {}, {
-          credential: a.id || a.name,
-          id: n?.id ?? "",
-        });
+        const recent = recentByCredential.get(String(a.id || a.name)) || [];
         return { a, n, rank, state, recent };
       })
       .sort(
@@ -130,19 +147,19 @@
     <p class="muted small">Accounts, capacity, and history in one place.</p>
   </div>
   <div class="history-controls">
-      <select aria-label="History provider" bind:value={store.historyProvider}>
-        <option value="">All providers</option>
-        {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
-      </select>
-      <div class="seg history-range" role="group" aria-label="History range">
-        {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
-          <button
-            aria-pressed={store.historyRange === value}
-            onclick={() => (store.historyRange = value)}>{title}</button
-          >
-        {/each}
-      </div>
+    <select aria-label="History provider" bind:value={store.historyProvider}>
+      <option value="">All providers</option>
+      {#each historyProviders as id}<option value={id}>{label(id)}</option>{/each}
+    </select>
+    <div class="seg history-range" role="group" aria-label="History range">
+      {#each [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"]] as [value, title]}
+        <button
+          aria-pressed={store.historyRange === value}
+          onclick={() => (store.historyRange = value)}>{title}</button
+        >
+      {/each}
     </div>
+  </div>
 </div>
 {#if !store.creds.error && (store.native.error || !store.online)}
   <p class="alert">Refresh failed. Showing the last readings.</p>

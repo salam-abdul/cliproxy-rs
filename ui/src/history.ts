@@ -11,7 +11,7 @@ export const historyPollMs = (range: string) =>
  */
 export function requestBuckets(
   history: Data,
-  account?: { credential: string; id: string },
+  account?: { credential: string; id?: string },
   statusesCount = true,
 ) {
   const from = Number(history.from);
@@ -33,8 +33,11 @@ export function requestBuckets(
     byStart.set(Number(row.at), row);
   }
   const observed = new Set<number>();
+  // An account without a native id has no status readings.
   const statuses =
-    statusesCount && Array.isArray(history.statuses) ? history.statuses : [];
+    statusesCount && (!account || account.id !== undefined) && Array.isArray(history.statuses)
+      ? history.statuses
+      : [];
   for (const row of statuses) {
     if (
       row.model !== "claude" ||

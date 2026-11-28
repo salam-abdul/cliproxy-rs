@@ -13,7 +13,7 @@ page.on("pageerror", e => errors.push(e.message));
 let checks = 0, historyChecks = 0, fail = false, hold, release, native = false, overage = false, policyFailure = false;
 let requireKey = false, quotaStarted, expired = false, availability = "included", saveHold, saveRelease, saveStarted;
 const historyUrls = [];
-let historyHold, historyRelease, historyFailure = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
+let historyHold, historyRelease, historyFailure = false, historyConflict = false, credsFailure = false, acceptDialogs = false, credsObservedAt;
 let activityChecks = 0, activityConflict = false, codexHistory = false;
 let speedChecks = 0, speedConflict = false, speedEmpty = false, speedUntimed = false;
 let toolsChecks = 0, toolsConflict = false, toolsFailure = false, toolsPending = [];
@@ -52,6 +52,7 @@ await page.route("**/*", async route => {
     historyUrls.push(request.url());
     if (historyHold) await historyHold;
     if (historyFailure) return route.fulfill({status:500,json:{error:"History could not be read"}});
+    if (historyConflict) return route.fulfill({status:409,json:{error:"activity store is not running"}});
     const params = new URL(request.url()).searchParams;
     const range = params.get("range") || "24h", filter = params.get("provider");
     const now = Date.now(), duration = {"24h":86400000,"7d":604800000,"30d":2592000000}[range];
@@ -271,7 +272,6 @@ try {
   assert.equal(await page.getByRole("switch", {name:/Allow paid overage/}).count(), 0, "policy is absent from Overview");
   const accountCard = page.locator(".account-row", {has: page.getByRole("button", {name:"account-a.json", exact:true})});
   await accountCard.getByText("2 requests", {exact:true}).waitFor({state:"attached"});
-  assert.equal(await accountCard.getByText("Not tracked", {exact:true}).count(), 0, "without native routing an account card shows its history, not Not tracked");
   assert.equal(await page.getByText(/Native Claude routing · Account switches/).count(), 0);
   const meter = page.getByRole("meter", {name:"5-hour limit remaining"});
   await meter.waitFor();
@@ -322,7 +322,6 @@ try {
   assert.ok(await codexCard.locator(".account-history span.served").count() > 0, "a Codex card draws its request bars");
   await page.getByRole("group", {name:"History range"}).waitFor();
   await page.getByRole("heading", {name:"Top models", exact:true}).waitFor();
-  assert.equal(await page.getByText("Not tracked", {exact:true}).count(), 0, "every account card is tracked");
   await settle();
   assert.equal(historyChecks - mountLoads, 1, "history loads once at mount, not again when native status arrives");
   await codexCard.getByRole("button", {name:"codex-a.json", exact:true}).click();
@@ -332,6 +331,22 @@ try {
   assert.equal(await codexDetail.getByText("History could not be loaded", {exact:false}).count(), 0, "a Codex drawer shows its usage history");
   await page.getByRole("button", {name:"Close", exact:true}).click();
   await codexDetail.waitFor({state:"hidden"});
+  // The Accounts page loads history for its drawer without native routing.
+  await page.goto("http://dashboard.test/management.html#credentials/account-a.json");
+  await page.reload();
+  const accountDetail = page.getByRole("dialog", {name:/account-a.json details/});
+  const accountUsage = accountDetail.locator("section", {has: page.getByRole("heading", {name:"Usage history", exact:true})});
+  await accountUsage.locator(".drawer-numbers div", {hasText:"requests"}).getByText("2", {exact:true}).waitFor();
+  assert.equal(await accountDetail.getByText("Loading history…").count(), 0, "the Accounts drawer shows loaded history");
+  await page.getByRole("button", {name:"Close", exact:true}).click();
+  await accountDetail.waitFor({state:"hidden"});
+  // A stopped activity store is named, not reported as a failed load.
+  historyConflict = true;
+  await page.goto("http://dashboard.test/management.html#overview");
+  await page.reload();
+  await page.getByText("The activity store is not running.", {exact:true}).waitFor();
+  assert.equal(await page.getByText(/History could not be loaded/).count(), 0, "a 409 is not a failed load");
+  historyConflict = false;
   creds.pop();
   codexHistory = false;
 
