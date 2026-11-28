@@ -45,10 +45,12 @@ test("proxy send outcomes are labelled by status", () => {
 test("native error outcomes have their own labels", () => {
   for (const [outcome, label] of [
     ["upstream_stream_error", "Response stream error"],
-    ["api_error", "Provider API error"],
     ["invalid_request_error", "Request rejected as invalid"],
-    ["not_found_error", "Not found"],
+    ["not_found", "Not found"],
     ["permission_error", "Permission denied"],
+    ["routing_unavailable", "No remaining account for this model"],
+    ["admission_timeout", "Quota admission timed out"],
+    ["routing_error", "Routing state unavailable"],
   ])
     assert.equal(outcomeLabel({ outcome }), label);
 });
